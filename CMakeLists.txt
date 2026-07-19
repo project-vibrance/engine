@@ -23,9 +23,9 @@ include(GNUInstallDirs)
 
 # Release metadata is the single source for both the DLL query API and the
 # machine-readable manifest installed with the SDK.
+set(VIBRANCE_ENGINE_NAME "vibranceUI")
 set(VIBRANCE_SUFFIX "20260719.0-a")
 set(VIBRANCE_FULL_VERSION "${PROJECT_VERSION}-${VIBRANCE_SUFFIX}")
-set(VIBRANCE_ENGINE_NAME "vibranceUI")
 set(VIBRANCE_ENGINE_LAST_UPDATED "2026-07-19")
 
 set(CMAKE_CXX_STANDARD 20)

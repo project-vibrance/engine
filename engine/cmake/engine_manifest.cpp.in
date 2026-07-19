@@ -3,11 +3,11 @@
 namespace
 {
     constexpr EngineManifest kEngineManifest {
-        "@VIBRANCE_SUFFIX@",
-        "@VIBRANCE_FULL_VERSION@",
-        "@VIBRANCE_ENGINE_NAME@",
-        "@PROJECT_VERSION@",
-        "@VIBRANCE_ENGINE_LAST_UPDATED@"
+        .name = "@VIBRANCE_ENGINE_NAME@",
+        .version = "@PROJECT_VERSION@",
+        .suffix = "@VIBRANCE_SUFFIX@",
+        .full_version = "@VIBRANCE_FULL_VERSION@",
+        .lastUpdated = "@VIBRANCE_ENGINE_LAST_UPDATED@"
     };
 }
 
