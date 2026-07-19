@@ -1,6 +1,9 @@
 # vibranceUI
 
-`vibranceUI` is a standalone C++20 SDK. It owns the renderer, UI,
+> [!NOTE]
+> **`vibranceUI`**_, developed by **[59xa](https://github.com/59xa)** and **[Florian Butz](https://github.com/FlorianButz)**, is licenced under the **[CC BY-SA 4.0](LICENCE)** copyleft licence._
+
+**`vibranceUI`** is a standalone C++20 SDK. It owns the renderer, UI,
 windowing adapter, audio, media, engine shaders, and all engine implementation
 code. Applications consume its installed CMake package and never add this
 source tree with `add_subdirectory()`.
@@ -81,3 +84,8 @@ Applications may redirect the user layer with `VIBRANCE_RESOURCE_ROOT`, or
 redirect assets and config independently with `VIBRANCE_ASSETS_DIR` and
 `VIBRANCE_CONFIG_DIR`. The engine does not copy packaged resources into the
 user directory.
+
+# Contribution & documentation
+While implementation is currently somewhat vague, developers and users are welcome to audit the source code's infrastructure. Contribution to document the engine's capabilities and functionalities are always welcome.
+
+Developers can also create pull requests to implement features and fixing bugs or issues found within the source code.
