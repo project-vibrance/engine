@@ -6,6 +6,8 @@ struct EngineManifest
 {
     const char* name;
     const char* version;
+    const char* suffix;
+    const char* full_version;
     const char* lastUpdated;
 };
 

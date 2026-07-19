@@ -9,7 +9,11 @@ if(CMAKE_GENERATOR STREQUAL "MinGW Makefiles" AND MINGW_PATH)
     set(CMAKE_CXX_COMPILER "${MINGW_PATH}/bin/g++.exe" CACHE FILEPATH "" FORCE)
 endif()
 
-project(vibrance_engine VERSION 0.1.0 LANGUAGES C CXX)
+set(VIBRANCE_MAJOR 0)
+set(VIBRANCE_MINOR 1)
+set(VIBRANCE_PATCH 0)
+
+project(vibrance_engine VERSION ${VIBRANCE_MAJOR}.${VIBRANCE_MINOR}.${VIBRANCE_PATCH} LANGUAGES C CXX)
 
 if(APPLE)
     enable_language(OBJCXX)
@@ -19,7 +23,9 @@ include(GNUInstallDirs)
 
 # Release metadata is the single source for both the DLL query API and the
 # machine-readable manifest installed with the SDK.
-set(VIBRANCE_ENGINE_NAME "vibrance-engine")
+set(VIBRANCE_SUFFIX "20260719.0-a")
+set(VIBRANCE_FULL_VERSION "${PROJECT_VERSION}-${VIBRANCE_SUFFIX}")
+set(VIBRANCE_ENGINE_NAME "vibranceUI")
 set(VIBRANCE_ENGINE_LAST_UPDATED "2026-07-19")
 
 set(CMAKE_CXX_STANDARD 20)

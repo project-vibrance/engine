@@ -3,6 +3,8 @@
 namespace
 {
     constexpr EngineManifest kEngineManifest {
+        "@VIBRANCE_SUFFIX@",
+        "@VIBRANCE_FULL_VERSION@",
         "@VIBRANCE_ENGINE_NAME@",
         "@PROJECT_VERSION@",
         "@VIBRANCE_ENGINE_LAST_UPDATED@"
