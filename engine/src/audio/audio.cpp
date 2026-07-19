@@ -348,14 +348,15 @@ AudioEngine::Impl::Impl(bool enabled) : enabled(enabled)
     }
 
 #if defined(VIBRANCE_HAS_SOLOUD)
-    unsigned int backend = SoLoud::Soloud::MINIAUDIO;
 #if defined(__APPLE__)
-    backend = SoLoud::Soloud::COREAUDIO;
+    constexpr unsigned int backendId = SoLoud::Soloud::COREAUDIO;
+#else
+    constexpr unsigned int backendId = SoLoud::Soloud::MINIAUDIO;
 #endif
 
     const SoLoud::result result = soloud.init(
         SoLoud::Soloud::CLIP_ROUNDOFF,
-        backend,
+        backendId,
         SoLoud::Soloud::AUTO,
         2048u,
         2u);
@@ -373,8 +374,10 @@ AudioEngine::Impl::Impl(bool enabled) : enabled(enabled)
     soloud.setGlobalVolume(masterVolume);
     if (logger)
     {
-        const char* backend = soloud.getBackendString();
-        logger->info("Audio initialised with SoLoud backend: " + std::string(backend ? backend : "unknown"));
+        const char* backendName = soloud.getBackendString();
+        logger->info(
+            "Audio initialised with SoLoud backend: " +
+            std::string(backendName ? backendName : "unknown"));
     }
 #else
     if (logger)
@@ -459,7 +462,7 @@ AudioClipHandle AudioEngine::Impl::load_clip(const std::filesystem::path& path)
         }
         if (clip != clips.end())
         {
-            if (initialised && clip->second.wav)
+            if (clip->second.wav)
             {
                 soloud.stopAudioSource(*clip->second.wav);
             }

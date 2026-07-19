@@ -76,7 +76,7 @@ namespace
             return true;
         }
 
-        bool parse_object(std::string prefix, ThemeEntries& entries)
+        bool parse_object(const std::string& prefix, ThemeEntries& entries)
         {
             if (!consume('{'))
             {
@@ -488,18 +488,7 @@ namespace
         });
     }
 
-    std::filesystem::path theme_file_from_directory(const std::filesystem::path& directory, std::string_view name)
-    {
-        // Theme names are file stems so callers can pass "dark" instead of "dark.json"
-        std::filesystem::path fileName = name.empty() ? std::filesystem::path("theme") : std::filesystem::path(name);
-        if (fileName.extension().empty())
-        {
-            fileName += ".json";
-        }
-        return directory / fileName;
-    }
 }
-
 bool ui_load_theme_file(const std::filesystem::path& path, UiTheme& theme)
 {
     const std::string source = read_text_file(path);
@@ -536,12 +525,4 @@ UiTheme ui_theme_from_file(const std::filesystem::path& path, UiTheme fallback)
     UiTheme theme = std::move(fallback);
     ui_load_theme_file(path, theme);
     return theme;
-}
-
-UiTheme ui_theme_from_directory(
-    const std::filesystem::path& directory,
-    std::string_view name,
-    UiTheme fallback)
-{
-    return ui_theme_from_file(theme_file_from_directory(directory, name), std::move(fallback));
 }

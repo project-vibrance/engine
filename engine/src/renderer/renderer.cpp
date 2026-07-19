@@ -89,8 +89,8 @@ namespace
 		bool active = false;
 
 		WindowsFrameTimerResolution()
+			: winmm(LoadLibraryA("winmm.dll"))
 		{
-			winmm = LoadLibraryA("winmm.dll");
 			if (!winmm)
 			{
 				return;
@@ -119,12 +119,12 @@ namespace
 		HANDLE timer = nullptr;
 
 		WindowsFrameWaitTimer()
-		{
-			timer = CreateWaitableTimerExW(
+			: timer(CreateWaitableTimerExW(
 				nullptr,
 				nullptr,
 				CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-				TIMER_ALL_ACCESS);
+				TIMER_ALL_ACCESS))
+		{
 			if (!timer)
 			{
 				timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);

@@ -469,7 +469,7 @@ void Logger::log(const std::vector<std::string>& items, const char* prefix) {
 
 	if (!is_vulkan_renderer_logging_enabled()) return;
 
-	for (std::string item : items) logOut << prefix << item << std::endl;
+	for (const std::string& item : items) logOut << prefix << item << std::endl;
 }
 
 void Logger::log(const std::vector<vk::SurfaceFormatKHR>& formats) {

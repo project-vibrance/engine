@@ -1,9 +1,8 @@
 if not exist build mkdir build
 
-REM accept first argument as build type (Debug/Release) or legacy -NDEBUG
+REM accept first argument as build type (Debug/Release)
 SET BUILD_TYPE=Debug
 IF NOT "%~1"=="" (
-	IF /I "%~1"=="-NDEBUG" SET BUILD_TYPE=Release
 	IF /I "%~1"=="release" SET BUILD_TYPE=Release
 	IF /I "%~1"=="Release" SET BUILD_TYPE=Release
 	IF /I "%~1"=="debug" SET BUILD_TYPE=Debug

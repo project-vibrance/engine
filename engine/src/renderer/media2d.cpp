@@ -1890,7 +1890,7 @@ namespace
             return;
         }
 
-        std::vector<unsigned char> source = rgba;
+        std::vector<unsigned char> source;
         for (uint32_t pass = 0; pass < 4u; ++pass)
         {
             bool changed = false;
@@ -2889,7 +2889,7 @@ namespace
             vk::ImageUsageFlagBits::eSampled,
             mipLevels,
             false);
-        if (!asset.image || !upload_rgba_to_image(allocator, commandBuffer, queue, *asset.image, rgba, asset.name))
+        if (!upload_rgba_to_image(allocator, commandBuffer, queue, *asset.image, rgba, asset.name))
         {
             asset.image.reset();
             return false;
@@ -2967,7 +2967,7 @@ namespace
             vk::ImageUsageFlagBits::eSampled,
             mipLevels,
             false);
-        if (!image || !upload_rgba_to_image(allocator, commandBuffer, queue, *image, rgba, asset.name))
+        if (!upload_rgba_to_image(allocator, commandBuffer, queue, *image, rgba, asset.name))
         {
             return false;
         }

@@ -182,8 +182,9 @@ install(TARGETS vibrance_engine
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+# Public headers have one canonical source and install namespace.
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/vibranceUI")
 
 # Copy every dependency header tree referenced by the public C++ API. All
 # compiled dependency code remains private inside vibrance_engine.

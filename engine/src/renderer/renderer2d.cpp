@@ -125,28 +125,6 @@ namespace
         return { minPosition.x, minPosition.y, scaledSize.x, scaledSize.y };
     }
 
-    const RenderLayer2DComponent& layer_or_default(const entt::registry& registry, entt::entity entity)
-    {
-        // Children inherit render ordering from the nearest parent with a layer
-        static const RenderLayer2DComponent defaultLayer {};
-        entt::entity current = entity;
-        for (uint32_t depth = 0; depth < 64u && current != entt::null && registry.valid(current); ++depth)
-        {
-            if (const auto* layer = registry.try_get<RenderLayer2DComponent>(current))
-            {
-                return *layer;
-            }
-
-            const auto* parent = registry.try_get<Parent2DComponent>(current);
-            if (!parent || parent->parent == current)
-            {
-                break;
-            }
-            current = parent->parent;
-        }
-        return defaultLayer;
-    }
-
     bool is_visible(const entt::registry& registry, entt::entity entity)
     {
         entt::entity current = entity;
@@ -299,7 +277,7 @@ namespace
     {
         if (a.alwaysOnTop != b.alwaysOnTop)
         {
-            return !a.alwaysOnTop && b.alwaysOnTop;
+            return b.alwaysOnTop;
         }
         if (a.stackLayer != b.stackLayer)
         {
@@ -4177,20 +4155,15 @@ void Hosted3DCompositePipeline::record(
 
     bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, postScope);
-    DispatchBounds bounds = {};
-    if (dispatchRect.z > 0u && dispatchRect.w > 0u)
-    {
-        bounds = {
+    const DispatchBounds bounds =
+        dispatchRect.z > 0u && dispatchRect.w > 0u
+        ? DispatchBounds {
             std::min(dispatchRect.x, swapchain.extent.width),
             std::min(dispatchRect.y, swapchain.extent.height),
             std::min(dispatchRect.z, swapchain.extent.width - std::min(dispatchRect.x, swapchain.extent.width)),
             std::min(dispatchRect.w, swapchain.extent.height - std::min(dispatchRect.y, swapchain.extent.height))
-        };
-    }
-    else
-    {
-        bounds = make_full_screen_bounds(swapchain);
-    }
+        }
+        : make_full_screen_bounds(swapchain);
     if (bounds.empty())
     {
         return;

@@ -508,7 +508,7 @@ namespace
 			vk::ImageUsageFlagBits::eSampled,
 			mipLevels,
 			false);
-		if (!texture.image || !upload_rgba_to_image(allocator, commandBuffer, queue, *texture.image, source.rgba, source.name))
+		if (!upload_rgba_to_image(allocator, commandBuffer, queue, *texture.image, source.rgba, source.name))
 		{
 			return {};
 		}
@@ -1067,7 +1067,7 @@ namespace
 		return objectText.compare(markerPos + marker.size(), 4, "true") == 0;
 	}
 
-	std::vector<float> parse_float_array(std::string arrayText)
+	std::vector<float> parse_float_array(const std::string& arrayText)
 	{
 		std::vector<float> values;
 		const char* cursor = arrayText.c_str();
@@ -1091,7 +1091,7 @@ namespace
 		return values;
 	}
 
-	std::vector<uint32_t> parse_u32_array(std::string arrayText)
+	std::vector<uint32_t> parse_u32_array(const std::string& arrayText)
 	{
 		std::vector<uint32_t> values;
 		const char* cursor = arrayText.c_str();
@@ -1122,7 +1122,7 @@ namespace
 		{
 			return {};
 		}
-		return parse_float_array(std::move(arrayText));
+		return parse_float_array(arrayText);
 	}
 
 	float field_float(const std::string& objectText, std::string_view key, float fallback = 0.0f)
@@ -1153,7 +1153,7 @@ namespace
 		{
 			return {};
 		}
-		return parse_u32_array(std::move(arrayText));
+		return parse_u32_array(arrayText);
 	}
 
 	glm::mat4 field_transform(const std::string& nodeText)
@@ -1306,7 +1306,8 @@ namespace
 		const uint64_t byteStride = field_u64(bufferView, "byteStride");
 		view.stride = static_cast<uint32_t>(byteStride != 0 ? byteStride : view.components * component_size(view.componentType));
 		const uint64_t totalOffset = bufferViewOffset + accessorOffset;
-		const uint64_t elementSize = view.components * component_size(view.componentType);
+		const uint64_t elementSize =
+			static_cast<uint64_t>(view.components) * component_size(view.componentType);
 		const uint64_t requiredSize = totalOffset + (view.count == 0 ? 0 : (view.count - 1) * view.stride + elementSize);
 		if (requiredSize > binBytes.size())
 		{

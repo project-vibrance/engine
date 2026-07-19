@@ -2,7 +2,7 @@
 set -e
 
 BUILD_TYPE=${1:-Debug}
-if [ "$1" == "-NDEBUG" ] || [ "$1" == "release" ] || [ "$1" == "Release" ]; then
+if [ "$1" == "release" ] || [ "$1" == "Release" ]; then
   BUILD_TYPE="Release"
 fi
 
