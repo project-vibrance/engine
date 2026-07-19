@@ -1,0 +1,499 @@
+#version 450
+
+const uint STYLE_GRADIENT = 1u << 0;
+const uint STYLE_OUTLINE = 1u << 1;
+const uint STYLE_SDF_EDGES = 1u << 2;
+const uint STYLE_BLUR = 1u << 5;
+const uint STYLE_RADIAL_GRADIENT = 1u << 11;
+const uint STYLE_TRANSFORM_2_5D = 1u << 12;
+const uint STYLE_SHAPE_MASK = 1u << 15;
+const uint STYLE_CORNER_RADII = 1u << 16;
+
+const uint PRIMITIVE_RECTANGLE = 1u;
+const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
+const uint PRIMITIVE_ELLIPSE = 3u;
+const uint PRIMITIVE_SQUIRCLE = 6u;
+const uint PRIMITIVE_NOTCHED_SQUIRCLE = 7u;
+const uint MASK_RADIUS_BITS = 255u;
+const uint MASK_PRIMITIVE_SHIFT = 8u;
+const uint MASK_AMOUNT_SHIFT = 12u;
+const uint MASK_POWER_SHIFT = 16u;
+const uint MASK_NOTCH_AMOUNT_SHIFT = 20u;
+const uint MASK_NOTCH_DEPTH_SHIFT = 24u;
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
+
+layout (push_constant) uniform Renderer2DConstants {
+    vec4 rect;
+    vec4 uvRect;
+    vec4 color0;
+    vec4 color1;
+    vec4 color2;
+    vec4 effect0;
+    vec4 effect1;
+    uvec4 data;
+} pc;
+
+struct SurfacePoint {
+    bool inside;
+    vec2 uv;
+};
+
+ivec2 dispatch_origin() {
+    return ivec2(int(pc.data.w & 65535u), int((pc.data.w >> 16u) & 65535u));
+}
+
+vec4 blend_over(vec4 dst, vec4 src) {
+    float outA = src.a + dst.a * (1.0 - src.a);
+    vec3 outRgb = src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a);
+    if (outA > 0.0001) {
+        outRgb /= outA;
+    }
+    return vec4(outRgb, outA);
+}
+
+SurfacePoint make_surface_point(bool inside, vec2 uv) {
+    SurfacePoint point;
+    point.inside = inside;
+    point.uv = uv;
+    return point;
+}
+
+vec3 project_surface_corner(vec2 uv) {
+    vec3 p = vec3((uv - vec2(0.5)) * pc.rect.zw, 0.0);
+
+    float pitchCos = cos(pc.effect1.y);
+    float pitchSin = sin(pc.effect1.y);
+    p = vec3(p.x, p.y * pitchCos - p.z * pitchSin, p.y * pitchSin + p.z * pitchCos);
+
+    float yawCos = cos(pc.effect1.z);
+    float yawSin = sin(pc.effect1.z);
+    p = vec3(p.x * yawCos + p.z * yawSin, p.y, -p.x * yawSin + p.z * yawCos);
+
+    float perspective = max(pc.effect1.w, 0.0);
+    float q = 1.0;
+    if (perspective > 0.001) {
+        float cameraDistance = max(min(pc.rect.z, pc.rect.w), 1.0) / perspective;
+        q = cameraDistance / max(cameraDistance + p.z, 1.0);
+    }
+
+    vec2 projected = p.xy * q;
+    float zCos = cos(pc.effect1.x);
+    float zSin = sin(pc.effect1.x);
+    projected = vec2(
+        projected.x * zCos - projected.y * zSin,
+        projected.x * zSin + projected.y * zCos
+    );
+
+    return vec3(pc.rect.xy + pc.rect.zw * 0.5 + projected, q);
+}
+
+vec3 barycentric_coords(vec2 p, vec2 a, vec2 b, vec2 c) {
+    vec2 v0 = b - a;
+    vec2 v1 = c - a;
+    vec2 v2 = p - a;
+    float denom = v0.x * v1.y - v1.x * v0.y;
+    if (abs(denom) <= 0.0001) {
+        return vec3(-1.0);
+    }
+
+    float v = (v2.x * v1.y - v1.x * v2.y) / denom;
+    float w = (v0.x * v2.y - v2.x * v0.y) / denom;
+    return vec3(1.0 - v - w, v, w);
+}
+
+bool barycentric_inside(vec3 bary) {
+    return bary.x >= -0.001 && bary.y >= -0.001 && bary.z >= -0.001;
+}
+
+vec2 perspective_uv(vec3 bary, vec2 uv0, vec2 uv1, vec2 uv2, float q0, float q1, float q2) {
+    float denom = max(bary.x * q0 + bary.y * q1 + bary.z * q2, 0.0001);
+    return (uv0 * bary.x * q0 + uv1 * bary.y * q1 + uv2 * bary.z * q2) / denom;
+}
+
+SurfacePoint surface_point_for_pixel(vec2 pixel) {
+    if ((pc.data.y & STYLE_TRANSFORM_2_5D) == 0u) {
+        return make_surface_point(true, (pixel - pc.rect.xy) / max(pc.rect.zw, vec2(1.0)));
+    }
+
+    vec3 p00 = project_surface_corner(vec2(0.0, 0.0));
+    vec3 p10 = project_surface_corner(vec2(1.0, 0.0));
+    vec3 p11 = project_surface_corner(vec2(1.0, 1.0));
+    vec3 p01 = project_surface_corner(vec2(0.0, 1.0));
+
+    vec3 tri0 = barycentric_coords(pixel, p00.xy, p10.xy, p11.xy);
+    if (barycentric_inside(tri0)) {
+        vec2 uv = perspective_uv(tri0, vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0), p00.z, p10.z, p11.z);
+        return make_surface_point(true, uv);
+    }
+
+    vec3 tri1 = barycentric_coords(pixel, p00.xy, p11.xy, p01.xy);
+    if (barycentric_inside(tri1)) {
+        vec2 uv = perspective_uv(tri1, vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0), p00.z, p11.z, p01.z);
+        return make_surface_point(true, uv);
+    }
+
+    return make_surface_point(false, vec2(0.0));
+}
+
+float sd_rounded_box(vec2 p, vec2 halfSize, float radius) {
+    vec2 q = abs(p) - max(halfSize - vec2(radius), vec2(0.0));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float sd_box(vec2 p, vec2 halfSize) {
+    vec2 q = abs(p) - halfSize;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+}
+
+vec4 unpack_corner_radii(uint packed) {
+    return vec4(
+        float(packed & 255u),
+        float((packed >> 8u) & 255u),
+        float((packed >> 16u) & 255u),
+        float((packed >> 24u) & 255u)
+    );
+}
+
+float corner_radius_for(vec2 p, vec4 radii) {
+    if (p.y < 0.0) {
+        return p.x < 0.0 ? radii.x : radii.y;
+    }
+    return p.x < 0.0 ? radii.w : radii.z;
+}
+
+float sd_rounded_box_corners(vec2 p, vec2 halfSize, vec4 radii) {
+    float radius = clamp(corner_radius_for(p, radii), 0.0, min(halfSize.x, halfSize.y));
+    return sd_rounded_box(p, halfSize, radius);
+}
+
+float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float power) {
+    float safeRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
+    vec2 outside = max(q, vec2(0.0));
+    float roundedNorm = length(outside);
+    float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
+    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float sd_squircle_box_corners(vec2 p, vec2 halfSize, vec4 radii, float amount, float power) {
+    float safeRadius = clamp(corner_radius_for(p, radii), 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
+    vec2 outside = max(q, vec2(0.0));
+    float roundedNorm = length(outside);
+    float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
+    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float notch_flare_size(vec2 size, float amount, float depth) {
+    const float morphThreshold = 0.85;
+    float progress = clamp((clamp(amount, 0.0, 1.0) - morphThreshold) / (1.0 - morphThreshold), 0.0, 1.0);
+    float depthTarget = depth > 0.5 ? depth : clamp(size.y * 0.62, 0.0, 92.0);
+    float flareTarget = clamp(depthTarget * 0.18, 0.0, min(size.y * 0.5, size.x * 0.18));
+    float sizeRatio = clamp((size.y * 0.5) / max(flareTarget, 0.001), 0.0, 1.0);
+    float flareT = sizeRatio * progress;
+    return flareTarget * flareT * flareT;
+}
+
+float sd_dynamic_notch(vec2 p, vec2 halfSize, float radius, float amount, float squircleAmount, float power, float depth) {
+    const float morphThreshold = 0.85;
+    float topRadius = radius * clamp(1.0 - clamp(amount, 0.0, 1.0) / morphThreshold, 0.0, 1.0);
+    float flare = notch_flare_size(halfSize * 2.0, amount, depth);
+    float bottomRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    float body = sd_squircle_box_corners(
+        p,
+        halfSize,
+        vec4(topRadius, topRadius, bottomRadius, bottomRadius),
+        max(squircleAmount, clamp(amount, 0.0, 1.0)),
+        power);
+    if (flare <= 0.05) {
+        return body;
+    }
+
+    vec2 topCenter = vec2(0.0, -halfSize.y + flare * 0.5);
+    float topBar = sd_box(p - topCenter, vec2(halfSize.x + flare, flare * 0.5));
+    float leftCutout = length(p - vec2(-halfSize.x - flare, -halfSize.y + flare)) - flare;
+    float rightCutout = length(p - vec2(halfSize.x + flare, -halfSize.y + flare)) - flare;
+    float topFlares = max(topBar, max(-leftCutout, -rightCutout));
+    return min(body, topFlares);
+}
+
+float sd_notched_squircle(
+    vec2 pixel,
+    vec4 rect,
+    float cornerRadius,
+    float squircleAmount,
+    float squirclePower,
+    float notchAmount,
+    float notchDepthOverride) {
+    vec2 size = max(rect.zw, vec2(1.0));
+    float amount = clamp(notchAmount, 0.0, 1.0);
+    float autoDepth = clamp(size.y * 0.62, 0.0, 92.0);
+    float requestedDepth = notchDepthOverride > 0.5 ? notchDepthOverride : autoDepth;
+    if (amount <= 0.01) {
+        vec2 halfSize = max(size * 0.5, vec2(0.5));
+        vec2 center = rect.xy + halfSize;
+        vec2 p = pixel - center;
+        return sd_squircle_box(p, halfSize, clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y)), squircleAmount, squirclePower);
+    }
+
+    vec2 halfSize = max(size * 0.5, vec2(0.5));
+    vec2 center = rect.xy + halfSize;
+    float radius = clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y));
+    return sd_dynamic_notch(
+        pixel - center,
+        halfSize,
+        radius,
+        amount,
+        squircleAmount,
+        squirclePower,
+        requestedDepth);
+}
+
+float primitive_sdf(
+    vec2 pixel,
+    vec4 rect,
+    uint primitive,
+    float cornerRadius,
+    vec4 cornerRadii,
+    bool useCornerRadii,
+    vec4 shapeParams) {
+    vec2 halfSize = max(rect.zw * 0.5, vec2(0.5));
+    vec2 center = rect.xy + halfSize;
+    vec2 p = pixel - center;
+
+    if (primitive == PRIMITIVE_ELLIPSE) {
+        vec2 q = p / halfSize;
+        return (length(q) - 1.0) * min(halfSize.x, halfSize.y);
+    }
+
+    float radius = primitive == PRIMITIVE_RECTANGLE ? 0.0 : clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y));
+    float squircleAmount = clamp(shapeParams.x, 0.0, 1.0);
+    float squirclePower = clamp(shapeParams.y <= 0.001 ? 4.0 : shapeParams.y, 2.0, 5.0);
+    if (primitive == PRIMITIVE_SQUIRCLE) {
+        return sd_squircle_box(p, halfSize, radius, squircleAmount, squirclePower);
+    }
+    if (primitive == PRIMITIVE_NOTCHED_SQUIRCLE) {
+        return sd_notched_squircle(
+            pixel,
+            rect,
+            radius,
+            squircleAmount,
+            squirclePower,
+            shapeParams.z,
+            shapeParams.w);
+    }
+    if (primitive != PRIMITIVE_RECTANGLE && useCornerRadii) {
+        return sd_rounded_box_corners(p, halfSize, cornerRadii);
+    }
+    return sd_rounded_box(p, halfSize, radius);
+}
+
+float shape_sdf(vec2 pixel) {
+    bool useCornerRadii = (pc.data.y & STYLE_CORNER_RADII) != 0u;
+    vec4 cornerRadii = useCornerRadii ? unpack_corner_radii(pc.data.z) : vec4(pc.effect0.x);
+    bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
+    vec4 shapeParams = effect1Reserved ? vec4(1.0, 4.0, 0.0, 0.0) : pc.effect1;
+    return primitive_sdf(pixel, pc.rect, pc.data.x, pc.effect0.x, cornerRadii, useCornerRadii, shapeParams);
+}
+
+float primitive_bounds_padding(vec4 shapeParams) {
+    if (pc.data.x != PRIMITIVE_NOTCHED_SQUIRCLE) {
+        return 0.0;
+    }
+    return notch_flare_size(max(pc.rect.zw, vec2(1.0)), shapeParams.z, shapeParams.w) + 6.0;
+}
+
+float shape_mask_alpha(vec2 pixel, float softness) {
+    if ((pc.data.y & STYLE_SHAPE_MASK) == 0u) {
+        return 1.0;
+    }
+
+    uint primitive = (pc.data.z >> MASK_PRIMITIVE_SHIFT) & 15u;
+    float radius = float(pc.data.z & MASK_RADIUS_BITS);
+    float squircleAmount = float((pc.data.z >> MASK_AMOUNT_SHIFT) & 15u) / 15.0;
+    float squirclePower = 2.0 + (float((pc.data.z >> MASK_POWER_SHIFT) & 15u) / 15.0) * 3.0;
+    float notchAmount = float((pc.data.z >> MASK_NOTCH_AMOUNT_SHIFT) & 15u) / 15.0;
+    float notchDepth = float((pc.data.z >> MASK_NOTCH_DEPTH_SHIFT) & 255u);
+    vec4 maskParams = vec4(squircleAmount, squirclePower, notchAmount, notchDepth);
+    float sdf = primitive_sdf(pixel, pc.effect1, primitive, radius, vec4(radius), false, maskParams);
+    float inwardSoftness = max(softness, 0.75);
+    return 1.0 - smoothstep(-inwardSoftness, 0.0, sdf);
+}
+
+vec4 fill_color(vec2 uv) {
+    if ((pc.data.y & STYLE_GRADIENT) == 0u) {
+        return pc.color0;
+    }
+
+    vec2 a = pc.uvRect.xy;
+    vec2 b = pc.uvRect.zw;
+    if ((pc.data.y & STYLE_RADIAL_GRADIENT) != 0u) {
+        float radius = max(length(b - a), 0.0001);
+        float t = clamp(length(uv - a) / radius, 0.0, 1.0);
+        t = smoothstep(0.0, 1.0, t);
+        return mix(pc.color0, pc.color1, t);
+    }
+
+    vec2 axis = b - a;
+    float denom = max(dot(axis, axis), 0.0001);
+    float t = clamp(dot(uv - a, axis) / denom, 0.0, 1.0);
+    return mix(pc.color0, pc.color1, t);
+}
+
+vec4 compose_shape_layers(vec4 body, float bodyCoverage, vec4 outline, float outlineCoverage) {
+    float bodyAlpha = body.a * bodyCoverage;
+    float outlineAlpha = outline.a * outlineCoverage;
+    float alpha = bodyAlpha + outlineAlpha;
+    if (alpha <= 0.0001) {
+        return vec4(0.0);
+    }
+
+    vec3 premultiplied = body.rgb * bodyAlpha + outline.rgb * outlineAlpha;
+    return vec4(premultiplied / alpha, alpha);
+}
+
+float top_outline_factor_for_notch(vec2 pixel, float outlineWidth, float softness) {
+    bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
+    if (effect1Reserved ||
+        pc.data.x != PRIMITIVE_NOTCHED_SQUIRCLE ||
+        pc.effect1.z <= 0.01 ||
+        outlineWidth <= 0.001) {
+        return 1.0;
+    }
+
+    float notchSuppression = smoothstep(0.04, 0.22, clamp(pc.effect1.z, 0.0, 1.0));
+    float topDistance = pixel.y - pc.rect.y;
+    float topEdgeFactor = smoothstep(outlineWidth + softness * 0.25, outlineWidth + softness * 1.75, topDistance);
+    return mix(1.0, topEdgeFactor, notchSuppression);
+}
+
+vec4 shade_shape_sample(vec2 samplePoint) {
+    SurfacePoint surface = surface_point_for_pixel(samplePoint);
+    if (!surface.inside) {
+        return vec4(0.0);
+    }
+
+    vec2 localPixel = pc.rect.xy + surface.uv * pc.rect.zw;
+    float sdf = shape_sdf(localPixel);
+    float softness = max(pc.effect0.z, 0.5);
+    float maskAlpha = shape_mask_alpha(samplePoint, softness);
+    if (maskAlpha <= 0.001) {
+        return vec4(0.0);
+    }
+
+    bool smoothEdges = (pc.data.y & STYLE_SDF_EDGES) != 0u;
+    float fillAlpha = smoothEdges ? smoothstep(softness, -softness, sdf) : (sdf <= 0.0 ? 1.0 : 0.0);
+    float outlineWidth = max(pc.effect0.y, 0.0);
+    float innerAlpha = outlineWidth > 0.0
+        ? (smoothEdges ? smoothstep(softness, -softness, sdf + outlineWidth) : (sdf + outlineWidth <= 0.0 ? 1.0 : 0.0))
+        : fillAlpha;
+    float outlineAlpha = max(fillAlpha - innerAlpha, 0.0);
+    float bodyCoverage = outlineWidth > 0.0 ? innerAlpha : fillAlpha;
+    float topOutlineFactor = top_outline_factor_for_notch(localPixel, outlineWidth, softness);
+    bodyCoverage = mix(fillAlpha, bodyCoverage, topOutlineFactor);
+    outlineAlpha *= topOutlineFactor;
+
+    vec2 uv = clamp(surface.uv, vec2(0.0), vec2(1.0));
+    vec4 body = fill_color(uv);
+    vec4 outline = pc.color2;
+    vec4 src = compose_shape_layers(body, bodyCoverage, outline, outlineAlpha);
+    src.a *= maskAlpha * pc.effect0.w;
+    return src.a > 0.001 ? src : vec4(0.0);
+}
+
+void accumulate_shape_sample(vec2 samplePoint, float weight, inout vec3 premultiplied, inout float alpha, inout float weightSum) {
+    vec4 sampleColor = shade_shape_sample(samplePoint);
+    premultiplied += sampleColor.rgb * sampleColor.a * weight;
+    alpha += sampleColor.a * weight;
+    weightSum += weight;
+}
+
+vec4 resolve_accumulated_shape(vec3 premultiplied, float alpha, float weightSum) {
+    alpha /= max(weightSum, 0.0001);
+    premultiplied /= max(weightSum, 0.0001);
+    vec3 rgb = alpha > 0.0001 ? premultiplied / alpha : vec3(0.0);
+    return vec4(rgb, alpha);
+}
+
+vec4 resolve_filtered_shape(vec2 pixelCenter) {
+    vec3 premultiplied = vec3(0.0);
+    float alpha = 0.0;
+    float weightSum = 0.0;
+
+    accumulate_shape_sample(pixelCenter + vec2(-0.375, -0.125), 0.25, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2( 0.125, -0.375), 0.25, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(-0.125,  0.375), 0.25, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2( 0.375,  0.125), 0.25, premultiplied, alpha, weightSum);
+
+    return resolve_accumulated_shape(premultiplied, alpha, weightSum);
+}
+
+vec4 resolve_transformed_shape(vec2 pixelCenter) {
+    return resolve_filtered_shape(pixelCenter);
+}
+
+vec4 resolve_blurred_shape(vec2 pixelCenter) {
+    float radius = clamp(pc.effect0.z, 0.0, 40.0);
+    if (radius <= 0.5) {
+        return shade_shape_sample(pixelCenter);
+    }
+
+    vec3 premultiplied = vec3(0.0);
+    float alpha = 0.0;
+    float weightSum = 0.0;
+    float nearRadius = radius * 0.36;
+    float midRadius = radius * 0.62;
+    float farRadius = radius * 0.9;
+
+    accumulate_shape_sample(pixelCenter, 0.18, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2( nearRadius, 0.0), 0.10, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(-nearRadius, 0.0), 0.10, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(0.0,  nearRadius), 0.10, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(0.0, -nearRadius), 0.10, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2( midRadius,  midRadius), 0.07, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(-midRadius,  midRadius), 0.07, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2( midRadius, -midRadius), 0.07, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(-midRadius, -midRadius), 0.07, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2( farRadius, 0.0), 0.035, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(-farRadius, 0.0), 0.035, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(0.0,  farRadius), 0.035, premultiplied, alpha, weightSum);
+    accumulate_shape_sample(pixelCenter + vec2(0.0, -farRadius), 0.035, premultiplied, alpha, weightSum);
+
+    return resolve_accumulated_shape(premultiplied, alpha, weightSum);
+}
+
+void main() {
+    ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = imageSize(colorBuffer);
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
+        return;
+    }
+
+    vec2 p = vec2(pixel) + vec2(0.5);
+    bool transformed = (pc.data.y & STYLE_TRANSFORM_2_5D) != 0u;
+    bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
+    vec4 shapeParams = effect1Reserved ? vec4(1.0, 4.0, 0.0, 0.0) : pc.effect1;
+    float boundsPad = pc.effect0.y + pc.effect0.z + primitive_bounds_padding(shapeParams);
+    if (!transformed &&
+        (p.x < pc.rect.x - boundsPad ||
+        p.y < pc.rect.y - boundsPad ||
+        p.x > pc.rect.x + pc.rect.z + boundsPad ||
+        p.y > pc.rect.y + pc.rect.w + boundsPad)) {
+        return;
+    }
+
+    bool foregroundBlur = (pc.data.y & STYLE_BLUR) != 0u && pc.effect0.z > 0.5;
+    vec4 src = transformed
+        ? resolve_transformed_shape(p)
+        : (foregroundBlur ? resolve_blurred_shape(p) : resolve_filtered_shape(p));
+    if (src.a <= 0.001) {
+        return;
+    }
+
+    vec4 dst = imageLoad(colorBuffer, pixel);
+    imageStore(colorBuffer, pixel, blend_over(dst, src));
+}

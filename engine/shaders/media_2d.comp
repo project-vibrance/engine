@@ -1,0 +1,519 @@
+#version 450
+
+const uint STYLE_GRADIENT = 1u << 0;
+const uint STYLE_BLUR = 1u << 5;
+const uint STYLE_RADIAL_GRADIENT = 1u << 11;
+const uint STYLE_TRANSFORM_2_5D = 1u << 12;
+const uint STYLE_MEDIA_COLOR_ADJUST = 1u << 13;
+const uint STYLE_MEDIA_AUTO_BLACK_LIFT = 1u << 14;
+const uint STYLE_SHAPE_MASK = 1u << 15;
+const uint STYLE_MEDIA_TINT_AS_MASK = 1u << 19;
+const uint STYLE_MEDIA_PREMULTIPLIED_ALPHA = 1u << 22;
+const uint PRIMITIVE_RECTANGLE = 1u;
+const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
+const uint PRIMITIVE_ELLIPSE = 3u;
+const uint PRIMITIVE_SQUIRCLE = 6u;
+const uint PRIMITIVE_NOTCHED_SQUIRCLE = 7u;
+const float AUTO_BLACK_LIFT_FLOOR = 0.038;
+const float AUTO_BLACK_LIFT_RANGE = 0.18;
+const float AUTO_BLACK_LIFT_BLEND = 0.92;
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
+layout (set = 1, binding = 0) uniform sampler2D mediaTexture;
+
+layout (push_constant) uniform Renderer2DConstants {
+    vec4 rect;
+    vec4 uvRect;
+    vec4 color0;
+    vec4 color1;
+    vec4 color2;
+    vec4 effect0;
+    vec4 effect1;
+    uvec4 data;
+} pc;
+
+struct SurfacePoint {
+    bool inside;
+    vec2 uv;
+};
+
+ivec2 dispatch_origin() {
+    return ivec2(int(pc.data.w & 65535u), int((pc.data.w >> 16u) & 65535u));
+}
+
+vec4 blend_over(vec4 dst, vec4 src) {
+    float outA = src.a + dst.a * (1.0 - src.a);
+    vec3 outRgb = src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a);
+    if (outA > 0.0001) {
+        outRgb /= outA;
+    }
+    return vec4(outRgb, outA);
+}
+
+SurfacePoint make_surface_point(bool inside, vec2 uv) {
+    SurfacePoint point;
+    point.inside = inside;
+    point.uv = uv;
+    return point;
+}
+
+vec3 project_surface_corner(vec2 uv) {
+    vec3 p = vec3((uv - vec2(0.5)) * pc.rect.zw, 0.0);
+
+    float pitchCos = cos(pc.effect1.y);
+    float pitchSin = sin(pc.effect1.y);
+    p = vec3(p.x, p.y * pitchCos - p.z * pitchSin, p.y * pitchSin + p.z * pitchCos);
+
+    float yawCos = cos(pc.effect1.z);
+    float yawSin = sin(pc.effect1.z);
+    p = vec3(p.x * yawCos + p.z * yawSin, p.y, -p.x * yawSin + p.z * yawCos);
+
+    float perspective = max(pc.effect1.w, 0.0);
+    float q = 1.0;
+    if (perspective > 0.001) {
+        float cameraDistance = max(min(pc.rect.z, pc.rect.w), 1.0) / perspective;
+        q = cameraDistance / max(cameraDistance + p.z, 1.0);
+    }
+
+    vec2 projected = p.xy * q;
+    float zCos = cos(pc.effect1.x);
+    float zSin = sin(pc.effect1.x);
+    projected = vec2(
+        projected.x * zCos - projected.y * zSin,
+        projected.x * zSin + projected.y * zCos
+    );
+
+    return vec3(pc.rect.xy + pc.rect.zw * 0.5 + projected, q);
+}
+
+vec3 barycentric_coords(vec2 p, vec2 a, vec2 b, vec2 c) {
+    vec2 v0 = b - a;
+    vec2 v1 = c - a;
+    vec2 v2 = p - a;
+    float denom = v0.x * v1.y - v1.x * v0.y;
+    if (abs(denom) <= 0.0001) {
+        return vec3(-1.0);
+    }
+
+    float v = (v2.x * v1.y - v1.x * v2.y) / denom;
+    float w = (v0.x * v2.y - v2.x * v0.y) / denom;
+    return vec3(1.0 - v - w, v, w);
+}
+
+bool barycentric_inside(vec3 bary) {
+    return bary.x >= -0.001 && bary.y >= -0.001 && bary.z >= -0.001;
+}
+
+vec2 perspective_uv(vec3 bary, vec2 uv0, vec2 uv1, vec2 uv2, float q0, float q1, float q2) {
+    float denom = max(bary.x * q0 + bary.y * q1 + bary.z * q2, 0.0001);
+    return (uv0 * bary.x * q0 + uv1 * bary.y * q1 + uv2 * bary.z * q2) / denom;
+}
+
+SurfacePoint surface_point_for_pixel(vec2 pixel) {
+    if ((pc.data.y & STYLE_TRANSFORM_2_5D) == 0u) {
+        return make_surface_point(true, (pixel - pc.rect.xy) / max(pc.rect.zw, vec2(1.0)));
+    }
+
+    vec3 p00 = project_surface_corner(vec2(0.0, 0.0));
+    vec3 p10 = project_surface_corner(vec2(1.0, 0.0));
+    vec3 p11 = project_surface_corner(vec2(1.0, 1.0));
+    vec3 p01 = project_surface_corner(vec2(0.0, 1.0));
+
+    vec3 tri0 = barycentric_coords(pixel, p00.xy, p10.xy, p11.xy);
+    if (barycentric_inside(tri0)) {
+        vec2 uv = perspective_uv(tri0, vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0), p00.z, p10.z, p11.z);
+        return make_surface_point(true, uv);
+    }
+
+    vec3 tri1 = barycentric_coords(pixel, p00.xy, p11.xy, p01.xy);
+    if (barycentric_inside(tri1)) {
+        vec2 uv = perspective_uv(tri1, vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0), p00.z, p11.z, p01.z);
+        return make_surface_point(true, uv);
+    }
+
+    return make_surface_point(false, vec2(0.0));
+}
+
+float rounded_rect_mask(vec2 p) {
+    float radius = clamp(pc.effect0.x, 0.0, min(pc.rect.z, pc.rect.w) * 0.5);
+    float softness = max(pc.effect0.y, 0.0);
+    if (radius <= 0.001 && softness <= 0.001) {
+        return 1.0;
+    }
+
+    vec2 halfSize = pc.rect.zw * 0.5;
+    vec2 local = p - (pc.rect.xy + halfSize);
+    vec2 q = abs(local) - (halfSize - vec2(radius));
+    float distanceToEdge = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    if (softness <= 0.001) {
+        return distanceToEdge <= 0.0 ? 1.0 : 0.0;
+    }
+    return 1.0 - smoothstep(0.0, softness, distanceToEdge);
+}
+
+float sd_rounded_box(vec2 p, vec2 halfSize, float radius) {
+    vec2 q = abs(p) - max(halfSize - vec2(radius), vec2(0.0));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float sd_box(vec2 p, vec2 halfSize) {
+    vec2 q = abs(p) - halfSize;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+}
+
+float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float power) {
+    float safeRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
+    vec2 outside = max(q, vec2(0.0));
+    float roundedNorm = length(outside);
+    float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
+    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float corner_radius_for(vec2 p, vec4 radii) {
+    if (p.y < 0.0) {
+        return p.x < 0.0 ? radii.x : radii.y;
+    }
+    return p.x < 0.0 ? radii.w : radii.z;
+}
+
+float sd_squircle_box_corners(vec2 p, vec2 halfSize, vec4 radii, float amount, float power) {
+    float safeRadius = clamp(corner_radius_for(p, radii), 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
+    vec2 outside = max(q, vec2(0.0));
+    float roundedNorm = length(outside);
+    float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
+    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float notch_flare_size(vec2 size, float amount, float depth) {
+    const float morphThreshold = 0.85;
+    float progress = clamp((clamp(amount, 0.0, 1.0) - morphThreshold) / (1.0 - morphThreshold), 0.0, 1.0);
+    float depthTarget = depth > 0.5 ? depth : clamp(size.y * 0.62, 0.0, 92.0);
+    float flareTarget = clamp(depthTarget * 0.18, 0.0, min(size.y * 0.5, size.x * 0.18));
+    float sizeRatio = clamp((size.y * 0.5) / max(flareTarget, 0.001), 0.0, 1.0);
+    float flareT = sizeRatio * progress;
+    return flareTarget * flareT * flareT;
+}
+
+float sd_dynamic_notch(
+    vec2 p,
+    vec2 halfSize,
+    float radius,
+    float amount,
+    float squircleAmount,
+    float power,
+    float depth) {
+    const float morphThreshold = 0.85;
+    float topRadius = radius * clamp(1.0 - clamp(amount, 0.0, 1.0) / morphThreshold, 0.0, 1.0);
+    float flare = notch_flare_size(halfSize * 2.0, amount, depth);
+    float bottomRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    float body = sd_squircle_box_corners(
+        p,
+        halfSize,
+        vec4(topRadius, topRadius, bottomRadius, bottomRadius),
+        max(squircleAmount, clamp(amount, 0.0, 1.0)),
+        power);
+    if (flare <= 0.05) {
+        return body;
+    }
+
+    vec2 topCenter = vec2(0.0, -halfSize.y + flare * 0.5);
+    float topBar = sd_box(p - topCenter, vec2(halfSize.x + flare, flare * 0.5));
+    float leftCutout = length(p - vec2(-halfSize.x - flare, -halfSize.y + flare)) - flare;
+    float rightCutout = length(p - vec2(halfSize.x + flare, -halfSize.y + flare)) - flare;
+    float topFlares = max(topBar, max(-leftCutout, -rightCutout));
+    return min(body, topFlares);
+}
+
+float sd_notched_squircle(
+    vec2 pixel,
+    vec4 rect,
+    float cornerRadius,
+    float squircleAmount,
+    float squirclePower,
+    float notchAmount,
+    float notchDepth) {
+    vec2 size = max(rect.zw, vec2(1.0));
+    vec2 halfSize = max(size * 0.5, vec2(0.5));
+    vec2 center = rect.xy + halfSize;
+    float radius = clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y));
+    float amount = clamp(notchAmount, 0.0, 1.0);
+    if (amount <= 0.01) {
+        return sd_squircle_box(pixel - center, halfSize, radius, squircleAmount, squirclePower);
+    }
+    return sd_dynamic_notch(pixel - center, halfSize, radius, amount, squircleAmount, squirclePower, notchDepth);
+}
+
+vec4 decode_notched_mask_params() {
+    uint packed = uint(max(pc.color2.z, 0.0) + 0.5);
+    float squircleAmount = float(packed & 15u) / 15.0;
+    float squirclePower = 2.0 + (float((packed >> 4u) & 15u) / 15.0) * 3.0;
+    float notchAmount = float((packed >> 8u) & 15u) / 15.0;
+    return vec4(squircleAmount, squirclePower, notchAmount, pc.color2.w);
+}
+
+float inherited_shape_mask_alpha(vec2 pixel) {
+    if ((pc.data.y & STYLE_SHAPE_MASK) == 0u) {
+        return 1.0;
+    }
+
+    uint primitive = uint(max(pc.color2.x, 0.0) + 0.5);
+    vec4 rect = pc.effect1;
+    vec2 halfSize = max(rect.zw * 0.5, vec2(0.5));
+    vec2 p = pixel - (rect.xy + halfSize);
+    float radius = clamp(pc.color2.y, 0.0, min(halfSize.x, halfSize.y));
+    float sdf = 0.0;
+    if (primitive == PRIMITIVE_ELLIPSE) {
+        vec2 q = p / halfSize;
+        sdf = (length(q) - 1.0) * min(halfSize.x, halfSize.y);
+    } else if (primitive == PRIMITIVE_SQUIRCLE) {
+        sdf = sd_squircle_box(p, halfSize, radius, pc.color2.z, pc.color2.w);
+    } else if (primitive == PRIMITIVE_NOTCHED_SQUIRCLE) {
+        vec4 maskParams = decode_notched_mask_params();
+        sdf = sd_notched_squircle(pixel, rect, radius, maskParams.x, maskParams.y, maskParams.z, maskParams.w);
+    } else if (primitive == PRIMITIVE_RECTANGLE) {
+        sdf = sd_rounded_box(p, halfSize, 0.0);
+    } else {
+        sdf = sd_rounded_box(p, halfSize, radius);
+    }
+    return 1.0 - smoothstep(-0.75, 0.0, sdf);
+}
+
+float gradient_t(vec2 localUv) {
+    vec2 a = pc.color2.xy;
+    vec2 b = pc.color2.zw;
+    if ((pc.data.y & STYLE_RADIAL_GRADIENT) != 0u) {
+        float radius = max(length(b - a), 0.0001);
+        return clamp(length(localUv - a) / radius, 0.0, 1.0);
+    }
+
+    vec2 axis = b - a;
+    float denom = max(dot(axis, axis), 0.0001);
+    return clamp(dot(localUv - a, axis) / denom, 0.0, 1.0);
+}
+
+vec3 media_tint_rgb(vec2 localUv) {
+    if ((pc.data.y & STYLE_GRADIENT) == 0u) {
+        return pc.color0.rgb;
+    }
+
+    return mix(pc.color0.rgb, pc.color1.rgb, gradient_t(localUv));
+}
+
+float media_alpha_mask(vec2 localUv) {
+    if ((pc.data.y & STYLE_GRADIENT) == 0u) {
+        return pc.color0.a;
+    }
+
+    return mix(pc.color0.a, pc.color1.a, gradient_t(localUv));
+}
+
+bool media_premultiplied_alpha() {
+    return (pc.data.y & STYLE_MEDIA_PREMULTIPLIED_ALPHA) != 0u;
+}
+
+vec4 sample_media_texture(vec2 uv) {
+    return texture(mediaTexture, uv);
+}
+
+vec4 sample_media(vec2 uv) {
+    if ((pc.data.y & STYLE_BLUR) == 0u || pc.effect0.z <= 0.001) {
+        return sample_media_texture(uv);
+    }
+
+    int radius = clamp(int(round(pc.effect0.z)), 0, 32);
+    if (radius <= 0) {
+        return sample_media_texture(uv);
+    }
+
+    int stepSize = max(1, radius / 6);
+    float sigma = max(float(radius) * 0.5, 1.0);
+    vec2 uvPerScreenPixel = abs(pc.uvRect.zw - pc.uvRect.xy) / max(pc.rect.zw, vec2(1.0));
+    vec2 uvMin = min(pc.uvRect.xy, pc.uvRect.zw);
+    vec2 uvMax = max(pc.uvRect.xy, pc.uvRect.zw);
+    bool premultiplied = media_premultiplied_alpha();
+
+    vec3 weightedRgb = vec3(0.0);
+    float weightedAlpha = 0.0;
+    float weightSum = 0.0;
+    for (int y = -radius; y <= radius; y += stepSize) {
+        for (int x = -radius; x <= radius; x += stepSize) {
+            vec2 offset = vec2(float(x), float(y));
+            float weight = exp(-dot(offset, offset) / (2.0 * sigma * sigma));
+            vec2 sampleUv = clamp(uv + offset * uvPerScreenPixel, uvMin, uvMax);
+            vec4 sampleColor = sample_media_texture(sampleUv);
+            weightedRgb += (premultiplied ? sampleColor.rgb : sampleColor.rgb * sampleColor.a) * weight;
+            weightedAlpha += sampleColor.a * weight;
+            weightSum += weight;
+        }
+    }
+
+    float alpha = weightedAlpha / max(weightSum, 0.0001);
+    vec3 rgb = premultiplied
+        ? weightedRgb / max(weightSum, 0.0001)
+        : (weightedAlpha > 0.0001 ? weightedRgb / weightedAlpha : vec3(0.0));
+    return vec4(rgb, alpha);
+}
+
+vec4 unpremultiply_media(vec4 src) {
+    if (!media_premultiplied_alpha()) {
+        return src;
+    }
+    src.rgb = src.a > 0.0001 ? src.rgb / src.a : vec3(0.0);
+    return src;
+}
+
+float unpack_unorm8(uint packed, uint shift) {
+    return float((packed >> shift) & 255u) / 255.0;
+}
+
+float unpack_range8(uint packed, uint shift, float minValue, float maxValue) {
+    return mix(minValue, maxValue, unpack_unorm8(packed, shift));
+}
+
+vec3 apply_media_color_adjustment(vec3 rgb) {
+    if ((pc.data.y & STYLE_MEDIA_COLOR_ADJUST) == 0u) {
+        return rgb;
+    }
+
+    uint packed = pc.data.z;
+    float brightness = unpack_range8(packed, 0u, -1.0, 1.0);
+    float contrast = unpack_range8(packed, 8u, 0.0, 4.0);
+    float exposure = unpack_range8(packed, 16u, -4.0, 4.0);
+    float invertAmount = unpack_unorm8(packed, 24u);
+
+    vec3 adjusted = rgb * exp2(exposure);
+    adjusted = (adjusted - vec3(0.5)) * contrast + vec3(0.5);
+    adjusted += vec3(brightness);
+    adjusted = mix(adjusted, vec3(1.0) - adjusted, invertAmount);
+    return clamp(adjusted, vec3(0.0), vec3(1.0));
+}
+
+float media_black_background_factor() {
+    return (pc.data.y & STYLE_MEDIA_AUTO_BLACK_LIFT) != 0u ? 1.0 : 0.0;
+}
+
+vec3 apply_media_auto_black_lift(vec3 rgb, float alpha, float backgroundFactor) {
+    if (backgroundFactor <= 0.001) {
+        return rgb;
+    }
+    float alphaWeight = smoothstep(0.05, 0.35, alpha);
+    float strength = backgroundFactor * alphaWeight;
+    if (strength <= 0.001) {
+        return rgb;
+    }
+
+    float luminance = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    float blackWeight = 1.0 - smoothstep(AUTO_BLACK_LIFT_FLOOR, AUTO_BLACK_LIFT_RANGE, luminance);
+    vec3 raisedBlack = max(rgb, vec3(AUTO_BLACK_LIFT_FLOOR));
+
+    vec3 balanced = mix(rgb, raisedBlack, blackWeight * AUTO_BLACK_LIFT_BLEND);
+    return clamp(mix(rgb, balanced, strength), vec3(0.0), vec3(1.0));
+}
+
+vec4 shade_media_sample(vec2 samplePoint, float backgroundFactor) {
+    SurfacePoint surface = surface_point_for_pixel(samplePoint);
+    if (!surface.inside) {
+        return vec4(0.0);
+    }
+
+    vec2 localUv = clamp(surface.uv, vec2(0.0), vec2(1.0));
+    vec2 uv = mix(pc.uvRect.xy, pc.uvRect.zw, localUv);
+    vec4 src = unpremultiply_media(sample_media(uv));
+    vec3 tintRgb = media_tint_rgb(localUv);
+    if ((pc.data.y & STYLE_MEDIA_TINT_AS_MASK) != 0u) {
+        src.rgb = tintRgb;
+    } else {
+        src.rgb *= tintRgb;
+    }
+    src.rgb = apply_media_color_adjustment(src.rgb);
+    src.rgb = apply_media_auto_black_lift(src.rgb, src.a, backgroundFactor);
+    src.a *= media_alpha_mask(localUv) * pc.effect0.w;
+    src.a *= rounded_rect_mask(pc.rect.xy + localUv * pc.rect.zw);
+    src.a *= inherited_shape_mask_alpha(samplePoint);
+    return src.a > 0.001 ? src : vec4(0.0);
+}
+
+void accumulate_media_sample(
+    vec2 samplePoint,
+    float weight,
+    float backgroundFactor,
+    inout vec3 premultiplied,
+    inout float alpha,
+    inout float weightSum) {
+    vec4 sampleColor = shade_media_sample(samplePoint, backgroundFactor);
+    premultiplied += sampleColor.rgb * sampleColor.a * weight;
+    alpha += sampleColor.a * weight;
+    weightSum += weight;
+}
+
+vec4 resolve_accumulated_media(vec3 premultiplied, float alpha, float weightSum) {
+    alpha /= max(weightSum, 0.0001);
+    premultiplied /= max(weightSum, 0.0001);
+    vec3 rgb = alpha > 0.0001 ? premultiplied / alpha : vec3(0.0);
+    return vec4(rgb, alpha);
+}
+
+vec4 resolve_filtered_media(vec2 pixelCenter, float backgroundFactor) {
+    vec3 premultiplied = vec3(0.0);
+    float alpha = 0.0;
+    float weightSum = 0.0;
+
+    accumulate_media_sample(pixelCenter + vec2(-0.375, -0.125), 0.25, backgroundFactor, premultiplied, alpha, weightSum);
+    accumulate_media_sample(pixelCenter + vec2( 0.125, -0.375), 0.25, backgroundFactor, premultiplied, alpha, weightSum);
+    accumulate_media_sample(pixelCenter + vec2(-0.125,  0.375), 0.25, backgroundFactor, premultiplied, alpha, weightSum);
+    accumulate_media_sample(pixelCenter + vec2( 0.375,  0.125), 0.25, backgroundFactor, premultiplied, alpha, weightSum);
+
+    return resolve_accumulated_media(premultiplied, alpha, weightSum);
+}
+
+vec4 resolve_transformed_media(vec2 pixelCenter, float backgroundFactor) {
+    vec4 s0 = shade_media_sample(pixelCenter + vec2(-0.375, -0.125), backgroundFactor);
+    vec4 s1 = shade_media_sample(pixelCenter + vec2( 0.125, -0.375), backgroundFactor);
+    vec4 s2 = shade_media_sample(pixelCenter + vec2(-0.125,  0.375), backgroundFactor);
+    vec4 s3 = shade_media_sample(pixelCenter + vec2( 0.375,  0.125), backgroundFactor);
+
+    vec3 premultiplied =
+        s0.rgb * s0.a +
+        s1.rgb * s1.a +
+        s2.rgb * s2.a +
+        s3.rgb * s3.a;
+    float alpha = s0.a + s1.a + s2.a + s3.a;
+    premultiplied *= 0.25;
+    alpha *= 0.25;
+
+    vec3 rgb = alpha > 0.0001 ? premultiplied / alpha : vec3(0.0);
+    return vec4(rgb, alpha);
+}
+
+void main() {
+    ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = imageSize(colorBuffer);
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
+        return;
+    }
+
+    vec2 p = vec2(pixel) + vec2(0.5);
+    bool transformed = (pc.data.y & STYLE_TRANSFORM_2_5D) != 0u;
+    float samplePad = 1.0;
+    if (!transformed &&
+        (p.x < pc.rect.x - samplePad || p.y < pc.rect.y - samplePad ||
+        p.x > pc.rect.x + pc.rect.z + samplePad || p.y > pc.rect.y + pc.rect.w + samplePad)) {
+        return;
+    }
+
+    float backgroundFactor = media_black_background_factor();
+    vec4 src = transformed
+        ? resolve_transformed_media(p, backgroundFactor)
+        : resolve_filtered_media(p, backgroundFactor);
+    if (src.a <= 0.001) {
+        return;
+    }
+
+    vec4 dst = imageLoad(colorBuffer, pixel);
+    imageStore(colorBuffer, pixel, blend_over(dst, src));
+}

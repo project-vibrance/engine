@@ -1,0 +1,43 @@
+#version 450
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout (set = 0, binding = 1, rgba8) readonly uniform image2D sceneColorBuffer;
+layout (set = 1, binding = 0, rgba8) writeonly uniform image2D tempSurface;
+layout (set = 1, binding = 2, rgba8) readonly uniform image2D uiBlurSurface;
+layout (set = 1, binding = 4, rgba8) readonly uniform image2D uiStaticSurface;
+layout (set = 1, binding = 5, rgba8) readonly uniform image2D uiStaticBlurSurface;
+layout (set = 1, binding = 6, rgba8) readonly uniform image2D uiExternalBackdropSurface;
+
+const uint COMPOSITE_USE_EXTERNAL_BACKDROP_UNDERLAY = 1u << 0;
+
+layout (push_constant) uniform Composite2DConstants {
+    uvec4 data;
+} pc;
+
+vec4 blend_over(vec4 dst, vec4 src) {
+    float outA = src.a + dst.a * (1.0 - src.a);
+    vec3 outRgb = src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a);
+    if (outA > 0.0001) {
+        outRgb /= outA;
+    }
+    return vec4(outRgb, outA);
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = imageSize(sceneColorBuffer);
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
+        return;
+    }
+
+    vec4 sceneColor = imageLoad(sceneColorBuffer, pixel);
+    vec4 staticColor = imageLoad(uiStaticSurface, pixel);
+
+    vec4 color = vec4(0.0);
+    if ((pc.data.x & COMPOSITE_USE_EXTERNAL_BACKDROP_UNDERLAY) != 0u) {
+        color = imageLoad(uiExternalBackdropSurface, pixel);
+    }
+    color = blend_over(color, staticColor);
+    color = blend_over(color, sceneColor);
+    imageStore(tempSurface, pixel, color);
+}

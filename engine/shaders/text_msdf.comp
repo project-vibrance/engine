@@ -1,0 +1,494 @@
+#version 450
+
+const uint STYLE_GRADIENT = 1u << 0;
+const uint STYLE_OUTLINE = 1u << 1;
+const uint STYLE_SHADOW = 1u << 3;
+const uint STYLE_GLOW = 1u << 4;
+const uint STYLE_BLUR = 1u << 5;
+const uint STYLE_ATLAS_TEXT = 1u << 8;
+const uint STYLE_SHAPE_MASK = 1u << 15;
+const uint PRIMITIVE_RECTANGLE = 1u;
+const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
+const uint PRIMITIVE_ELLIPSE = 3u;
+const uint PRIMITIVE_SQUIRCLE = 6u;
+const uint PRIMITIVE_NOTCHED_SQUIRCLE = 7u;
+const uint TEXT_PASS_ALL = 0u;
+const uint TEXT_PASS_UNDERLAY = 1u;
+const uint TEXT_PASS_FOREGROUND = 2u;
+const uint TEXT_PASS_MASK = 3u;
+const uint TEXT_WEIGHT_SHIFT = 2u;
+const uint TEXT_WEIGHT_MASK = 4095u;
+const int TEXT_WEIGHT_BIAS = 2048;
+const float TEXT_WEIGHT_SCALE = 256.0;
+const float SDF_EDGE = 180.0 / 255.0;
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
+layout (set = 1, binding = 3, rgba8) readonly uniform image2D fontAtlas;
+
+layout (push_constant) uniform Renderer2DConstants {
+    vec4 rect;
+    vec4 uvRect;
+    vec4 color0;
+    vec4 color1;
+    vec4 color2;
+    vec4 effect0;
+    vec4 effect1;
+    uvec4 data;
+} pc;
+
+ivec2 dispatch_origin() {
+    return ivec2(int(pc.data.w & 65535u), int((pc.data.w >> 16u) & 65535u));
+}
+
+float median(float r, float g, float b) {
+    return max(min(r, g), min(max(r, g), b));
+}
+
+vec4 blend_over(vec4 dst, vec4 src) {
+    float outA = src.a + dst.a * (1.0 - src.a);
+    vec3 outRgb = src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a);
+    if (outA > 0.0001) {
+        outRgb /= outA;
+    }
+    return vec4(outRgb, outA);
+}
+
+float pseudo_glyph_sdf(vec2 uv) {
+    float glyphCount = max(1.0, floor(pc.rect.z / max(pc.rect.w * 0.52, 1.0)));
+    vec2 cell = vec2(fract(uv.x * glyphCount), uv.y);
+
+    float stem = abs(cell.x - 0.28) - 0.075;
+    vec2 bowlPos = (cell - vec2(0.52, 0.52)) * vec2(1.15, 0.9);
+    float bowl = abs(length(bowlPos) - 0.28) - 0.055;
+    float cap = abs(cell.y - 0.24) - 0.055;
+    float sdf = min(min(stem, bowl), cap);
+    return sdf * pc.rect.w;
+}
+
+float msdf_alpha(vec2 uv, float offset) {
+    float sdf = pseudo_glyph_sdf(uv) - offset;
+    float pxRange = max(pc.effect0.x, 1.0);
+    vec3 msdf = vec3(0.5 - sdf / pxRange);
+    float signedDistance = median(msdf.r, msdf.g, msdf.b) - 0.5;
+    return clamp(signedDistance * pxRange + 0.5, 0.0, 1.0);
+}
+
+float sample_font_atlas(vec2 atlasUv) {
+    ivec2 atlasSize = imageSize(fontAtlas);
+    vec2 texel = clamp(atlasUv, vec2(0.0), vec2(1.0)) * vec2(atlasSize) - vec2(0.5);
+    ivec2 basePixel = ivec2(floor(texel));
+    vec2 blend = fract(texel);
+
+    ivec2 p00 = clamp(basePixel, ivec2(0), atlasSize - ivec2(1));
+    ivec2 p10 = clamp(basePixel + ivec2(1, 0), ivec2(0), atlasSize - ivec2(1));
+    ivec2 p01 = clamp(basePixel + ivec2(0, 1), ivec2(0), atlasSize - ivec2(1));
+    ivec2 p11 = clamp(basePixel + ivec2(1, 1), ivec2(0), atlasSize - ivec2(1));
+
+    float a00 = imageLoad(fontAtlas, p00).a;
+    float a10 = imageLoad(fontAtlas, p10).a;
+    float a01 = imageLoad(fontAtlas, p01).a;
+    float a11 = imageLoad(fontAtlas, p11).a;
+    return mix(mix(a00, a10, blend.x), mix(a01, a11, blend.x), blend.y);
+}
+
+float atlas_pixels_per_screen_pixel() {
+    ivec2 atlasSize = imageSize(fontAtlas);
+    vec2 glyphAtlasSize = max((pc.uvRect.zw - pc.uvRect.xy) * vec2(atlasSize), vec2(1.0));
+    vec2 atlasPerScreen = glyphAtlasSize / max(pc.rect.zw, vec2(1.0));
+    return max(min(atlasPerScreen.x, atlasPerScreen.y), 0.001);
+}
+
+float atlas_signed_distance_pixels(vec2 localUv) {
+    vec2 clampedUv = clamp(localUv, vec2(0.0), vec2(1.0));
+    vec2 atlasUv = mix(pc.uvRect.xy, pc.uvRect.zw, clampedUv);
+    float range = max(pc.effect0.x, 1.0);
+    float atlasDistance = (sample_font_atlas(atlasUv) - SDF_EDGE) * range / SDF_EDGE;
+    vec2 outsidePixels = (localUv - clampedUv) * pc.rect.zw;
+    return atlasDistance / atlas_pixels_per_screen_pixel() - length(outsidePixels);
+}
+
+float pseudo_signed_distance_pixels(vec2 localUv) {
+    vec2 clampedUv = clamp(localUv, vec2(0.0), vec2(1.0));
+    vec2 outsidePixels = (localUv - clampedUv) * pc.rect.zw;
+    return -pseudo_glyph_sdf(clampedUv) - length(outsidePixels);
+}
+
+float glyph_signed_distance_pixels(vec2 localUv, bool atlasText) {
+    return atlasText ? atlas_signed_distance_pixels(localUv) : pseudo_signed_distance_pixels(localUv);
+}
+
+float glyph_weight_expansion_pixels() {
+    uint packed = (pc.data.z >> TEXT_WEIGHT_SHIFT) & TEXT_WEIGHT_MASK;
+    return float(int(packed) - TEXT_WEIGHT_BIAS) / TEXT_WEIGHT_SCALE;
+}
+
+float sd_rounded_box(vec2 p, vec2 halfSize, float radius) {
+    vec2 q = abs(p) - max(halfSize - vec2(radius), vec2(0.0));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float sd_box(vec2 p, vec2 halfSize) {
+    vec2 q = abs(p) - halfSize;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+}
+
+float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float power) {
+    float safeRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
+    vec2 outside = max(q, vec2(0.0));
+    float roundedNorm = length(outside);
+    float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
+    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float corner_radius_for(vec2 p, vec4 radii) {
+    if (p.y < 0.0) {
+        return p.x < 0.0 ? radii.x : radii.y;
+    }
+    return p.x < 0.0 ? radii.w : radii.z;
+}
+
+float sd_squircle_box_corners(vec2 p, vec2 halfSize, vec4 radii, float amount, float power) {
+    float safeRadius = clamp(corner_radius_for(p, radii), 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
+    vec2 outside = max(q, vec2(0.0));
+    float roundedNorm = length(outside);
+    float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
+    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float notch_flare_size(vec2 size, float amount, float depth) {
+    const float morphThreshold = 0.85;
+    float progress = clamp((clamp(amount, 0.0, 1.0) - morphThreshold) / (1.0 - morphThreshold), 0.0, 1.0);
+    float depthTarget = depth > 0.5 ? depth : clamp(size.y * 0.62, 0.0, 92.0);
+    float flareTarget = clamp(depthTarget * 0.18, 0.0, min(size.y * 0.5, size.x * 0.18));
+    float sizeRatio = clamp((size.y * 0.5) / max(flareTarget, 0.001), 0.0, 1.0);
+    float flareT = sizeRatio * progress;
+    return flareTarget * flareT * flareT;
+}
+
+float sd_dynamic_notch(
+    vec2 p,
+    vec2 halfSize,
+    float radius,
+    float amount,
+    float squircleAmount,
+    float power,
+    float depth) {
+    const float morphThreshold = 0.85;
+    float topRadius = radius * clamp(1.0 - clamp(amount, 0.0, 1.0) / morphThreshold, 0.0, 1.0);
+    float flare = notch_flare_size(halfSize * 2.0, amount, depth);
+    float bottomRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    float body = sd_squircle_box_corners(
+        p,
+        halfSize,
+        vec4(topRadius, topRadius, bottomRadius, bottomRadius),
+        max(squircleAmount, clamp(amount, 0.0, 1.0)),
+        power);
+    if (flare <= 0.05) {
+        return body;
+    }
+
+    vec2 topCenter = vec2(0.0, -halfSize.y + flare * 0.5);
+    float topBar = sd_box(p - topCenter, vec2(halfSize.x + flare, flare * 0.5));
+    float leftCutout = length(p - vec2(-halfSize.x - flare, -halfSize.y + flare)) - flare;
+    float rightCutout = length(p - vec2(halfSize.x + flare, -halfSize.y + flare)) - flare;
+    float topFlares = max(topBar, max(-leftCutout, -rightCutout));
+    return min(body, topFlares);
+}
+
+float sd_notched_squircle(
+    vec2 pixel,
+    vec4 rect,
+    float cornerRadius,
+    float squircleAmount,
+    float squirclePower,
+    float notchAmount,
+    float notchDepth) {
+    vec2 size = max(rect.zw, vec2(1.0));
+    vec2 halfSize = max(size * 0.5, vec2(0.5));
+    vec2 center = rect.xy + halfSize;
+    float radius = clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y));
+    float amount = clamp(notchAmount, 0.0, 1.0);
+    if (amount <= 0.01) {
+        return sd_squircle_box(pixel - center, halfSize, radius, squircleAmount, squirclePower);
+    }
+    return sd_dynamic_notch(pixel - center, halfSize, radius, amount, squircleAmount, squirclePower, notchDepth);
+}
+
+vec4 decode_notched_mask_params() {
+    uint packed = uint(max(pc.color2.z, 0.0) + 0.5);
+    float squircleAmount = float(packed & 15u) / 15.0;
+    float squirclePower = 2.0 + (float((packed >> 4u) & 15u) / 15.0) * 3.0;
+    float notchAmount = float((packed >> 8u) & 15u) / 15.0;
+    return vec4(squircleAmount, squirclePower, notchAmount, pc.color2.w);
+}
+
+float inherited_shape_mask_alpha(vec2 pixel) {
+    if ((pc.data.y & STYLE_SHAPE_MASK) == 0u) {
+        return 1.0;
+    }
+
+    uint primitive = uint(max(pc.color2.x, 0.0) + 0.5);
+    vec4 rect = pc.effect1;
+    vec2 halfSize = max(rect.zw * 0.5, vec2(0.5));
+    vec2 p = pixel - (rect.xy + halfSize);
+    float radius = clamp(pc.color2.y, 0.0, min(halfSize.x, halfSize.y));
+    float sdf = 0.0;
+    if (primitive == PRIMITIVE_ELLIPSE) {
+        vec2 q = p / halfSize;
+        sdf = (length(q) - 1.0) * min(halfSize.x, halfSize.y);
+    } else if (primitive == PRIMITIVE_SQUIRCLE) {
+        sdf = sd_squircle_box(p, halfSize, radius, pc.color2.z, pc.color2.w);
+    } else if (primitive == PRIMITIVE_NOTCHED_SQUIRCLE) {
+        vec4 maskParams = decode_notched_mask_params();
+        sdf = sd_notched_squircle(pixel, rect, radius, maskParams.x, maskParams.y, maskParams.z, maskParams.w);
+    } else if (primitive == PRIMITIVE_RECTANGLE) {
+        sdf = sd_rounded_box(p, halfSize, 0.0);
+    } else {
+        sdf = sd_rounded_box(p, halfSize, radius);
+    }
+    return 1.0 - smoothstep(-0.75, 0.0, sdf);
+}
+
+float atlas_sdf_alpha(vec2 localUv, float expansionPixels) {
+    float distance = atlas_signed_distance_pixels(localUv) + expansionPixels;
+    float edgeSoftness = 0.72;
+    return smoothstep(-edgeSoftness, edgeSoftness, distance);
+}
+
+float glyph_alpha(vec2 localUv, bool atlasText, float expansionPixels) {
+    if (atlasText) {
+        return atlas_sdf_alpha(localUv, expansionPixels);
+    }
+
+    if (localUv.x < 0.0 || localUv.y < 0.0 || localUv.x > 1.0 || localUv.y > 1.0) {
+        return 0.0;
+    }
+
+    return msdf_alpha(localUv, -expansionPixels);
+}
+
+float atlas_boundary_fade(vec2 localUv, bool atlasText, float radiusPixels) {
+    if (!atlasText) {
+        return 1.0;
+    }
+
+    if (radiusPixels > 0.5) {
+        vec2 outsideUv = max(max(-localUv, localUv - vec2(1.0)), vec2(0.0));
+        float outsidePixels = length(outsideUv * pc.rect.zw);
+        return 1.0 - smoothstep(max(radiusPixels * 0.78, 1.0), radiusPixels + 1.0, outsidePixels);
+    }
+
+    vec2 edgePixels = min(localUv, vec2(1.0) - localUv) * pc.rect.zw;
+    float edgeDistance = min(edgePixels.x, edgePixels.y);
+    float rangeScreen = max(pc.effect0.x / atlas_pixels_per_screen_pixel(), 1.0);
+    float fadeWidth = clamp(min(max(radiusPixels, 1.0) * 0.35, rangeScreen * 0.22), 1.0, 10.0);
+    return smoothstep(0.0, fadeWidth, edgeDistance);
+}
+
+float blurred_glyph_alpha(vec2 localUv, bool atlasText, float radiusPixels, float expansionPixels) {
+    float radius = max(radiusPixels, 0.0);
+    if (radius <= 0.5) {
+        return glyph_alpha(localUv, atlasText, expansionPixels);
+    }
+
+    float distance = glyph_signed_distance_pixels(localUv, atlasText) + expansionPixels;
+    float outsideDistance = max(-distance, 0.0);
+    float sigma = max(radius * 0.46, 0.75);
+    float gaussian = exp(-(outsideDistance * outsideDistance) / (2.0 * sigma * sigma));
+    float cutoff = 1.0 - smoothstep(max(radius * 0.45, 0.0), radius + 1.0, outsideDistance);
+    float insideCoverage = smoothstep(-0.72, 0.72, distance);
+    float coverage = max(insideCoverage, gaussian * cutoff);
+    return clamp(coverage * atlas_boundary_fade(localUv, atlasText, radius), 0.0, 1.0);
+}
+
+float shadow_alpha(vec2 localUv, bool atlasText) {
+    return blurred_glyph_alpha(localUv, atlasText, pc.effect1.z, glyph_weight_expansion_pixels());
+}
+
+vec4 fill_color(vec2 uv) {
+    if ((pc.data.y & STYLE_GRADIENT) == 0u) {
+        return pc.color0;
+    }
+
+    if ((pc.data.y & STYLE_ATLAS_TEXT) != 0u) {
+        float t = clamp(uv.x * 0.8 + uv.y * 0.2, 0.0, 1.0);
+        return mix(pc.color0, pc.color1, t);
+    }
+
+    vec2 a = pc.uvRect.xy;
+    vec2 b = pc.uvRect.zw;
+    vec2 axis = b - a;
+    float denom = max(dot(axis, axis), 0.0001);
+    float t = clamp(dot(uv - a, axis) / denom, 0.0, 1.0);
+    return mix(pc.color0, pc.color1, t);
+}
+
+vec4 shade_text_sample(
+    vec2 samplePoint,
+    bool atlasText,
+    bool renderUnderlay,
+    bool renderForeground,
+    bool renderGlow) {
+    vec2 uv = (samplePoint - pc.rect.xy) / max(pc.rect.zw, vec2(1.0));
+
+    float fillAlpha = 0.0;
+    float outlineAlpha = 0.0;
+    float weightExpansion = glyph_weight_expansion_pixels();
+    if (renderForeground || renderGlow) {
+        fillAlpha = atlasText ?
+            atlas_sdf_alpha(uv, weightExpansion) :
+            msdf_alpha(clamp(uv, vec2(0.0), vec2(1.0)), -weightExpansion);
+        if ((pc.data.y & STYLE_OUTLINE) != 0u) {
+            float outlineExpansion = weightExpansion + pc.effect0.y;
+            float outlineCoverage = atlasText ?
+                atlas_sdf_alpha(uv, outlineExpansion) :
+                msdf_alpha(clamp(uv, vec2(0.0), vec2(1.0)), -outlineExpansion);
+            outlineAlpha = max(outlineCoverage - fillAlpha, 0.0);
+        }
+    }
+
+    vec4 src = vec4(0.0);
+    if (renderUnderlay && (pc.data.y & STYLE_SHADOW) != 0u) {
+        vec2 shadowUv = (samplePoint - pc.effect1.xy - pc.rect.xy) / max(pc.rect.zw, vec2(1.0));
+        float shadowCoverage = shadow_alpha(shadowUv, atlasText);
+        float shadowAlpha = shadowCoverage * pc.color2.a * pc.effect0.w * 0.52;
+        src = blend_over(src, vec4(pc.color2.rgb, shadowAlpha));
+    }
+
+    if (renderGlow) {
+        float glowCoverage = blurred_glyph_alpha(uv, atlasText, pc.effect0.z, weightExpansion);
+        float glowAlpha = max(glowCoverage - fillAlpha - outlineAlpha, 0.0) * 0.85;
+        if (glowAlpha > 0.001) {
+            src = blend_over(src, vec4(pc.color2.rgb, pc.color2.a * glowAlpha * pc.effect0.w));
+        }
+    }
+
+    if (renderForeground) {
+        vec2 fillUv = clamp(uv, vec2(0.0), vec2(1.0));
+        if (outlineAlpha > 0.001) {
+            src = blend_over(src, vec4(pc.color2.rgb, pc.color2.a * outlineAlpha * pc.effect0.w));
+        }
+
+        vec4 fillLayer = fill_color(fillUv);
+        fillLayer.a *= fillAlpha * pc.effect0.w;
+        src = blend_over(src, fillLayer);
+    }
+
+    src.a *= inherited_shape_mask_alpha(samplePoint);
+    return src.a > 0.001 ? src : vec4(0.0);
+}
+
+vec4 resolve_text(
+    vec2 pixelCenter,
+    bool atlasText,
+    bool renderUnderlay,
+    bool renderForeground,
+    bool renderGlow) {
+    vec4 s0 = shade_text_sample(pixelCenter + vec2(-0.375, -0.125), atlasText, renderUnderlay, renderForeground, renderGlow);
+    vec4 s1 = shade_text_sample(pixelCenter + vec2( 0.125, -0.375), atlasText, renderUnderlay, renderForeground, renderGlow);
+    vec4 s2 = shade_text_sample(pixelCenter + vec2(-0.125,  0.375), atlasText, renderUnderlay, renderForeground, renderGlow);
+    vec4 s3 = shade_text_sample(pixelCenter + vec2( 0.375,  0.125), atlasText, renderUnderlay, renderForeground, renderGlow);
+
+    vec3 premultiplied =
+        s0.rgb * s0.a +
+        s1.rgb * s1.a +
+        s2.rgb * s2.a +
+        s3.rgb * s3.a;
+    float alpha = s0.a + s1.a + s2.a + s3.a;
+    premultiplied *= 0.25;
+    alpha *= 0.25;
+
+    vec3 rgb = alpha > 0.0001 ? premultiplied / alpha : vec3(0.0);
+    return vec4(rgb, alpha);
+}
+
+void accumulate_text_sample(
+    vec2 samplePoint,
+    float weight,
+    bool atlasText,
+    bool renderUnderlay,
+    bool renderForeground,
+    bool renderGlow,
+    inout vec3 premultiplied,
+    inout float alpha,
+    inout float weightSum) {
+    vec4 sampleColor = shade_text_sample(samplePoint, atlasText, renderUnderlay, renderForeground, renderGlow);
+    premultiplied += sampleColor.rgb * sampleColor.a * weight;
+    alpha += sampleColor.a * weight;
+    weightSum += weight;
+}
+
+vec4 resolve_blurred_text(
+    vec2 pixelCenter,
+    bool atlasText,
+    bool renderUnderlay,
+    bool renderForeground,
+    bool renderGlow) {
+    float radius = clamp(pc.effect1.w, 0.0, 40.0);
+    if ((pc.data.y & STYLE_BLUR) == 0u || radius <= 0.5) {
+        return resolve_text(pixelCenter, atlasText, renderUnderlay, renderForeground, renderGlow);
+    }
+
+    vec3 premultiplied = vec3(0.0);
+    float alpha = 0.0;
+    float weightSum = 0.0;
+    float nearRadius = radius * 0.32;
+    float midRadius = radius * 0.58;
+    float farRadius = radius * 0.88;
+
+    accumulate_text_sample(pixelCenter, 0.18, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2( nearRadius, 0.0), 0.10, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2(-nearRadius, 0.0), 0.10, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2(0.0,  nearRadius), 0.10, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2(0.0, -nearRadius), 0.10, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2( midRadius,  midRadius), 0.07, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2(-midRadius,  midRadius), 0.07, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2( midRadius, -midRadius), 0.07, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2(-midRadius, -midRadius), 0.07, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2( farRadius, 0.0), 0.035, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2(-farRadius, 0.0), 0.035, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2(0.0,  farRadius), 0.035, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+    accumulate_text_sample(pixelCenter + vec2(0.0, -farRadius), 0.035, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+
+    alpha /= max(weightSum, 0.0001);
+    premultiplied /= max(weightSum, 0.0001);
+    vec3 rgb = alpha > 0.0001 ? premultiplied / alpha : vec3(0.0);
+    return vec4(rgb, alpha);
+}
+
+void main() {
+    ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = imageSize(colorBuffer);
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
+        return;
+    }
+
+    vec2 p = vec2(pixel) + vec2(0.5);
+    float glyphPad = max(max(pc.effect0.y, pc.effect0.z), pc.effect1.w);
+    float shadowPad = max(abs(pc.effect1.x), abs(pc.effect1.y)) + max(pc.effect1.z, 0.0);
+    float pad = max(glyphPad, shadowPad) + 2.0;
+    float samplePad = pad + 1.0;
+    if (p.x < pc.rect.x - samplePad || p.y < pc.rect.y - samplePad ||
+        p.x > pc.rect.x + pc.rect.z + samplePad || p.y > pc.rect.y + pc.rect.w + samplePad) {
+        return;
+    }
+
+    bool atlasText = (pc.data.y & STYLE_ATLAS_TEXT) != 0u;
+    uint textPass = pc.data.z & TEXT_PASS_MASK;
+    bool renderUnderlay = textPass == TEXT_PASS_ALL || textPass == TEXT_PASS_UNDERLAY;
+    bool renderForeground = textPass == TEXT_PASS_ALL || textPass == TEXT_PASS_FOREGROUND;
+    bool renderGlow = renderUnderlay && (pc.data.y & STYLE_GLOW) != 0u;
+
+    vec4 src = resolve_blurred_text(p, atlasText, renderUnderlay, renderForeground, renderGlow);
+    if (src.a <= 0.001) {
+        return;
+    }
+
+    vec4 dst = imageLoad(colorBuffer, pixel);
+    imageStore(colorBuffer, pixel, blend_over(dst, src));
+}

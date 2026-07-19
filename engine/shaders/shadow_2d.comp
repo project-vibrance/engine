@@ -1,0 +1,218 @@
+#version 450
+
+const uint STYLE_CORNER_RADII = 1u << 16;
+
+const uint PRIMITIVE_RECTANGLE = 1u;
+const uint PRIMITIVE_ELLIPSE = 3u;
+const uint PRIMITIVE_SQUIRCLE = 6u;
+const uint PRIMITIVE_NOTCHED_SQUIRCLE = 7u;
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
+
+layout (push_constant) uniform Renderer2DConstants {
+    vec4 rect;
+    vec4 uvRect;
+    vec4 color0;
+    vec4 color1;
+    vec4 color2;
+    vec4 effect0;
+    vec4 effect1;
+    uvec4 data;
+} pc;
+
+ivec2 dispatch_origin() {
+    return ivec2(int(pc.data.w & 65535u), int((pc.data.w >> 16u) & 65535u));
+}
+
+vec4 blend_over(vec4 dst, vec4 src) {
+    float outA = src.a + dst.a * (1.0 - src.a);
+    vec3 outRgb = src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a);
+    if (outA > 0.0001) {
+        outRgb /= outA;
+    }
+    return vec4(outRgb, outA);
+}
+
+float sd_rounded_box(vec2 p, vec2 halfSize, float radius) {
+    vec2 q = abs(p) - max(halfSize - vec2(radius), vec2(0.0));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float sd_box(vec2 p, vec2 halfSize) {
+    vec2 q = abs(p) - halfSize;
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+}
+
+vec4 unpack_corner_radii(uint packed) {
+    return vec4(
+        float(packed & 255u),
+        float((packed >> 8u) & 255u),
+        float((packed >> 16u) & 255u),
+        float((packed >> 24u) & 255u)
+    );
+}
+
+float corner_radius_for(vec2 p, vec4 radii) {
+    if (p.y < 0.0) {
+        return p.x < 0.0 ? radii.x : radii.y;
+    }
+    return p.x < 0.0 ? radii.w : radii.z;
+}
+
+float sd_rounded_box_corners(vec2 p, vec2 halfSize, vec4 radii) {
+    float radius = clamp(corner_radius_for(p, radii), 0.0, min(halfSize.x, halfSize.y));
+    return sd_rounded_box(p, halfSize, radius);
+}
+
+float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float power) {
+    float safeRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
+    vec2 outside = max(q, vec2(0.0));
+    float roundedNorm = length(outside);
+    float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
+    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float sd_squircle_box_corners(vec2 p, vec2 halfSize, vec4 radii, float amount, float power) {
+    float safeRadius = clamp(corner_radius_for(p, radii), 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
+    vec2 outside = max(q, vec2(0.0));
+    float roundedNorm = length(outside);
+    float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
+    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float notch_flare_size(vec2 size, float amount, float depth) {
+    const float morphThreshold = 0.85;
+    float progress = clamp((clamp(amount, 0.0, 1.0) - morphThreshold) / (1.0 - morphThreshold), 0.0, 1.0);
+    float depthTarget = depth > 0.5 ? depth : clamp(size.y * 0.62, 0.0, 92.0);
+    float flareTarget = clamp(depthTarget * 0.18, 0.0, min(size.y * 0.5, size.x * 0.18));
+    float sizeRatio = clamp((size.y * 0.5) / max(flareTarget, 0.001), 0.0, 1.0);
+    float flareT = sizeRatio * progress;
+    return flareTarget * flareT * flareT;
+}
+
+float sd_dynamic_notch(vec2 p, vec2 halfSize, float radius, float amount, float squircleAmount, float power, float depth) {
+    const float morphThreshold = 0.85;
+    float topRadius = radius * clamp(1.0 - clamp(amount, 0.0, 1.0) / morphThreshold, 0.0, 1.0);
+    float flare = notch_flare_size(halfSize * 2.0, amount, depth);
+    float bottomRadius = clamp(radius, 0.0, min(halfSize.x, halfSize.y));
+    float body = sd_squircle_box_corners(
+        p,
+        halfSize,
+        vec4(topRadius, topRadius, bottomRadius, bottomRadius),
+        max(squircleAmount, clamp(amount, 0.0, 1.0)),
+        power);
+    if (flare <= 0.05) {
+        return body;
+    }
+
+    vec2 topCenter = vec2(0.0, -halfSize.y + flare * 0.5);
+    float topBar = sd_box(p - topCenter, vec2(halfSize.x + flare, flare * 0.5));
+    float leftCutout = length(p - vec2(-halfSize.x - flare, -halfSize.y + flare)) - flare;
+    float rightCutout = length(p - vec2(halfSize.x + flare, -halfSize.y + flare)) - flare;
+    float topFlares = max(topBar, max(-leftCutout, -rightCutout));
+    return min(body, topFlares);
+}
+
+float sd_notched_squircle(
+    vec2 pixel,
+    vec4 rect,
+    float cornerRadius,
+    float squircleAmount,
+    float squirclePower,
+    float notchAmount,
+    float notchDepthOverride) {
+    vec2 size = max(rect.zw, vec2(1.0));
+    float amount = clamp(notchAmount, 0.0, 1.0);
+    float autoDepth = clamp(size.y * 0.62, 0.0, 92.0);
+    float requestedDepth = notchDepthOverride > 0.5 ? notchDepthOverride : autoDepth;
+    if (amount <= 0.01) {
+        vec2 halfSize = max(size * 0.5, vec2(0.5));
+        vec2 center = rect.xy + halfSize;
+        vec2 p = pixel - center;
+        return sd_squircle_box(p, halfSize, clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y)), squircleAmount, squirclePower);
+    }
+
+    vec2 halfSize = max(size * 0.5, vec2(0.5));
+    vec2 center = rect.xy + halfSize;
+    float radius = clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y));
+    return sd_dynamic_notch(
+        pixel - center,
+        halfSize,
+        radius,
+        amount,
+        squircleAmount,
+        squirclePower,
+        requestedDepth);
+}
+
+float shadow_sdf(vec2 pixel) {
+    vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
+    vec2 center = pc.rect.xy + halfSize;
+    vec2 p = pixel - center;
+
+    if (pc.data.x == PRIMITIVE_ELLIPSE) {
+        vec2 q = p / halfSize;
+        return (length(q) - 1.0) * min(halfSize.x, halfSize.y);
+    }
+
+    float radius = pc.data.x == PRIMITIVE_RECTANGLE ? 0.0 : clamp(pc.effect0.x, 0.0, min(halfSize.x, halfSize.y));
+    float squircleAmount = clamp(pc.effect1.x, 0.0, 1.0);
+    float squirclePower = clamp(pc.effect1.y <= 0.001 ? 4.0 : pc.effect1.y, 2.0, 5.0);
+    if (pc.data.x == PRIMITIVE_SQUIRCLE) {
+        return sd_squircle_box(p, halfSize, radius, squircleAmount, squirclePower);
+    }
+    if (pc.data.x == PRIMITIVE_NOTCHED_SQUIRCLE) {
+        return sd_notched_squircle(
+            pixel,
+            pc.rect,
+            radius,
+            squircleAmount,
+            squirclePower,
+            pc.effect1.z,
+            pc.effect1.w);
+    }
+    if (pc.data.x != PRIMITIVE_RECTANGLE && (pc.data.y & STYLE_CORNER_RADII) != 0u) {
+        return sd_rounded_box_corners(p, halfSize, unpack_corner_radii(pc.data.z));
+    }
+    return sd_rounded_box(p, halfSize, radius);
+}
+
+float primitive_bounds_padding() {
+    if (pc.data.x != PRIMITIVE_NOTCHED_SQUIRCLE) {
+        return 0.0;
+    }
+    return notch_flare_size(max(pc.rect.zw, vec2(1.0)), pc.effect1.z, pc.effect1.w) + 6.0;
+}
+
+void main() {
+    ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = imageSize(colorBuffer);
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
+        return;
+    }
+
+    vec2 p = vec2(pixel) + vec2(0.5);
+    float blurRadius = max(pc.effect0.y, 0.5);
+    float boundsPad = blurRadius + primitive_bounds_padding();
+    if (p.x < pc.rect.x - boundsPad ||
+        p.y < pc.rect.y - boundsPad ||
+        p.x > pc.rect.x + pc.rect.z + boundsPad ||
+        p.y > pc.rect.y + pc.rect.w + boundsPad) {
+        return;
+    }
+
+    float sdf = shadow_sdf(p);
+    float alpha = (1.0 - smoothstep(-blurRadius, blurRadius, sdf)) * pc.color0.a * pc.effect0.w;
+    if (alpha <= 0.001) {
+        return;
+    }
+
+    vec4 shadow = vec4(pc.color0.rgb, alpha);
+    vec4 dst = imageLoad(colorBuffer, pixel);
+    imageStore(colorBuffer, pixel, blend_over(dst, shadow));
+}

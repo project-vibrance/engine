@@ -1,0 +1,44 @@
+#version 450
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
+layout (set = 1, binding = 1, rgba8) readonly uniform image2D modelColorBuffer;
+
+layout (push_constant) uniform Hosted3DCompositeConstants {
+    uvec4 dispatchRect;
+} pc;
+
+vec4 blend_premultiplied_over(vec4 dst, vec4 src) {
+    float srcA = clamp(src.a, 0.0, 1.0);
+    float outA = srcA + dst.a * (1.0 - srcA);
+    vec3 outRgbPremultiplied = src.rgb + dst.rgb * dst.a * (1.0 - srcA);
+    vec3 outRgb = outA > 0.0001 ? outRgbPremultiplied / outA : vec3(0.0);
+    return vec4(outRgb, outA);
+}
+
+ivec2 scale_pixel_to_image(ivec2 pixel, ivec2 dstSize, ivec2 srcSize) {
+    vec2 uv = (vec2(pixel) + vec2(0.5)) / max(vec2(dstSize), vec2(1.0));
+    return clamp(ivec2(uv * vec2(srcSize)), ivec2(0), srcSize - ivec2(1));
+}
+
+void main() {
+    if (gl_GlobalInvocationID.x >= pc.dispatchRect.z ||
+        gl_GlobalInvocationID.y >= pc.dispatchRect.w) {
+        return;
+    }
+
+    ivec2 pixel = ivec2(pc.dispatchRect.xy) + ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screenSize = imageSize(colorBuffer);
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
+        return;
+    }
+
+    ivec2 modelSize = imageSize(modelColorBuffer);
+    vec4 modelColor = imageLoad(modelColorBuffer, scale_pixel_to_image(pixel, screenSize, modelSize));
+    if (modelColor.a <= 0.001) {
+        return;
+    }
+
+    vec4 sceneColor = imageLoad(colorBuffer, pixel);
+    imageStore(colorBuffer, pixel, blend_premultiplied_over(sceneColor, modelColor));
+}

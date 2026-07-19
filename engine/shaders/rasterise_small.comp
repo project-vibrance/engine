@@ -1,0 +1,168 @@
+#version 450
+struct Vertex {
+    vec3 position;
+    float padding1;
+    vec3 color;
+    float padding2;
+    vec3 normal;
+    float padding3;
+    vec2 uv;
+    vec2 padding4;
+    vec4 tangent;
+    vec4 material;
+    vec4 material2;
+    vec4 material3;
+};
+
+layout (local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout (set = 0, binding = 0, r32ui) uniform uimage2D depthBuffer;
+layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
+layout (std430, set = 1, binding = 0) readonly buffer vertexBuffer {
+    uint triangleCount;
+    Vertex vertices[];
+};
+layout (push_constant) uniform RasterConstants {
+    mat4 worldToClip;
+    uint firstTriangle;
+    uint drawTriangleCount;
+    uint rasterPass;
+    uint flags;
+    vec4 viewportRect;
+    vec4 clipRect;
+    vec4 materialColor;
+} raster;
+
+vec3 get_barycentric_coordinate(vec2 a, vec2 b, vec2 c, vec2 p) {
+    
+    vec3 bc = cross(vec3(a.x - p.x, b.x - a.x, c.x - a.x), vec3(a.y - p.y, b.y - a.y, c.y - a.y));
+
+    if (abs(bc.x) < 0.000001) {
+        return vec3(-1, 1, 1);
+    }
+
+    return vec3(1 - (bc.y + bc.z) / bc.x, bc.y / bc.x, bc.z / bc.x);
+}
+
+vec4 resolved_viewport() {
+    vec2 image_size = vec2(imageSize(colorBuffer));
+    if (raster.viewportRect.z <= 0.0 || raster.viewportRect.w <= 0.0) {
+        return vec4(0.0, 0.0, image_size.x, image_size.y);
+    }
+    return raster.viewportRect;
+}
+
+vec4 resolved_clip_rect(vec4 viewport) {
+    if (raster.clipRect.z <= 0.0 || raster.clipRect.w <= 0.0) {
+        return viewport;
+    }
+    return raster.clipRect;
+}
+
+vec4 blend_over(vec4 dst, vec4 src) {
+    float outA = src.a + dst.a * (1.0 - src.a);
+    vec3 outRgb = src.rgb * src.a + dst.rgb * dst.a * (1.0 - src.a);
+    if (outA > 0.0001) {
+        outRgb /= outA;
+    }
+    return vec4(outRgb, outA);
+}
+
+void write_fragment(ivec2 pixel, float depth, vec3 vertexColor) {
+    uint depth_value = floatBitsToUint(depth);
+    if (raster.rasterPass == 0u) {
+        imageAtomicMin(depthBuffer, pixel, depth_value);
+    } else if (imageLoad(depthBuffer, pixel).r == depth_value) {
+        vec4 src = vec4(clamp(vertexColor, vec3(0.0), vec3(1.0)) * raster.materialColor.rgb,
+            clamp(raster.materialColor.a, 0.0, 1.0));
+        if (src.a <= 0.001) {
+            return;
+        }
+        imageStore(colorBuffer, pixel, blend_over(imageLoad(colorBuffer, pixel), src));
+    }
+}
+
+bool project_vertex(Vertex vertex, vec4 viewport, out vec2 screen_pos, out float depth) {
+    vec4 clip_pos = raster.worldToClip * vec4(vertex.position, 1.0);
+    if (clip_pos.w <= 0.0) {
+        return false;
+    }
+
+    vec3 ndc = clip_pos.xyz / clip_pos.w;
+    screen_pos = viewport.xy + viewport.zw * 0.5 * (1.0 + ndc.xy);
+    float localDepth = clamp(ndc.z, 0.0, 1.0);
+    float depthLayer = float(raster.flags & 65535u);
+    depth = clamp((depthLayer + localDepth) / 65535.0, 0.0, 1.0);
+    return true;
+}
+
+void main() {
+
+    int index = int(gl_GlobalInvocationID.x);
+    ivec2 image_size = imageSize(colorBuffer);
+    vec4 viewport = resolved_viewport();
+    vec4 clipRect = resolved_clip_rect(viewport);
+
+    if (index >= int(raster.drawTriangleCount)) {
+        return;
+    }
+    
+    uint triangle_id = raster.firstTriangle + uint(index);
+    if (triangle_id >= triangleCount) {
+        return;
+    }
+    int triangle_index = 3 * int(triangle_id);
+
+    Vertex vertex_a = vertices[triangle_index];
+    Vertex vertex_b = vertices[triangle_index + 1];
+    Vertex vertex_c = vertices[triangle_index + 2];
+
+    vec3 color_a = vertex_a.color;
+    vec3 color_b = vertex_b.color;
+    vec3 color_c = vertex_c.color;
+    vec2 pos_a;
+    vec2 pos_b;
+    vec2 pos_c;
+    float depth_a;
+    float depth_b;
+    float depth_c;
+
+    if (!project_vertex(vertex_a, viewport, pos_a, depth_a) ||
+        !project_vertex(vertex_b, viewport, pos_b, depth_b) ||
+        !project_vertex(vertex_c, viewport, pos_c, depth_c)) {
+        return;
+    }
+
+    ivec2 bbox_min = ivec2(floor(min(pos_a, min(pos_b, pos_c))));
+    ivec2 bbox_max = ivec2(ceil(max(pos_a, max(pos_b, pos_c))));
+    ivec2 clip_min = max(ivec2(floor(clipRect.xy)), ivec2(0));
+    ivec2 clip_max = min(ivec2(ceil(clipRect.xy + clipRect.zw)) - ivec2(1), image_size - ivec2(1));
+
+    if (clip_max.x < clip_min.x || clip_max.y < clip_min.y) {
+        return;
+    }
+
+    bool covered = false;
+    for (int x = max(clip_min.x, bbox_min.x); x <= min(clip_max.x, bbox_max.x); x++) {
+        for (int y = max(clip_min.y, bbox_min.y); y <= min(clip_max.y, bbox_max.y); y++) {
+
+            vec3 bc = get_barycentric_coordinate(pos_a, pos_b, pos_c, vec2(float(x) + 0.5, float(y) + 0.5));
+            if (bc.x < 0 || bc.y < 0 || bc.z < 0) {
+                continue;
+            }
+
+            ivec2 pixel = ivec2(x, y);
+            float depth = bc.x * depth_a + bc.y * depth_b + bc.z * depth_c;
+            vec3 vertexColor = bc.x * color_a + bc.y * color_b + bc.z * color_c;
+            write_fragment(pixel, depth, vertexColor);
+            covered = true;
+        }
+    }
+
+    if (!covered) {
+        vec2 triangleCenter = (pos_a + pos_b + pos_c) / 3.0;
+        ivec2 pixel = ivec2(floor(triangleCenter));
+        if (pixel.x >= clip_min.x && pixel.x <= clip_max.x && pixel.y >= clip_min.y && pixel.y <= clip_max.y) {
+            write_fragment(pixel, (depth_a + depth_b + depth_c) / 3.0, (color_a + color_b + color_c) / 3.0);
+        }
+    }
+}

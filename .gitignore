@@ -1,0 +1,6 @@
+/.vscode/c_cpp_properties.json
+/build/
+/install/
+/install-*/
+.env.cmake
+.DS_Store

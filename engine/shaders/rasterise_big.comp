@@ -1,0 +1,109 @@
+#version 450
+struct Vertex {
+    vec3 position;
+    float padding1;
+    vec3 color;
+    float padding2;
+    vec3 normal;
+    float padding3;
+    vec2 uv;
+    vec2 padding4;
+    vec4 tangent;
+    vec4 material;
+    vec4 material2;
+    vec4 material3;
+};
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout (set = 0, binding = 0, r32ui) uniform uimage2D depthBuffer;
+layout (set = 0, binding = 1, rgba8) writeonly uniform image2D colorBuffer;
+layout (std430, set = 1, binding = 0) readonly buffer vertexBuffer {
+    uint triangleCount;
+    Vertex vertices[];
+};
+layout (push_constant) uniform RasterConstants {
+    mat4 worldToClip;
+    uint firstTriangle;
+    uint drawTriangleCount;
+    uint rasterPass;
+} raster;
+
+vec3 get_barycentric_coordinate(vec2 a, vec2 b, vec2 c, vec2 p) {
+    
+    vec3 bc = cross(vec3(a.x - p.x, b.x - a.x, c.x - a.x), vec3(a.y - p.y, b.y - a.y, c.y - a.y));
+
+    if (abs(bc.x) < 1) {
+        return vec3(-1, 1, 1);
+    }
+
+    return vec3(1 - (bc.y + bc.z) / bc.x, bc.y / bc.x, bc.z / bc.x);
+}
+
+bool project_vertex(Vertex vertex, vec2 screen_size, out vec2 screen_pos, out float depth) {
+    vec4 clip_pos = raster.worldToClip * vec4(vertex.position, 1.0);
+    if (clip_pos.w <= 0.0) {
+        return false;
+    }
+
+    vec3 ndc = clip_pos.xyz / clip_pos.w;
+    if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return false;
+    }
+
+    screen_pos = screen_size * (1.0 + ndc.xy);
+    depth = ndc.z;
+    return true;
+}
+
+void main() {
+
+    ivec2 screen_pos = ivec2(gl_GlobalInvocationID.xy);
+    vec2 screen_size = 0.5 * vec2(imageSize(colorBuffer));
+    
+    if (int(gl_GlobalInvocationID.z) >= int(raster.drawTriangleCount)) {
+        return;
+    }
+
+    int triangle_index = 3 * int(raster.firstTriangle + gl_GlobalInvocationID.z);
+
+    Vertex vertex_a = vertices[triangle_index];
+    Vertex vertex_b = vertices[triangle_index + 1];
+    Vertex vertex_c = vertices[triangle_index + 2];
+
+    vec3 color_a = vertex_a.color;
+    vec3 color_b = vertex_b.color;
+    vec3 color_c = vertex_c.color;
+    vec2 pos_a;
+    vec2 pos_b;
+    vec2 pos_c;
+    float depth_a;
+    float depth_b;
+    float depth_c;
+
+    if (!project_vertex(vertex_a, screen_size, pos_a, depth_a) ||
+        !project_vertex(vertex_b, screen_size, pos_b, depth_b) ||
+        !project_vertex(vertex_c, screen_size, pos_c, depth_c)) {
+        return;
+    }
+
+    // Offset to minimum triangle corner
+    screen_pos += ivec2(min(pos_a, min(pos_b, pos_c)));
+
+    if (screen_pos.x < 0 || screen_pos.x >= 2 * screen_size.x || screen_pos.y < 0 || screen_pos.y >= 2 * screen_size.y) {
+        return;
+    }
+
+    vec3 bc = get_barycentric_coordinate(pos_a, pos_b, pos_c, vec2(screen_pos));
+    if (bc.x < 0 || bc.y < 0 || bc.z < 0) {
+        return;
+    }
+    
+    uint depth_value = floatBitsToUint(bc.x * depth_a + bc.y * depth_b + bc.z * depth_c);
+    if (raster.rasterPass == 0u) {
+        imageAtomicMin(depthBuffer, screen_pos, depth_value);
+    } else if (imageLoad(depthBuffer, screen_pos).r == depth_value) {
+        uvec3 color = uvec3(255.0 * (bc.x * color_a + bc.y * color_b + bc.z * color_c));
+        vec4 outColor = (1.0 / 255.0) * vec4(float(color.r), float(color.g), float(color.b), 255.0);
+        imageStore(colorBuffer, screen_pos, outColor);
+    }
+}
