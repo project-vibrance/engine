@@ -2149,6 +2149,8 @@ inline void ui_refresh_search_result_slots(
         return;
     }
 
+    // Detach the reusable result subtree before remapping its visible rows.
+    scene.activate_dynamic(list->menuRoot, 0.35f);
     list->visibleEntryIndices.clear();
     const std::size_t slotCount = list->rows.size();
     if (slotCount == 0u || list->matchedEntryIndices.empty())
@@ -2259,6 +2261,9 @@ inline void ui_set_search_result_query(
         return;
     }
 
+    // Wake the result subtree before query processing mutates visibility and
+    // labels, keeping unrelated window chrome in its existing static cache.
+    scene.activate_dynamic(list->menuRoot, 0.35f);
     list->visibleEntryIndices.clear();
     list->matchedEntryIndices.clear();
     list->firstVisibleIndex = 0u;

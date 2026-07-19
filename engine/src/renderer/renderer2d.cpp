@@ -2859,6 +2859,13 @@ void Renderer2DScene::activate_dynamic(entt::entity entity, float durationSecond
     }
 
     Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
+    if (cache.mode == Renderer2DCacheMode::eStatic)
+    {
+        // Direct activation requests temporarily promote cached UI. This keeps
+        // focus, typing, hover and similar updates off the static surface until idle.
+        cache.mode = Renderer2DCacheMode::eTimed;
+        cache.restoreStaticWhenIdle = true;
+    }
     const bool alreadyBypassesStaticLayer = !affects_static_cache(registry_, entity);
     if (cache.pendingActiveSeconds >= durationSeconds)
     {
@@ -3444,8 +3451,10 @@ void Renderer2DScene::build_render_plan(
         }
 
         const BlurComponent* blur = registry_.try_get<BlurComponent>(entity);
-        const bool transitionBlurVisible = displayTransition.blurRadius > 0.001f && alpha_visible(displayTransition.opacity);
-        if (blur || style_backdrop_blur_visible(style) || transitionBlurVisible)
+        // Display-transition blur is a foreground primitive effect handled by
+        // the shape pipeline above. Only explicit backdrop blur belongs here;
+        // otherwise transparent layout roots create temporary rectangular panes.
+        if (blur || style_backdrop_blur_visible(style))
         {
             Renderer2DBatch blurBatch = batch;
             const float blurCornerRadius = blurBatch.effect0.x;
@@ -3454,8 +3463,8 @@ void Renderer2DScene::build_render_plan(
             const uint32_t blurPasses = blur ? blur->passes : style.backdropBlurPasses;
             const float baseBlurOpacity = blur ?
                 blur->opacity :
-                (style_backdrop_blur_visible(style) ? style.backdropBlurOpacity : 1.0f);
-            const float blurRadius = std::max(baseBlurRadius, displayTransition.blurRadius);
+                style.backdropBlurOpacity;
+            const float blurRadius = baseBlurRadius;
             const float blurOpacity = baseBlurOpacity * displayTransition.opacity;
             blurBatch.color2 = {
                 style.gradientStart.x,
@@ -4449,24 +4458,82 @@ void Renderer2D::record(
         cachedLayerPlanCache.cachedTexts = renderPlanCache.cachedTexts;
     };
 
-    if (renderPlanCache.rebuildCachedLayer)
+    const bool cachedCutoffMatches =
+        cachedLayerHasDynamicCutoff == hasDynamicLayer &&
+        (!hasDynamicLayer ||
+            (cachedLayerCutoffStackLayer == lowestDynamicLayer.stackLayer &&
+                cachedLayerCutoffStackOrder == lowestDynamicLayer.stackOrder &&
+                cachedLayerCutoffLayer == lowestDynamicLayer.layer &&
+                cachedLayerCutoffOrder == lowestDynamicLayer.order &&
+                cachedLayerCutoffAlwaysOnTop == lowestDynamicLayer.alwaysOnTop));
+    const bool rebuildForDynamicCutoff = !cachedCutoffMatches;
+    const bool rebuildCachedLayer = renderPlanCache.rebuildCachedLayer || rebuildForDynamicCutoff;
+
+    if (rebuildCachedLayer)
     {
+        // A visibility-only dynamic transition (such as a blinking caret) does
+        // not invalidate static entities. Reuse the last complete static plan
+        // while rebuilding its cutoff, unless the scene itself changed.
+        const Renderer2DRenderPlan& staticPlan = renderPlanCache.rebuildCachedLayer ?
+            renderPlanCache :
+            cachedLayerPlanCache;
+        std::vector<Renderer2DBatch> cachedPanelBlurs = staticPlan.cachedPanelBlurs;
+        std::vector<Renderer2DBatch> cachedShadows = staticPlan.cachedShadows;
+        std::vector<Renderer2DBatch> cachedBlurs = staticPlan.cachedBlurs;
+        std::vector<Renderer2DBatch> cachedShapes = staticPlan.cachedShapes;
+        std::vector<Renderer2DBatch> cachedMedia = staticPlan.cachedMedia;
+        std::vector<Renderer2DBatch> cachedTexts = staticPlan.cachedTexts;
+
+        if (hasDynamicLayer)
+        {
+            // Higher cached batches are replayed with the moving subtree to preserve
+            // z-order. Remove them from the static surface first so they are blended once.
+            auto remove_replayed_overlays = [&](std::vector<Renderer2DBatch>& batches) {
+                batches.erase(
+                    std::remove_if(
+                        batches.begin(),
+                        batches.end(),
+                        [&](const Renderer2DBatch& batch) {
+                            return render_layer_key_less(lowestDynamicLayer, render_layer_key(batch));
+                        }),
+                    batches.end());
+            };
+            remove_replayed_overlays(cachedPanelBlurs);
+            remove_replayed_overlays(cachedShadows);
+            remove_replayed_overlays(cachedBlurs);
+            remove_replayed_overlays(cachedShapes);
+            remove_replayed_overlays(cachedMedia);
+            remove_replayed_overlays(cachedTexts);
+        }
+
         clear_frame_surface(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts, DescriptorScope::eUICache);
         record_layered_ops(
-            renderPlanCache.cachedPanelBlurs,
-            renderPlanCache.cachedShadows,
-            renderPlanCache.cachedBlurs,
-            renderPlanCache.cachedShapes,
-            renderPlanCache.cachedMedia,
-            renderPlanCache.cachedTexts,
+            cachedPanelBlurs,
+            cachedShadows,
+            cachedBlurs,
+            cachedShapes,
+            cachedMedia,
+            cachedTexts,
             {},
             DescriptorScope::eUICache,
             DescriptorScope::eUICachePost,
             DescriptorScope::ePost,
             false,
             externalBackdropAvailable);
-        store_cached_layer_plan();
-        cachedLayerGeneration = scene.cache_generation();
+        if (renderPlanCache.rebuildCachedLayer)
+        {
+            store_cached_layer_plan();
+            cachedLayerGeneration = scene.cache_generation();
+        }
+        cachedLayerHasDynamicCutoff = hasDynamicLayer;
+        if (hasDynamicLayer)
+        {
+            cachedLayerCutoffStackLayer = lowestDynamicLayer.stackLayer;
+            cachedLayerCutoffStackOrder = lowestDynamicLayer.stackOrder;
+            cachedLayerCutoffLayer = lowestDynamicLayer.layer;
+            cachedLayerCutoffOrder = lowestDynamicLayer.order;
+            cachedLayerCutoffAlwaysOnTop = lowestDynamicLayer.alwaysOnTop;
+        }
     }
 
     if (hasDynamicLayer)

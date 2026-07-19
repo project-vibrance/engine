@@ -213,6 +213,7 @@ inline void ui_focus_text_input(
     entt::registry& registry = scene.registry();
     if (state.focusedTextInput != entt::null && registry.valid(state.focusedTextInput))
     {
+        scene.activate_dynamic(state.focusedTextInput, 0.4f);
         if (TextInputComponent* oldInput = registry.try_get<TextInputComponent>(state.focusedTextInput))
         {
             oldInput->focused = false;
@@ -234,8 +235,8 @@ inline void ui_focus_text_input(
 
     input->focused = true;
     state.focusedTextInput = entity;
-    ui_update_text_input_visual(scene, fontAtlas, entity);
     scene.activate_dynamic(entity, 0.4f);
+    ui_update_text_input_visual(scene, fontAtlas, entity);
 }
 
 inline void ui_append_text_input(
@@ -262,6 +263,7 @@ inline void ui_append_text_input(
         return;
     }
 
+    scene.activate_dynamic(state.focusedTextInput, 0.35f);
     if (input->onChanged)
     {
         input->onChanged(input->value);
@@ -836,12 +838,12 @@ inline void ui_handle_key(
         return;
     }
 
+    scene.activate_dynamic(state.focusedTextInput, 0.35f);
     if (input->onChanged)
     {
         input->onChanged(input->value);
     }
     ui_update_text_input_visual(scene, fontAtlas, state.focusedTextInput);
-    scene.activate_dynamic(state.focusedTextInput, 0.35f);
 }
 
 inline void ui_handle_drop(

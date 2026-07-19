@@ -223,4 +223,10 @@ private:
     mutable Renderer2DRenderPlan renderPlanCache;
     mutable Renderer2DRenderPlan cachedLayerPlanCache;
     mutable uint64_t cachedLayerGeneration = 0;
+    mutable bool cachedLayerHasDynamicCutoff = false;
+    mutable int32_t cachedLayerCutoffStackLayer = 0;
+    mutable uint32_t cachedLayerCutoffStackOrder = 0;
+    mutable int32_t cachedLayerCutoffLayer = 0;
+    mutable uint32_t cachedLayerCutoffOrder = 0;
+    mutable bool cachedLayerCutoffAlwaysOnTop = false;
 };
