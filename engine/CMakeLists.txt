@@ -1,6 +1,20 @@
 file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 
+set(ENGINE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${ENGINE_GENERATED_DIR}")
+set(ENGINE_MANIFEST_CPP "${ENGINE_GENERATED_DIR}/engine_manifest.cpp")
+set(ENGINE_MANIFEST_JSON "${ENGINE_GENERATED_DIR}/vibrance_engine_manifest.json")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/engine_manifest.cpp.in"
+    "${ENGINE_MANIFEST_CPP}"
+    @ONLY)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vibrance_engine_manifest.json.in"
+    "${ENGINE_MANIFEST_JSON}"
+    @ONLY)
+list(APPEND ENGINE_SOURCES "${ENGINE_MANIFEST_CPP}")
+
 if(APPLE)
     file(GLOB_RECURSE ENGINE_OBJCXX_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.mm")
@@ -10,7 +24,7 @@ endif()
 # Compile shader sources once, then turn the SPIR-V binaries into a generated
 # translation unit. Runtime applications therefore need neither shader files
 # nor shaderc beside the engine DLL.
-set(EMBEDDED_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(EMBEDDED_SHADER_DIR "${ENGINE_GENERATED_DIR}")
 set(EMBEDDED_SHADER_HEADER "${EMBEDDED_SHADER_DIR}/embedded_shaders.h")
 set(EMBEDDED_SHADER_CPP "${EMBEDDED_SHADER_DIR}/embedded_shaders.cpp")
 set(EMBEDDED_SHADER_MANIFEST "${EMBEDDED_SHADER_DIR}/embedded_shaders.manifest")
@@ -186,6 +200,9 @@ install(TARGETS vibrance_engine
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/vibranceUI")
 
+install(FILES "${ENGINE_MANIFEST_JSON}"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine")
+
 # Copy every dependency header tree referenced by the public C++ API. All
 # compiled dependency code remains private inside vibrance_engine.
 install(DIRECTORY "${GLM_INCLUDE_DIR}/glm"
@@ -212,7 +229,8 @@ install(EXPORT vibrance_engineTargets
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vibrance_engineConfig.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/vibrance_engineConfig.cmake"
-    INSTALL_DESTINATION "${CONFIG_INSTALL_DIR}")
+    INSTALL_DESTINATION "${CONFIG_INSTALL_DIR}"
+    PATH_VARS CMAKE_INSTALL_DATADIR)
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/vibrance_engineConfigVersion.cmake"

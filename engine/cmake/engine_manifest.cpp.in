@@ -1,0 +1,15 @@
+#include <vibranceUI/core/engine_manifest.h>
+
+namespace
+{
+    constexpr EngineManifest kEngineManifest {
+        "@VIBRANCE_ENGINE_NAME@",
+        "@PROJECT_VERSION@",
+        "@VIBRANCE_ENGINE_LAST_UPDATED@"
+    };
+}
+
+const EngineManifest& vibrance_engine_manifest() noexcept
+{
+    return kEngineManifest;
+}

@@ -1,4 +1,9 @@
 @PACKAGE_INIT@
 
+set(vibrance_engine_VERSION "@PROJECT_VERSION@")
+set_and_check(
+    vibrance_engine_MANIFEST_FILE
+    "@PACKAGE_CMAKE_INSTALL_DATADIR@/vibrance_engine/vibrance_engine_manifest.json")
+
 include("${CMAKE_CURRENT_LIST_DIR}/vibrance_engineTargets.cmake")
 check_required_components(vibrance_engine)

@@ -1,4 +1,5 @@
 #pragma once
+#include <vibranceUI/core/engine_manifest.h>
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/audio/audio.h>

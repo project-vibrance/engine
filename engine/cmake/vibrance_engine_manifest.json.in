@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "name": "@VIBRANCE_ENGINE_NAME@",
+  "version": "@PROJECT_VERSION@",
+  "last_updated": "@VIBRANCE_ENGINE_LAST_UPDATED@"
+}

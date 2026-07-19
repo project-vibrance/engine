@@ -33,6 +33,7 @@ The selected prefix is a relocatable SDK:
   include/vibranceUI/... public API
   lib/... import/static metadata
   lib/cmake/vibrance_engine/vibrance_engineConfig.cmake
+  share/vibrance_engine/vibrance_engine_manifest.json
 ```
 
 A downstream CMake project needs only:
@@ -44,6 +45,11 @@ target_link_libraries(my_app PRIVATE vibrance::engine)
 
 Pass the SDK prefix through `CMAKE_PREFIX_PATH`, or point the app's
 `VIBRANCE_ENGINE_ROOT` cache variable at it.
+
+The installed package exposes `vibrance_engine_MANIFEST_FILE` for build tools.
+At runtime, include `<vibranceUI/core/engine_manifest.h>` and call
+`vibrance_engine_manifest()` to query the same engine name, semantic version,
+and ISO last-updated date directly from the loaded DLL.
 
 ## Dependency policy
 
