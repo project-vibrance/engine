@@ -11,6 +11,7 @@
 #include <vector>
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
+#include <vibranceUI/graphics/backdrop.h>
 
 enum class Renderer2DPrimitive : uint32_t
 {
@@ -553,6 +554,13 @@ struct ShapeComponent
     }
 };
 
+struct SystemBackdropComponent
+{
+    // Bounds and shape are resolved from the entity every frame. This value
+    // only describes the requested material/provider recipe.
+    SystemBackdropRegion region {};
+};
+
 struct DragHandle2DComponent
 {
     entt::entity target = entt::null;
@@ -943,6 +951,17 @@ struct Renderer2DCacheComponent
     bool propagateToChildren = true;
     bool restoreStaticWhenIdle = false;
     bool detachedFromStaticLayer = false;
+};
+
+struct ScrollEdgeFade2DComponent
+{
+    // Applied to a scrolling content root. Descendants fade and foreground-
+    // blur as their owning row approaches either edge of the masked viewport.
+    bool enabled = true;
+    float topHeight = 0.0f;
+    float bottomHeight = 0.0f;
+    float minimumOpacity = 0.0f;
+    float maximumBlurRadius = 0.0f;
 };
 
 struct DisplayTransition2DComponent

@@ -1643,10 +1643,13 @@ Engine* GlfwPanelWindowHost::build_engine_for_window()
     engineCreateInfo.maxRenderPixels = hostOptions.maxRenderPixels;
     engineCreateInfo.msaaSamples = hostOptions.msaaSamples;
     engineCreateInfo.presentMode = hostOptions.presentMode;
+    engineCreateInfo.renderBackend = hostOptions.renderBackend;
+    engineCreateInfo.presentationBackend = hostOptions.presentationBackend;
     engineCreateInfo.targetFrameRate = hostOptions.targetFrameRate;
     engineCreateInfo.instanceExtensionCount = glfwExtensionCount;
     engineCreateInfo.instanceExtensions = glfwExtensions;
     engineCreateInfo.surfaceUserData = hostedWindow;
+    engineCreateInfo.nativeWindowHandle = glfw_native_window_handle(hostedWindow);
     engineCreateInfo.createSurface = vibrance_glfw_create_surface;
     engineCreateInfo.transparentFramebuffer = hostOptions.transparentFramebuffer;
     engineCreateInfo.enableAudio = hostOptions.enableAudio;

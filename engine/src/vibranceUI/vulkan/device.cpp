@@ -42,17 +42,27 @@ bool supports(const vk::PhysicalDevice& device, const char** ppRequestedExtensio
     return true;
 }
 
-bool is_suitable(const vk::PhysicalDevice& device)
+bool is_suitable(const vk::PhysicalDevice& device, bool requireWindowsCompositionInterop)
 {
     Logger* logger = Logger::fetch_logger();
     logger->vulkan("Checking if device is suitable...");
 
-    uint32_t requestedExtensionCount = 1;
-    const char* ppRequestedExtensions[] = {
+    std::vector<const char*> requestedExtensions {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
+#if defined(_WIN32)
+    if (requireWindowsCompositionInterop)
+    {
+        requestedExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+    }
+#else
+    (void)requireWindowsCompositionInterop;
+#endif
     
-	if (supports(device, ppRequestedExtensions, requestedExtensionCount))
+	if (supports(
+        device,
+        requestedExtensions.data(),
+        static_cast<uint32_t>(requestedExtensions.size())))
     {
         logger->vulkan("Physical device supports the requested extensions.");
 	}
@@ -65,7 +75,9 @@ bool is_suitable(const vk::PhysicalDevice& device)
     return true;
 }
 
-vk::PhysicalDevice choose_physical_device(const vk::Instance instance)
+vk::PhysicalDevice choose_physical_device(
+    const vk::Instance instance,
+    bool requireWindowsCompositionInterop)
 {
     // Prefer a discrete GPU, while falling back to the first suitable integrated device
     Logger* logger = Logger::fetch_logger();
@@ -82,7 +94,7 @@ vk::PhysicalDevice choose_physical_device(const vk::Instance instance)
         
         vk::PhysicalDeviceProperties properties = device.getProperties();
 
-		if (is_suitable(device)) 
+		if (is_suitable(device, requireWindowsCompositionInterop)) 
         {
 			bool discrete = properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
 			if (!bestDevice || (discrete && !foundDiscrete))
@@ -135,7 +147,11 @@ uint32_t find_queue_family_index(vk::PhysicalDevice physicalDevice, vk::SurfaceK
     return UINT32_MAX;
 }
 
-vk::Device create_logical_device(vk::PhysicalDevice physicalDevice, vk::SurfaceKHR surface, std::deque<std::function<void(vk::Device)>>& deletionQueue)
+vk::Device create_logical_device(
+    vk::PhysicalDevice physicalDevice,
+    vk::SurfaceKHR surface,
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    bool enableWindowsCompositionInterop)
 {
     Logger* logger = Logger::fetch_logger();
 
@@ -152,6 +168,14 @@ vk::Device create_logical_device(vk::PhysicalDevice physicalDevice, vk::SurfaceK
     );
 
     vk::PhysicalDeviceFeatures deviceFeatures = vk::PhysicalDeviceFeatures();
+    vk::PhysicalDeviceVulkan13Features supportedVulkan13Features = {};
+    vk::PhysicalDeviceFeatures2 supportedFeatures = {};
+    supportedFeatures.pNext = &supportedVulkan13Features;
+    physicalDevice.getFeatures2(&supportedFeatures);
+
+    vk::PhysicalDeviceVulkan13Features enabledVulkan13Features = {};
+    enabledVulkan13Features.shaderDemoteToHelperInvocation =
+        supportedVulkan13Features.shaderDemoteToHelperInvocation;
 
     std::vector<const char*> enabledLayers;
     if (logger->is_vulkan_validation_enabled())
@@ -162,6 +186,14 @@ vk::Device create_logical_device(vk::PhysicalDevice physicalDevice, vk::SurfaceK
     std::vector<const char*> enabledExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
+#if defined(_WIN32)
+    if (enableWindowsCompositionInterop)
+    {
+        enabledExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+    }
+#else
+    (void)enableWindowsCompositionInterop;
+#endif
 
     std::vector<vk::ExtensionProperties> availableExtensions = physicalDevice.enumerateDeviceExtensionProperties().value;
     for (const vk::ExtensionProperties& extension : availableExtensions)
@@ -184,6 +216,10 @@ vk::Device create_logical_device(vk::PhysicalDevice physicalDevice, vk::SurfaceK
         static_cast<uint32_t>(enabledExtensions.size()), enabledExtensions.data(),
         &deviceFeatures
     );
+    if (enabledVulkan13Features.shaderDemoteToHelperInvocation)
+    {
+        deviceInfo.pNext = &enabledVulkan13Features;
+    }
 
     vk::ResultValueType<vk::Device>::type logicalDevice = physicalDevice.createDevice(deviceInfo);
 

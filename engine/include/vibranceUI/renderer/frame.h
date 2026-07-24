@@ -44,7 +44,10 @@ class Frame
         const Camera& camera,
         double currentTimeSeconds,
         bool externalBackdropAvailable,
-        bool useExternalBackdropUnderlay
+        bool useExternalBackdropUnderlay,
+        vk::Image compositionImage = {},
+        bool compositionImageFirstUse = true,
+        uint32_t graphicsQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
     );
 
     void resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModelRenderExtent);
@@ -74,6 +77,10 @@ class Frame
     VmaAllocator& allocator;
     // These surfaces form the 2D, hosted 3D, blur, cache, and external backdrop graph
     StorageImage* depthBuffer = nullptr, *colorBuffer = nullptr, *modelDepthBuffer = nullptr, *modelColorBuffer = nullptr, *tempSurface = nullptr;
+    // DXGI Composition swapchains consume premultiplied alpha. Keep that
+    // output separate from tempSurface, whose straight alpha is required by
+    // Vulkan surfaces that advertise post-multiplied composition.
+    StorageImage* compositionSurface = nullptr;
     StorageImage* uiBlurSurface = nullptr, *uiStaticSurface = nullptr, *uiStaticBlurSurface = nullptr;
     StorageImage* externalBackdropSurface = nullptr, *fontAtlasImage = nullptr;
     ColorAttachmentImage* hosted3DColorBuffer = nullptr;

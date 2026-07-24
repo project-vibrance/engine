@@ -4,6 +4,11 @@
 #include <algorithm>
 #include <sstream>
 
+#if defined(_WIN32)
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
+
 namespace
 {
     void log_window_features(GLFWwindow* window, const GlfwWindowCreateInfo& createInfo)
@@ -263,6 +268,16 @@ void set_glfw_window_should_close(GLFWwindow* window, bool shouldClose)
     {
         glfwSetWindowShouldClose(window, shouldClose ? GLFW_TRUE : GLFW_FALSE);
     }
+}
+
+void* glfw_native_window_handle(GLFWwindow* window)
+{
+#if defined(_WIN32)
+    return window ? static_cast<void*>(glfwGetWin32Window(window)) : nullptr;
+#else
+    (void)window;
+    return nullptr;
+#endif
 }
 
 #if !defined(__APPLE__)

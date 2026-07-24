@@ -7,6 +7,7 @@ layout (set = 1, binding = 2, rgba8) readonly uniform image2D uiBlurSurface;
 layout (set = 1, binding = 4, rgba8) readonly uniform image2D uiStaticSurface;
 layout (set = 1, binding = 5, rgba8) readonly uniform image2D uiStaticBlurSurface;
 layout (set = 1, binding = 6, rgba8) readonly uniform image2D uiExternalBackdropSurface;
+layout (set = 1, binding = 7, rgba8) writeonly uniform image2D compositionSurface;
 
 const uint COMPOSITE_USE_EXTERNAL_BACKDROP_UNDERLAY = 1u << 0;
 
@@ -40,4 +41,5 @@ void main() {
     color = blend_over(color, staticColor);
     color = blend_over(color, sceneColor);
     imageStore(tempSurface, pixel, color);
+    imageStore(compositionSurface, pixel, vec4(color.rgb * color.a, color.a));
 }

@@ -51,6 +51,37 @@ At runtime, include `<vibranceUI/core/engine_manifest.h>` and call
 `vibrance_engine_manifest()` to query the same engine name, semantic version,
 and ISO last-updated date directly from the loaded DLL.
 
+## Renderer and system-backdrop backends
+
+Renderer-specific implementation is separated by API:
+
+```text
+engine/src/vibranceUI/
+  vulkan/   Vulkan renderer and external-image interop
+  directx/  D3D/Windows Composition presentation and backdrop effects
+```
+
+`RenderBackend` identifies the API that draws the UI. `PresentationBackend`
+is separate because Windows currently keeps Vulkan as the renderer and uses a
+D3D11 swap-chain bridge only to place its pixels in a Windows Composition
+tree. This lets the OS compositor supply the pixels behind the window without
+desktop capture. D3D11 is intentionally used for this bridge: Composition
+consumes a DXGI surface, and D3D11 has the smaller interop and synchronization
+surface. A future D3D12 renderer remains independent of this choice.
+
+`SystemBackdropRegion` supports the extensible material set `eOff`, `eBlur`,
+`eFrosted`, and `eLiquid`, with rectangle, per-corner rounded rectangle, and
+ellipse clipping. The engine provider builds shaped HostBackdrop effect
+visuals. On non-Windows systems these regions resolve to off. Native DWM
+Acrylic and Mica providers are also exposed on Windows, but the raw Win32 DWM
+API is window-scoped; the engine therefore accepts them only for a full-window
+rectangle and rejects requests that could leak outside their requested shape.
+
+MinGW builds the reusable engine normally and invokes MSVC only for the small
+C++/WinRT companion `vibrance_win32_composition.dll`. Installing the engine
+places that companion beside the engine DLL, and the exported CMake package
+publishes its path so downstream applications can copy or install it.
+
 ## Dependency policy
 
 Compiled third-party code is linked privately into the engine shared library.

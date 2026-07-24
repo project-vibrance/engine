@@ -1,6 +1,8 @@
 @PACKAGE_INIT@
 
 set(vibrance_engine_VERSION "@PROJECT_VERSION@")
+set(vibrance_engine_WIN32_COMPOSITION_DLL
+    "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/vibrance_win32_composition.dll")
 set_and_check(
     vibrance_engine_MANIFEST_FILE
     "@PACKAGE_CMAKE_INSTALL_DATADIR@/vibrance_engine/vibrance_engine_manifest.json")

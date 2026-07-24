@@ -10,6 +10,8 @@
 #include <vibranceUI/renderer/font_atlas.h>
 #include <vibranceUI/renderer/media2d.h>
 #include <vibranceUI/renderer/present_mode.h>
+#include <vibranceUI/graphics/backend.h>
+#include <vibranceUI/graphics/backdrop.h>
 #include <vibranceUI/audio/audio.h>
 #include <vibranceUI/localisation/localisation.h>
 
@@ -23,11 +25,15 @@ struct EngineCreateInfo
     // Requested MSAA samples for hosted 3D rendering; falls back to the nearest supported count
     uint32_t msaaSamples = 4;
     RendererPresentMode presentMode = RendererPresentMode::eAuto;
+    RenderBackend renderBackend = RenderBackend::eVulkan;
+    PresentationBackend presentationBackend = PresentationBackend::eNative;
     // 0 means uncapped; otherwise draw waits to stay near the requested frame rate
     uint32_t targetFrameRate = 0;
     uint32_t instanceExtensionCount = 0;
     const char* const* instanceExtensions = nullptr;
     void* surfaceUserData = nullptr;
+    // Native platform handle used only by an explicitly selected presenter.
+    void* nativeWindowHandle = nullptr;
     int (*createSurface)(void* instance, void* userData, void* surfaceOut) = nullptr;
     bool transparentFramebuffer = false;
     bool enableAudio = true;
@@ -116,6 +122,12 @@ class VIBRANCE_ENGINE_API Engine
     std::string locale() const;
 
     std::string resolve_text(const Text& text) const;
+
+    RenderBackend render_backend() const;
+
+    PresentationBackend presentation_backend() const;
+
+    bool system_backdrop_available() const;
 
     // Re-resolves every LocalisedTextComponent in the active 2D scene
     void refresh_localised_texts();

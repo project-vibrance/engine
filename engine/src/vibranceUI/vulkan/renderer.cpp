@@ -9,6 +9,7 @@
 #include <vibranceUI/renderer/swapchain.h>
 #include <vibranceUI/factories/mesh_factory.h>
 #include <vibranceUI/core/camera.h>
+#include "../directx/composition_presenter.h"
 #include <sstream>
 #include <string_view>
 #include <deque>
@@ -77,6 +78,33 @@ namespace
 			std::max(1u, static_cast<uint32_t>(std::round(static_cast<double>(width) * scale))),
 			std::max(1u, static_cast<uint32_t>(std::round(static_cast<double>(height) * scale)))
 		};
+	}
+
+	bool same_backdrop_region(
+		const SystemBackdropRegion& left,
+		const SystemBackdropRegion& right)
+	{
+		const auto close = [](float a, float b) {
+			return std::abs(a - b) <= 0.05f;
+		};
+		return left.material == right.material &&
+			left.provider == right.provider &&
+			left.shape == right.shape &&
+			close(left.x, right.x) && close(left.y, right.y) &&
+			close(left.width, right.width) && close(left.height, right.height) &&
+			close(left.cornerRadius, right.cornerRadius) &&
+			close(left.topLeftRadius, right.topLeftRadius) &&
+			close(left.topRightRadius, right.topRightRadius) &&
+			close(left.bottomRightRadius, right.bottomRightRadius) &&
+			close(left.bottomLeftRadius, right.bottomLeftRadius) &&
+			close(left.squircleAmount, right.squircleAmount) &&
+			close(left.squirclePower, right.squirclePower) &&
+			close(left.blurRadius, right.blurRadius) &&
+			close(left.saturation, right.saturation) &&
+			close(left.tint.red, right.tint.red) &&
+			close(left.tint.green, right.tint.green) &&
+			close(left.tint.blue, right.tint.blue) &&
+			close(left.tint.alpha, right.tint.alpha);
 	}
 
 #ifdef _WIN32
@@ -651,6 +679,9 @@ struct Engine::Impl
 	bool set_locale(const std::string& locale);
 	std::string locale() const;
 	std::string resolve_text(const Text& text) const;
+	RenderBackend render_backend() const;
+	PresentationBackend presentation_backend() const;
+	bool system_backdrop_available() const;
 	void refresh_localised_texts();
 	Localisation& localisation();
 	const Localisation& localisation() const;
@@ -670,11 +701,17 @@ private:
 	void make_descriptor_sets();
 	void make_pipeline_layouts();
 	void make_pipelines();
+	bool rebuild_composition_presenter();
+	void update_system_backdrop_regions();
 
 	uint32_t framebufferWidth = 0;
 	uint32_t framebufferHeight = 0;
 	uint32_t maxRenderPixels = 0;
 	uint32_t requestedMsaaSamples = 4;
+	RenderBackend renderBackend = RenderBackend::eVulkan;
+	PresentationBackend requestedPresentationBackend = PresentationBackend::eNative;
+	PresentationBackend activePresentationBackend = PresentationBackend::eNative;
+	void* nativeWindowHandle = nullptr;
 	vk::Extent2D renderExtent = {};
 	vk::Extent2D modelRenderExtent = {};
 
@@ -689,12 +726,15 @@ private:
 	vk::Device logicalDevice;
 	VmaAllocator allocator = nullptr;
 	vk::Queue graphicsQueue;
+	uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
 	vk::SurfaceKHR surface;
 	void* surfaceUserData = nullptr;
 	int (*createSurface)(void* instance, void* userData, void* surfaceOut) = nullptr;
 	Swapchain swapchain;
 	bool rendererReady = false;
 	bool transparentFramebuffer = false;
+	WindowsCompositionPresenter compositionPresenter;
+	std::vector<SystemBackdropRegion> appliedBackdropRegions;
 
 	std::unordered_map<DescriptorScope, vk::DescriptorSetLayout> descriptorSetLayouts;
 	std::unordered_map<PipelineType, vk::PipelineLayout> pipelineLayouts;
@@ -843,6 +883,7 @@ bool Engine::load_localisation_directories(
 	{
 		impl->set_locale(shared_locale());
 	}
+
 	return loaded;
 }
 
@@ -883,6 +924,21 @@ std::string Engine::locale() const
 std::string Engine::resolve_text(const Text& text) const
 {
 	return impl->resolve_text(text);
+}
+
+RenderBackend Engine::render_backend() const
+{
+	return impl->render_backend();
+}
+
+PresentationBackend Engine::presentation_backend() const
+{
+	return impl->presentation_backend();
+}
+
+bool Engine::system_backdrop_available() const
+{
+	return impl->system_backdrop_available();
 }
 
 void Engine::refresh_localised_texts()
@@ -949,6 +1005,9 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	framebufferHeight(createInfo.framebufferHeight),
 	maxRenderPixels(createInfo.maxRenderPixels),
 	requestedMsaaSamples(createInfo.msaaSamples),
+	renderBackend(createInfo.renderBackend),
+	requestedPresentationBackend(createInfo.presentationBackend),
+	nativeWindowHandle(createInfo.nativeWindowHandle),
 	renderExtent(choose_render_extent(createInfo.framebufferWidth, createInfo.framebufferHeight, createInfo.maxRenderPixels)),
 	modelRenderExtent(choose_render_extent(createInfo.framebufferWidth, createInfo.framebufferHeight, createInfo.maxRenderPixels)),
 	transparentFramebuffer(createInfo.transparentFramebuffer),
@@ -956,6 +1015,11 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	audioEngine(createInfo.enableAudio)
 {
     logger = Logger::fetch_logger();
+    if (renderBackend != RenderBackend::eVulkan)
+    {
+        logger->error("The requested render backend is not implemented. vibranceUI currently renders with Vulkan.");
+        return;
+    }
     logger->vulkan("Initialising renderer.");
 
     instance = make_instance(
@@ -993,7 +1057,25 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		}
 	});
 
-	physicalDevice = choose_physical_device(instance);
+	bool compositionRequested =
+		requestedPresentationBackend == PresentationBackend::eWindowsCompositionD3D11;
+#if !defined(_WIN32)
+	compositionRequested = false;
+#endif
+	if (compositionRequested && !nativeWindowHandle)
+	{
+		logger->warning(
+			"Windows Composition presentation requires a native HWND; using native Vulkan presentation.");
+		compositionRequested = false;
+	}
+	physicalDevice = choose_physical_device(instance, compositionRequested);
+	if (!physicalDevice && compositionRequested)
+	{
+		logger->warning(
+			"No Vulkan GPU supports D3D11 external-memory interop; using native Vulkan presentation.");
+		compositionRequested = false;
+		physicalDevice = choose_physical_device(instance, false);
+	}
 	if (!physicalDevice)
 	{
 		logger->vulkan(LogLevel::eError, "No suitable physical device was found.");
@@ -1002,13 +1084,17 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	hosted3DSamples = choose_hosted3d_sample_count(physicalDevice, requestedMsaaSamples);
 	logger->vulkan(std::string("Hosted 3D MSAA sample count: ") + sample_count_name(hosted3DSamples) + ".");
 
-	logicalDevice = create_logical_device(physicalDevice, surface, deviceDeletionQueue);
+	logicalDevice = create_logical_device(
+		physicalDevice,
+		surface,
+		deviceDeletionQueue,
+		compositionRequested);
 	if (!logicalDevice)
 	{
 		logger->vulkan("Failed to create a logical device.");
 		return;
 	}
-	uint32_t graphicsQueueFamilyIndex = find_queue_family_index(physicalDevice, surface, vk::QueueFlagBits::eGraphics);
+	graphicsQueueFamilyIndex = find_queue_family_index(physicalDevice, surface, vk::QueueFlagBits::eGraphics);
 	graphicsQueue = logicalDevice.getQueue(graphicsQueueFamilyIndex, 0);
 
 	VmaAllocatorCreateInfo allocatorInfo = {};
@@ -1024,6 +1110,21 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	{
 		logger->vulkan("Swapchain creation produced no drawable images.");
 		return;
+	}
+	if (compositionRequested && compositionPresenter.initialise(
+			nativeWindowHandle,
+			physicalDevice,
+			logicalDevice,
+			swapchain.extent.width,
+			swapchain.extent.height,
+			static_cast<uint32_t>(swapchain.images.size()),
+			graphicsQueueFamilyIndex))
+	{
+		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
+	}
+	else
+	{
+		activePresentationBackend = PresentationBackend::eNative;
 	}
 	renderExtent = choose_render_extent(swapchain.extent.width, swapchain.extent.height, maxRenderPixels);
 	modelRenderExtent = renderExtent;
@@ -1086,6 +1187,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	descriptorTypes = { vk::DescriptorType::eCombinedImageSampler };
 	descriptorPools[DescriptorScope::eMediaTexture] = make_descriptor_pool(logicalDevice, kMaxMedia2DTextures, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 	descriptorTypes = {
+		vk::DescriptorType::eStorageImage,
 		vk::DescriptorType::eStorageImage,
 		vk::DescriptorType::eStorageImage,
 		vk::DescriptorType::eStorageImage,
@@ -1173,6 +1275,7 @@ void Engine::Impl::make_descriptor_sets()
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
+	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
 	descriptorSetLayouts[DescriptorScope::ePost] = builder.build(deviceDeletionQueue);
 	descriptorSetLayouts[DescriptorScope::eUICache] = descriptorSetLayouts[DescriptorScope::eFrame];
 	descriptorSetLayouts[DescriptorScope::eUICachePost] = descriptorSetLayouts[DescriptorScope::ePost];
@@ -1231,7 +1334,7 @@ void Engine::Impl::make_pipeline_layouts()
 	pipelineLayouts[PipelineType::eModel3D] = builder.build(deviceDeletionQueue);
 }
 
-void Engine::Impl::make_pipelines()
+void Engine::Impl::make_pipelines() 
 {
 	pipelines[PipelineType::eClear] = make_compute_pipeline(
 		logicalDevice, "clear_screen", pipelineLayouts[PipelineType::eClear], deviceDeletionQueue
@@ -1270,6 +1373,145 @@ void Engine::Impl::make_pipelines()
 		logicalDevice, "model_3d", pipelineLayouts[PipelineType::eModel3D], hosted3DRenderPass,
 		hosted3DSamples, deviceDeletionQueue
 	);
+}
+
+bool Engine::Impl::rebuild_composition_presenter()
+{
+	compositionPresenter.shutdown(logicalDevice);
+	appliedBackdropRegions.clear();
+	activePresentationBackend = PresentationBackend::eNative;
+#if defined(_WIN32)
+	if (requestedPresentationBackend != PresentationBackend::eWindowsCompositionD3D11 ||
+		!nativeWindowHandle || !logicalDevice || !physicalDevice ||
+		!swapchain.chain || swapchain.images.empty())
+	{
+		return false;
+	}
+	if (compositionPresenter.initialise(
+			nativeWindowHandle,
+			physicalDevice,
+			logicalDevice,
+			swapchain.extent.width,
+			swapchain.extent.height,
+			static_cast<uint32_t>(swapchain.images.size()),
+			graphicsQueueFamilyIndex))
+	{
+		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
+		return true;
+	}
+#endif
+	return false;
+}
+
+void Engine::Impl::update_system_backdrop_regions()
+{
+	if (!compositionPresenter.available())
+	{
+		return;
+	}
+
+	std::vector<SystemBackdropRegion> regions;
+	entt::registry& registry = renderer2DScene.registry();
+	auto view = registry.view<
+		const Transform2DComponent,
+		const ShapeComponent,
+		const SystemBackdropComponent,
+		const RenderLayer2DComponent>();
+	regions.reserve(view.size_hint());
+	const float outputScaleX = renderExtent.width > 0u ?
+		static_cast<float>(swapchain.extent.width) / static_cast<float>(renderExtent.width) : 1.0f;
+	const float outputScaleY = renderExtent.height > 0u ?
+		static_cast<float>(swapchain.extent.height) / static_cast<float>(renderExtent.height) : 1.0f;
+	view.each([&](
+		entt::entity,
+		const Transform2DComponent& transform,
+		const ShapeComponent& shape,
+		const SystemBackdropComponent& backdrop,
+		const RenderLayer2DComponent& layer) {
+		if (!layer.visible || backdrop.region.material == SystemBackdropMaterial::eOff ||
+			std::abs(transform.rotationRadians) > 0.0001f ||
+			glm::length(transform.rotation3DRadians) > 0.0001f)
+		{
+			return;
+		}
+		const glm::vec2 framebufferSize = shape.size * glm::abs(transform.scale);
+		const glm::vec2 topLeft = transform.position - transform.origin * framebufferSize;
+		if (framebufferSize.x <= 0.0f || framebufferSize.y <= 0.0f)
+		{
+			return;
+		}
+
+		SystemBackdropRegion region = backdrop.region;
+		region.x = topLeft.x * outputScaleX;
+		region.y = topLeft.y * outputScaleY;
+		region.width = framebufferSize.x * outputScaleX;
+		region.height = framebufferSize.y * outputScaleY;
+		const float shapeScale = std::max(outputScaleX, outputScaleY);
+		if (region.deriveShapeFromEntity)
+		{
+			const glm::vec4 radii = shape.effective_corner_radii() * shapeScale;
+			// Preserve explicit zero-radius corners instead of letting the bridge
+			// replace them with the largest custom radius as a uniform fallback.
+			region.cornerRadius = shape.customCornerRadii ?
+				0.0f :
+				shape.cornerRadius * shapeScale;
+			region.topLeftRadius = radii.x;
+			region.topRightRadius = radii.y;
+			region.bottomRightRadius = radii.z;
+			region.bottomLeftRadius = radii.w;
+			region.squircleAmount = shape.squircleAmount;
+			region.squirclePower = shape.squirclePower;
+			switch (shape.primitive)
+			{
+			case Renderer2DPrimitive::eRectangle:
+				region.shape = SystemBackdropShape::eRectangle;
+				break;
+			case Renderer2DPrimitive::eEllipse:
+				region.shape = SystemBackdropShape::eEllipse;
+				break;
+			case Renderer2DPrimitive::eSquircle:
+				region.shape = SystemBackdropShape::eSquircle;
+				break;
+			default:
+				region.shape = SystemBackdropShape::eRoundedRectangle;
+				break;
+			}
+		}
+		else
+		{
+			region.cornerRadius *= shapeScale;
+			region.topLeftRadius *= shapeScale;
+			region.topRightRadius *= shapeScale;
+			region.bottomRightRadius *= shapeScale;
+			region.bottomLeftRadius *= shapeScale;
+		}
+		regions.push_back(region);
+	});
+
+	bool unchanged = regions.size() == appliedBackdropRegions.size();
+	if (unchanged)
+	{
+		for (std::size_t index = 0u; index < regions.size(); ++index)
+		{
+			if (!same_backdrop_region(regions[index], appliedBackdropRegions[index]))
+			{
+				unchanged = false;
+				break;
+			}
+		}
+	}
+	if (!unchanged && compositionPresenter.set_regions(regions))
+	{
+		Logger::fetch_logger()->info(
+			"Windows Composition backdrop regions applied: " +
+			std::to_string(regions.size()) + ".");
+		appliedBackdropRegions = std::move(regions);
+	}
+	else if (!unchanged)
+	{
+		Logger::fetch_logger()->warning(
+			"Windows Composition rejected the requested backdrop regions.");
+	}
 }
 
 void Engine::Impl::draw()
@@ -1324,6 +1566,10 @@ void Engine::Impl::draw()
 		}
 		renderExtent = choose_render_extent(swapchain.extent.width, swapchain.extent.height, maxRenderPixels);
 		modelRenderExtent = renderExtent;
+		if (requestedPresentationBackend == PresentationBackend::eWindowsCompositionD3D11)
+		{
+			rebuild_composition_presenter();
+		}
 		for (Frame& frame : frames)
 		{
 			frame.resize_resources(renderExtent, modelRenderExtent);
@@ -1384,12 +1630,27 @@ void Engine::Impl::draw()
 	const bool useExternalBackdropUnderlay =
 		externalBackdropAvailable &&
 		swapchain.compositeAlpha == vk::CompositeAlphaFlagBitsKHR::eOpaque;
+	uint32_t compositionBufferIndex = 0u;
+	vk::Image compositionImage {};
+	bool compositionImageFirstUse = true;
+	if (compositionPresenter.available() && compositionPresenter.buffer_count() > 0u)
+	{
+		compositionBufferIndex = frameIndex % compositionPresenter.buffer_count();
+		if (compositionPresenter.acquire(compositionBufferIndex))
+		{
+			compositionImage = compositionPresenter.image(compositionBufferIndex);
+			compositionImageFirstUse = compositionPresenter.first_use(compositionBufferIndex);
+		}
+	}
 	frame.record_command_buffer(
 		imageIndex,
 		camera,
 		renderTimeSeconds,
 		externalBackdropAvailable,
-		useExternalBackdropUnderlay);
+		useExternalBackdropUnderlay,
+		compositionImage,
+		compositionImageFirstUse,
+		graphicsQueueFamilyIndex);
 	vk::SubmitInfo submitInfo = {};
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &frame.commandBuffer;
@@ -1405,6 +1666,10 @@ void Engine::Impl::draw()
 	{
 		logger->vulkan("Failed to submit buffer to graphics queue.");
 		return;
+	}
+	if (compositionImage)
+	{
+		compositionPresenter.mark_used(compositionBufferIndex);
 	}
 
 	vk::PresentInfoKHR presentInfo = {};
@@ -1429,6 +1694,22 @@ void Engine::Impl::draw()
 	{
 		logger->vulkan("Failed to present swapchain image. VkResult: " + std::to_string(static_cast<int>(presentResult)));
 		return;
+	}
+
+	if (compositionImage)
+	{
+		const vk::Result compositionFenceResult = logicalDevice.waitForFences(
+			frame.renderFinishedFence,
+			true,
+			UINT64_MAX);
+		if (compositionFenceResult == vk::Result::eSuccess)
+		{
+			update_system_backdrop_regions();
+			if (!compositionPresenter.present(compositionBufferIndex))
+			{
+				logger->warning("Windows Composition could not present the shared Vulkan frame.");
+			}
+		}
 	}
 
 	frameIndex = (frameIndex + 1) % frameCountLocal;
@@ -1852,6 +2133,21 @@ std::string Engine::Impl::resolve_text(const Text& text) const
 	return localisation_.resolve(text);
 }
 
+RenderBackend Engine::Impl::render_backend() const
+{
+	return renderBackend;
+}
+
+PresentationBackend Engine::Impl::presentation_backend() const
+{
+	return activePresentationBackend;
+}
+
+bool Engine::Impl::system_backdrop_available() const
+{
+	return compositionPresenter.available();
+}
+
 Localisation& Engine::Impl::localisation()
 {
 	return localisation_;
@@ -1922,6 +2218,7 @@ Engine::Impl::~Impl()
 			logger->vulkan("Failed to wait for queue to idle.");
 		}
 	}
+	compositionPresenter.shutdown(logicalDevice);
 
     logger->vulkan("Exiting application.");
 

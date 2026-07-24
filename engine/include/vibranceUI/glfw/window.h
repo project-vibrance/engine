@@ -75,6 +75,7 @@ VIBRANCE_GLFW_API void set_glfw_window_title(GLFWwindow* window, const char* tit
 VIBRANCE_GLFW_API void set_glfw_window_position(GLFWwindow* window, int x, int y);
 VIBRANCE_GLFW_API void set_glfw_window_size(GLFWwindow* window, int width, int height);
 VIBRANCE_GLFW_API void set_glfw_window_should_close(GLFWwindow* window, bool shouldClose);
+VIBRANCE_GLFW_API void* glfw_native_window_handle(GLFWwindow* window);
 VIBRANCE_GLFW_API bool begin_glfw_native_window_drag(GLFWwindow* window);
 VIBRANCE_GLFW_API void iconify_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void maximize_glfw_window(GLFWwindow* window);

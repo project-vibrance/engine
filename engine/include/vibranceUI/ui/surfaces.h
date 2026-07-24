@@ -235,6 +235,7 @@ struct UiPanelBackgroundLayer
     bool dynamicCache = false;
     bool clipChildren = true;
     bool sdfEdges = true;
+    std::optional<SystemBackdropRegion> systemBackdrop {};
 
     static UiPanelBackgroundLayer fill(const ShapeStyleComponent& style, float radius = 0.0f)
     {
@@ -542,6 +543,12 @@ inline entt::entity ui_create_panel_background_layer(
 
     const glm::vec4 corners = ui_panel_background_corners(layer);
     ui.set_shape_corners(entity, corners.x, corners.y, corners.z, corners.w, layer.sdfEdges);
+    if (layer.systemBackdrop && layer.systemBackdrop->material != SystemBackdropMaterial::eOff)
+    {
+        ui.registry().emplace_or_replace<SystemBackdropComponent>(
+            entity,
+            SystemBackdropComponent { *layer.systemBackdrop });
+    }
     if (layer.clipChildren)
     {
         ui.scene().enable_mask(entity, false);
@@ -611,6 +618,8 @@ struct UiScrollEdgeFadeOptions
     float backdropBlurRadius = 18.0f;
     uint32_t backdropBlurPasses = 2u;
     float backdropBlurOpacity = 0.85f;
+    float contentFadeMinimumOpacity = 0.0f;
+    float contentFadeBlurRadius = 0.0f;
     int32_t layer = 5;
     uint32_t order = 0u;
     bool alwaysOnTop = false;
@@ -619,6 +628,7 @@ struct UiScrollEdgeFadeOptions
     bool drawTint = true;
     bool backdropBlurFollowsFillAlpha = true;
     bool backdropBlurClipToInheritedMask = true;
+    bool fadeContent = false;
 };
 
 inline entt::entity ui_create_scroll_edge_fade(
@@ -634,7 +644,7 @@ inline entt::entity ui_create_scroll_edge_fade(
 
     const bool top = edge == UiScrollFadeEdge::eTop;
     const float height = std::max(top ? options.topHeight : options.bottomHeight, 0.0f);
-    if (height <= 0.0f)
+    if (height <= 0.0f || (!options.drawTint && options.backdropBlurRadius <= 0.0f))
     {
         return entt::null;
     }
@@ -1030,6 +1040,18 @@ inline UiScrollViewHandle ui_create_scroll_view(
                 ui.scale()),
             scaled_offset(0.0f, options.contentInitialOffset, ui.scale()),
             scaled_size(0.0f, options.contentHeight, ui.scale()));
+        if (options.createEdgeFades && options.edgeFades.fadeContent)
+        {
+            registry.emplace_or_replace<ScrollEdgeFade2DComponent>(
+                handle.content,
+                ScrollEdgeFade2DComponent {
+                    true,
+                    scaled_scalar(options.edgeFades.topHeight, ui.scale()),
+                    scaled_scalar(options.edgeFades.bottomHeight, ui.scale()),
+                    std::clamp(options.edgeFades.contentFadeMinimumOpacity, 0.0f, 1.0f),
+                    scaled_scalar(options.edgeFades.contentFadeBlurRadius, ui.scale())
+                });
+        }
     }
 
     if (options.createScrollbar)

@@ -235,6 +235,8 @@ struct GlfwPanelWindowHostOptions
     uint32_t maxRenderPixels = 0;
     uint32_t msaaSamples = 4;
     RendererPresentMode presentMode = RendererPresentMode::eAuto;
+    RenderBackend renderBackend = RenderBackend::eVulkan;
+    PresentationBackend presentationBackend = PresentationBackend::eNative;
     uint32_t targetFrameRate = 0;
     std::string title = "vibranceUI panel window";
     GlfwPanelWindowEngineConfigurator configureEngine;

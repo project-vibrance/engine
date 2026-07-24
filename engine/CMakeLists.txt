@@ -1,5 +1,8 @@
 file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+# C++/WinRT stays in its MSVC companion DLL and must never enter the MinGW
+# engine target. The MinGW side talks to it through a versioned POD C ABI.
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "composition_bridge\\.cpp$")
 
 set(ENGINE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${ENGINE_GENERATED_DIR}")
@@ -77,6 +80,84 @@ list(APPEND ENGINE_SOURCES "${EMBEDDED_SHADER_CPP}")
 
 add_library(vibrance_engine SHARED ${ENGINE_SOURCES})
 add_library(vibrance::engine ALIAS vibrance_engine)
+
+set(VIBRANCE_WIN32_COMPOSITION_AVAILABLE OFF)
+if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
+    find_program(
+        VIBRANCE_VSWHERE_EXECUTABLE
+        NAMES vswhere.exe
+        PATHS
+            "C:/Program Files (x86)/Microsoft Visual Studio/Installer"
+            "$ENV{ProgramFiles\(x86\)}/Microsoft Visual Studio/Installer"
+        NO_DEFAULT_PATH)
+    if(VIBRANCE_VSWHERE_EXECUTABLE)
+        execute_process(
+            COMMAND
+                "${VIBRANCE_VSWHERE_EXECUTABLE}"
+                -latest
+                -products *
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+                -property installationPath
+            OUTPUT_VARIABLE VIBRANCE_VISUAL_STUDIO_ROOT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+    set(VIBRANCE_VCVARSALL
+        "${VIBRANCE_VISUAL_STUDIO_ROOT}/VC/Auxiliary/Build/vcvarsall.bat")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+            set(VIBRANCE_COMPOSITION_ARCH amd64_arm64)
+        else()
+            set(VIBRANCE_COMPOSITION_ARCH x64)
+        endif()
+    else()
+        set(VIBRANCE_COMPOSITION_ARCH x86)
+    endif()
+
+    if(EXISTS "${VIBRANCE_VCVARSALL}")
+        set(VIBRANCE_COMPOSITION_DIRECTORY
+            "${CMAKE_CURRENT_BINARY_DIR}/win32-composition")
+        set(VIBRANCE_COMPOSITION_DLL
+            "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_win32_composition.dll")
+        set(VIBRANCE_COMPOSITION_OBJECT_DIRECTORY
+            "${VIBRANCE_COMPOSITION_DIRECTORY}/obj")
+        set(VIBRANCE_COMPOSITION_SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx/composition_bridge.cpp")
+        set(VIBRANCE_COMPOSITION_ABI_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx/composition_bridge_abi.h")
+        set(VIBRANCE_COMPOSITION_BUILD_SCRIPT
+            "${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/build_composition_bridge.bat")
+        add_custom_command(
+            OUTPUT "${VIBRANCE_COMPOSITION_DLL}"
+            COMMAND
+                "${VIBRANCE_COMPOSITION_BUILD_SCRIPT}"
+                "${VIBRANCE_VCVARSALL}"
+                "${VIBRANCE_COMPOSITION_ARCH}"
+                "${VIBRANCE_COMPOSITION_SOURCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx"
+                "${VIBRANCE_COMPOSITION_DLL}"
+                "${VIBRANCE_COMPOSITION_OBJECT_DIRECTORY}"
+            DEPENDS
+                "${VIBRANCE_COMPOSITION_SOURCE}"
+                "${VIBRANCE_COMPOSITION_ABI_HEADER}"
+                "${VIBRANCE_COMPOSITION_BUILD_SCRIPT}"
+            BYPRODUCTS
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_win32_composition.exp"
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_win32_composition.lib"
+            COMMENT "Building Windows Composition/D3D11 presenter bridge with MSVC"
+            VERBATIM)
+        add_custom_target(vibrance_win32_composition ALL
+            DEPENDS "${VIBRANCE_COMPOSITION_DLL}")
+        add_dependencies(vibrance_engine vibrance_win32_composition)
+        set(VIBRANCE_WIN32_COMPOSITION_AVAILABLE ON)
+        message(STATUS
+            "Windows Composition presenter: enabled (${VIBRANCE_COMPOSITION_ARCH}, MSVC, D3D11 bridge)")
+    else()
+        message(WARNING
+            "VIBRANCE_ENABLE_WIN32_COMPOSITION is ON, but MSVC was not found. "
+            "Windows Composition materials will resolve to off.")
+    endif()
+endif()
 
 set_target_properties(vibrance_engine PROPERTIES
     EXPORT_NAME engine
@@ -171,6 +252,7 @@ if(TARGET fastgltf::fastgltf)
 endif()
 
 if(WIN32)
+    target_compile_definitions(vibrance_engine PRIVATE VK_USE_PLATFORM_WIN32_KHR)
     target_link_libraries(vibrance_engine PRIVATE
         ole32 winmm user32 gdi32 shell32)
 elseif(APPLE)
@@ -195,6 +277,10 @@ install(TARGETS vibrance_engine
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
+    install(FILES "${VIBRANCE_COMPOSITION_DLL}"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
 
 # Public headers have one canonical source and install namespace.
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/"

@@ -1420,6 +1420,95 @@ namespace
         return {};
     }
 
+    DisplayTransitionEffect2D inherited_scroll_edge_fade_effect(
+        const entt::registry& registry,
+        entt::entity entity)
+    {
+        entt::entity current = entity;
+        entt::entity childOfCurrent = entity;
+        for (uint32_t depth = 0; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+        {
+            if (const ScrollEdgeFade2DComponent* fade = registry.try_get<ScrollEdgeFade2DComponent>(current);
+                fade && fade->enabled)
+            {
+                glm::vec4 viewport = unclipped_rect();
+                entt::entity viewportAncestor = current;
+                for (uint32_t parentDepth = 0; parentDepth < 64u; ++parentDepth)
+                {
+                    const Parent2DComponent* parent = registry.try_get<Parent2DComponent>(viewportAncestor);
+                    if (!parent || parent->parent == entt::null || !registry.valid(parent->parent))
+                    {
+                        break;
+                    }
+                    viewportAncestor = parent->parent;
+                    if (const Mask2DComponent* mask = registry.try_get<Mask2DComponent>(viewportAncestor);
+                        mask && mask->enabled)
+                    {
+                        viewport = entity_mask_rect(registry, viewportAncestor, *mask);
+                        break;
+                    }
+                }
+                if (rect_empty(viewport))
+                {
+                    return {};
+                }
+
+                const entt::entity sampleEntity = current == entity ? entity : childOfCurrent;
+                const float centerY = display_transition_origin(registry, sampleEntity).y;
+                const auto smooth = [](float value) {
+                    const float t = std::clamp(value, 0.0f, 1.0f);
+                    return t * t * (3.0f - 2.0f * t);
+                };
+                float visibility = 1.0f;
+                if (fade->topHeight > 0.0f)
+                {
+                    visibility = std::min(
+                        visibility,
+                        smooth((centerY - viewport.y) / fade->topHeight));
+                }
+                if (fade->bottomHeight > 0.0f)
+                {
+                    const float bottom = viewport.y + viewport.w;
+                    visibility = std::min(
+                        visibility,
+                        smooth((bottom - centerY) / fade->bottomHeight));
+                }
+
+                DisplayTransitionEffect2D effect = {};
+                effect.opacity = glm::mix(
+                    std::clamp(fade->minimumOpacity, 0.0f, 1.0f),
+                    1.0f,
+                    visibility);
+                effect.blurRadius = std::max(fade->maximumBlurRadius, 0.0f) * (1.0f - visibility);
+                return effect;
+            }
+
+            const Parent2DComponent* parent = registry.try_get<Parent2DComponent>(current);
+            if (!parent || parent->parent == entt::null || parent->parent == current)
+            {
+                break;
+            }
+            childOfCurrent = current;
+            current = parent->parent;
+        }
+        return {};
+    }
+
+    DisplayTransitionEffect2D inherited_visual_effect(
+        const entt::registry& registry,
+        entt::entity entity,
+        double currentTimeSeconds)
+    {
+        DisplayTransitionEffect2D effect = inherited_display_transition_effect(
+            registry,
+            entity,
+            currentTimeSeconds);
+        const DisplayTransitionEffect2D edgeFade = inherited_scroll_edge_fade_effect(registry, entity);
+        effect.opacity *= edgeFade.opacity;
+        effect.blurRadius = std::max(effect.blurRadius, edgeFade.blurRadius);
+        return effect;
+    }
+
     glm::vec2 fallback_model_size(const entt::registry& registry, entt::entity entity, const Model3DComponent& model)
     {
         if (model.size.x > 0.0f && model.size.y > 0.0f)
@@ -3385,7 +3474,7 @@ void Renderer2DScene::build_render_plan(
         const ShapeStyleComponent* stylePtr = registry_.try_get<ShapeStyleComponent>(entity);
         const ShapeStyleComponent& style = stylePtr ? *stylePtr : defaultShapeStyle;
         const DisplayTransitionEffect2D displayTransition =
-            inherited_display_transition_effect(registry_, entity, currentTimeSeconds);
+            inherited_visual_effect(registry_, entity, currentTimeSeconds);
 
         Renderer2DBatch batch = {};
         batch.entity = entity;
@@ -3536,7 +3625,7 @@ void Renderer2DScene::build_render_plan(
         }
 
         const DisplayTransitionEffect2D displayTransition =
-            inherited_display_transition_effect(registry_, entity, currentTimeSeconds);
+            inherited_visual_effect(registry_, entity, currentTimeSeconds);
         const glm::vec4 rect = apply_display_transition_scale(
             media_bounds_from_component(transform, media),
             displayTransition);
@@ -3644,7 +3733,7 @@ void Renderer2DScene::build_render_plan(
         const TextStyleComponent* stylePtr = registry_.try_get<TextStyleComponent>(entity);
         const TextStyleComponent& style = stylePtr ? *stylePtr : defaultTextStyle;
         const DisplayTransitionEffect2D displayTransition =
-            inherited_display_transition_effect(registry_, entity, currentTimeSeconds);
+            inherited_visual_effect(registry_, entity, currentTimeSeconds);
 
         const glm::vec4 textBounds = text_bounds_from_component(transform, text);
 
@@ -3740,7 +3829,7 @@ void Renderer2DScene::build_render_plan(
 
         const RenderLayer2DKey layer = render_layer_key(registry_, entity);
         const DisplayTransitionEffect2D displayTransition =
-            inherited_display_transition_effect(registry_, entity, currentTimeSeconds);
+            inherited_visual_effect(registry_, entity, currentTimeSeconds);
 
         Renderer3DModelBatch batch = {};
         batch.entity = entity;

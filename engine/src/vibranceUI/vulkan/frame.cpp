@@ -42,6 +42,8 @@ namespace
 			vk::ImageUsageFlagBits::eColorAttachment);
 		frame.tempSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
 			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.compositionSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
 		frame.uiBlurSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
 			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
 		frame.uiStaticSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
@@ -99,7 +101,7 @@ namespace
 		// Descriptor scopes point shaders at the current frame surfaces and buffers
 		StorageImage* fontAtlasDescriptorImage = frame.fontAtlasImage != nullptr ? frame.fontAtlasImage : frame.uiBlurSurface;
 		std::vector<vk::WriteDescriptorSet> updates;
-		updates.reserve(21);
+		updates.reserve(23);
 
 		auto add_image_write = [&](DescriptorScope scope, uint32_t binding, StorageImage* image) {
 			vk::WriteDescriptorSet writeOp = {};
@@ -139,6 +141,7 @@ namespace
 		add_image_write(DescriptorScope::ePost, 4, frame.uiStaticSurface);
 		add_image_write(DescriptorScope::ePost, 5, frame.uiStaticBlurSurface);
 		add_image_write(DescriptorScope::ePost, 6, frame.externalBackdropSurface);
+		add_image_write(DescriptorScope::ePost, 7, frame.compositionSurface);
 
 		add_image_write(DescriptorScope::eUICache, 0, frame.depthBuffer);
 		add_image_write(DescriptorScope::eUICache, 1, frame.uiStaticSurface);
@@ -150,6 +153,7 @@ namespace
 		add_image_write(DescriptorScope::eUICachePost, 4, frame.uiStaticSurface);
 		add_image_write(DescriptorScope::eUICachePost, 5, frame.uiStaticBlurSurface);
 		add_image_write(DescriptorScope::eUICachePost, 6, frame.externalBackdropSurface);
+		add_image_write(DescriptorScope::eUICachePost, 7, frame.compositionSurface);
 
 		frame.logicalDevice.updateDescriptorSets(static_cast<uint32_t>(updates.size()), updates.data(), 0, nullptr);
 	}
@@ -202,7 +206,10 @@ void Frame::record_command_buffer(
 	const Camera& camera,
 	double currentTimeSeconds,
 	bool externalBackdropAvailable,
-	bool useExternalBackdropUnderlay)
+	bool useExternalBackdropUnderlay,
+	vk::Image compositionImage,
+	bool compositionImageFirstUse,
+	uint32_t graphicsQueueFamilyIndex)
 {
 	// Record all passes for one swapchain image, including UI cache and final composite
 	Logger* logger = Logger::fetch_logger();
@@ -269,6 +276,7 @@ void Frame::record_command_buffer(
 	transition_render_target(modelDepthBuffer, vk::AccessFlagBits::eMemoryWrite);
 	transition_render_target(modelColorBuffer, vk::AccessFlagBits::eMemoryWrite);
 	transition_render_target(tempSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	transition_render_target(compositionSurface, vk::AccessFlagBits::eShaderWrite);
 	transition_render_target(uiBlurSurface, vk::AccessFlagBits::eMemoryWrite);
 	prepare_cache_target(uiStaticSurface);
 	prepare_cache_target(uiStaticBlurSurface);
@@ -353,6 +361,61 @@ void Frame::record_command_buffer(
 		vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe
 	);
 
+	if (compositionImage)
+	{
+		transition_image_layout(commandBuffer, compositionSurface->image,
+			vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
+			vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eTransferRead,
+			vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer
+		);
+
+		vk::ImageMemoryBarrier acquireBarrier = {};
+		acquireBarrier.oldLayout = compositionImageFirstUse ?
+			vk::ImageLayout::eUndefined : vk::ImageLayout::eGeneral;
+		acquireBarrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+		acquireBarrier.srcAccessMask = {};
+		acquireBarrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+		acquireBarrier.srcQueueFamilyIndex = compositionImageFirstUse ?
+			VK_QUEUE_FAMILY_IGNORED : VK_QUEUE_FAMILY_EXTERNAL_KHR;
+		acquireBarrier.dstQueueFamilyIndex = compositionImageFirstUse ?
+			VK_QUEUE_FAMILY_IGNORED : graphicsQueueFamilyIndex;
+		acquireBarrier.image = compositionImage;
+		acquireBarrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+		acquireBarrier.subresourceRange.levelCount = 1u;
+		acquireBarrier.subresourceRange.layerCount = 1u;
+		commandBuffer.pipelineBarrier(
+			vk::PipelineStageFlagBits::eTopOfPipe,
+			vk::PipelineStageFlagBits::eTransfer,
+			{},
+			nullptr,
+			nullptr,
+			acquireBarrier);
+
+		copy_image_to_image(
+			commandBuffer,
+			compositionSurface->image,
+			compositionImage,
+			compositionSurface->extent,
+			swapchain.extent);
+
+		vk::ImageMemoryBarrier releaseBarrier = {};
+		releaseBarrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+		releaseBarrier.newLayout = vk::ImageLayout::eGeneral;
+		releaseBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		releaseBarrier.dstAccessMask = {};
+		releaseBarrier.srcQueueFamilyIndex = graphicsQueueFamilyIndex;
+		releaseBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR;
+		releaseBarrier.image = compositionImage;
+		releaseBarrier.subresourceRange = acquireBarrier.subresourceRange;
+		commandBuffer.pipelineBarrier(
+			vk::PipelineStageFlagBits::eTransfer,
+			vk::PipelineStageFlagBits::eBottomOfPipe,
+			{},
+			nullptr,
+			nullptr,
+			releaseBarrier);
+	}
+
 	result = commandBuffer.end();
 	if (result != vk::Result::eSuccess)
 	{
@@ -405,6 +468,7 @@ void Frame::free_resources()
 	delete_storage_image(modelDepthBuffer);
 	delete_storage_image(modelColorBuffer);
 	delete_storage_image(tempSurface);
+	delete_storage_image(compositionSurface);
 	delete_storage_image(uiBlurSurface);
 	delete_storage_image(uiStaticSurface);
 	delete_storage_image(uiStaticBlurSurface);
