@@ -6,6 +6,8 @@ const uint PRIMITIVE_RECTANGLE = 1u;
 const uint PRIMITIVE_ELLIPSE = 3u;
 const uint PRIMITIVE_SQUIRCLE = 6u;
 const uint PRIMITIVE_NOTCHED_SQUIRCLE = 7u;
+const uint PRIMITIVE_CIRCULAR_PROGRESS = 8u;
+const float TWO_PI = 6.28318530718;
 
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
@@ -150,10 +152,50 @@ float sd_notched_squircle(
         requestedDepth);
 }
 
+float positive_angle(float angle) {
+    return mod(mod(angle, TWO_PI) + TWO_PI, TWO_PI);
+}
+
+float sd_circular_progress(vec2 pixel, vec4 rect, vec4 arcParams) {
+    float progress = clamp(arcParams.x, 0.0, 1.0);
+    if (progress <= 0.00001) {
+        return 1000000.0;
+    }
+
+    vec2 halfSize = max(rect.zw * 0.5, vec2(0.5));
+    vec2 p = pixel - (rect.xy + halfSize);
+    float outerRadius = max(min(halfSize.x, halfSize.y), 0.5);
+    float halfStroke = clamp(arcParams.y * 0.5, 0.0, outerRadius);
+    float centerRadius = max(outerRadius - halfStroke, 0.0);
+    float ringSdf = abs(length(p) - centerRadius) - halfStroke;
+    if (progress >= 0.99999) {
+        return ringSdf;
+    }
+
+    float angle = atan(p.y, p.x);
+    float relativeAngle = arcParams.w >= 0.0
+        ? positive_angle(angle - arcParams.z)
+        : positive_angle(arcParams.z - angle);
+    float sweep = TWO_PI * progress;
+    if (relativeAngle <= sweep) {
+        return ringSdf;
+    }
+
+    float direction = arcParams.w >= 0.0 ? 1.0 : -1.0;
+    vec2 startPoint = centerRadius * vec2(cos(arcParams.z), sin(arcParams.z));
+    float endAngle = arcParams.z + direction * sweep;
+    vec2 endPoint = centerRadius * vec2(cos(endAngle), sin(endAngle));
+    return min(length(p - startPoint), length(p - endPoint)) - halfStroke;
+}
+
 float shadow_sdf(vec2 pixel) {
     vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
     vec2 center = pc.rect.xy + halfSize;
     vec2 p = pixel - center;
+
+    if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
+        return sd_circular_progress(pixel, pc.rect, pc.uvRect);
+    }
 
     if (pc.data.x == PRIMITIVE_ELLIPSE) {
         vec2 q = p / halfSize;

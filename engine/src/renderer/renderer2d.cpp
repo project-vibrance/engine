@@ -400,6 +400,16 @@ namespace
         };
     }
 
+    glm::vec4 circular_progress_parameters(const ShapeComponent& shape)
+    {
+        return {
+            std::clamp(shape.arcProgress, 0.0f, 1.0f),
+            std::max(shape.arcThickness, 0.0f),
+            shape.arcStartAngleRadians,
+            shape.arcClockwise ? 1.0f : -1.0f
+        };
+    }
+
     float notched_squircle_flare_size(glm::vec2 size, float amount, float depth)
     {
         constexpr float morphThreshold = 0.85f;
@@ -1534,6 +1544,7 @@ namespace
         switch (primitive)
         {
         case Renderer2DPrimitive::eEllipse:
+        case Renderer2DPrimitive::eCircularProgress:
             return point_in_ellipse(rect, point);
         case Renderer2DPrimitive::eSquircle:
         case Renderer2DPrimitive::eRoundedRectangle:
@@ -3386,7 +3397,9 @@ void Renderer2DScene::build_render_plan(
         batch.primitive = shape.primitive;
         batch.rect = apply_display_transition_scale(make_bounds(transform, shape.size), displayTransition);
         batch.clipRect = inherited_mask_clip_rect(registry_, entity);
-        batch.uvRect = { style.gradientStart.x, style.gradientStart.y, style.gradientEnd.x, style.gradientEnd.y };
+        batch.uvRect = shape.primitive == Renderer2DPrimitive::eCircularProgress ?
+            circular_progress_parameters(shape) :
+            glm::vec4(style.gradientStart.x, style.gradientStart.y, style.gradientEnd.x, style.gradientEnd.y);
         batch.color0 = style.color0;
         batch.color1 = style.color1;
         batch.color2 = style.outlineColor;

@@ -14,6 +14,8 @@ const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
 const uint PRIMITIVE_ELLIPSE = 3u;
 const uint PRIMITIVE_SQUIRCLE = 6u;
 const uint PRIMITIVE_NOTCHED_SQUIRCLE = 7u;
+const uint PRIMITIVE_CIRCULAR_PROGRESS = 8u;
+const float TWO_PI = 6.28318530718;
 const uint MASK_RADIUS_BITS = 255u;
 const uint MASK_PRIMITIVE_SHIFT = 8u;
 const uint MASK_AMOUNT_SHIFT = 12u;
@@ -253,6 +255,66 @@ float sd_notched_squircle(
         requestedDepth);
 }
 
+float positive_angle(float angle) {
+    return mod(mod(angle, TWO_PI) + TWO_PI, TWO_PI);
+}
+
+float circular_progress_relative_angle(vec2 p, vec4 arcParams) {
+    float angle = atan(p.y, p.x);
+    return arcParams.w >= 0.0
+        ? positive_angle(angle - arcParams.z)
+        : positive_angle(arcParams.z - angle);
+}
+
+float sd_circular_progress(vec2 pixel, vec4 rect, vec4 arcParams) {
+    float progress = clamp(arcParams.x, 0.0, 1.0);
+    if (progress <= 0.00001) {
+        return 1000000.0;
+    }
+
+    vec2 halfSize = max(rect.zw * 0.5, vec2(0.5));
+    vec2 p = pixel - (rect.xy + halfSize);
+    float outerRadius = max(min(halfSize.x, halfSize.y), 0.5);
+    float halfStroke = clamp(arcParams.y * 0.5, 0.0, outerRadius);
+    float centerRadius = max(outerRadius - halfStroke, 0.0);
+    float ringSdf = abs(length(p) - centerRadius) - halfStroke;
+    if (progress >= 0.99999) {
+        return ringSdf;
+    }
+
+    float sweep = TWO_PI * progress;
+    float relativeAngle = circular_progress_relative_angle(p, arcParams);
+    if (relativeAngle <= sweep) {
+        return ringSdf;
+    }
+
+    float direction = arcParams.w >= 0.0 ? 1.0 : -1.0;
+    vec2 startPoint = centerRadius * vec2(cos(arcParams.z), sin(arcParams.z));
+    float endAngle = arcParams.z + direction * sweep;
+    vec2 endPoint = centerRadius * vec2(cos(endAngle), sin(endAngle));
+    return min(length(p - startPoint), length(p - endPoint)) - halfStroke;
+}
+
+float circular_progress_gradient_t(vec2 pixel) {
+    vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
+    vec2 p = pixel - (pc.rect.xy + halfSize);
+    float progress = clamp(pc.uvRect.x, 0.0, 1.0);
+    float sweep = max(TWO_PI * progress, 0.00001);
+    float relativeAngle = circular_progress_relative_angle(p, pc.uvRect);
+    if (relativeAngle <= sweep || progress >= 0.99999) {
+        return clamp(relativeAngle / sweep, 0.0, 1.0);
+    }
+
+    float outerRadius = max(min(halfSize.x, halfSize.y), 0.5);
+    float halfStroke = clamp(pc.uvRect.y * 0.5, 0.0, outerRadius);
+    float centerRadius = max(outerRadius - halfStroke, 0.0);
+    float direction = pc.uvRect.w >= 0.0 ? 1.0 : -1.0;
+    vec2 startPoint = centerRadius * vec2(cos(pc.uvRect.z), sin(pc.uvRect.z));
+    float endAngle = pc.uvRect.z + direction * sweep;
+    vec2 endPoint = centerRadius * vec2(cos(endAngle), sin(endAngle));
+    return length(p - startPoint) <= length(p - endPoint) ? 0.0 : 1.0;
+}
+
 float primitive_sdf(
     vec2 pixel,
     vec4 rect,
@@ -293,6 +355,10 @@ float primitive_sdf(
 }
 
 float shape_sdf(vec2 pixel) {
+    if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
+        return sd_circular_progress(pixel, pc.rect, pc.uvRect);
+    }
+
     bool useCornerRadii = (pc.data.y & STYLE_CORNER_RADII) != 0u;
     vec4 cornerRadii = useCornerRadii ? unpack_corner_radii(pc.data.z) : vec4(pc.effect0.x);
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
@@ -327,6 +393,11 @@ float shape_mask_alpha(vec2 pixel, float softness) {
 vec4 fill_color(vec2 uv) {
     if ((pc.data.y & STYLE_GRADIENT) == 0u) {
         return pc.color0;
+    }
+
+    if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
+        vec2 pixel = pc.rect.xy + clamp(uv, vec2(0.0), vec2(1.0)) * pc.rect.zw;
+        return mix(pc.color0, pc.color1, circular_progress_gradient_t(pixel));
     }
 
     vec2 a = pc.uvRect.xy;

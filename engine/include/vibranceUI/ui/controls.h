@@ -419,6 +419,32 @@ struct UiSliderOptions
     std::function<void(const SliderInputEvent&)> onChanged;
 };
 
+struct UiCircularProgressComponent
+{
+    // The root is the track; indicator owns the partial foreground arc.
+    entt::entity indicator = entt::null;
+    float value = 0.0f;
+    float minValue = 0.0f;
+    float maxValue = 1.0f;
+};
+
+struct UiCircularProgressOptions
+{
+    // Supplying an end colour changes that arc from solid to an angular gradient.
+    float value = 0.0f;
+    float minValue = 0.0f;
+    float maxValue = 1.0f;
+    float thickness = 6.0f;
+    float startAngleRadians = -1.57079632679f;
+    bool clockwise = true;
+    std::string trackColor = "#FFFFFF18";
+    std::string trackEndColor {};
+    std::string progressColor = "#6EE77CFF";
+    std::string progressEndColor {};
+    float opacity = 1.0f;
+    float edgeSoftness = 0.8f;
+};
+
 struct UiRadioControlComponent
 {
     bool checked = false;
@@ -3264,6 +3290,133 @@ inline UiControlHandle ui_create_slider(
     slider.onChanged = std::move(options.onChanged);
     registry.emplace<SliderInputComponent>(handle.root, std::move(slider));
     registry.emplace<DisabledVisualComponent>(handle.root, DisabledVisualComponent { options.dimWhenDisabled, false });
+    return handle;
+}
+
+inline float ui_circular_progress_normalized_value(
+    float value,
+    float minValue,
+    float maxValue)
+{
+    const float low = std::min(minValue, maxValue);
+    const float high = std::max(minValue, maxValue);
+    return high > low ? std::clamp((value - low) / (high - low), 0.0f, 1.0f) : 0.0f;
+}
+
+inline bool ui_set_circular_progress(
+    Renderer2DScene& scene,
+    entt::entity root,
+    float value)
+{
+    entt::registry& registry = scene.registry();
+    UiCircularProgressComponent* control =
+        registry.try_get<UiCircularProgressComponent>(root);
+    if (!control || control->indicator == entt::null ||
+        !registry.valid(control->indicator))
+    {
+        return false;
+    }
+
+    const float low = std::min(control->minValue, control->maxValue);
+    const float high = std::max(control->minValue, control->maxValue);
+    control->value = std::clamp(value, low, high);
+    ShapeComponent* indicator =
+        registry.try_get<ShapeComponent>(control->indicator);
+    if (!indicator)
+    {
+        return false;
+    }
+
+    indicator->arcProgress = ui_circular_progress_normalized_value(
+        control->value,
+        control->minValue,
+        control->maxValue);
+    scene.mark_dirty(control->indicator);
+    return true;
+}
+
+inline UiControlHandle ui_create_circular_progress(
+    UiBuilder& ui,
+    entt::entity parent,
+    UiAlignment alignment,
+    glm::vec2 offset,
+    float diameter,
+    int32_t layer,
+    uint32_t order,
+    UiCircularProgressOptions options = {})
+{
+    Renderer2DScene& scene = ui.scene();
+    entt::registry& registry = ui.registry();
+    UiControlHandle handle = {};
+    const float safeDiameter = std::max(diameter, 1.0f);
+    const float safeThickness = std::clamp(options.thickness, 0.0f, safeDiameter);
+    const glm::vec2 scaledDiameter =
+        scaled_size(safeDiameter, safeDiameter, ui.scale());
+    const float scaledThickness = scaled_scalar(safeThickness, ui.scale());
+    const float scaledSoftness = scaled_scalar(
+        std::max(options.edgeSoftness, 0.0f),
+        ui.scale());
+
+    auto arcStyle = [&](std::string_view color, std::string_view endColor) {
+        ShapeStyleComponent style = endColor.empty() ?
+            make_solid_style(color, "#00000000", 0.0f, options.opacity) :
+            make_gradient_style(color, endColor, "#00000000", 0.0f, options.opacity);
+        style.edgeSoftness = scaledSoftness;
+        return style;
+    };
+    auto configureArc = [&](entt::entity entity, float progress) {
+        if (ShapeComponent* shape = registry.try_get<ShapeComponent>(entity))
+        {
+            shape->arcProgress = std::clamp(progress, 0.0f, 1.0f);
+            shape->arcThickness = scaledThickness;
+            shape->arcStartAngleRadians = options.startAngleRadians;
+            shape->arcClockwise = options.clockwise;
+        }
+    };
+
+    handle.root = scene.create_shape(
+        { 0.0f, 0.0f },
+        scaledDiameter,
+        arcStyle(options.trackColor, options.trackEndColor),
+        Renderer2DPrimitive::eCircularProgress);
+    configureArc(handle.root, 1.0f);
+    ui.set_layer(handle.root, layer, order);
+    ui.attach_aligned(
+        handle.root,
+        parent,
+        alignment,
+        scaled_offset(offset.x, offset.y, ui.scale()),
+        scaledDiameter);
+
+    handle.indicator = scene.create_shape(
+        { 0.0f, 0.0f },
+        scaledDiameter,
+        arcStyle(options.progressColor, options.progressEndColor),
+        Renderer2DPrimitive::eCircularProgress);
+    configureArc(
+        handle.indicator,
+        ui_circular_progress_normalized_value(
+            options.value,
+            options.minValue,
+            options.maxValue));
+    ui.set_layer(handle.indicator, layer + 1, order);
+    ui.attach_aligned(
+        handle.indicator,
+        handle.root,
+        UiAlignment::eCenter,
+        glm::vec2(0.0f),
+        scaledDiameter);
+
+    const float low = std::min(options.minValue, options.maxValue);
+    const float high = std::max(options.minValue, options.maxValue);
+    registry.emplace<UiCircularProgressComponent>(
+        handle.root,
+        UiCircularProgressComponent {
+            handle.indicator,
+            std::clamp(options.value, low, high),
+            low,
+            high
+        });
     return handle;
 }
 

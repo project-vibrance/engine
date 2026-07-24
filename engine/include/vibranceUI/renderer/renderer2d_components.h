@@ -22,7 +22,8 @@ enum class Renderer2DPrimitive : uint32_t
     eGlyphRun = 4,
     eMedia = 5,
     eSquircle = 6,
-    eNotchedSquircle = 7
+    eNotchedSquircle = 7,
+    eCircularProgress = 8
 };
 
 enum class Renderer2DFill : uint32_t
@@ -510,7 +511,7 @@ struct GridCell2DComponent
 
 struct ShapeComponent
 {
-    // Geometry knobs used by the shape shader, including squircle and notch variants
+    // Geometry knobs used by the shape shader, including squircle, notch, and arc variants
     Renderer2DPrimitive primitive = Renderer2DPrimitive::eRoundedRectangle;
     glm::vec2 size { 100.0f, 40.0f };
     float cornerRadius = 0.0f;
@@ -519,6 +520,10 @@ struct ShapeComponent
     float squirclePower = 4.0f;
     float notchAmount = 0.0f;
     float notchDepth = 0.0f;
+    float arcProgress = 1.0f;
+    float arcThickness = 4.0f;
+    float arcStartAngleRadians = -1.57079632679f;
+    bool arcClockwise = true;
     bool customCornerRadii = false;
     bool sdfEdges = true;
     bool draggable = false;
