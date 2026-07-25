@@ -4,19 +4,24 @@
 #include <initguid.h>
 
 #include "composition_bridge_abi.h"
+#include "private_composition_19041.h"
 
 #include <DispatcherQueue.h>
-#include <d2d1.h>
+#include <d2d1_2.h>
+#include <d2d1helper.h>
 #include <d2d1effects.h>
 #include <d3d11_4.h>
 #include <dwmapi.h>
 #include <dxgi1_4.h>
+#include <shobjidl.h>
+#include <wincodec.h>
 #include <windows.graphics.effects.interop.h>
 #include <windows.graphics.interop.h>
 #include <windows.ui.composition.interop.h>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.Effects.h>
 #include <winrt/Windows.Graphics.h>
 #include <winrt/Windows.System.h>
@@ -35,9 +40,29 @@
 #include <utility>
 #include <vector>
 
+// These DWM declarations were published after SDK 19041. Keep their stable
+// numeric ABI locally so the bridge can compile against 19041 while probing
+// support on the running Windows build before it uses them.
+#if !defined(DWMWA_USE_HOSTBACKDROPBRUSH)
+#define DWMWA_USE_HOSTBACKDROPBRUSH static_cast<DWMWINDOWATTRIBUTE>(17)
+#endif
+#if !defined(DWMWA_SYSTEMBACKDROP_TYPE)
+#define DWMWA_SYSTEMBACKDROP_TYPE static_cast<DWMWINDOWATTRIBUTE>(38)
+enum DWM_SYSTEMBACKDROP_TYPE
+{
+    DWMSBT_AUTO = 0,
+    DWMSBT_NONE = 1,
+    DWMSBT_MAINWINDOW = 2,
+    DWMSBT_TRANSIENTWINDOW = 3,
+    DWMSBT_TABBEDWINDOW = 4
+};
+#endif
+
 namespace abi_effects = ABI::Windows::Graphics::Effects;
 namespace composition = winrt::Windows::UI::Composition;
+namespace composition_directx = winrt::Windows::Graphics::DirectX;
 namespace effects = winrt::Windows::Graphics::Effects;
+namespace private_composition = vibrance::directx::private_composition_19041;
 
 template <>
 inline constexpr winrt::guid winrt::impl::guid_v<
@@ -51,6 +76,18 @@ inline constexpr winrt::guid winrt::impl::guid_v<
 namespace
 {
 thread_local std::string lastCompositionError;
+
+DWORD windows_build_number() noexcept
+{
+    using RtlGetVersionFn = LONG(WINAPI*)(OSVERSIONINFOW*);
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    const auto rtlGetVersion = ntdll ?
+        reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion")) :
+        nullptr;
+    OSVERSIONINFOW version { sizeof(version) };
+    return rtlGetVersion && rtlGetVersion(&version) >= 0 ?
+        version.dwBuildNumber : 0u;
+}
 
 void set_last_error(const char* stage, const winrt::hresult_error& error)
 {
@@ -485,6 +522,21 @@ private:
 
 class CompositionBridge
 {
+    struct LiquidSurfaceSample
+    {
+        composition::CompositionVisualSurface surface { nullptr };
+        float localX = 0.0f;
+        float localY = 0.0f;
+        bool privateDesktop = false;
+    };
+
+    struct RegionVisualState
+    {
+        VibranceCompositionRegion descriptor {};
+        composition::ContainerVisual container { nullptr };
+        std::vector<LiquidSurfaceSample> liquidBackdropSamples;
+    };
+
 public:
     explicit CompositionBridge(const VibranceCompositionCreateInfo& info) :
         window_(static_cast<HWND>(info.window)),
@@ -498,6 +550,7 @@ public:
 
     ~CompositionBridge()
     {
+        reset_private_desktop();
         if (regions_)
         {
             regions_.Children().RemoveAll();
@@ -511,6 +564,11 @@ public:
         root_ = nullptr;
         target_ = nullptr;
         compositor_ = nullptr;
+        privateCompositorPartner_ = nullptr;
+        compositionTarget_ = nullptr;
+        compositionDevice_ = nullptr;
+        d2dDevice_ = nullptr;
+        d2dFactory_ = nullptr;
         dispatcherController_ = nullptr;
 
         if (hostBackdropEnabled_ && window_)
@@ -622,24 +680,19 @@ public:
         {
             return index < queries_.size();
         }
-        while (true)
+        const HRESULT result = context_->GetData(
+            queries_[index].get(),
+            nullptr,
+            0u,
+            D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        if (result == S_OK)
         {
-            const HRESULT result = context_->GetData(
-                queries_[index].get(),
-                nullptr,
-                0u,
-                0u);
-            if (result == S_OK)
-            {
-                queryPending_[index] = false;
-                return true;
-            }
-            if (result != S_FALSE)
-            {
-                return false;
-            }
-            SwitchToThread();
+            queryPending_[index] = false;
+            return true;
         }
+        // D3D still owns this shared buffer. The Vulkan renderer can skip the
+        // Composition copy for this frame instead of stalling its render loop.
+        return false;
     }
 
     bool present(std::uint32_t index)
@@ -668,8 +721,19 @@ public:
         context_->CopyResource(backBuffer.get(), sharedTextures_[index].get());
         context_->End(queries_[index].get());
         queryPending_[index] = true;
-        context_->Flush();
-        return SUCCEEDED(swapchain_->Present(1u, 0u));
+        const HRESULT presentResult = swapchain_->Present(
+            0u,
+            DXGI_PRESENT_DO_NOT_WAIT);
+        // The compositor already has a newer queued frame. Dropping this copy
+        // is preferable to blocking the Vulkan submission thread.
+        if (presentResult == DXGI_ERROR_WAS_STILL_DRAWING)
+        {
+            // Present did not submit this command stream, so explicitly flush
+            // the copy/query that releases the shared texture back to Vulkan.
+            context_->Flush();
+            return true;
+        }
+        return SUCCEEDED(presentResult);
     }
 
     bool set_regions(
@@ -682,7 +746,44 @@ public:
         }
         try
         {
+            bool canUpdateInPlace = regionVisuals_.size() == count;
+            bool exactlyUnchanged = canUpdateInPlace;
+            if (canUpdateInPlace)
+            {
+                for (std::uint32_t index = 0u; index < count; ++index)
+                {
+                    exactlyUnchanged = exactlyUnchanged &&
+                        std::memcmp(
+                            &regionVisuals_[index].descriptor,
+                            &regions[index],
+                            sizeof(regions[index])) == 0;
+                    if (!same_region_except_position(
+                            regionVisuals_[index].descriptor,
+                            regions[index]))
+                    {
+                        canUpdateInPlace = false;
+                        break;
+                    }
+                }
+            }
+            if (exactlyUnchanged)
+            {
+                return true;
+            }
+            if (canUpdateInPlace)
+            {
+                // A drag changes only offsets. Retaining the visual/effect
+                // objects lets DWM interpolate one continuous composition
+                // tree instead of flashing between destroyed trees.
+                for (std::uint32_t index = 0u; index < count; ++index)
+                {
+                    update_region_position(regionVisuals_[index], regions[index]);
+                }
+                return true;
+            }
+
             regions_.Children().RemoveAll();
+            regionVisuals_.clear();
             const DWM_SYSTEMBACKDROP_TYPE disabled = DWMSBT_NONE;
             DwmSetWindowAttribute(
                 window_,
@@ -698,13 +799,86 @@ public:
             }
             return true;
         }
+        catch (const winrt::hresult_error& error)
+        {
+            set_last_error("set backdrop regions", error);
+            const std::wstring message =
+                L"vibranceUI: Windows Composition rejected backdrop regions (HRESULT " +
+                std::to_wstring(static_cast<std::int32_t>(error.code())) +
+                L"): " + error.message().c_str() + L"\n";
+            OutputDebugStringW(message.c_str());
+            return false;
+        }
         catch (...)
         {
+            lastCompositionError = "set backdrop regions: unknown exception";
             return false;
         }
     }
 
 private:
+    static bool same_region_except_position(
+        VibranceCompositionRegion left,
+        VibranceCompositionRegion right) noexcept
+    {
+        // All bridge descriptors are zero-initialised before being populated,
+        // including their padding. Position is the only value allowed to
+        // change without rebuilding the shape/effect graph.
+        left.x = 0.0f;
+        left.y = 0.0f;
+        right.x = 0.0f;
+        right.y = 0.0f;
+        return std::memcmp(&left, &right, sizeof(left)) == 0;
+    }
+
+    bool private_desktop_geometry_current() const noexcept
+    {
+        RECT current {};
+        return window_ && GetWindowRect(window_, &current) &&
+            EqualRect(&current, &privateDesktopWindowRect_) != FALSE;
+    }
+
+    winrt::Windows::Foundation::Numerics::float2 liquid_source_offset(
+        const VibranceCompositionRegion& region) const noexcept
+    {
+        return {
+            static_cast<float>(
+                privateDesktopWindowRect_.left - privateDesktopSourceRect_.left) +
+                region.x,
+            static_cast<float>(
+                privateDesktopWindowRect_.top - privateDesktopSourceRect_.top) +
+                region.y
+        };
+    }
+
+    void update_region_position(
+        RegionVisualState& state,
+        const VibranceCompositionRegion& region)
+    {
+        if (state.container)
+        {
+            state.container.Offset({ region.x, region.y, 0.0f });
+        }
+        if (privateDesktopSource_ && !private_desktop_geometry_current())
+        {
+            refresh_private_desktop();
+        }
+        for (LiquidSurfaceSample& sample : state.liquidBackdropSamples)
+        {
+            const auto origin = sample.privateDesktop ?
+                liquid_source_offset(region) :
+                winrt::Windows::Foundation::Numerics::float2 {
+                    region.x,
+                    region.y
+                };
+            sample.surface.SourceOffset({
+                origin.x + sample.localX,
+                origin.y + sample.localY
+            });
+        }
+        state.descriptor = region;
+    }
+
     void initialise_dispatcher()
     {
         try
@@ -829,6 +1003,13 @@ private:
             lastCompositionError = "IDXGIFactory2::CreateSwapChainForComposition failed";
             return false;
         }
+        if (winrt::com_ptr<IDXGISwapChain2> lowLatencySwapchain;
+            SUCCEEDED(swapchain_->QueryInterface(lowLatencySwapchain.put())))
+        {
+            // Keep only the freshest completed Vulkan frame queued for DWM.
+            // This limits Composition latency without pacing the Vulkan loop.
+            (void)lowLatencySwapchain->SetMaximumFrameLatency(1u);
+        }
 
         sharedTextures_.resize(bufferCount_);
         sharedHandles_.resize(bufferCount_, nullptr);
@@ -884,6 +1065,99 @@ private:
         return true;
     }
 
+    bool initialise_private_compositor()
+    {
+        if (windows_build_number() < private_composition::minimumSupportedBuild)
+        {
+            return false;
+        }
+
+        try
+        {
+            winrt::com_ptr<IDXGIDevice> dxgiDevice;
+            if (FAILED(device_->QueryInterface(dxgiDevice.put())))
+            {
+                return false;
+            }
+
+            D2D1_FACTORY_OPTIONS factoryOptions {};
+            winrt::com_ptr<ID2D1Factory2> d2dFactory;
+            if (FAILED(D2D1CreateFactory(
+                    D2D1_FACTORY_TYPE_MULTI_THREADED,
+                    __uuidof(ID2D1Factory2),
+                    &factoryOptions,
+                    d2dFactory.put_void())))
+            {
+                return false;
+            }
+            winrt::com_ptr<ID2D1Device> d2dDevice;
+            if (FAILED(d2dFactory->CreateDevice(dxgiDevice.get(), d2dDevice.put())))
+            {
+                return false;
+            }
+
+            const auto factory = winrt::get_activation_factory<
+                composition::Compositor,
+                private_composition::IInteropCompositorFactoryPartner>();
+            winrt::com_ptr<private_composition::IInteropCompositorPartner> partner;
+            if (FAILED(factory->CreateInteropCompositor(
+                    d2dDevice.get(),
+                    nullptr,
+                    __uuidof(private_composition::IInteropCompositorPartner),
+                    partner.put_void())))
+            {
+                return false;
+            }
+
+            auto compositor = partner.as<composition::Compositor>();
+            auto compositionDevice = partner.try_as<IDCompositionDesktopDevice>();
+            if (!compositionDevice)
+            {
+                return false;
+            }
+            winrt::com_ptr<IDCompositionTarget> compositionTarget;
+            if (FAILED(compositionDevice->CreateTargetForHwnd(
+                    window_,
+                    TRUE,
+                    compositionTarget.put())))
+            {
+                return false;
+            }
+            auto target = compositionTarget.try_as<composition::CompositionTarget>();
+            if (!target)
+            {
+                return false;
+            }
+
+            d2dFactory_ = std::move(d2dFactory);
+            d2dDevice_ = std::move(d2dDevice);
+            privateCompositorPartner_ = std::move(partner);
+            compositionDevice_ = std::move(compositionDevice);
+            compositionTarget_ = std::move(compositionTarget);
+            compositor_ = std::move(compositor);
+            target_ = std::move(target);
+            privateInteropEnabled_ = true;
+            OutputDebugStringW(
+                L"vibranceUI: private Windows 19041 InteropCompositor enabled.\n");
+            return true;
+        }
+        catch (const winrt::hresult_error& error)
+        {
+            const std::wstring message =
+                L"vibranceUI: private InteropCompositor unavailable (HRESULT " +
+                std::to_wstring(static_cast<std::int32_t>(error.code())) +
+                L"); using the public Composition backend.\n";
+            OutputDebugStringW(message.c_str());
+            return false;
+        }
+        catch (...)
+        {
+            OutputDebugStringW(
+                L"vibranceUI: private InteropCompositor unavailable; using the public Composition backend.\n");
+            return false;
+        }
+    }
+
     bool initialise_composition()
     {
         // A desktop HWND must explicitly opt into HostBackdropBrush. Without
@@ -896,14 +1170,19 @@ private:
             &enabled,
             sizeof(enabled)));
 
-        compositor_ = composition::Compositor();
-        const auto desktopInterop =
-            compositor_.as<ABI::Windows::UI::Composition::Desktop::ICompositorDesktopInterop>();
-        winrt::check_hresult(desktopInterop->CreateDesktopWindowTarget(
-            window_,
-            true,
-            reinterpret_cast<ABI::Windows::UI::Composition::Desktop::IDesktopWindowTarget**>(
-                winrt::put_abi(target_))));
+        if (!initialise_private_compositor())
+        {
+            compositor_ = composition::Compositor();
+            const auto desktopInterop = compositor_.as<
+                ABI::Windows::UI::Composition::Desktop::ICompositorDesktopInterop>();
+            composition::Desktop::DesktopWindowTarget desktopTarget { nullptr };
+            winrt::check_hresult(desktopInterop->CreateDesktopWindowTarget(
+                window_,
+                true,
+                reinterpret_cast<ABI::Windows::UI::Composition::Desktop::IDesktopWindowTarget**>(
+                    winrt::put_abi(desktopTarget))));
+            target_ = desktopTarget.as<composition::CompositionTarget>();
+        }
 
         winrt::com_ptr<ABI::Windows::UI::Composition::ICompositionSurface>
             compositionSurface;
@@ -930,8 +1209,887 @@ private:
         return true;
     }
 
+    void reset_private_desktop() noexcept
+    {
+        if (privateDesktopWallpaperThumbnail_)
+        {
+            DwmUnregisterThumbnail(privateDesktopWallpaperThumbnail_);
+            privateDesktopWallpaperThumbnail_ = nullptr;
+        }
+        privateDesktopWallpaperDwmVisual_ = nullptr;
+        privateDesktopWallpaperVisual_ = nullptr;
+        privateDesktopWallpaperSurface_ = nullptr;
+        privateDesktopCombinedSource_ = nullptr;
+        privateDesktopWindowsSource_ = nullptr;
+        privateDesktopSource_ = nullptr;
+        privateDesktopContainer_ = nullptr;
+        privateDesktopVisual_ = nullptr;
+        if (privateDesktopThumbnail_)
+        {
+            DwmUnregisterThumbnail(privateDesktopThumbnail_);
+            privateDesktopThumbnail_ = nullptr;
+        }
+        createSharedDesktopVisual_ = nullptr;
+        createSharedThumbnailVisual_ = nullptr;
+        updateSharedDesktopVisual_ = nullptr;
+        if (dwmPrivateModule_)
+        {
+            FreeLibrary(dwmPrivateModule_);
+            dwmPrivateModule_ = nullptr;
+        }
+        if (privateDesktopWindowAttribute_ && window_)
+        {
+            if (const HMODULE user32 = GetModuleHandleW(L"user32.dll"))
+            {
+                const auto setWindowCompositionAttribute =
+                    reinterpret_cast<private_composition::SetWindowCompositionAttributeFn>(
+                        GetProcAddress(user32, "SetWindowCompositionAttribute"));
+                if (setWindowCompositionAttribute)
+                {
+                    BOOL disabled = FALSE;
+                    private_composition::WindowCompositionAttributeData data {
+                        private_composition::WindowCompositionAttribute::ExcludedFromLivePreview,
+                        &disabled,
+                        sizeof(disabled)
+                    };
+                    setWindowCompositionAttribute(window_, &data);
+                }
+            }
+        }
+        privateDesktopWindowAttribute_ = false;
+    }
+
+    struct DesktopWallpaperDescriptor
+    {
+        std::wstring path;
+        DESKTOP_WALLPAPER_POSITION position = DWPOS_FILL;
+        COLORREF background = RGB(0, 0, 0);
+        RECT monitorRect {};
+        RECT virtualDesktopRect {};
+    };
+
+    DesktopWallpaperDescriptor query_desktop_wallpaper(
+        const RECT& monitorRect) const noexcept
+    {
+        DesktopWallpaperDescriptor result;
+        result.monitorRect = monitorRect;
+        result.virtualDesktopRect = {
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_XVIRTUALSCREEN) +
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN) +
+                GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        };
+
+        winrt::com_ptr<IDesktopWallpaper> wallpaper;
+        if (FAILED(CoCreateInstance(
+                CLSID_DesktopWallpaper,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                __uuidof(IDesktopWallpaper),
+                wallpaper.put_void())))
+        {
+            return result;
+        }
+
+        wallpaper->GetPosition(&result.position);
+        wallpaper->GetBackgroundColor(&result.background);
+
+        std::wstring monitorId;
+        UINT monitorCount = 0u;
+        if (SUCCEEDED(wallpaper->GetMonitorDevicePathCount(&monitorCount)))
+        {
+            for (UINT index = 0u; index < monitorCount; ++index)
+            {
+                LPWSTR candidateId = nullptr;
+                if (FAILED(wallpaper->GetMonitorDevicePathAt(
+                        index,
+                        &candidateId)) ||
+                    !candidateId)
+                {
+                    continue;
+                }
+
+                RECT candidateRect {};
+                const bool matches =
+                    SUCCEEDED(wallpaper->GetMonitorRECT(
+                        candidateId,
+                        &candidateRect)) &&
+                    EqualRect(&candidateRect, &monitorRect) != FALSE;
+                if (matches)
+                {
+                    monitorId = candidateId;
+                }
+                CoTaskMemFree(candidateId);
+                if (matches)
+                {
+                    break;
+                }
+            }
+        }
+
+        LPWSTR path = nullptr;
+        HRESULT pathResult = wallpaper->GetWallpaper(
+            monitorId.empty() ? nullptr : monitorId.c_str(),
+            &path);
+        if ((pathResult == S_OK || pathResult == S_FALSE) && path)
+        {
+            result.path = path;
+        }
+        if (path)
+        {
+            CoTaskMemFree(path);
+        }
+        return result;
+    }
+
+    bool ensure_wallpaper_graphics_device()
+    {
+        if (wallpaperGraphicsDevice_)
+        {
+            return true;
+        }
+        if (!compositor_ || !d2dDevice_)
+        {
+            return false;
+        }
+
+        const auto compositorInterop = compositor_.as<
+            ABI::Windows::UI::Composition::ICompositorInterop>();
+        return SUCCEEDED(compositorInterop->CreateGraphicsDevice(
+            d2dDevice_.get(),
+            reinterpret_cast<
+                ABI::Windows::UI::Composition::ICompositionGraphicsDevice**>(
+                    winrt::put_abi(wallpaperGraphicsDevice_))));
+    }
+
+    winrt::com_ptr<ID2D1Bitmap1> load_wallpaper_bitmap(
+        ID2D1DeviceContext* context,
+        const std::wstring& path,
+        UINT& width,
+        UINT& height) const noexcept
+    {
+        width = 0u;
+        height = 0u;
+        if (!context || path.empty())
+        {
+            return nullptr;
+        }
+
+        winrt::com_ptr<IWICImagingFactory2> factory;
+        if (FAILED(CoCreateInstance(
+                CLSID_WICImagingFactory2,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                __uuidof(IWICImagingFactory2),
+                factory.put_void())))
+        {
+            return nullptr;
+        }
+
+        winrt::com_ptr<IWICBitmapDecoder> decoder;
+        if (FAILED(factory->CreateDecoderFromFilename(
+                path.c_str(),
+                nullptr,
+                GENERIC_READ,
+                WICDecodeMetadataCacheOnLoad,
+                decoder.put())))
+        {
+            return nullptr;
+        }
+
+        winrt::com_ptr<IWICBitmapFrameDecode> frame;
+        if (FAILED(decoder->GetFrame(0u, frame.put())) ||
+            FAILED(frame->GetSize(&width, &height)) ||
+            width == 0u || height == 0u)
+        {
+            return nullptr;
+        }
+
+        winrt::com_ptr<IWICFormatConverter> converter;
+        if (FAILED(factory->CreateFormatConverter(converter.put())) ||
+            FAILED(converter->Initialize(
+                frame.get(),
+                GUID_WICPixelFormat32bppPBGRA,
+                WICBitmapDitherTypeNone,
+                nullptr,
+                0.0,
+                WICBitmapPaletteTypeCustom)))
+        {
+            return nullptr;
+        }
+
+        winrt::com_ptr<ID2D1Bitmap1> bitmap;
+        if (FAILED(context->CreateBitmapFromWicBitmap(
+                converter.get(),
+                nullptr,
+                bitmap.put())))
+        {
+            return nullptr;
+        }
+        return bitmap;
+    }
+
+    static D2D1_RECT_F scaled_wallpaper_destination(
+        float sourceWidth,
+        float sourceHeight,
+        float targetWidth,
+        float targetHeight,
+        float scale)
+    {
+        const float width = sourceWidth * scale;
+        const float height = sourceHeight * scale;
+        const float left = (targetWidth - width) * 0.5f;
+        const float top = (targetHeight - height) * 0.5f;
+        return D2D1::RectF(left, top, left + width, top + height);
+    }
+
+    static void draw_wallpaper_bitmap(
+        ID2D1DeviceContext* context,
+        ID2D1Bitmap1* bitmap,
+        UINT bitmapWidth,
+        UINT bitmapHeight,
+        const DesktopWallpaperDescriptor& wallpaper,
+        float targetWidth,
+        float targetHeight)
+    {
+        if (!context || !bitmap || bitmapWidth == 0u || bitmapHeight == 0u)
+        {
+            return;
+        }
+
+        const float imageWidth = static_cast<float>(bitmapWidth);
+        const float imageHeight = static_cast<float>(bitmapHeight);
+        const D2D1_RECT_F source = D2D1::RectF(
+            0.0f,
+            0.0f,
+            imageWidth,
+            imageHeight);
+        D2D1_RECT_F destination = D2D1::RectF(
+            0.0f,
+            0.0f,
+            targetWidth,
+            targetHeight);
+
+        if (wallpaper.position == DWPOS_TILE)
+        {
+            const float virtualOffsetX = static_cast<float>(
+                wallpaper.monitorRect.left -
+                wallpaper.virtualDesktopRect.left);
+            const float virtualOffsetY = static_cast<float>(
+                wallpaper.monitorRect.top -
+                wallpaper.virtualDesktopRect.top);
+            float firstX = -std::fmod(virtualOffsetX, imageWidth);
+            float firstY = -std::fmod(virtualOffsetY, imageHeight);
+            if (firstX > 0.0f)
+            {
+                firstX -= imageWidth;
+            }
+            if (firstY > 0.0f)
+            {
+                firstY -= imageHeight;
+            }
+
+            const std::uint64_t columns = static_cast<std::uint64_t>(
+                std::ceil((targetWidth - firstX) / imageWidth));
+            const std::uint64_t rows = static_cast<std::uint64_t>(
+                std::ceil((targetHeight - firstY) / imageHeight));
+            if (columns * rows <= 4096u)
+            {
+                for (float y = firstY; y < targetHeight; y += imageHeight)
+                {
+                    for (float x = firstX; x < targetWidth; x += imageWidth)
+                    {
+                        const D2D1_RECT_F tile = D2D1::RectF(
+                            x,
+                            y,
+                            x + imageWidth,
+                            y + imageHeight);
+                        context->DrawBitmap(
+                            bitmap,
+                            &tile,
+                            1.0f,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                            &source);
+                    }
+                }
+                return;
+            }
+        }
+
+        if (wallpaper.position == DWPOS_CENTER)
+        {
+            destination = scaled_wallpaper_destination(
+                imageWidth,
+                imageHeight,
+                targetWidth,
+                targetHeight,
+                1.0f);
+        }
+        else if (wallpaper.position == DWPOS_FIT)
+        {
+            const float scale = std::min(
+                targetWidth / imageWidth,
+                targetHeight / imageHeight);
+            destination = scaled_wallpaper_destination(
+                imageWidth,
+                imageHeight,
+                targetWidth,
+                targetHeight,
+                scale);
+        }
+        else if (wallpaper.position == DWPOS_FILL ||
+            wallpaper.position == DWPOS_TILE)
+        {
+            const float scale = std::max(
+                targetWidth / imageWidth,
+                targetHeight / imageHeight);
+            destination = scaled_wallpaper_destination(
+                imageWidth,
+                imageHeight,
+                targetWidth,
+                targetHeight,
+                scale);
+        }
+        else if (wallpaper.position == DWPOS_SPAN)
+        {
+            const float virtualWidth = static_cast<float>(
+                wallpaper.virtualDesktopRect.right -
+                wallpaper.virtualDesktopRect.left);
+            const float virtualHeight = static_cast<float>(
+                wallpaper.virtualDesktopRect.bottom -
+                wallpaper.virtualDesktopRect.top);
+            const float scale = std::max(
+                virtualWidth / imageWidth,
+                virtualHeight / imageHeight);
+            const D2D1_RECT_F virtualDestination =
+                scaled_wallpaper_destination(
+                    imageWidth,
+                    imageHeight,
+                    virtualWidth,
+                    virtualHeight,
+                    scale);
+            destination = virtualDestination;
+            destination.left += static_cast<float>(
+                wallpaper.virtualDesktopRect.left -
+                wallpaper.monitorRect.left);
+            destination.right += static_cast<float>(
+                wallpaper.virtualDesktopRect.left -
+                wallpaper.monitorRect.left);
+            destination.top += static_cast<float>(
+                wallpaper.virtualDesktopRect.top -
+                wallpaper.monitorRect.top);
+            destination.bottom += static_cast<float>(
+                wallpaper.virtualDesktopRect.top -
+                wallpaper.monitorRect.top);
+        }
+
+        context->DrawBitmap(
+            bitmap,
+            &destination,
+            1.0f,
+            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            &source);
+    }
+
+    bool draw_desktop_wallpaper(
+        const composition::CompositionDrawingSurface& surface,
+        const DesktopWallpaperDescriptor& wallpaper,
+        float width,
+        float height)
+    {
+        const auto surfaceInterop = surface.as<
+            ABI::Windows::UI::Composition::ICompositionDrawingSurfaceInterop>();
+        winrt::com_ptr<ID2D1DeviceContext> context;
+        POINT offset {};
+        if (FAILED(surfaceInterop->BeginDraw(
+                nullptr,
+                __uuidof(ID2D1DeviceContext),
+                context.put_void(),
+                &offset)))
+        {
+            return false;
+        }
+
+        context->SetTransform(D2D1::Matrix3x2F::Translation(
+            static_cast<float>(offset.x),
+            static_cast<float>(offset.y)));
+        context->Clear(D2D1::ColorF(
+            static_cast<float>(GetRValue(wallpaper.background)) / 255.0f,
+            static_cast<float>(GetGValue(wallpaper.background)) / 255.0f,
+            static_cast<float>(GetBValue(wallpaper.background)) / 255.0f,
+            1.0f));
+
+        UINT bitmapWidth = 0u;
+        UINT bitmapHeight = 0u;
+        const auto bitmap = load_wallpaper_bitmap(
+            context.get(),
+            wallpaper.path,
+            bitmapWidth,
+            bitmapHeight);
+        if (bitmap)
+        {
+            draw_wallpaper_bitmap(
+                context.get(),
+                bitmap.get(),
+                bitmapWidth,
+                bitmapHeight,
+                wallpaper,
+                width,
+                height);
+        }
+        return SUCCEEDED(surfaceInterop->EndDraw());
+    }
+
+    bool rebuild_private_wallpaper()
+    {
+        if (!privateDesktopWindowsSource_)
+        {
+            return false;
+        }
+
+        const float width = static_cast<float>(
+            privateDesktopSourceRect_.right -
+            privateDesktopSourceRect_.left);
+        const float height = static_cast<float>(
+            privateDesktopSourceRect_.bottom -
+            privateDesktopSourceRect_.top);
+        if (width <= 0.0f || height <= 0.0f)
+        {
+            return false;
+        }
+
+        const DesktopWallpaperDescriptor wallpaper =
+            query_desktop_wallpaper(privateDesktopSourceRect_);
+        if (wallpaper.path.empty())
+        {
+            const composition::Visual liveWallpaper =
+                create_private_wallpaper_host_visual(
+                    privateDesktopSourceRect_,
+                    static_cast<LONG>(width),
+                    static_cast<LONG>(height));
+            if (liveWallpaper)
+            {
+                return compose_private_wallpaper_visual(
+                    liveWallpaper,
+                    width,
+                    height);
+            }
+        }
+
+        if (!ensure_wallpaper_graphics_device())
+        {
+            return false;
+        }
+        auto surface = wallpaperGraphicsDevice_.CreateDrawingSurface(
+            { width, height },
+            composition_directx::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            composition_directx::DirectXAlphaMode::Premultiplied);
+        if (!draw_desktop_wallpaper(surface, wallpaper, width, height))
+        {
+            return false;
+        }
+
+        auto wallpaperBrush = compositor_.CreateSurfaceBrush(surface);
+        wallpaperBrush.Stretch(composition::CompositionStretch::Fill);
+        auto wallpaperVisual = compositor_.CreateSpriteVisual();
+        wallpaperVisual.Size({ width, height });
+        wallpaperVisual.Brush(wallpaperBrush);
+
+        if (privateDesktopWallpaperThumbnail_)
+        {
+            DwmUnregisterThumbnail(privateDesktopWallpaperThumbnail_);
+            privateDesktopWallpaperThumbnail_ = nullptr;
+            privateDesktopWallpaperDwmVisual_ = nullptr;
+        }
+        if (!compose_private_wallpaper_visual(
+                wallpaperVisual,
+                width,
+                height))
+        {
+            return false;
+        }
+
+        privateDesktopWallpaperSurface_ = std::move(surface);
+        OutputDebugStringW(
+            L"vibranceUI: decoded desktop wallpaper layered beneath the private DWM window source.\n");
+        return true;
+    }
+
+    bool compose_private_wallpaper_visual(
+        const composition::Visual& wallpaperVisual,
+        float width,
+        float height)
+    {
+        if (!wallpaperVisual || !privateDesktopWindowsSource_)
+        {
+            return false;
+        }
+        if (!privateDesktopCombinedSource_)
+        {
+            privateDesktopCombinedSource_ = compositor_.CreateContainerVisual();
+        }
+        privateDesktopCombinedSource_.Size({ width, height });
+        privateDesktopCombinedSource_.Children().RemoveAll();
+        privateDesktopCombinedSource_.Children().InsertAtBottom(wallpaperVisual);
+        privateDesktopCombinedSource_.Children().InsertAtTop(
+            privateDesktopWindowsSource_);
+        privateDesktopWallpaperVisual_ = wallpaperVisual;
+        privateDesktopSource_ = privateDesktopCombinedSource_;
+        return true;
+    }
+
+    composition::Visual create_private_wallpaper_host_visual(
+        const RECT& monitorRect,
+        LONG width,
+        LONG height)
+    {
+        if (!createSharedThumbnailVisual_ || !compositionDevice_ ||
+            width <= 0 || height <= 0)
+        {
+            return nullptr;
+        }
+
+        const HWND programManager = FindWindowW(L"Progman", nullptr);
+        if (!programManager)
+        {
+            return nullptr;
+        }
+
+        // Wallpaper Engine exposes its live surface as a Progman child. Try
+        // that redirected visual first; Progman itself remains the generic
+        // fallback for Windows Spotlight and other managed wallpaper hosts.
+        std::array<HWND, 3> candidates {
+            FindWindowExW(
+                programManager,
+                nullptr,
+                L"WPEDesktopDX11Window",
+                nullptr),
+            FindWindowExW(
+                programManager,
+                nullptr,
+                L"WPECloneView",
+                nullptr),
+            programManager
+        };
+
+        for (const HWND sourceWindow : candidates)
+        {
+            if (!sourceWindow)
+            {
+                continue;
+            }
+
+            RECT sourceWindowRect {};
+            if (!GetWindowRect(sourceWindow, &sourceWindowRect))
+            {
+                continue;
+            }
+            DWM_THUMBNAIL_PROPERTIES properties {};
+            properties.dwFlags =
+                DWM_TNP_RECTDESTINATION |
+                DWM_TNP_RECTSOURCE |
+                DWM_TNP_VISIBLE |
+                DWM_TNP_OPACITY |
+                private_composition::thumbnailEnable3D;
+            properties.rcDestination = { 0, 0, width, height };
+            properties.rcSource = {
+                monitorRect.left - sourceWindowRect.left,
+                monitorRect.top - sourceWindowRect.top,
+                monitorRect.right - sourceWindowRect.left,
+                monitorRect.bottom - sourceWindowRect.top
+            };
+            properties.opacity = 255u;
+            properties.fVisible = TRUE;
+            properties.fSourceClientAreaOnly = FALSE;
+
+            winrt::com_ptr<IDCompositionVisual2> visual;
+            HTHUMBNAIL thumbnail = nullptr;
+            const HRESULT result = createSharedThumbnailVisual_(
+                window_,
+                sourceWindow,
+                2u,
+                &properties,
+                compositionDevice_.get(),
+                visual.put_void(),
+                &thumbnail);
+            if (FAILED(result) || !visual || !thumbnail)
+            {
+                if (thumbnail)
+                {
+                    DwmUnregisterThumbnail(thumbnail);
+                }
+                continue;
+            }
+
+            auto source = visual.try_as<composition::Visual>();
+            if (!source)
+            {
+                DwmUnregisterThumbnail(thumbnail);
+                continue;
+            }
+
+            if (privateDesktopWallpaperThumbnail_)
+            {
+                DwmUnregisterThumbnail(privateDesktopWallpaperThumbnail_);
+            }
+            privateDesktopWallpaperThumbnail_ = thumbnail;
+            privateDesktopWallpaperDwmVisual_ = std::move(visual);
+            privateDesktopWallpaperSurface_ = nullptr;
+            OutputDebugStringW(
+                L"vibranceUI: live desktop wallpaper host layered beneath the private DWM window source.\n");
+            return source;
+        }
+        return nullptr;
+    }
+
+    bool refresh_private_desktop()
+    {
+        if (!privateDesktopThumbnail_ || !updateSharedDesktopVisual_ ||
+            !privateDesktopSource_)
+        {
+            return false;
+        }
+
+        RECT windowRectangle {};
+        if (!GetWindowRect(window_, &windowRectangle))
+        {
+            return false;
+        }
+        MONITORINFO monitorInfo { sizeof(monitorInfo) };
+        if (!GetMonitorInfoW(
+                MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST),
+                &monitorInfo))
+        {
+            return false;
+        }
+
+        RECT source = monitorInfo.rcMonitor;
+        SIZE destination {
+            source.right - source.left,
+            source.bottom - source.top
+        };
+        if (destination.cx <= 0 || destination.cy <= 0)
+        {
+            return false;
+        }
+
+        // Exclude only the transparent renderer host. Excluding every HWND
+        // owned by this process also removes an attached console and any
+        // sibling tool windows from the private desktop visual. The host has
+        // WCA_EXCLUDED_FROM_LIVEPREVIEW as a second guard against feedback.
+        std::array<HWND, 1> excludedWindows { window_ };
+
+        HRESULT result = E_NOTIMPL;
+        if (windowsBuild_ >= private_composition::firstModernMultiWindowBuild)
+        {
+            const auto update = reinterpret_cast<
+                private_composition::UpdateSharedMultiWindowVisualFn>(
+                    updateSharedDesktopVisual_);
+            result = update(
+                privateDesktopThumbnail_,
+                nullptr,
+                0u,
+                excludedWindows.data(),
+                static_cast<DWORD>(excludedWindows.size()),
+                &source,
+                &destination,
+                1u);
+        }
+        else
+        {
+            const auto update = reinterpret_cast<
+                private_composition::UpdateSharedVirtualDesktopVisualFn>(
+                    updateSharedDesktopVisual_);
+            result = update(
+                privateDesktopThumbnail_,
+                nullptr,
+                0u,
+                excludedWindows.data(),
+                static_cast<DWORD>(excludedWindows.size()),
+                &source,
+                &destination);
+        }
+        if (FAILED(result))
+        {
+            return false;
+        }
+
+        privateDesktopSourceRect_ = source;
+        privateDesktopWindowRect_ = windowRectangle;
+        privateDesktopWindowsSource_.Size({
+            static_cast<float>(destination.cx),
+            static_cast<float>(destination.cy)
+        });
+        if (!rebuild_private_wallpaper())
+        {
+            privateDesktopSource_ = privateDesktopWindowsSource_;
+            OutputDebugStringW(
+                L"vibranceUI: desktop wallpaper visual unavailable; retaining the private DWM window source.\n");
+        }
+        return true;
+    }
+
+    bool initialise_private_desktop()
+    {
+        if (!privateInteropEnabled_ || !compositionDevice_)
+        {
+            return false;
+        }
+        if (privateDesktopSource_)
+        {
+            return private_desktop_geometry_current() || refresh_private_desktop();
+        }
+
+        windowsBuild_ = windows_build_number();
+        if (windowsBuild_ < private_composition::minimumSupportedBuild)
+        {
+            return false;
+        }
+        dwmPrivateModule_ = LoadLibraryExW(
+            L"dwmapi.dll",
+            nullptr,
+            LOAD_LIBRARY_SEARCH_SYSTEM32);
+        if (!dwmPrivateModule_)
+        {
+            return false;
+        }
+        createSharedDesktopVisual_ = reinterpret_cast<
+            private_composition::CreateSharedMultiWindowVisualFn>(
+                GetProcAddress(
+                    dwmPrivateModule_,
+                    MAKEINTRESOURCEA(
+                        private_composition::createSharedMultiWindowVisualOrdinal)));
+        createSharedThumbnailVisual_ = reinterpret_cast<
+            private_composition::CreateSharedThumbnailVisualFn>(
+                GetProcAddress(
+                    dwmPrivateModule_,
+                    MAKEINTRESOURCEA(
+                        private_composition::createSharedThumbnailVisualOrdinal)));
+        updateSharedDesktopVisual_ = GetProcAddress(
+            dwmPrivateModule_,
+            MAKEINTRESOURCEA(
+                private_composition::updateSharedMultiWindowVisualOrdinal));
+        if (!createSharedDesktopVisual_ || !updateSharedDesktopVisual_)
+        {
+            reset_private_desktop();
+            return false;
+        }
+
+        if (const HMODULE user32 = GetModuleHandleW(L"user32.dll"))
+        {
+            const auto setWindowCompositionAttribute =
+                reinterpret_cast<private_composition::SetWindowCompositionAttributeFn>(
+                    GetProcAddress(user32, "SetWindowCompositionAttribute"));
+            if (setWindowCompositionAttribute)
+            {
+                BOOL enabled = TRUE;
+                private_composition::WindowCompositionAttributeData data {
+                    private_composition::WindowCompositionAttribute::ExcludedFromLivePreview,
+                    &enabled,
+                    sizeof(enabled)
+                };
+                privateDesktopWindowAttribute_ =
+                    setWindowCompositionAttribute(window_, &data) != FALSE;
+            }
+        }
+
+        winrt::com_ptr<IDCompositionVisual2> desktopVisual;
+        HTHUMBNAIL desktopThumbnail = nullptr;
+        const HRESULT createResult = createSharedDesktopVisual_(
+            window_,
+            compositionDevice_.get(),
+            desktopVisual.put_void(),
+            &desktopThumbnail);
+        if (FAILED(createResult) || !desktopVisual || !desktopThumbnail)
+        {
+            reset_private_desktop();
+            return false;
+        }
+
+        winrt::com_ptr<IDCompositionVisual2> desktopContainer;
+        if (FAILED(compositionDevice_->CreateVisual(desktopContainer.put())) ||
+            FAILED(desktopContainer->AddVisual(desktopVisual.get(), TRUE, nullptr)))
+        {
+            DwmUnregisterThumbnail(desktopThumbnail);
+            reset_private_desktop();
+            return false;
+        }
+        auto desktopSource = desktopContainer.try_as<composition::Visual>();
+        if (!desktopSource)
+        {
+            DwmUnregisterThumbnail(desktopThumbnail);
+            reset_private_desktop();
+            return false;
+        }
+
+        privateDesktopVisual_ = std::move(desktopVisual);
+        privateDesktopContainer_ = std::move(desktopContainer);
+        privateDesktopThumbnail_ = desktopThumbnail;
+        privateDesktopWindowsSource_ = std::move(desktopSource);
+        privateDesktopSource_ = privateDesktopWindowsSource_;
+        if (!refresh_private_desktop())
+        {
+            reset_private_desktop();
+            return false;
+        }
+        OutputDebugStringW(
+            L"vibranceUI: private DWM multi-window visual enabled for liquid material (no capture/readback surface).\n");
+        return true;
+    }
+
+    composition::CompositionBrush make_private_liquid_source_brush(
+        const VibranceCompositionRegion& region,
+        composition::CompositionVisualSurface& visualSurface)
+    {
+        if (!initialise_private_desktop())
+        {
+            return nullptr;
+        }
+
+        visualSurface = compositor_.CreateVisualSurface();
+        visualSurface.SourceVisual(privateDesktopSource_);
+        visualSurface.SourceOffset(liquid_source_offset(region));
+        visualSurface.SourceSize({ region.width, region.height });
+
+        auto surfaceBrush = compositor_.CreateSurfaceBrush(visualSurface);
+        surfaceBrush.Stretch(composition::CompositionStretch::Fill);
+        surfaceBrush.CenterPoint({ region.width * 0.5f, region.height * 0.5f });
+        // Keep the retained desktop visual's optical magnification subtle.
+        // The SDF overlay supplies the stronger boundary response without
+        // excessively enlarging the entire backdrop sample.
+        const float scale = 1.0f +
+            std::clamp(region.refraction, 0.0f, 0.20f) * 1.35f;
+        surfaceBrush.Scale({ scale, scale });
+        return surfaceBrush;
+    }
+
+    composition::CompositionBrush make_liquid_glaze()
+    {
+        auto gradient = compositor_.CreateRadialGradientBrush();
+        gradient.EllipseCenter({ 0.42f, 0.38f });
+        gradient.EllipseRadius({ 0.72f, 0.72f });
+        gradient.GradientOriginOffset({ -0.12f, -0.16f });
+        auto stops = gradient.ColorStops();
+        stops.Append(compositor_.CreateColorGradientStop(
+            0.0f,
+            color(1.0f, 1.0f, 1.0f, 0.055f)));
+        stops.Append(compositor_.CreateColorGradientStop(
+            0.62f,
+            color(0.82f, 0.94f, 1.0f, 0.012f)));
+        stops.Append(compositor_.CreateColorGradientStop(
+            0.86f,
+            color(0.72f, 0.88f, 1.0f, 0.055f)));
+        stops.Append(compositor_.CreateColorGradientStop(
+            1.0f,
+            color(1.0f, 1.0f, 1.0f, 0.16f)));
+        return gradient;
+    }
+
     composition::CompositionBrush make_effect_brush(
-        const VibranceCompositionRegion& region)
+        const VibranceCompositionRegion& region,
+        const composition::CompositionBrush& source = nullptr)
     {
         auto sourceParameter =
             composition::CompositionEffectSourceParameter(L"backdrop");
@@ -949,8 +2107,37 @@ private:
         auto brush = factory.CreateBrush();
         brush.SetSourceParameter(
             L"backdrop",
-            compositor_.CreateHostBackdropBrush());
+            source ? source : compositor_.CreateHostBackdropBrush());
         return brush;
+    }
+
+    bool build_liquid_lens(
+        const composition::ContainerVisual& container,
+        const VibranceCompositionRegion& region,
+        std::vector<LiquidSurfaceSample>& retainedSamples)
+    {
+        composition::CompositionVisualSurface backdropSurface { nullptr };
+        auto lensSource = make_private_liquid_source_brush(
+            region,
+            backdropSurface);
+        if (!lensSource || !backdropSurface)
+        {
+            return false;
+        }
+
+        auto lens = compositor_.CreateSpriteVisual();
+        lens.Size({ region.width, region.height });
+        lens.Brush(make_effect_brush(region, lensSource));
+        container.Children().InsertAtBottom(lens);
+
+        retainedSamples.clear();
+        retainedSamples.push_back({
+            std::move(backdropSurface),
+            0.0f,
+            0.0f,
+            true
+        });
+        return true;
     }
 
     composition::CompositionClip make_clip(
@@ -975,16 +2162,30 @@ private:
         const float topRight = radius(region.topRightRadius, region.cornerRadius);
         const float bottomRight = radius(region.bottomRightRadius, region.cornerRadius);
         const float bottomLeft = radius(region.bottomLeftRadius, region.cornerRadius);
-        if (region.shape == 3u)
+        if (region.shape == 3u || region.shape == 4u)
         {
+            float clippedTopLeft = topLeft;
+            float clippedTopRight = topRight;
+            float amount = region.shape == 4u ?
+                std::clamp(region.notchAmount, 0.0f, 1.0f) : 0.0f;
+            if (region.shape == 4u)
+            {
+                constexpr float morphThreshold = 0.85f;
+                const float topScale = std::clamp(
+                    1.0f - amount / morphThreshold,
+                    0.0f,
+                    1.0f);
+                clippedTopLeft *= topScale;
+                clippedTopRight *= topScale;
+            }
             auto source = winrt::make<SquircleGeometrySource>(
                 region.width,
                 region.height,
-                topLeft,
-                topRight,
+                clippedTopLeft,
+                clippedTopRight,
                 bottomRight,
                 bottomLeft,
-                region.squircleAmount,
+                std::max(region.squircleAmount, amount),
                 region.squirclePower);
             auto path = composition::CompositionPath(source);
             return compositor_.CreateGeometricClip(
@@ -1016,10 +2217,7 @@ private:
 
     bool add_region(const VibranceCompositionRegion& region)
     {
-        // Material 3 (liquid) is reserved until the private Windows backdrop
-        // provider supplies a sampleable surface. Never approximate it with a
-        // blur/tint graph: that was visually incorrect and caused artefacts.
-        if (region.material == 0u || region.material == 3u ||
+        if (region.material == 0u ||
             region.width <= 0.0f ||
             region.height <= 0.0f)
         {
@@ -1036,7 +2234,8 @@ private:
                 region.x <= 0.5f && region.y <= 0.5f &&
                 region.width >= static_cast<float>(width_) - 1.0f &&
                 region.height >= static_cast<float>(height_) - 1.0f;
-            if (!coversWindow || region.shape != 0u)
+            if (!coversWindow || region.shape != 0u ||
+                region.verticalStart > 0.001f)
             {
                 OutputDebugStringW(
                     L"vibranceUI: Windows Acrylic/Mica requires a full-window rectangle in the raw Win32 backend; request resolved to off.\n");
@@ -1052,6 +2251,9 @@ private:
             {
                 return false;
             }
+            RegionVisualState state;
+            state.descriptor = region;
+            regionVisuals_.push_back(std::move(state));
             return true;
         }
 
@@ -1063,24 +2265,67 @@ private:
             container.Clip(clip);
         }
 
-        auto backdrop = compositor_.CreateSpriteVisual();
-        backdrop.Size(container.Size());
-        backdrop.Brush(make_effect_brush(region));
-        container.Children().InsertAtBottom(backdrop);
+        RegionVisualState state;
+        state.descriptor = region;
+        state.container = container;
 
-        if (region.material == 2u)
+        const float materialTop =
+            std::clamp(region.verticalStart, 0.0f, 0.98f) * region.height;
+        VibranceCompositionRegion materialRegion = region;
+        materialRegion.y += materialTop;
+        materialRegion.height = std::max(region.height - materialTop, 1.0f);
+        composition::ContainerVisual materialContainer = container;
+        if (materialTop > 0.01f)
+        {
+            materialContainer = compositor_.CreateContainerVisual();
+            materialContainer.Offset({ 0.0f, materialTop, 0.0f });
+            materialContainer.Size({ region.width, materialRegion.height });
+            container.Children().InsertAtTop(materialContainer);
+        }
+
+        if (region.material == 3u)
+        {
+            if (!build_liquid_lens(
+                    materialContainer,
+                    materialRegion,
+                    state.liquidBackdropSamples))
+            {
+                OutputDebugStringW(
+                    L"vibranceUI: liquid request resolved to off because the private DWM visual is unavailable.\n");
+                return false;
+            }
+            for (LiquidSurfaceSample& sample : state.liquidBackdropSamples)
+            {
+                sample.localY += materialTop;
+            }
+
+            auto glaze = compositor_.CreateSpriteVisual();
+            glaze.Size(materialContainer.Size());
+            glaze.Brush(make_liquid_glaze());
+            materialContainer.Children().InsertAtTop(glaze);
+        }
+        else
+        {
+            auto backdrop = compositor_.CreateSpriteVisual();
+            backdrop.Size(materialContainer.Size());
+            backdrop.Brush(make_effect_brush(materialRegion));
+            materialContainer.Children().InsertAtBottom(backdrop);
+        }
+
+        if (region.material == 2u || region.material == 3u)
         {
             auto tint = compositor_.CreateSpriteVisual();
-            tint.Size(container.Size());
+            tint.Size(materialContainer.Size());
             tint.Brush(compositor_.CreateColorBrush(color(
                 region.tintRed,
                 region.tintGreen,
                 region.tintBlue,
                 region.tintAlpha)));
-            container.Children().InsertAtTop(tint);
+            materialContainer.Children().InsertAtTop(tint);
         }
 
         regions_.Children().InsertAtTop(container);
+        regionVisuals_.push_back(std::move(state));
         return true;
     }
 
@@ -1091,6 +2336,9 @@ private:
     LUID adapterLuid_ {};
     bool apartmentOwned_ = false;
     bool hostBackdropEnabled_ = false;
+    bool privateInteropEnabled_ = false;
+    bool privateDesktopWindowAttribute_ = false;
+    DWORD windowsBuild_ = 0u;
 
     winrt::Windows::System::DispatcherQueueController dispatcherController_ { nullptr };
     winrt::com_ptr<ID3D11Device5> device_;
@@ -1101,11 +2349,38 @@ private:
     std::vector<winrt::com_ptr<ID3D11Query>> queries_;
     std::vector<bool> queryPending_;
 
+    winrt::com_ptr<ID2D1Factory2> d2dFactory_;
+    winrt::com_ptr<ID2D1Device> d2dDevice_;
+    winrt::com_ptr<private_composition::IInteropCompositorPartner>
+        privateCompositorPartner_;
+    winrt::com_ptr<IDCompositionDesktopDevice> compositionDevice_;
+    winrt::com_ptr<IDCompositionTarget> compositionTarget_;
+    HMODULE dwmPrivateModule_ = nullptr;
+    private_composition::CreateSharedMultiWindowVisualFn
+        createSharedDesktopVisual_ = nullptr;
+    private_composition::CreateSharedThumbnailVisualFn
+        createSharedThumbnailVisual_ = nullptr;
+    FARPROC updateSharedDesktopVisual_ = nullptr;
+    HTHUMBNAIL privateDesktopThumbnail_ = nullptr;
+    HTHUMBNAIL privateDesktopWallpaperThumbnail_ = nullptr;
+    winrt::com_ptr<IDCompositionVisual2> privateDesktopVisual_;
+    winrt::com_ptr<IDCompositionVisual2> privateDesktopContainer_;
+    winrt::com_ptr<IDCompositionVisual2> privateDesktopWallpaperDwmVisual_;
+    composition::CompositionGraphicsDevice wallpaperGraphicsDevice_ { nullptr };
+    composition::CompositionDrawingSurface privateDesktopWallpaperSurface_ { nullptr };
+    composition::Visual privateDesktopWallpaperVisual_ { nullptr };
+    composition::Visual privateDesktopWindowsSource_ { nullptr };
+    composition::ContainerVisual privateDesktopCombinedSource_ { nullptr };
+    composition::Visual privateDesktopSource_ { nullptr };
+    RECT privateDesktopSourceRect_ {};
+    RECT privateDesktopWindowRect_ {};
+
     composition::Compositor compositor_ { nullptr };
-    composition::Desktop::DesktopWindowTarget target_ { nullptr };
+    composition::CompositionTarget target_ { nullptr };
     composition::ContainerVisual root_ { nullptr };
     composition::ContainerVisual regions_ { nullptr };
     composition::SpriteVisual content_ { nullptr };
+    std::vector<RegionVisualState> regionVisuals_;
 };
 }
 

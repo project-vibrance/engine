@@ -8,6 +8,7 @@ const uint STYLE_RADIAL_GRADIENT = 1u << 11;
 const uint STYLE_TRANSFORM_2_5D = 1u << 12;
 const uint STYLE_SHAPE_MASK = 1u << 15;
 const uint STYLE_CORNER_RADII = 1u << 16;
+const uint STYLE_LIQUID_GLASS_OVERLAY = 1u << 23;
 
 const uint PRIMITIVE_RECTANGLE = 1u;
 const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
@@ -427,6 +428,83 @@ vec4 compose_shape_layers(vec4 body, float bodyCoverage, vec4 outline, float out
     return vec4(premultiplied / alpha, alpha);
 }
 
+vec4 liquid_glass_overlay(vec2 pixel, float sdf) {
+    const float PI = 3.14159265359;
+    float radius = max(min(pc.rect.z, pc.rect.w) * 0.5, 1.0);
+    float edgeWidth = max(clamp(pc.uvRect.x, 0.02, 1.0) * radius, 1.0);
+    float edgeDistance = clamp(max(-sdf, 0.0) / edgeWidth, 0.0, 1.0);
+
+    // This is the supplied shader's non-linear boundary response: zero in the
+    // centre, rising sharply near the SDF edge like a thick glass lens.
+    float edge = 1.0 - smoothstep(0.0, 1.0, edgeDistance);
+    float cosEdge = 1.0 - cos(edge * PI * 0.5);
+
+    const float normalStep = 0.75;
+    vec2 gradient = vec2(
+        shape_sdf(pixel + vec2(normalStep, 0.0)) -
+            shape_sdf(pixel - vec2(normalStep, 0.0)),
+        shape_sdf(pixel + vec2(0.0, normalStep)) -
+            shape_sdf(pixel - vec2(0.0, normalStep)));
+    vec2 normal = length(gradient) > 0.0001 ? normalize(gradient) : vec2(0.0, -1.0);
+
+    vec2 lightDirection = normalize(vec2(-0.58, -0.82));
+    float mirroredRim = abs(dot(normal, lightDirection));
+    float keyLight = pow(max(dot(normal, lightDirection), 0.0), 2.25);
+    float rimStrength = clamp(pc.uvRect.y, 0.0, 2.0);
+    float chromaticStrength = clamp(pc.uvRect.z, 0.0, 1.0);
+    float darkeningStrength = clamp(pc.uvRect.w, 0.0, 1.0);
+
+    vec4 result = vec4(pc.color0.rgb, pc.color0.a);
+
+    vec2 uv = clamp((pixel - pc.rect.xy) / max(pc.rect.zw, vec2(1.0)), vec2(0.0), vec2(1.0));
+    // Broad, low-opacity environment reflections remain inside the glass and
+    // move with its geometry. They complement the live compositor backdrop
+    // without replacing or capturing it.
+    float upperSweep = exp(-pow((uv.y - (0.16 + uv.x * 0.10)) / 0.115, 2.0));
+    float lowerBounce = exp(-pow((uv.y - (0.88 - uv.x * 0.06)) / 0.16, 2.0));
+    float interiorReflection = (upperSweep * 0.075 + lowerBounce * 0.028) *
+        (1.0 - edge * 0.58) * clamp(pc.uvRect.y, 0.0, 2.0);
+    result = blend_over(
+        result,
+        vec4(mix(vec3(0.72, 0.86, 1.0), vec3(1.0, 0.965, 0.91), uv.x),
+            interiorReflection));
+
+    // Approximate the reflection buffer in the supplied multi-pass shader with
+    // a directional transparent rim. The live desktop itself remains supplied
+    // by Windows Composition underneath this Vulkan layer.
+    float darkAlpha = darkeningStrength * cosEdge *
+        mix(1.0, 0.24, keyLight);
+    result = blend_over(result, vec4(0.006, 0.010, 0.016, darkAlpha));
+
+    vec3 spectral = vec3(
+        max(-normal.x, 0.0),
+        0.22 * (1.0 - abs(normal.x)),
+        max(normal.x, 0.0));
+    vec3 rimRgb = clamp(
+        pc.color1.rgb + spectral * chromaticStrength * cosEdge,
+        vec3(0.0),
+        vec3(1.0));
+    float rimAlpha = clamp(
+        pc.color1.a * rimStrength * cosEdge *
+            (0.20 + 0.80 * mirroredRim),
+        0.0,
+        0.92);
+    result = blend_over(result, vec4(rimRgb, rimAlpha));
+
+    // A narrow specular crest gives the lens the wet, reflective edge visible
+    // in the reference while leaving the centre nearly clear.
+    float crest = pow(cosEdge, 3.0) * pow(keyLight, 0.65);
+    result = blend_over(result, vec4(1.0, 0.985, 0.96, crest * 0.32));
+
+    // A secondary glancing reflection makes the lower/right edge respond like
+    // thick glass instead of a uniformly stroked circle.
+    vec2 secondaryLight = normalize(vec2(0.74, 0.48));
+    float secondary = pow(max(dot(normal, secondaryLight), 0.0), 5.0) *
+        pow(cosEdge, 2.2);
+    result = blend_over(result, vec4(0.70, 0.86, 1.0, secondary * 0.16));
+    return result;
+}
+
 float top_outline_factor_for_notch(vec2 pixel, float outlineWidth, float softness) {
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
     if (effect1Reserved ||
@@ -469,7 +547,9 @@ vec4 shade_shape_sample(vec2 samplePoint) {
     outlineAlpha *= topOutlineFactor;
 
     vec2 uv = clamp(surface.uv, vec2(0.0), vec2(1.0));
-    vec4 body = fill_color(uv);
+    vec4 body = (pc.data.y & STYLE_LIQUID_GLASS_OVERLAY) != 0u
+        ? liquid_glass_overlay(localPixel, sdf)
+        : fill_color(uv);
     vec4 outline = pc.color2;
     vec4 src = compose_shape_layers(body, bodyCoverage, outline, outlineAlpha);
     src.a *= maskAlpha * pc.effect0.w;

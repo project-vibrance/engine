@@ -901,7 +901,7 @@ inline void ui_apply_rich_sidebar_row_palette(const UiTheme& theme, UiSidebarRic
     options.hoveredRowColor = theme.settingsPanel.sidebarRowHover;
     options.pressedRowColor = theme.settingsPanel.sidebarRowPressed;
     options.titleColor = theme.settingsPanel.sidebarLabel;
-    options.subtitleColor = theme.settingsPanel.searchPlaceholder;
+    options.subtitleColor = theme.settingsPanel.sidebarSubLabel;
     options.selectedTitleColor = theme.settingsPanel.sidebarSelectedLabel;
     options.selectedSubtitleColor = "rgba(255, 255, 255, 0.82)";
     options.mediaBackgroundColor = theme.settingsPanel.avatarBackground;

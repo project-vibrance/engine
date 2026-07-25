@@ -9,6 +9,7 @@ const uint STYLE_BLUR_HORIZONTAL = 1u << 17;
 const uint STYLE_BLUR_VERTICAL = 1u << 18;
 const uint STYLE_BLUR_FOLLOWS_FILL_ALPHA = 1u << 20;
 const uint STYLE_BLUR_INHERITED_SHAPE_MASK = 1u << 21;
+const uint STYLE_LIQUID_GLASS_REFRACTION = 1u << 24;
 const uint BLUR_USE_STATIC_BACKDROP = 1u << 31;
 const uint BLUR_USE_EXTERNAL_BACKDROP = 1u << 30;
 const uint PASS_INDEX_MASK = 65535u;
@@ -344,9 +345,9 @@ vec4 blur_input_color_at(vec2 coord, bool readScratch) {
     return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
-vec4 sample_axis_blur(ivec2 pixel, vec2 axis, float radius, bool readScratch) {
+vec4 sample_axis_blur_at(vec2 pixelCoord, vec2 axis, float radius, bool readScratch) {
     if (radius <= 0.5) {
-        return blur_input_color(pixel, readScratch);
+        return blur_input_color_at(pixelCoord, readScratch);
     }
 
     const int sampleCount = 21;
@@ -364,7 +365,6 @@ vec4 sample_axis_blur(ivec2 pixel, vec2 axis, float radius, bool readScratch) {
     vec3 weightedRgb = vec3(0.0);
     float alphaSum = 0.0;
     float weightSum = 0.0;
-    vec2 pixelCoord = vec2(pixel);
     for (int i = 0; i < sampleCount; ++i) {
         vec2 sampleCoord = pixelCoord + axis * offsets[i] * radius;
         vec4 sampleColor = blur_input_color_at(sampleCoord, readScratch);
@@ -377,6 +377,10 @@ vec4 sample_axis_blur(ivec2 pixel, vec2 axis, float radius, bool readScratch) {
     float sourceAlpha = weightSum > 0.0001 ? alphaSum / weightSum : 0.0;
     vec3 sourceRgb = alphaSum > 0.0001 ? weightedRgb / alphaSum : vec3(0.0);
     return vec4(sourceRgb, sourceAlpha);
+}
+
+vec4 sample_axis_blur(ivec2 pixel, vec2 axis, float radius, bool readScratch) {
+    return sample_axis_blur_at(vec2(pixel), axis, radius, readScratch);
 }
 
 void main() {
@@ -430,7 +434,51 @@ void main() {
         return;
     }
 
-    vec4 source = sample_axis_blur(pixel, blur_axis(passIndex, true), radius, true);
+    vec4 source;
+    if ((pc.data.y & STYLE_LIQUID_GLASS_REFRACTION) != 0u) {
+        // The source is the scratch copy produced by the horizontal pass, so
+        // these neighbouring reads are stable even while the final pixels are
+        // written back to sceneColorBuffer. The displacement grows only near
+        // the SDF boundary, keeping the glass centre clear and readable.
+        const float normalStep = 0.85;
+        vec2 gradient = vec2(
+            shape_sdf(p + vec2(normalStep, 0.0)) -
+                shape_sdf(p - vec2(normalStep, 0.0)),
+            shape_sdf(p + vec2(0.0, normalStep)) -
+                shape_sdf(p - vec2(0.0, normalStep)));
+        vec2 normal = length(gradient) > 0.0001 ?
+            normalize(gradient) : vec2(0.0, -1.0);
+        float shapeRadius = max(min(pc.rect.z, pc.rect.w) * 0.5, 1.0);
+        float edgeWidth = max(clamp(pc.color0.z, 0.02, 1.0) * shapeRadius, 1.0);
+        float edgeDistance = clamp(max(-shape_sdf(p), 0.0) / edgeWidth, 0.0, 1.0);
+        float edge = 1.0 - smoothstep(0.0, 1.0, edgeDistance);
+        float displacement = clamp(pc.color0.x, 0.0, 0.30) * shapeRadius *
+            pow(edge, 1.35);
+        vec2 refractedCoord = vec2(pixel) - normal * displacement;
+
+        source = sample_axis_blur_at(
+            refractedCoord,
+            blur_axis(passIndex, true),
+            radius,
+            true);
+
+        // Split only the outer optical band. Sampling red and blue on
+        // opposite sides produces a genuine content-dependent chromatic edge
+        // rather than drawing a fixed coloured outline.
+        float chromaticOffset = clamp(pc.color0.y, 0.0, 1.0) * 8.0 *
+            pow(edge, 1.8);
+        vec4 redSample = blur_input_color_at(
+            refractedCoord - normal * chromaticOffset,
+            true);
+        vec4 blueSample = blur_input_color_at(
+            refractedCoord + normal * chromaticOffset,
+            true);
+        source.r = redSample.r;
+        source.b = blueSample.b;
+        source.a = max(source.a, max(redSample.a, blueSample.a));
+    } else {
+        source = sample_axis_blur(pixel, blur_axis(passIndex, true), radius, true);
+    }
     float gradientAlpha = blur_gradient_alpha_factor(p);
     vec4 blurred = vec4(source.rgb, clamp(source.a * pc.effect0.w * mask * gradientAlpha, 0.0, 1.0));
     if (blurred.a <= 0.001) {

@@ -99,7 +99,9 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleMediaTintAsMask = 1u << 19,
     eRenderer2DStyleBlurFollowsFillAlpha = 1u << 20,
     eRenderer2DStyleBlurInheritedShapeMask = 1u << 21,
-    eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22
+    eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
+    eRenderer2DStyleLiquidGlassOverlay = 1u << 23,
+    eRenderer2DStyleLiquidGlassRefraction = 1u << 24
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -662,6 +664,24 @@ struct ShapeStyleComponent
     }
 };
 
+struct LiquidGlassOverlayComponent
+{
+    // The compositor supplies OS pixels below the window. Vulkan refracts UI
+    // content already rendered below this entity, then adds tint, chromatic
+    // edges, highlights and reflections above both sources.
+    bool enabled = true;
+    glm::vec4 rimColor { 0.86f, 0.95f, 1.0f, 0.82f };
+    // Width is expressed as a fraction of the shape radius.
+    float edgeWidth = 0.34f;
+    float rimIntensity = 0.88f;
+    float chromaticAberration = 0.14f;
+    float edgeDarkening = 0.20f;
+    // Fraction of the shortest shape radius used for edge displacement.
+    float refractionStrength = 0.10f;
+    // Keep this low for clear glass; it only softens Vulkan content beneath it.
+    float internalBlurRadius = 1.25f;
+};
+
 struct ShadowComponent
 {
     glm::vec4 color { 0.0f, 0.0f, 0.0f, 0.35f };
@@ -972,9 +992,11 @@ struct DisplayTransition2DComponent
     bool removeWhenComplete = true;
     bool destroyEntityTreeOnComplete = false;
     bool hasStarted = false;
+    bool delayScheduled = false;
     bool hasBaseScale = false;
     entt::entity destroyTarget = entt::null;
     double startSeconds = 0.0;
+    float delaySeconds = 0.0f;
     float durationSeconds = 0.24f;
     float fromOpacity = 0.0f;
     float toOpacity = 1.0f;
@@ -993,6 +1015,12 @@ struct DisplayTransition2DComponent
     float springStiffness = 5.0f;
     float springDamping = 3.0f;
     DisplayTransitionCurve2D curve = DisplayTransitionCurve2D::eDefault;
+
+    DisplayTransition2DComponent& set_delay(float seconds)
+    {
+        delaySeconds = std::max(seconds, 0.0f);
+        return *this;
+    }
 
     DisplayTransition2DComponent& set_speed(float value)
     {
@@ -1293,6 +1321,9 @@ public:
         double currentTimeSeconds);
     bool clear_display_transition(entt::entity entity);
     uint64_t cache_generation() const;
+    // Changes for any rendered entity, including dynamic entities that do not
+    // invalidate the reusable static cache.
+    uint64_t frame_generation() const;
     bool hit_test(glm::vec2 point);
     entt::entity entity_at(glm::vec2 point);
     entt::entity draggable_parent_at(glm::vec2 point);
@@ -1304,4 +1335,5 @@ public:
 private:
     entt::registry registry_;
     uint64_t cacheGeneration_ = 1;
+    uint64_t frameGeneration_ = 1;
 };

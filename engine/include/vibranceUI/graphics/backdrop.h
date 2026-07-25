@@ -12,8 +12,8 @@ enum class SystemBackdropMaterial : std::uint32_t
     eOff = 0u,
     eBlur = 1u,
     eFrosted = 2u,
-    // Reserved for the Windows-private backdrop backend. Until that backend
-    // is available, liquid requests deliberately resolve to eOff.
+    // Uses the Windows-private compositor visual backend when runtime probing
+    // succeeds. It resolves to eOff on unsupported Windows builds/platforms.
     eLiquid = 3u
 };
 
@@ -31,7 +31,8 @@ enum class SystemBackdropShape : std::uint32_t
     eRectangle = 0u,
     eRoundedRectangle = 1u,
     eEllipse = 2u,
-    eSquircle = 3u
+    eSquircle = 3u,
+    eNotchedSquircle = 4u
 };
 
 struct SystemBackdropColor
@@ -65,10 +66,20 @@ struct SystemBackdropRegion
     float bottomLeftRadius = 0.0f;
     float squircleAmount = 1.0f;
     float squirclePower = 4.0f;
+    // Animated notch geometry used by island-style surfaces. Composition uses
+    // these values to flatten the leading corners with the Vulkan shape.
+    float notchAmount = 0.0f;
+    float notchDepth = 0.0f;
+    // Fraction of the shape height kept free of material from the top. The
+    // outer shape clip still covers the complete entity.
+    float verticalStart = 0.0f;
 
     // Engine material controls. Windows Acrylic/Mica may ignore these values.
     float blurRadius = 24.0f;
     float saturation = 1.0f;
+    // Fractional optical magnification for the liquid material. This moves the
+    // compositor-owned desktop visual without ever exposing capture pixels.
+    float refraction = 0.035f;
     SystemBackdropColor tint { 1.0f, 1.0f, 1.0f, 0.14f };
 };
 

@@ -4,6 +4,10 @@ layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout (set = 0, binding = 0, r32ui) writeonly uniform uimage2D depthBuffer;
 layout (set = 0, binding = 1, rgba8) writeonly uniform image2D colorBuffer;
 
+layout (push_constant) uniform ClearScreenConstants {
+    uvec4 data;
+} pc;
+
 void main() {
 
     ivec2 screen_pos = ivec2(gl_GlobalInvocationID.xy);
@@ -13,7 +17,9 @@ void main() {
         return;
     }
 
-    uint depthClearValue = floatBitsToUint(1.0);
-    imageStore(depthBuffer, screen_pos, uvec4(depthClearValue, 0, 0, 0));
+    if ((pc.data.x & 1u) != 0u) {
+        uint depthClearValue = floatBitsToUint(1.0);
+        imageStore(depthBuffer, screen_pos, uvec4(depthClearValue, 0, 0, 0));
+    }
     imageStore(colorBuffer, screen_pos, vec4(0.0));
 }

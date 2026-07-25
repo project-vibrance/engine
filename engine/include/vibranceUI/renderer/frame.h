@@ -45,6 +45,8 @@ class Frame
         double currentTimeSeconds,
         bool externalBackdropAvailable,
         bool useExternalBackdropUnderlay,
+        bool presentNativeSurface,
+        bool clearNativeSurface,
         vk::Image compositionImage = {},
         bool compositionImageFirstUse = true,
         uint32_t graphicsQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED

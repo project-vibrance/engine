@@ -154,7 +154,9 @@ public:
         std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
         std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
-        bool useExternalBackdropUnderlay = false
+        bool useExternalBackdropUnderlay = false,
+        bool writeNativeSurface = true,
+        bool writeCompositionSurface = false
     ) const;
 };
 
@@ -209,7 +211,9 @@ public:
         std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
         std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
-        bool useExternalBackdropUnderlay = false
+        bool useExternalBackdropUnderlay = false,
+        bool writeNativeSurface = true,
+        bool writeCompositionSurface = false
     ) const;
 
 private:

@@ -207,6 +207,8 @@ void Frame::record_command_buffer(
 	double currentTimeSeconds,
 	bool externalBackdropAvailable,
 	bool useExternalBackdropUnderlay,
+	bool presentNativeSurface,
+	bool clearNativeSurface,
 	vk::Image compositionImage,
 	bool compositionImageFirstUse,
 	uint32_t graphicsQueueFamilyIndex)
@@ -262,21 +264,37 @@ void Frame::record_command_buffer(
 		);
 	};
 
-	transition_image_layout(commandBuffer, depthBuffer->image,
-		vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
-		vk::AccessFlagBits::eNone, vk::AccessFlagBits::eMemoryWrite,
-		vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader
-	);
+	const bool renderLegacy2D = triangleCount2D > 0u;
+	const bool renderHosted3D = triangleCount3D > 0u ||
+		!scene2D.registry().view<Model3DComponent>().empty();
+	if (renderLegacy2D)
+	{
+		transition_image_layout(commandBuffer, depthBuffer->image,
+			vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+			vk::AccessFlagBits::eNone, vk::AccessFlagBits::eMemoryWrite,
+			vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader
+		);
+	}
 
 	transition_image_layout(commandBuffer, colorBuffer->image,
 		vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
 		vk::AccessFlagBits::eNone, vk::AccessFlagBits::eMemoryWrite,
 		vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader
 	);
-	transition_render_target(modelDepthBuffer, vk::AccessFlagBits::eMemoryWrite);
-	transition_render_target(modelColorBuffer, vk::AccessFlagBits::eMemoryWrite);
-	transition_render_target(tempSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
-	transition_render_target(compositionSurface, vk::AccessFlagBits::eShaderWrite);
+	if (renderHosted3D)
+	{
+		transition_render_target(modelDepthBuffer, vk::AccessFlagBits::eMemoryWrite);
+		transition_render_target(modelColorBuffer, vk::AccessFlagBits::eMemoryWrite);
+	}
+	const bool writeNativeContent = presentNativeSurface && !clearNativeSurface;
+	if (writeNativeContent)
+	{
+		transition_render_target(tempSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	}
+	if (compositionImage)
+	{
+		transition_render_target(compositionSurface, vk::AccessFlagBits::eShaderWrite);
+	}
 	transition_render_target(uiBlurSurface, vk::AccessFlagBits::eMemoryWrite);
 	prepare_cache_target(uiStaticSurface);
 	prepare_cache_target(uiStaticBlurSurface);
@@ -286,19 +304,47 @@ void Frame::record_command_buffer(
 	commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipelines[pipelineType]);
 	commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pipelineLayouts[pipelineType],
 		0, 1, &descriptorSets[DescriptorScope::eFrame], 0, nullptr);
+	const glm::uvec4 clear2DConstants {
+		renderLegacy2D ? 1u : 0u,
+		0u,
+		0u,
+		0u
+	};
+	commandBuffer.pushConstants(
+		pipelineLayouts[pipelineType],
+		vk::ShaderStageFlagBits::eCompute,
+		0u,
+		sizeof(clear2DConstants),
+		&clear2DConstants);
 	uint32_t workgroupCountX = (renderExtent.width + 7) / 8;
 	uint32_t workgroupCountY = (renderExtent.height + 7) / 8;
 	commandBuffer.dispatch(workgroupCountX, workgroupCountY, 1);
-	commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pipelineLayouts[pipelineType],
-		0, 1, &descriptorSets[DescriptorScope::eModelFrame], 0, nullptr);
-	uint32_t modelWorkgroupCountX = (modelRenderExtent.width + 7) / 8;
-	uint32_t modelWorkgroupCountY = (modelRenderExtent.height + 7) / 8;
-	commandBuffer.dispatch(modelWorkgroupCountX, modelWorkgroupCountY, 1);
+	if (renderHosted3D)
+	{
+		commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pipelineLayouts[pipelineType],
+			0, 1, &descriptorSets[DescriptorScope::eModelFrame], 0, nullptr);
+		const glm::uvec4 clear3DConstants { 1u, 0u, 0u, 0u };
+		commandBuffer.pushConstants(
+			pipelineLayouts[pipelineType],
+			vk::ShaderStageFlagBits::eCompute,
+			0u,
+			sizeof(clear3DConstants),
+			&clear3DConstants);
+		const uint32_t modelWorkgroupCountX = (modelRenderExtent.width + 7) / 8;
+		const uint32_t modelWorkgroupCountY = (modelRenderExtent.height + 7) / 8;
+		commandBuffer.dispatch(modelWorkgroupCountX, modelWorkgroupCountY, 1);
+	}
 
-	barrier_render_target(depthBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	if (renderLegacy2D)
+	{
+		barrier_render_target(depthBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	}
 	barrier_render_target(colorBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
-	barrier_render_target(modelDepthBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
-	barrier_render_target(modelColorBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	if (renderHosted3D)
+	{
+		barrier_render_target(modelDepthBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+		barrier_render_target(modelColorBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	}
 	barrier_render_target(uiBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
 
 	renderer2D.record(
@@ -327,39 +373,74 @@ void Frame::record_command_buffer(
 		externalBackdropAvailable);
 
 	barrier_render_target(colorBuffer, vk::AccessFlagBits::eShaderRead);
-	barrier_render_target(modelColorBuffer, vk::AccessFlagBits::eShaderRead);
+	if (renderHosted3D)
+	{
+		barrier_render_target(modelColorBuffer, vk::AccessFlagBits::eShaderRead);
+	}
 	barrier_render_target(uiBlurSurface, vk::AccessFlagBits::eShaderRead);
 	barrier_render_target(uiStaticSurface, vk::AccessFlagBits::eShaderRead);
 	barrier_render_target(uiStaticBlurSurface, vk::AccessFlagBits::eShaderRead);
-	barrier_render_target(tempSurface, vk::AccessFlagBits::eShaderWrite);
-	
-	renderer2D.record_composite(
-		commandBuffer,
-		renderTarget,
-		pipelines,
-		descriptorSets,
-		pipelineLayouts,
-		useExternalBackdropUnderlay);
+	if (writeNativeContent)
+	{
+		barrier_render_target(tempSurface, vk::AccessFlagBits::eShaderWrite);
+	}
 
-	transition_image_layout(commandBuffer, tempSurface->image,
-		vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
-		vk::AccessFlagBits::eMemoryWrite, vk::AccessFlagBits::eTransferRead,
-		vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer
-	);
+	if (writeNativeContent || compositionImage)
+	{
+		renderer2D.record_composite(
+			commandBuffer,
+			renderTarget,
+			pipelines,
+			descriptorSets,
+			pipelineLayouts,
+			useExternalBackdropUnderlay,
+			writeNativeContent,
+			static_cast<bool>(compositionImage));
+	}
 
-	transition_image_layout(commandBuffer, swapchain.images[imageIndex],
-		vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
-		vk::AccessFlagBits::eNone, vk::AccessFlagBits::eTransferWrite,
-		vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer
-	);
+	if (presentNativeSurface)
+	{
+		transition_image_layout(commandBuffer, swapchain.images[imageIndex],
+			vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+			vk::AccessFlagBits::eNone, vk::AccessFlagBits::eTransferWrite,
+			vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer
+		);
 
-	copy_image_to_image(commandBuffer, tempSurface->image, swapchain.images[imageIndex], tempSurface->extent, swapchain.extent);
+		if (clearNativeSurface)
+		{
+			const vk::ClearColorValue transparent(
+				std::array<float, 4> { 0.0f, 0.0f, 0.0f, 0.0f });
+			vk::ImageSubresourceRange range {};
+			range.aspectMask = vk::ImageAspectFlagBits::eColor;
+			range.levelCount = 1u;
+			range.layerCount = 1u;
+			commandBuffer.clearColorImage(
+				swapchain.images[imageIndex],
+				vk::ImageLayout::eTransferDstOptimal,
+				transparent,
+				range);
+		}
+		else
+		{
+			transition_image_layout(commandBuffer, tempSurface->image,
+				vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
+				vk::AccessFlagBits::eMemoryWrite, vk::AccessFlagBits::eTransferRead,
+				vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer
+			);
+			copy_image_to_image(
+				commandBuffer,
+				tempSurface->image,
+				swapchain.images[imageIndex],
+				tempSurface->extent,
+				swapchain.extent);
+		}
 
-	transition_image_layout(commandBuffer, swapchain.images[imageIndex],
-		vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR,
-		vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eMemoryRead,
-		vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe
-	);
+		transition_image_layout(commandBuffer, swapchain.images[imageIndex],
+			vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR,
+			vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eMemoryRead,
+			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe
+		);
+	}
 
 	if (compositionImage)
 	{

@@ -85,7 +85,9 @@ namespace
 		const SystemBackdropRegion& right)
 	{
 		const auto close = [](float a, float b) {
-			return std::abs(a - b) <= 0.05f;
+			return a == b ||
+				(std::isfinite(a) && std::isfinite(b) &&
+					std::abs(a - b) <= 0.05f);
 		};
 		return left.material == right.material &&
 			left.provider == right.provider &&
@@ -99,8 +101,12 @@ namespace
 			close(left.bottomLeftRadius, right.bottomLeftRadius) &&
 			close(left.squircleAmount, right.squircleAmount) &&
 			close(left.squirclePower, right.squirclePower) &&
+			close(left.notchAmount, right.notchAmount) &&
+			close(left.notchDepth, right.notchDepth) &&
+			close(left.verticalStart, right.verticalStart) &&
 			close(left.blurRadius, right.blurRadius) &&
 			close(left.saturation, right.saturation) &&
+			close(left.refraction, right.refraction) &&
 			close(left.tint.red, right.tint.red) &&
 			close(left.tint.green, right.tint.green) &&
 			close(left.tint.blue, right.tint.blue) &&
@@ -108,6 +114,31 @@ namespace
 	}
 
 #ifdef _WIN32
+	uint32_t monitor_refresh_rate(void* nativeWindowHandle) noexcept
+	{
+		const HWND window = static_cast<HWND>(nativeWindowHandle);
+		const HMONITOR monitor = window ?
+			MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) : nullptr;
+		MONITORINFOEXW monitorInfo {};
+		monitorInfo.cbSize = sizeof(monitorInfo);
+		DEVMODEW displayMode {};
+		displayMode.dmSize = sizeof(displayMode);
+		if (monitor &&
+			GetMonitorInfoW(monitor, &monitorInfo) &&
+			EnumDisplaySettingsW(
+				monitorInfo.szDevice,
+				ENUM_CURRENT_SETTINGS,
+				&displayMode) &&
+			displayMode.dmDisplayFrequency >= 30u)
+		{
+			return std::clamp<uint32_t>(
+				displayMode.dmDisplayFrequency,
+				30u,
+				360u);
+		}
+		return 60u;
+	}
+
 	struct WindowsFrameTimerResolution
 	{
 		using TimePeriodFn = UINT(WINAPI*)(UINT);
@@ -265,6 +296,7 @@ namespace
 	{
 		ensure_frame_timer_resolution();
 		using Clock = std::chrono::steady_clock;
+		constexpr auto spinWindow = std::chrono::microseconds(250);
 
 		for (;;)
 		{
@@ -275,11 +307,19 @@ namespace
 			}
 
 			const auto remaining = deadline - now;
-			if (wait_with_high_resolution_timer(deadline))
+			if (remaining > spinWindow &&
+				wait_with_high_resolution_timer(deadline - spinWindow))
 			{
 				continue;
 			}
-			std::this_thread::sleep_for(remaining);
+			while (Clock::now() < deadline)
+			{
+#if defined(_WIN32)
+				YieldProcessor();
+#else
+				std::this_thread::yield();
+#endif
+			}
 			return;
 		}
 	}
@@ -757,6 +797,13 @@ private:
 	uint32_t frameIndex = 0;
 	uint32_t targetFrameRate = 0;
 	std::chrono::steady_clock::time_point nextFrameDeadline {};
+	std::vector<bool> compositionFramePending;
+	std::vector<uint32_t> compositionFrameBufferIndices;
+	uint32_t nextCompositionBufferIndex = 0u;
+	uint32_t compositionFrameRate = 60u;
+	std::chrono::steady_clock::time_point nextCompositionSubmitDeadline {};
+	std::chrono::steady_clock::time_point nextCompositionPollDeadline {};
+	bool nativeTransparencyPrimed = false;
 
 	std::unordered_map<uint32_t, Model3DAsset> modelAssets;
 	std::unordered_map<std::string, uint32_t> modelIdsByPath;
@@ -1015,6 +1062,9 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	audioEngine(createInfo.enableAudio)
 {
     logger = Logger::fetch_logger();
+#if defined(_WIN32)
+	compositionFrameRate = monitor_refresh_rate(nativeWindowHandle);
+#endif
     if (renderBackend != RenderBackend::eVulkan)
     {
         logger->error("The requested render backend is not implemented. vibranceUI currently renders with Vulkan.");
@@ -1241,6 +1291,8 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 			allocator, nullptr, &modelAssets, &mediaAssets, renderer2DScene, renderer2DFontAtlas.image()
 		));
 	}
+	compositionFramePending.assign(frameCount, false);
+	compositionFrameBufferIndices.assign(frameCount, 0u);
 
 	currentTime = 0.0;
 	lastTime = 0.0;
@@ -1286,6 +1338,7 @@ void Engine::Impl::make_pipeline_layouts()
 	PipelineLayoutBuilder builder(logicalDevice);
 
 	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
+	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(glm::uvec4));
 	pipelineLayouts[PipelineType::eClear] = builder.build(deviceDeletionQueue);
 
 	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
@@ -1378,6 +1431,15 @@ void Engine::Impl::make_pipelines()
 bool Engine::Impl::rebuild_composition_presenter()
 {
 	compositionPresenter.shutdown(logicalDevice);
+	nativeTransparencyPrimed = false;
+	nextCompositionSubmitDeadline = {};
+	nextCompositionPollDeadline = {};
+	nextCompositionBufferIndex = 0u;
+	std::fill(compositionFramePending.begin(), compositionFramePending.end(), false);
+	std::fill(
+		compositionFrameBufferIndices.begin(),
+		compositionFrameBufferIndices.end(),
+		0u);
 	appliedBackdropRegions.clear();
 	activePresentationBackend = PresentationBackend::eNative;
 #if defined(_WIN32)
@@ -1461,6 +1523,8 @@ void Engine::Impl::update_system_backdrop_regions()
 			region.bottomLeftRadius = radii.w;
 			region.squircleAmount = shape.squircleAmount;
 			region.squirclePower = shape.squirclePower;
+			region.notchAmount = shape.notchAmount;
+			region.notchDepth = shape.notchDepth * shapeScale;
 			switch (shape.primitive)
 			{
 			case Renderer2DPrimitive::eRectangle:
@@ -1471,6 +1535,9 @@ void Engine::Impl::update_system_backdrop_regions()
 				break;
 			case Renderer2DPrimitive::eSquircle:
 				region.shape = SystemBackdropShape::eSquircle;
+				break;
+			case Renderer2DPrimitive::eNotchedSquircle:
+				region.shape = SystemBackdropShape::eNotchedSquircle;
 				break;
 			default:
 				region.shape = SystemBackdropShape::eRoundedRectangle;
@@ -1488,6 +1555,25 @@ void Engine::Impl::update_system_backdrop_regions()
 		regions.push_back(region);
 	});
 
+	// EnTT storage order is not a presentation contract and can change when
+	// unrelated components move between pools. Keep the native composition
+	// regions deterministic so an unchanged frame never tears down its visual
+	// tree merely because iteration order changed.
+	std::stable_sort(
+		regions.begin(),
+		regions.end(),
+		[](const SystemBackdropRegion& left, const SystemBackdropRegion& right) {
+			if (left.material != right.material)
+			{
+				return left.material < right.material;
+			}
+			if (left.provider != right.provider)
+			{
+				return left.provider < right.provider;
+			}
+			return left.shape < right.shape;
+		});
+
 	bool unchanged = regions.size() == appliedBackdropRegions.size();
 	if (unchanged)
 	{
@@ -1502,9 +1588,23 @@ void Engine::Impl::update_system_backdrop_regions()
 	}
 	if (!unchanged && compositionPresenter.set_regions(regions))
 	{
-		Logger::fetch_logger()->info(
-			"Windows Composition backdrop regions applied: " +
-			std::to_string(regions.size()) + ".");
+		const bool topologyChanged =
+			regions.size() != appliedBackdropRegions.size() ||
+			std::mismatch(
+				regions.begin(),
+				regions.end(),
+				appliedBackdropRegions.begin(),
+				[](const SystemBackdropRegion& left, const SystemBackdropRegion& right) {
+					return left.material == right.material &&
+						left.provider == right.provider &&
+						left.shape == right.shape;
+				}).first != regions.end();
+		if (topologyChanged)
+		{
+			Logger::fetch_logger()->info(
+				"Windows Composition backdrop regions applied: " +
+				std::to_string(regions.size()) + ".");
+		}
 		appliedBackdropRegions = std::move(regions);
 	}
 	else if (!unchanged)
@@ -1516,7 +1616,10 @@ void Engine::Impl::update_system_backdrop_regions()
 
 void Engine::Impl::draw()
 {
-	if (!rendererReady) return;
+	if (!rendererReady)
+	{
+		return;
+	}
 
 	if (framebufferWidth == 0 || framebufferHeight == 0) 
 	{
@@ -1584,38 +1687,146 @@ void Engine::Impl::draw()
 	{
 		return;
 	}
+
+	bool submitCompositionFrame = false;
+	if (compositionPresenter.available() &&
+		compositionPresenter.buffer_count() > 0u)
+	{
+		if (targetFrameRate == 0u)
+		{
+			// Uncapped means the UI/simulation remains far above display rate,
+			// but avoid a zero-work 80kHz busy loop between DWM submissions.
+			constexpr uint32_t maxCompositionPollRate = 3000u;
+			const auto pollInterval =
+				std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+					std::chrono::duration<double>(
+						1.0 / static_cast<double>(maxCompositionPollRate)));
+			auto pollNow = std::chrono::steady_clock::now();
+			if (nextCompositionPollDeadline.time_since_epoch().count() != 0 &&
+				pollNow < nextCompositionPollDeadline)
+			{
+				ensure_frame_timer_resolution();
+				if (!wait_with_high_resolution_timer(nextCompositionPollDeadline))
+				{
+					std::this_thread::sleep_until(nextCompositionPollDeadline);
+				}
+				pollNow = std::chrono::steady_clock::now();
+			}
+			if (nextCompositionPollDeadline.time_since_epoch().count() == 0 ||
+				pollNow - nextCompositionPollDeadline > pollInterval * 2)
+			{
+				nextCompositionPollDeadline = pollNow + pollInterval;
+			}
+			else
+			{
+				nextCompositionPollDeadline += pollInterval;
+			}
+		}
+		else
+		{
+			nextCompositionPollDeadline = {};
+		}
+
+		const auto compositionNow = std::chrono::steady_clock::now();
+		// Treat a user limit that is within two frames/second of the reported
+		// monitor rate as the same cadence. Windows commonly reports 199 Hz for
+		// a nominal 200 Hz mode; running two near-identical clocks creates a
+		// visible beat even though both counters look fast.
+		if (targetFrameRate > 0u &&
+			targetFrameRate <= compositionFrameRate + 2u)
+		{
+			submitCompositionFrame = true;
+			nextCompositionSubmitDeadline = {};
+		}
+		else if (nextCompositionSubmitDeadline.time_since_epoch().count() == 0 ||
+			compositionNow >= nextCompositionSubmitDeadline)
+		{
+			submitCompositionFrame = true;
+			const auto interval =
+				std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+					std::chrono::duration<double>(
+						1.0 / static_cast<double>(compositionFrameRate)));
+			if (nextCompositionSubmitDeadline.time_since_epoch().count() == 0 ||
+				compositionNow - nextCompositionSubmitDeadline > interval * 2)
+			{
+				nextCompositionSubmitDeadline = compositionNow + interval;
+			}
+			else
+			{
+				// Accumulate from the ideal deadline instead of from the wake-up
+				// time. This prevents scheduler jitter from turning into drift.
+				nextCompositionSubmitDeadline += interval;
+			}
+		}
+
+		// DWM owns the visible target in Composition mode. Keep simulation/UI
+		// updates uncapped, but do not submit an invisible duplicate GPU frame
+		// between two monitor refreshes.
+		if (!submitCompositionFrame)
+		{
+			return;
+		}
+	}
 	Frame& frame = frames[frameIndex];
     
 	vk::Result fenceResult = logicalDevice.waitForFences(frame.renderFinishedFence, false, UINT64_MAX);
-    if (fenceResult != vk::Result::eSuccess)
-    {
-        logger->vulkan("Failed to wait for fence.");
-        return;
-    }
+	if (fenceResult != vk::Result::eSuccess)
+	{
+		logger->vulkan("Failed to wait for fence.");
+		return;
+	}
 
+	// Publish the Composition image produced the last time this in-flight
+	// frame was used. Its Vulkan fence is now complete, so D3D11 can read the
+	// shared texture without a same-frame CPU/GPU serialization point.
+	if (frameIndex < compositionFramePending.size() &&
+		compositionFramePending[frameIndex])
+	{
+		update_system_backdrop_regions();
+		const uint32_t completedBuffer =
+			compositionFrameBufferIndices[frameIndex];
+		if (!compositionPresenter.present(completedBuffer))
+		{
+			logger->warning(
+				"Windows Composition could not present the completed shared Vulkan frame.");
+		}
+		compositionFramePending[frameIndex] = false;
+	}
+
+	const bool compositionAvailable = compositionPresenter.available();
+	const bool clearNativeSurface =
+		compositionAvailable && !nativeTransparencyPrimed;
+	const bool presentNativeSurface =
+		!compositionAvailable || clearNativeSurface;
 	uint32_t imageIndex = 0;
-	VkResult acquireResult = vkAcquireNextImageKHR(
-		logicalDevice,
-		swapchain.chain,
-		UINT64_MAX,
-		frame.imageAcquiredSemaphore,
-		VK_NULL_HANDLE,
-		&imageIndex);
+	if (presentNativeSurface)
+	{
+		const VkResult acquireResult = vkAcquireNextImageKHR(
+			logicalDevice,
+			swapchain.chain,
+			UINT64_MAX,
+			frame.imageAcquiredSemaphore,
+			VK_NULL_HANDLE,
+			&imageIndex);
 
-	if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR || acquireResult == VK_SUBOPTIMAL_KHR)
-	{
-		swapchain.outdated = true;
-		return;
-	}
-	if (acquireResult == VK_ERROR_SURFACE_LOST_KHR)
-	{
-		recreate_surface();
-		return;
-	}
-	if (acquireResult != VK_SUCCESS)
-	{
-		logger->vulkan("Failed to acquire swapchain image. VkResult: " + std::to_string(static_cast<int>(acquireResult)));
-		return;
+		if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR ||
+			acquireResult == VK_SUBOPTIMAL_KHR)
+		{
+			swapchain.outdated = true;
+			return;
+		}
+		if (acquireResult == VK_ERROR_SURFACE_LOST_KHR)
+		{
+			recreate_surface();
+			return;
+		}
+		if (acquireResult != VK_SUCCESS)
+		{
+			logger->vulkan(
+				"Failed to acquire swapchain image. VkResult: " +
+				std::to_string(static_cast<int>(acquireResult)));
+			return;
+		}
 	}
 
 	vk::Result result = logicalDevice.resetFences(frame.renderFinishedFence);
@@ -1635,11 +1846,35 @@ void Engine::Impl::draw()
 	bool compositionImageFirstUse = true;
 	if (compositionPresenter.available() && compositionPresenter.buffer_count() > 0u)
 	{
-		compositionBufferIndex = frameIndex % compositionPresenter.buffer_count();
-		if (compositionPresenter.acquire(compositionBufferIndex))
+		if (submitCompositionFrame)
 		{
-			compositionImage = compositionPresenter.image(compositionBufferIndex);
-			compositionImageFirstUse = compositionPresenter.first_use(compositionBufferIndex);
+			const uint32_t bufferCount = compositionPresenter.buffer_count();
+			for (uint32_t offset = 0u; offset < bufferCount; ++offset)
+			{
+				const uint32_t candidate =
+					(nextCompositionBufferIndex + offset) % bufferCount;
+				bool reservedByVulkan = false;
+				for (std::size_t pending = 0u;
+					pending < compositionFramePending.size(); ++pending)
+				{
+					if (compositionFramePending[pending] &&
+						compositionFrameBufferIndices[pending] == candidate)
+					{
+						reservedByVulkan = true;
+						break;
+					}
+				}
+				if (reservedByVulkan || !compositionPresenter.acquire(candidate))
+				{
+					continue;
+				}
+
+				compositionBufferIndex = candidate;
+				compositionImage = compositionPresenter.image(candidate);
+				compositionImageFirstUse = compositionPresenter.first_use(candidate);
+				nextCompositionBufferIndex = (candidate + 1u) % bufferCount;
+				break;
+			}
 		}
 	}
 	frame.record_command_buffer(
@@ -1648,17 +1883,24 @@ void Engine::Impl::draw()
 		renderTimeSeconds,
 		externalBackdropAvailable,
 		useExternalBackdropUnderlay,
+		presentNativeSurface,
+		clearNativeSurface,
 		compositionImage,
 		compositionImageFirstUse,
 		graphicsQueueFamilyIndex);
 	vk::SubmitInfo submitInfo = {};
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &frame.commandBuffer;
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = &frame.imageAcquiredSemaphore;
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &frame.renderFinishedSemaphore;
-	vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+	submitInfo.waitSemaphoreCount = presentNativeSurface ? 1u : 0u;
+	submitInfo.pWaitSemaphores = presentNativeSurface ?
+		&frame.imageAcquiredSemaphore : nullptr;
+	submitInfo.signalSemaphoreCount = presentNativeSurface ? 1u : 0u;
+	submitInfo.pSignalSemaphores = presentNativeSurface ?
+		&frame.renderFinishedSemaphore : nullptr;
+	// The acquired native image is first touched by the transfer clear/copy in
+	// Frame::record. Waiting at the transfer stage keeps that one-time
+	// transparent prime correctly ordered on every driver.
+	vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eTransfer;
 	submitInfo.pWaitDstStageMask = &waitStage;
 
 	result = graphicsQueue.submit(submitInfo, frame.renderFinishedFence);
@@ -1670,33 +1912,55 @@ void Engine::Impl::draw()
 	if (compositionImage)
 	{
 		compositionPresenter.mark_used(compositionBufferIndex);
+		if (frameIndex < compositionFramePending.size())
+		{
+			compositionFramePending[frameIndex] = true;
+			compositionFrameBufferIndices[frameIndex] = compositionBufferIndex;
+		}
 	}
 
-	vk::PresentInfoKHR presentInfo = {};
-	presentInfo.swapchainCount = 1;
-	presentInfo.pSwapchains = &swapchain.chain;
-	presentInfo.pImageIndices = &imageIndex;
-	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &frame.renderFinishedSemaphore;
-	VkPresentInfoKHR rawPresentInfo = presentInfo;
-	VkResult presentResult = vkQueuePresentKHR(graphicsQueue, &rawPresentInfo);
-
-	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
-		swapchain.outdated = true;
-		return;
-	}
-	if (presentResult == VK_ERROR_SURFACE_LOST_KHR)
+	if (presentNativeSurface)
 	{
-		recreate_surface();
-		return;
-	}
-	if (presentResult != VK_SUCCESS)
-	{
-		logger->vulkan("Failed to present swapchain image. VkResult: " + std::to_string(static_cast<int>(presentResult)));
-		return;
+		vk::PresentInfoKHR presentInfo = {};
+		presentInfo.swapchainCount = 1;
+		presentInfo.pSwapchains = &swapchain.chain;
+		presentInfo.pImageIndices = &imageIndex;
+		presentInfo.waitSemaphoreCount = 1;
+		presentInfo.pWaitSemaphores = &frame.renderFinishedSemaphore;
+		VkPresentInfoKHR rawPresentInfo = presentInfo;
+		const VkResult presentResult =
+			vkQueuePresentKHR(graphicsQueue, &rawPresentInfo);
+
+		if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
+			presentResult == VK_SUBOPTIMAL_KHR)
+		{
+			swapchain.outdated = true;
+			return;
+		}
+		if (presentResult == VK_ERROR_SURFACE_LOST_KHR)
+		{
+			recreate_surface();
+			return;
+		}
+		if (presentResult != VK_SUCCESS)
+		{
+			logger->vulkan(
+				"Failed to present swapchain image. VkResult: " +
+				std::to_string(static_cast<int>(presentResult)));
+			return;
+		}
+		if (clearNativeSurface)
+		{
+			nativeTransparencyPrimed = true;
+		}
 	}
 
-	if (compositionImage)
+	// Normal and high-rate rendering stays pipelined. Very low explicit rates
+	// publish synchronously so a one-off frame is not delayed by several long
+	// frame intervals.
+	const bool pipelineComposition =
+		targetFrameRate == 0u || targetFrameRate >= 30u;
+	if (compositionImage && !pipelineComposition)
 	{
 		const vk::Result compositionFenceResult = logicalDevice.waitForFences(
 			frame.renderFinishedFence,
@@ -1708,6 +1972,10 @@ void Engine::Impl::draw()
 			if (!compositionPresenter.present(compositionBufferIndex))
 			{
 				logger->warning("Windows Composition could not present the shared Vulkan frame.");
+			}
+			if (frameIndex < compositionFramePending.size())
+			{
+				compositionFramePending[frameIndex] = false;
 			}
 		}
 	}
@@ -2014,6 +2282,9 @@ void Engine::Impl::set_target_frame_rate(uint32_t frameRate)
 {
 	targetFrameRate = std::min(frameRate, 1000u);
 	nextFrameDeadline = {};
+	nextCompositionSubmitDeadline = {};
+	nextCompositionPollDeadline = {};
+	nextCompositionBufferIndex = 0u;
 }
 
 uint32_t Engine::Impl::target_frame_rate() const

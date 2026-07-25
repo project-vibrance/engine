@@ -471,6 +471,10 @@ namespace
         assign_theme_colour(entries, settings.sidebarLabel, {
             "settingsPanel.sidebar.label", "settings.sidebar.label", "panelWindow.settings.sidebar.label"
         });
+        assign_theme_colour(entries, settings.sidebarSubLabel, {
+            "settingsPanel.sidebarSubLabel", "settings.sidebarSubLabel", "panelWindow.settings.sidebarSubLabel",
+            "settingsPanel.sidebar.subLabel", "settings.sidebar.subLabel", "panelWindow.settings.sidebar.subLabel"
+        });
         assign_theme_colour(entries, settings.sidebarSelectedLabel, {
             "settingsPanel.sidebar.selectedLabel", "settings.sidebar.selectedLabel", "panelWindow.settings.sidebar.selectedLabel"
         });

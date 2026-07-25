@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 2u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 5u;
 constexpr std::uint32_t VIBRANCE_COMPOSITION_MAX_BUFFERS = 3u;
 
 #pragma pack(push, 8)
@@ -42,8 +42,12 @@ struct VibranceCompositionRegion
     float bottomLeftRadius = 0.0f;
     float squircleAmount = 1.0f;
     float squirclePower = 4.0f;
+    float notchAmount = 0.0f;
+    float notchDepth = 0.0f;
+    float verticalStart = 0.0f;
     float blurRadius = 0.0f;
     float saturation = 1.0f;
+    float refraction = 0.035f;
     float tintRed = 1.0f;
     float tintGreen = 1.0f;
     float tintBlue = 1.0f;

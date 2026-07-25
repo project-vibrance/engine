@@ -114,6 +114,50 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
         set(VIBRANCE_COMPOSITION_ARCH x86)
     endif()
 
+    # The private interop ABI was verified against the 19041 SDK generation.
+    # Prefer an explicitly supplied SDK, then a normal machine-wide kit, and
+    # finally the official Microsoft.Windows.SDK.CPP NuGet package in the
+    # ignored development build cache. No absolute developer path is baked
+    # into the installed engine SDK.
+    set(_vibrance_sdk_root "${VIBRANCE_COMPOSITION_WINDOWS_SDK_ROOT}")
+    set(_vibrance_sdk_arch_root "${VIBRANCE_COMPOSITION_WINDOWS_SDK_ARCH_ROOT}")
+    if(NOT _vibrance_sdk_root)
+        get_filename_component(_vibrance_windows_kits_root
+            "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]"
+            ABSOLUTE)
+        if(EXISTS "${_vibrance_windows_kits_root}/Include/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}")
+            set(_vibrance_sdk_root "${_vibrance_windows_kits_root}")
+            set(_vibrance_sdk_arch_root
+                "${_vibrance_windows_kits_root}/Lib/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}")
+        endif()
+    endif()
+    if(NOT _vibrance_sdk_root)
+        file(GLOB _vibrance_sdk_nuget_roots LIST_DIRECTORIES TRUE
+            "${CMAKE_SOURCE_DIR}/build/sdk-19041/packages/microsoft.windows.sdk.cpp/*/c")
+        file(GLOB _vibrance_sdk_nuget_arch_roots LIST_DIRECTORIES TRUE
+            "${CMAKE_SOURCE_DIR}/build/sdk-19041/packages/microsoft.windows.sdk.cpp.${VIBRANCE_COMPOSITION_ARCH}/*/c")
+        if(_vibrance_sdk_nuget_roots AND _vibrance_sdk_nuget_arch_roots)
+            list(SORT _vibrance_sdk_nuget_roots COMPARE NATURAL ORDER DESCENDING)
+            list(SORT _vibrance_sdk_nuget_arch_roots COMPARE NATURAL ORDER DESCENDING)
+            list(GET _vibrance_sdk_nuget_roots 0 _vibrance_sdk_root)
+            list(GET _vibrance_sdk_nuget_arch_roots 0 _vibrance_sdk_arch_root)
+        endif()
+    endif()
+
+    set(VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT "")
+    set(VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR "")
+    set(VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR "")
+    if(EXISTS "${_vibrance_sdk_root}/Include/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}")
+        set(VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT
+            "${_vibrance_sdk_root}/Include/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}")
+        if(EXISTS "${_vibrance_sdk_arch_root}/um/${VIBRANCE_COMPOSITION_ARCH}")
+            set(VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR
+                "${_vibrance_sdk_arch_root}/um/${VIBRANCE_COMPOSITION_ARCH}")
+            set(VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR
+                "${_vibrance_sdk_arch_root}/ucrt/${VIBRANCE_COMPOSITION_ARCH}")
+        endif()
+    endif()
+
     if(EXISTS "${VIBRANCE_VCVARSALL}")
         set(VIBRANCE_COMPOSITION_DIRECTORY
             "${CMAKE_CURRENT_BINARY_DIR}/win32-composition")
@@ -125,6 +169,8 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx/composition_bridge.cpp")
         set(VIBRANCE_COMPOSITION_ABI_HEADER
             "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx/composition_bridge_abi.h")
+        set(VIBRANCE_COMPOSITION_PRIVATE_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx/private_composition_19041.h")
         set(VIBRANCE_COMPOSITION_BUILD_SCRIPT
             "${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/build_composition_bridge.bat")
         add_custom_command(
@@ -137,9 +183,14 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx"
                 "${VIBRANCE_COMPOSITION_DLL}"
                 "${VIBRANCE_COMPOSITION_OBJECT_DIRECTORY}"
+                "${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}"
+                "${VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT}"
+                "${VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR}"
+                "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
             DEPENDS
                 "${VIBRANCE_COMPOSITION_SOURCE}"
                 "${VIBRANCE_COMPOSITION_ABI_HEADER}"
+                "${VIBRANCE_COMPOSITION_PRIVATE_HEADER}"
                 "${VIBRANCE_COMPOSITION_BUILD_SCRIPT}"
             BYPRODUCTS
                 "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_win32_composition.exp"
@@ -150,8 +201,18 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             DEPENDS "${VIBRANCE_COMPOSITION_DLL}")
         add_dependencies(vibrance_engine vibrance_win32_composition)
         set(VIBRANCE_WIN32_COMPOSITION_AVAILABLE ON)
-        message(STATUS
-            "Windows Composition presenter: enabled (${VIBRANCE_COMPOSITION_ARCH}, MSVC, D3D11 bridge)")
+        if(VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT AND
+           VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR AND
+           VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR)
+            message(STATUS
+                "Windows Composition presenter: enabled (${VIBRANCE_COMPOSITION_ARCH}, MSVC, D3D11, SDK ${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION})")
+        else()
+            message(WARNING
+                "Windows SDK ${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION} was not found. "
+                "The Composition bridge will use the SDK selected by vcvarsall; "
+                "set VIBRANCE_COMPOSITION_WINDOWS_SDK_ROOT and "
+                "VIBRANCE_COMPOSITION_WINDOWS_SDK_ARCH_ROOT for a reproducible private-ABI build.")
+        endif()
     else()
         message(WARNING
             "VIBRANCE_ENABLE_WIN32_COMPOSITION is ON, but MSVC was not found. "
@@ -166,15 +227,28 @@ set_target_properties(vibrance_engine PROPERTIES
     SOVERSION "${PROJECT_VERSION_MAJOR}"
     POSITION_INDEPENDENT_CODE ON)
 
+option(
+    VIBRANCE_ENABLE_VULKAN_VALIDATION
+    "Enable Vulkan validation layers (use for diagnostics; adds runtime overhead)"
+    OFF)
+option(
+    VIBRANCE_ENABLE_VULKAN_RENDERER_LOGGING
+    "Enable verbose Vulkan renderer logging"
+    OFF)
+
 target_compile_features(vibrance_engine PUBLIC cxx_std_20)
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # Debug retains symbols/assertions, but renderer hot paths must not run at
+    # GCC's default -O0. -O2 is required here because this target contains the
+    # per-pixel batching and frame-submission code used by live UI profiling.
+    target_compile_options(vibrance_engine PRIVATE $<$<CONFIG:Debug>:-O2>)
+endif()
 target_compile_definitions(vibrance_engine PRIVATE
     VIBRANCE_ENGINE_EXPORTS
     GLM_ENABLE_EXPERIMENTAL
     $<$<CONFIG:Debug>:DEBUG>
-    $<$<CONFIG:Debug>:VIBRANCE_ENABLE_VULKAN_VALIDATION=1>
-    $<$<NOT:$<CONFIG:Debug>>:VIBRANCE_ENABLE_VULKAN_VALIDATION=0>
-    $<$<CONFIG:Debug>:VIBRANCE_ENABLE_VULKAN_RENDERER_LOGGING=1>
-    $<$<NOT:$<CONFIG:Debug>>:VIBRANCE_ENABLE_VULKAN_RENDERER_LOGGING=0>)
+    VIBRANCE_ENABLE_VULKAN_VALIDATION=$<BOOL:${VIBRANCE_ENABLE_VULKAN_VALIDATION}>
+    VIBRANCE_ENABLE_VULKAN_RENDERER_LOGGING=$<BOOL:${VIBRANCE_ENABLE_VULKAN_RENDERER_LOGGING}>)
 
 target_include_directories(vibrance_engine
     PUBLIC

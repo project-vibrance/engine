@@ -37,6 +37,12 @@ option(VIBRANCE_ENABLE_FFMPEG "Enable FFmpeg-backed video decoding when static F
 option(VIBRANCE_ENABLE_WIN32_COMPOSITION "Build the MSVC Windows Composition/D3D11 presenter bridge" ON)
 option(VIBRANCE_STATIC_MINGW_RUNTIME "Link the MinGW C/C++ runtime into the engine DLL" ON)
 set(FFMPEG_EXTRA_LIBRARIES "" CACHE STRING "Extra libraries required by a custom static FFmpeg build")
+set(VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION "10.0.19041.0" CACHE STRING
+    "Windows SDK used to compile the private Win32 Composition bridge")
+set(VIBRANCE_COMPOSITION_WINDOWS_SDK_ROOT "" CACHE PATH
+    "Optional Windows SDK root containing Include/<version> and Lib/<version>")
+set(VIBRANCE_COMPOSITION_WINDOWS_SDK_ARCH_ROOT "" CACHE PATH
+    "Optional NuGet architecture package root containing um/<arch> and ucrt/<arch>")
 
 # Public engine headers expose types from these header-only SDKs. They are copied
 # into the installed engine SDK so consumers need only one include directory.

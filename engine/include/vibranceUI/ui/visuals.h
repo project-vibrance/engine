@@ -476,25 +476,33 @@ inline void ui_update_button_cursor_shadow(Renderer2DScene& scene, entt::entity 
     const glm::vec2 minPosition = transform->position - transform->origin * size;
     const glm::vec2 uv = glm::clamp((point - minPosition) / size, glm::vec2(0.0f), glm::vec2(1.0f));
     const float radius = std::clamp(78.0f / std::max(size.x, size.y), 0.28f, 0.72f);
+    const bool pressed = button->leftPressed || button->rightPressed;
+    const glm::vec4 centerColor = pressed ?
+        renderer2d_hex_color("#FFE1A366") :
+        renderer2d_hex_color("#F2FFFC2E");
+    const glm::vec4 edgeColor = pressed ?
+        renderer2d_hex_color("#16685FEB") :
+        renderer2d_hex_color("#10212AF0");
+    const glm::vec4 outlineColor = pressed ?
+        renderer2d_hex_color("#FFFFFFB8") :
+        renderer2d_hex_color("#5CEBDBA8");
+    const glm::vec2 gradientEnd =
+        uv + glm::vec2(std::max(radius, 0.0001f), 0.0f);
 
-    if (button->leftPressed || button->rightPressed)
+    const bool changed =
+        style->fill != Renderer2DFill::eRadialGradient ||
+        glm::length(style->color0 - centerColor) > 0.0001f ||
+        glm::length(style->color1 - edgeColor) > 0.0001f ||
+        glm::length(style->outlineColor - outlineColor) > 0.0001f ||
+        glm::length(style->gradientStart - uv) > 0.0001f ||
+        glm::length(style->gradientEnd - gradientEnd) > 0.0001f;
+    if (!changed)
     {
-        style->set_radial_gradient(
-            renderer2d_hex_color("#FFE1A366"),
-            renderer2d_hex_color("#16685FEB"),
-            uv,
-            radius);
-        style->outlineColor = renderer2d_hex_color("#FFFFFFB8");
+        return;
     }
-    else
-    {
-        style->set_radial_gradient(
-            renderer2d_hex_color("#F2FFFC2E"),
-            renderer2d_hex_color("#10212AF0"),
-            uv,
-            radius);
-        style->outlineColor = renderer2d_hex_color("#5CEBDBA8");
-    }
+
+    style->set_radial_gradient(centerColor, edgeColor, uv, radius);
+    style->outlineColor = outlineColor;
     scene.mark_dirty(entity);
 }
 

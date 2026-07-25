@@ -10,6 +10,8 @@ layout (set = 1, binding = 6, rgba8) readonly uniform image2D uiExternalBackdrop
 layout (set = 1, binding = 7, rgba8) writeonly uniform image2D compositionSurface;
 
 const uint COMPOSITE_USE_EXTERNAL_BACKDROP_UNDERLAY = 1u << 0;
+const uint COMPOSITE_WRITE_COMPOSITION_SURFACE = 1u << 1;
+const uint COMPOSITE_WRITE_NATIVE_SURFACE = 1u << 2;
 
 layout (push_constant) uniform Composite2DConstants {
     uvec4 data;
@@ -40,6 +42,10 @@ void main() {
     }
     color = blend_over(color, staticColor);
     color = blend_over(color, sceneColor);
-    imageStore(tempSurface, pixel, color);
-    imageStore(compositionSurface, pixel, vec4(color.rgb * color.a, color.a));
+    if ((pc.data.x & COMPOSITE_WRITE_NATIVE_SURFACE) != 0u) {
+        imageStore(tempSurface, pixel, color);
+    }
+    if ((pc.data.x & COMPOSITE_WRITE_COMPOSITION_SURFACE) != 0u) {
+        imageStore(compositionSurface, pixel, vec4(color.rgb * color.a, color.a));
+    }
 }

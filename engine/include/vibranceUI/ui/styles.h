@@ -204,6 +204,7 @@ struct UiTheme
         std::string sidebarRowHover = "rgba(255, 255, 255, 0.55)";
         std::string sidebarRowPressed = "rgba(230, 230, 232, 0.75)";
         std::string sidebarLabel = "rgba(44, 45, 48, 1)";
+        std::string sidebarSubLabel = "rgba(23, 24, 26, 1)";
         std::string sidebarSelectedLabel = "rgba(255, 255, 255, 1)";
         std::string avatarBackground = "rgba(217, 161, 132, 1)";
         std::string avatarText = "rgba(91, 52, 29, 1)";
@@ -330,6 +331,7 @@ inline UiTheme ui_dark_theme()
     theme.settingsPanel.sidebarRowHover = "rgba(255, 255, 255, 0.10)";
     theme.settingsPanel.sidebarRowPressed = "rgba(255, 255, 255, 0.15)";
     theme.settingsPanel.sidebarLabel = theme.text;
+    theme.settingsPanel.sidebarSubLabel = theme.textMuted;
     theme.settingsPanel.sidebarSelectedLabel = "rgba(255, 255, 255, 1)";
     theme.settingsPanel.avatarBackground = "rgba(139, 104, 88, 1)";
     theme.settingsPanel.avatarText = "rgba(255, 232, 214, 1)";

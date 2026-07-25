@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 #include <utility>
 
 #if defined(_WIN32)
@@ -59,7 +60,9 @@ struct WindowsCompositionPresenter::Impl
     VibranceCompositionAcquireFn acquire = nullptr;
     VibranceCompositionPresentFn present = nullptr;
     VibranceCompositionSetRegionsFn setRegions = nullptr;
+    VibranceCompositionLastErrorFn lastError = nullptr;
 #endif
+    std::string lastRegionError;
     std::vector<SharedImage> images;
     std::uint32_t width = 0u;
     std::uint32_t height = 0u;
@@ -261,7 +264,7 @@ bool WindowsCompositionPresenter::initialise(
     const auto create = Impl::load_function<VibranceCompositionCreateFn>(
         impl->module,
         VIBRANCE_COMPOSITION_CREATE_SYMBOL);
-    const auto lastError = Impl::load_function<VibranceCompositionLastErrorFn>(
+    impl->lastError = Impl::load_function<VibranceCompositionLastErrorFn>(
         impl->module,
         VIBRANCE_COMPOSITION_LAST_ERROR_SYMBOL);
     impl->destroy = Impl::load_function<VibranceCompositionDestroyFn>(
@@ -323,7 +326,7 @@ bool WindowsCompositionPresenter::initialise(
         static_cast<std::uint32_t>(buffers.size()));
     if (!impl->bridge)
     {
-        const char* detail = lastError ? lastError() : nullptr;
+        const char* detail = impl->lastError ? impl->lastError() : nullptr;
         Logger::fetch_logger()->warning(
             "Windows Composition/D3D11 presenter initialisation failed; using native Vulkan presentation.");
         if (detail && detail[0] != '\0')
@@ -384,6 +387,8 @@ void WindowsCompositionPresenter::shutdown(vk::Device logicalDevice)
     impl->acquire = nullptr;
     impl->present = nullptr;
     impl->setRegions = nullptr;
+    impl->lastError = nullptr;
+    impl->lastRegionError.clear();
     if (impl->module)
     {
         FreeLibrary(impl->module);
@@ -463,7 +468,6 @@ bool WindowsCompositionPresenter::set_regions(
     for (const SystemBackdropRegion& region : regions)
     {
         if (region.material == SystemBackdropMaterial::eOff ||
-            region.material == SystemBackdropMaterial::eLiquid ||
             region.width <= 0.0f || region.height <= 0.0f)
         {
             continue;
@@ -483,17 +487,37 @@ bool WindowsCompositionPresenter::set_regions(
         native.bottomLeftRadius = region.bottomLeftRadius;
         native.squircleAmount = region.squircleAmount;
         native.squirclePower = region.squirclePower;
+        native.notchAmount = region.notchAmount;
+        native.notchDepth = region.notchDepth;
+        native.verticalStart = region.verticalStart;
         native.blurRadius = region.blurRadius;
         native.saturation = region.saturation;
+        native.refraction = region.refraction;
         native.tintRed = region.tint.red;
         native.tintGreen = region.tint.green;
         native.tintBlue = region.tint.blue;
         native.tintAlpha = region.tint.alpha;
         nativeRegions.push_back(native);
     }
-    return impl->setRegions(
+    const bool applied = impl->setRegions(
         impl->bridge,
         nativeRegions.empty() ? nullptr : nativeRegions.data(),
         static_cast<std::uint32_t>(nativeRegions.size())) != 0u;
+    if (applied)
+    {
+        impl->lastRegionError.clear();
+        return true;
+    }
+    const char* detail = impl->lastError ? impl->lastError() : nullptr;
+    const std::string message = detail && detail[0] != '\0'
+        ? std::string(detail)
+        : std::string("unknown Windows Composition error");
+    if (message != impl->lastRegionError)
+    {
+        Logger::fetch_logger()->warning(
+            std::string("Windows Composition backdrop detail: ") + message);
+        impl->lastRegionError = message;
+    }
+    return false;
 #endif
 }

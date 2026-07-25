@@ -1095,7 +1095,21 @@ namespace
 
             if (!transition.hasStarted)
             {
-                transition.startSeconds = currentTimeSeconds;
+                if (!transition.delayScheduled)
+                {
+                    // Schedule delays from the renderer clock. Callers may use
+                    // another monotonic clock (for example GLFW), whose epoch
+                    // is not required to match steady_clock.
+                    transition.startSeconds =
+                        currentTimeSeconds +
+                        static_cast<double>(transition.delaySeconds);
+                    transition.delayScheduled = true;
+                    changed = true;
+                }
+                if (currentTimeSeconds < transition.startSeconds)
+                {
+                    return;
+                }
                 transition.hasStarted = true;
                 changed = true;
             }
@@ -2642,6 +2656,13 @@ namespace
         }
 
         bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
+        const glm::uvec4 clearConstants { 0u, 0u, 0u, 0u };
+        commandBuffer.pushConstants(
+            pipelineLayouts[pipelineType],
+            vk::ShaderStageFlagBits::eCompute,
+            0u,
+            sizeof(clearConstants),
+            &clearConstants);
         dispatch_bounds(commandBuffer, make_full_screen_bounds(swapchain));
         insert_compute_memory_barrier(commandBuffer);
     }
@@ -2935,6 +2956,7 @@ void Renderer2DScene::clear()
 void Renderer2DScene::mark_dirty()
 {
     ++cacheGeneration_;
+    ++frameGeneration_;
 }
 
 void Renderer2DScene::mark_dirty(entt::entity entity)
@@ -2945,9 +2967,10 @@ void Renderer2DScene::mark_dirty(entt::entity entity)
     }
 
     cache_or_default(registry_, entity);
+    ++frameGeneration_;
     if (affects_static_cache(registry_, entity))
     {
-        mark_dirty();
+        ++cacheGeneration_;
     }
 }
 
@@ -2999,12 +3022,16 @@ bool Renderer2DScene::play_display_transition(
     }
 
     DisplayTransition2DComponent activeTransition = transition;
+    activeTransition.delaySeconds = std::max(activeTransition.delaySeconds, 0.0f);
     activeTransition.startSeconds = currentTimeSeconds;
     activeTransition.hasStarted = false;
+    activeTransition.delayScheduled = false;
     activeTransition.durationSeconds = std::max(activeTransition.durationSeconds, 0.0f);
     registry_.emplace_or_replace<DisplayTransition2DComponent>(entity, activeTransition);
 
-    const float activeSeconds = std::max(activeTransition.durationSeconds, 1.0f / 60.0f);
+    const float activeSeconds = std::max(
+        activeTransition.delaySeconds + activeTransition.durationSeconds,
+        1.0f / 60.0f);
     activate_dynamic(entity, activeSeconds);
     mark_dirty(entity);
     return true;
@@ -3025,6 +3052,11 @@ bool Renderer2DScene::clear_display_transition(entt::entity entity)
 uint64_t Renderer2DScene::cache_generation() const
 {
     return cacheGeneration_;
+}
+
+uint64_t Renderer2DScene::frame_generation() const
+{
+    return frameGeneration_;
 }
 
 entt::entity Renderer2DScene::entity_at(glm::vec2 point)
@@ -3452,13 +3484,15 @@ void Renderer2DScene::build_render_plan(
         }
 
         Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
+        const LiquidGlassOverlayComponent* liquidOverlay =
+            registry_.try_get<LiquidGlassOverlayComponent>(entity);
         const RenderLayer2DKey layer = render_layer_key(registry_, entity);
         const bool dynamicBatch = is_entity_dynamic_by_hierarchy(
             registry_,
             entity,
             currentTimeSeconds,
             dynamicMemo,
-            dynamicStack);
+            dynamicStack) || (liquidOverlay && liquidOverlay->enabled);
         const bool cachedBatch = !dynamicBatch && cache.mode != Renderer2DCacheMode::eDynamic && plan.rebuildCachedLayer;
 
         if (!dynamicBatch && !cachedBatch)
@@ -3502,6 +3536,61 @@ void Renderer2DScene::build_render_plan(
         const uint32_t transformFlags = transform2_5d_flags(transform);
         batch.effect1 = transformFlags == 0u ? shape_sdf_parameters(shape) : transform2_5d_effect(transform);
         batch.flags = shape_flags(shape, style) | transformFlags;
+        if (const LiquidGlassOverlayComponent* liquid = liquidOverlay;
+            liquid && liquid->enabled &&
+            shape.primitive != Renderer2DPrimitive::eCircularProgress)
+        {
+            batch.color1 = liquid->rimColor;
+            batch.uvRect = {
+                std::clamp(liquid->edgeWidth, 0.02f, 1.0f),
+                std::clamp(liquid->rimIntensity, 0.0f, 2.0f),
+                std::clamp(liquid->chromaticAberration, 0.0f, 1.0f),
+                std::clamp(liquid->edgeDarkening, 0.0f, 1.0f)
+            };
+            batch.flags |= eRenderer2DStyleLiquidGlassOverlay;
+
+            // Refract the Vulkan UI accumulated below this layer before the
+            // transparent highlight/tint shape is drawn. The blur pipeline
+            // already provides a race-free scratch image, so neighbouring
+            // samples never read pixels another invocation is overwriting.
+            if (transformFlags == 0u)
+            {
+                Renderer2DBatch refractionBatch = batch;
+                refractionBatch.color0 = {
+                    std::clamp(liquid->refractionStrength, 0.0f, 0.30f),
+                    std::clamp(liquid->chromaticAberration, 0.0f, 1.0f),
+                    std::clamp(liquid->edgeWidth, 0.02f, 1.0f),
+                    0.0f
+                };
+                refractionBatch.color1 = liquid->rimColor;
+                refractionBatch.color2 = glm::vec4(0.0f);
+                refractionBatch.uvRect = shape_sdf_parameters(shape);
+                refractionBatch.effect0 = {
+                    std::clamp(liquid->internalBlurRadius, 0.0f, 8.0f),
+                    1.0f,
+                    0.0f,
+                    displayTransition.opacity
+                };
+                refractionBatch.effect1 = {
+                    shape.cornerRadius,
+                    std::max(style.edgeSoftness, 0.75f),
+                    0.0f,
+                    0.0f
+                };
+                refractionBatch.flags &= ~(
+                    eRenderer2DStyleGradient |
+                    eRenderer2DStyleRadialGradient |
+                    eRenderer2DStyleTransform2_5D |
+                    eRenderer2DStyleCornerRadii |
+                    eRenderer2DStyleShapeMask |
+                    eRenderer2DStyleLiquidGlassOverlay);
+                refractionBatch.flags |=
+                    eRenderer2DStyleBlur |
+                    eRenderer2DStyleLiquidGlassRefraction;
+                refractionBatch.packedData = 0u;
+                plan.blurs.push_back(refractionBatch);
+            }
+        }
         if (transitionShapeBlur > 0.001f && transformFlags == 0u)
         {
             batch.flags |= eRenderer2DStyleBlur;
@@ -3544,7 +3633,9 @@ void Renderer2DScene::build_render_plan(
             };
             shadowBatch.effect1 = shape_sdf_parameters(shape);
             shadowBatch.flags |= eRenderer2DStyleShadow;
-            shadowBatch.flags &= ~eRenderer2DStyleTransform2_5D;
+            shadowBatch.flags &= ~(
+                eRenderer2DStyleTransform2_5D |
+                eRenderer2DStyleLiquidGlassOverlay);
             if ((shadowBatch.flags & eRenderer2DStyleCornerRadii) != 0u)
             {
                 shadowBatch.packedData = pack_corner_radii(padded_corner_radii(shape, shadow->spread));
@@ -3608,7 +3699,11 @@ void Renderer2DScene::build_render_plan(
                     blurBatch.flags |= eRenderer2DStyleBlurInheritedShapeMask;
                 }
             }
-            blurBatch.flags &= ~(eRenderer2DStyleTransform2_5D | eRenderer2DStyleCornerRadii | eRenderer2DStyleShapeMask);
+            blurBatch.flags &= ~(
+                eRenderer2DStyleTransform2_5D |
+                eRenderer2DStyleCornerRadii |
+                eRenderer2DStyleShapeMask |
+                eRenderer2DStyleLiquidGlassOverlay);
             blurBatch.packedData = 0u;
             (cachedBatch ? plan.cachedBlurs : plan.blurs).push_back(blurBatch);
         }
@@ -3947,11 +4042,20 @@ void BlurPipeline::record_batch(
         return;
     }
 
+    const float opticalPadding =
+        (batch.flags & eRenderer2DStyleLiquidGlassRefraction) != 0u ?
+        std::clamp(batch.color0.x, 0.0f, 0.30f) *
+                std::max(std::min(batch.rect.z, batch.rect.w) * 0.5f, 1.0f) +
+            std::clamp(batch.color0.y, 0.0f, 1.0f) * 8.0f +
+            std::max(batch.effect0.x, 0.0f) :
+        0.0f;
     const DispatchBounds bounds = make_dispatch_bounds(
         swapchain,
         expand_and_clip_rect(
             batch.rect,
-            std::max(std::max(batch.effect0.x, 0.0f), std::max(batch.effect1.z, 0.0f)) +
+            std::max(
+                std::max(std::max(batch.effect0.x, 0.0f), std::max(batch.effect1.z, 0.0f)),
+                opticalPadding) +
                 notched_squircle_dispatch_padding(batch, batch.uvRect),
             batch.clipRect),
         0.0f);
@@ -4231,7 +4335,9 @@ void CompositePipeline::record(
     std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
     std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
-    bool useExternalBackdropUnderlay) const
+    bool useExternalBackdropUnderlay,
+    bool writeNativeSurface,
+    bool writeCompositionSurface) const
 {
     const PipelineType pipelineType = PipelineType::eComposite2D;
     if (!bind_pipeline(commandBuffer, pipelineType, pipelines))
@@ -4241,7 +4347,14 @@ void CompositePipeline::record(
 
     bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts);
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts);
-    const glm::uvec4 constants { useExternalBackdropUnderlay ? 1u : 0u, 0u, 0u, 0u };
+    constexpr uint32_t useExternalBackdropFlag = 1u << 0u;
+    constexpr uint32_t writeCompositionSurfaceFlag = 1u << 1u;
+    constexpr uint32_t writeNativeSurfaceFlag = 1u << 2u;
+    const uint32_t flags =
+        (useExternalBackdropUnderlay ? useExternalBackdropFlag : 0u) |
+        (writeCompositionSurface ? writeCompositionSurfaceFlag : 0u) |
+        (writeNativeSurface ? writeNativeSurfaceFlag : 0u);
+    const glm::uvec4 constants { flags, 0u, 0u, 0u };
     commandBuffer.pushConstants(pipelineLayouts[pipelineType],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
     dispatch_bounds(commandBuffer, make_full_screen_bounds(swapchain));
@@ -4693,8 +4806,12 @@ void Renderer2D::record_composite(
     std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
     std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
-    bool useExternalBackdropUnderlay) const
+    bool useExternalBackdropUnderlay,
+    bool writeNativeSurface,
+    bool writeCompositionSurface) const
 {
     compositePipeline.record(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
-        useExternalBackdropUnderlay);
+        useExternalBackdropUnderlay,
+        writeNativeSurface,
+        writeCompositionSurface);
 }
