@@ -12,6 +12,8 @@ enum class SystemBackdropMaterial : std::uint32_t
     eOff = 0u,
     eBlur = 1u,
     eFrosted = 2u,
+    // Reserved for the Windows-private backdrop backend. Until that backend
+    // is available, liquid requests deliberately resolve to eOff.
     eLiquid = 3u
 };
 

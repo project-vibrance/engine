@@ -1016,7 +1016,11 @@ private:
 
     bool add_region(const VibranceCompositionRegion& region)
     {
-        if (region.material == 0u || region.width <= 0.0f ||
+        // Material 3 (liquid) is reserved until the private Windows backdrop
+        // provider supplies a sampleable surface. Never approximate it with a
+        // blur/tint graph: that was visually incorrect and caused artefacts.
+        if (region.material == 0u || region.material == 3u ||
+            region.width <= 0.0f ||
             region.height <= 0.0f)
         {
             return false;
@@ -1064,49 +1068,15 @@ private:
         backdrop.Brush(make_effect_brush(region));
         container.Children().InsertAtBottom(backdrop);
 
-        if (region.material == 2u || region.material == 3u)
+        if (region.material == 2u)
         {
             auto tint = compositor_.CreateSpriteVisual();
             tint.Size(container.Size());
-            if (region.material == 3u)
-            {
-                auto gradient = compositor_.CreateLinearGradientBrush();
-                gradient.StartPoint({ 0.0f, 0.0f });
-                gradient.EndPoint({ 1.0f, 1.0f });
-                auto first = compositor_.CreateColorGradientStop();
-                first.Offset(0.0f);
-                first.Color(color(
-                    std::min(region.tintRed + 0.12f, 1.0f),
-                    std::min(region.tintGreen + 0.12f, 1.0f),
-                    std::min(region.tintBlue + 0.16f, 1.0f),
-                    region.tintAlpha * 0.7f));
-                auto middle = compositor_.CreateColorGradientStop();
-                middle.Offset(0.48f);
-                middle.Color(color(
-                    region.tintRed,
-                    region.tintGreen,
-                    region.tintBlue,
-                    region.tintAlpha * 0.24f));
-                auto last = compositor_.CreateColorGradientStop();
-                last.Offset(1.0f);
-                last.Color(color(
-                    std::max(region.tintRed - 0.08f, 0.0f),
-                    std::max(region.tintGreen - 0.04f, 0.0f),
-                    region.tintBlue,
-                    region.tintAlpha * 0.62f));
-                gradient.ColorStops().InsertAt(0u, first);
-                gradient.ColorStops().InsertAt(1u, middle);
-                gradient.ColorStops().InsertAt(2u, last);
-                tint.Brush(gradient);
-            }
-            else
-            {
-                tint.Brush(compositor_.CreateColorBrush(color(
-                    region.tintRed,
-                    region.tintGreen,
-                    region.tintBlue,
-                    region.tintAlpha)));
-            }
+            tint.Brush(compositor_.CreateColorBrush(color(
+                region.tintRed,
+                region.tintGreen,
+                region.tintBlue,
+                region.tintAlpha)));
             container.Children().InsertAtTop(tint);
         }
 

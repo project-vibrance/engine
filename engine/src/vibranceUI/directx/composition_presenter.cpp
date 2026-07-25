@@ -463,6 +463,7 @@ bool WindowsCompositionPresenter::set_regions(
     for (const SystemBackdropRegion& region : regions)
     {
         if (region.material == SystemBackdropMaterial::eOff ||
+            region.material == SystemBackdropMaterial::eLiquid ||
             region.width <= 0.0f || region.height <= 0.0f)
         {
             continue;
