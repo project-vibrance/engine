@@ -99,7 +99,8 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleMediaTintAsMask = 1u << 19,
     eRenderer2DStyleBlurFollowsFillAlpha = 1u << 20,
     eRenderer2DStyleBlurInheritedShapeMask = 1u << 21,
-    eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22
+    eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
+    eRenderer2DStyleShadowOutsideOnly = 1u << 23
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -679,6 +680,9 @@ struct ShadowComponent
     float blurRadius = 16.0f;
     float spread = 0.0f;
     float opacity = 1.0f;
+    // Removes shadow coverage beneath the source primitive. This is useful for
+    // translucent glass because the shadow cannot darken the material itself.
+    bool outsideOnly = false;
 
     bool set_color(std::string_view hexColor)
     {

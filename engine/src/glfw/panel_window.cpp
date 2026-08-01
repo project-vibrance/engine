@@ -120,9 +120,12 @@ namespace
     float logical_title_height(const GlfwPanelWindowTemplateOptions& options)
     {
         // Reserve enough height for draggable chrome and traffic lights
+        const float trafficLightHeight = options.trafficLights.visible ?
+            options.trafficLights.firstCenter.y * 2.0f :
+            0.0f;
         return std::max(
             std::max(options.titleHeight, options.contentMargin.y),
-            options.trafficLights.firstCenter.y * 2.0f);
+            trafficLightHeight);
     }
 
     glm::vec2 traffic_light_center_at_index(
@@ -281,6 +284,7 @@ const GlfwPanelWindowTemplateOptions& GlfwPanelWindow::template_options() const
 void GlfwPanelWindow::set_template_options(GlfwPanelWindowTemplateOptions nextOptions)
 {
     // A template swap may change media paths, sizing, title text, and content
+    restore_traffic_light_maximise();
     options = std::move(nextOptions);
     load_template_font();
     load_traffic_light_icons();
@@ -646,62 +650,65 @@ void GlfwPanelWindow::build_scene()
         Renderer2DPrimitive::eRectangle);
     ui.set_layer(titleBar, -3, 0u);
 
-    const std::array<TrafficLightKind, 3> lights {
-        TrafficLightKind::eClose,
-        TrafficLightKind::eMinimise,
-        TrafficLightKind::eMaximise
-    };
-    for (std::size_t i = 0; i < lights.size(); ++i)
+    if (options.trafficLights.visible)
     {
-        const TrafficLightKind kind = lights[i];
-        const bool enabled = traffic_light_enabled(kind);
-        const std::string color = kind == TrafficLightKind::eClose ?
-            options.trafficLights.closeColor :
-            kind == TrafficLightKind::eMinimise ?
-                options.trafficLights.minimiseColor :
-                options.trafficLights.maximiseColor;
-
-        const glm::vec4 outlineColor = renderer2d_hex_color(
-            options.trafficLights.outlineColor,
-            glm::vec4(0.0f));
-        const float outlineWidth = outlineColor.a > 0.001f ?
-            std::max(scaled_scalar(options.trafficLights.outlineWidth, ui.scale()), 0.0f) :
-            0.0f;
-        ShapeStyleComponent dotStyle = make_solid_style(
-            renderer2d_hex_color(enabled ? color : options.trafficLights.disabledColor),
-            outlineColor,
-            outlineWidth,
-            enabled ? 1.0f : 0.58f);
-        dotStyle.edgeSoftness = std::max(scaled_scalar(options.trafficLights.edgeSoftness, ui.scale()), 0.0f);
-        const float lightRadius = std::max(scaled_scalar(options.trafficLights.radius, ui.scale()), 1.0f);
-
-        entt::entity dot = scene.create_shape(
-            traffic_light_center(kind) - glm::vec2(lightRadius),
-            glm::vec2(lightRadius * 2.0f),
-            dotStyle,
-            Renderer2DPrimitive::eEllipse);
-        ui.set_layer(dot, 100, static_cast<uint32_t>(i), true);
-
-        if (enabled && options.trafficLights.showIconsOnHover)
+        const std::array<TrafficLightKind, 3> lights {
+            TrafficLightKind::eClose,
+            TrafficLightKind::eMinimise,
+            TrafficLightKind::eMaximise
+        };
+        for (std::size_t i = 0; i < lights.size(); ++i)
         {
-            const Media2DHandle iconHandle = traffic_light_icon(kind);
-            if (iconHandle.valid())
+            const TrafficLightKind kind = lights[i];
+            const bool enabled = traffic_light_enabled(kind);
+            const std::string color = kind == TrafficLightKind::eClose ?
+                options.trafficLights.closeColor :
+                kind == TrafficLightKind::eMinimise ?
+                    options.trafficLights.minimiseColor :
+                    options.trafficLights.maximiseColor;
+
+            const glm::vec4 outlineColor = renderer2d_hex_color(
+                options.trafficLights.outlineColor,
+                glm::vec4(0.0f));
+            const float outlineWidth = outlineColor.a > 0.001f ?
+                std::max(scaled_scalar(options.trafficLights.outlineWidth, ui.scale()), 0.0f) :
+                0.0f;
+            ShapeStyleComponent dotStyle = make_solid_style(
+                renderer2d_hex_color(enabled ? color : options.trafficLights.disabledColor),
+                outlineColor,
+                outlineWidth,
+                enabled ? 1.0f : 0.58f);
+            dotStyle.edgeSoftness = std::max(scaled_scalar(options.trafficLights.edgeSoftness, ui.scale()), 0.0f);
+            const float lightRadius = std::max(scaled_scalar(options.trafficLights.radius, ui.scale()), 1.0f);
+
+            entt::entity dot = scene.create_shape(
+                traffic_light_center(kind) - glm::vec2(lightRadius),
+                glm::vec2(lightRadius * 2.0f),
+                dotStyle,
+                Renderer2DPrimitive::eEllipse);
+            ui.set_layer(dot, 100, static_cast<uint32_t>(i), true);
+
+            if (enabled && options.trafficLights.showIconsOnHover)
             {
-                const glm::vec2 iconSize = glm::max(
-                    scaled_size(options.trafficLights.iconSize.x, options.trafficLights.iconSize.y, ui.scale()),
-                    glm::vec2(1.0f));
-                entt::entity icon = scene.create_media(
-                    traffic_light_center(kind) - iconSize * 0.5f,
-                    iconSize,
-                    iconHandle,
-                    Media2DFit::eContain);
-                if (Media2DComponent* media = scene.registry().try_get<Media2DComponent>(icon))
+                const Media2DHandle iconHandle = traffic_light_icon(kind);
+                if (iconHandle.valid())
                 {
-                    media->set_mask_tint(options.trafficLights.iconTint);
+                    const glm::vec2 iconSize = glm::max(
+                        scaled_size(options.trafficLights.iconSize.x, options.trafficLights.iconSize.y, ui.scale()),
+                        glm::vec2(1.0f));
+                    entt::entity icon = scene.create_media(
+                        traffic_light_center(kind) - iconSize * 0.5f,
+                        iconSize,
+                        iconHandle,
+                        Media2DFit::eContain);
+                    if (Media2DComponent* media = scene.registry().try_get<Media2DComponent>(icon))
+                    {
+                        media->set_mask_tint(options.trafficLights.iconTint);
+                    }
+                    RenderLayer2DComponent& iconLayer = ui.set_layer(icon, 101, static_cast<uint32_t>(i), true);
+                    iconLayer.visible = hoveredTrafficLight == kind;
+                    trafficLightIconEntities[i] = icon;
                 }
-                RenderLayer2DComponent& iconLayer = ui.set_layer(icon, 101, static_cast<uint32_t>(i), true);
-                iconLayer.visible = hoveredTrafficLight == kind;
-                trafficLightIconEntities[i] = icon;
             }
         }
     }
@@ -734,7 +741,11 @@ void GlfwPanelWindow::build_scene()
             if (validX && validY)
             {
                 const float titleRowHeight = std::clamp(
-                    scaled_scalar(options.trafficLights.firstCenter.y * 2.0f, ui.scale()),
+                    scaled_scalar(
+                        options.trafficLights.visible ?
+                            options.trafficLights.firstCenter.y * 2.0f :
+                            options.titleHeight,
+                        ui.scale()),
                     1.0f,
                     panelGeometry.size.y);
                 const float titleRowFraction = titleRowHeight / std::max(panelGeometry.size.y, 1.0f);
@@ -770,13 +781,16 @@ void GlfwPanelWindow::build_scene()
         }
         else
         {
-            const bool trafficOnLeft = options.trafficLights.placement == GlfwPanelWindowTrafficLightPlacement::eTopLeft;
+            const bool trafficOnLeft = options.trafficLights.visible &&
+                options.trafficLights.placement == GlfwPanelWindowTrafficLightPlacement::eTopLeft;
             const float titleX = trafficOnLeft ?
                 options.trafficLights.firstCenter.x + options.trafficLights.spacing * 3.0f + 8.0f :
                 24.0f;
             titleOffset += glm::vec2(
                 titleX,
-                options.trafficLights.firstCenter.y - panelGeometry.logicalPanelSize.y * 0.5f);
+                (options.trafficLights.visible ?
+                    options.trafficLights.firstCenter.y :
+                    options.titleHeight * 0.5f) - panelGeometry.logicalPanelSize.y * 0.5f);
         }
 
         const float titleFontSize = std::max(options.titleFontSize, 1.0f);
@@ -873,7 +887,7 @@ void GlfwPanelWindow::build_default_content(GlfwPanelWindowTemplateContext& cont
 void GlfwPanelWindow::load_traffic_light_icons()
 {
     trafficLightIcons = {};
-    if (!engine)
+    if (!engine || !options.trafficLights.visible)
     {
         return;
     }
@@ -1153,7 +1167,7 @@ bool GlfwPanelWindow::cursor_screen_point(glm::vec2& point) const
 
 uint32_t GlfwPanelWindow::resize_edges_at(glm::vec2 windowPoint) const
 {
-    if (!options.resizable || glfw_window_maximized(window))
+    if (!options.resizable || glfw_window_maximized(window) || trafficLightMaximiseActive)
     {
         return eResizeNone;
     }
@@ -1296,6 +1310,11 @@ bool GlfwPanelWindow::scene_blocks_window_action(glm::vec2 framebufferPoint) con
 
 GlfwPanelWindow::TrafficLightKind GlfwPanelWindow::traffic_light_at(glm::vec2 windowPoint) const
 {
+    if (!options.trafficLights.visible || !options.trafficLights.accessible)
+    {
+        return TrafficLightKind::eNone;
+    }
+
     PanelGeometry panelGeometry = {};
     if (!panel_geometry_for_window(window, options.panelInset, panelGeometry))
     {
@@ -1344,6 +1363,11 @@ glm::vec2 GlfwPanelWindow::traffic_light_center(TrafficLightKind kind) const
 
 bool GlfwPanelWindow::traffic_light_enabled(TrafficLightKind kind) const
 {
+    if (!options.trafficLights.visible || !options.trafficLights.accessible)
+    {
+        return false;
+    }
+
     switch (kind)
     {
     case TrafficLightKind::eClose:
@@ -1445,18 +1469,104 @@ void GlfwPanelWindow::perform_traffic_light_action(TrafficLightKind kind)
         iconify_glfw_window(window);
         break;
     case TrafficLightKind::eMaximise:
-        if (glfw_window_maximized(window))
+        if (trafficLightMaximiseActive)
         {
-            restore_glfw_window(window);
+            restore_traffic_light_maximise();
         }
         else
         {
-            maximize_glfw_window(window);
+            if (glfw_window_maximized(window))
+            {
+                restore_glfw_window(window);
+                break;
+            }
+
+            int windowX = 0;
+            int windowY = 0;
+            int windowWidth = 0;
+            int windowHeight = 0;
+            if (!glfw_window_position(window, windowX, windowY) ||
+                !glfw_window_size(window, windowWidth, windowHeight))
+            {
+                break;
+            }
+            trafficLightRestorePosition = { windowX, windowY };
+            trafficLightRestoreSize = { windowWidth, windowHeight };
+            activeTrafficLightMaximiseMode = options.trafficLights.maximiseMode;
+
+            if (activeTrafficLightMaximiseMode ==
+                GlfwPanelWindowMaximiseMode::eFullscreen)
+            {
+                if (!set_glfw_window_fullscreen(window, true))
+                {
+                    break;
+                }
+                trafficLightMaximiseActive = true;
+                break;
+            }
+
+            glm::ivec2 workPosition(0);
+            glm::ivec2 workSize(0);
+            if (!glfw_window_monitor_work_area(window, workPosition, workSize))
+            {
+                break;
+            }
+            if (activeTrafficLightMaximiseMode ==
+                GlfwPanelWindowMaximiseMode::eWidthAndHeight)
+            {
+                maximize_glfw_window(window);
+            }
+            else if (activeTrafficLightMaximiseMode ==
+                GlfwPanelWindowMaximiseMode::eWidth)
+            {
+                set_glfw_window_position(window, workPosition.x, windowY);
+                set_glfw_window_size(window, workSize.x, windowHeight);
+            }
+            else
+            {
+                set_glfw_window_position(window, windowX, workPosition.y);
+                set_glfw_window_size(window, windowWidth, workSize.y);
+            }
+            trafficLightMaximiseActive = true;
         }
         break;
     default:
         break;
     }
+}
+
+void GlfwPanelWindow::restore_traffic_light_maximise()
+{
+    if (!window || !trafficLightMaximiseActive)
+    {
+        return;
+    }
+
+    if (activeTrafficLightMaximiseMode ==
+        GlfwPanelWindowMaximiseMode::eFullscreen)
+    {
+        set_glfw_window_fullscreen(
+            window,
+            false,
+            trafficLightRestorePosition,
+            trafficLightRestoreSize);
+    }
+    else
+    {
+        if (glfw_window_maximized(window))
+        {
+            restore_glfw_window(window);
+        }
+        set_glfw_window_position(
+            window,
+            trafficLightRestorePosition.x,
+            trafficLightRestorePosition.y);
+        set_glfw_window_size(
+            window,
+            trafficLightRestoreSize.x,
+            trafficLightRestoreSize.y);
+    }
+    trafficLightMaximiseActive = false;
 }
 
 UiCursorKind GlfwPanelWindow::cursor_for_resize_edges(uint32_t edges) const

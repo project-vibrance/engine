@@ -33,11 +33,26 @@ enum class GlfwPanelWindowTrafficLightPlacement
     eTopRight
 };
 
+enum class GlfwPanelWindowMaximiseMode
+{
+    // Fullscreen attaches the GLFW window to the monitor. The remaining modes
+    // preserve the windowed surface and use the monitor work area.
+    eFullscreen,
+    eWidth,
+    eHeight,
+    eWidthAndHeight
+};
+
 struct GlfwPanelWindowTrafficLightOptions
 {
-    // Close is always available; only minimise/maximise can be disabled
+    // Visibility controls chrome layout; accessibility controls all pointer
+    // interaction while retaining a disabled visual when the lights are shown.
+    bool visible = true;
+    bool accessible = true;
     bool minimiseEnabled = true;
     bool maximiseEnabled = true;
+    GlfwPanelWindowMaximiseMode maximiseMode =
+        GlfwPanelWindowMaximiseMode::eWidthAndHeight;
     GlfwPanelWindowTrafficLightPlacement placement = GlfwPanelWindowTrafficLightPlacement::eTopLeft;
     glm::vec2 firstCenter { 28.0f, 32.0f };
     float spacing = 22.0f;
@@ -196,6 +211,7 @@ private:
     Media2DHandle traffic_light_icon(TrafficLightKind kind) const;
     void set_hovered_traffic_light(TrafficLightKind kind);
     void perform_traffic_light_action(TrafficLightKind kind);
+    void restore_traffic_light_maximise();
     UiCursorKind cursor_for_resize_edges(uint32_t edges) const;
 
     GLFWwindow* window = nullptr;
@@ -211,6 +227,11 @@ private:
         entt::null
     };
     TrafficLightKind hoveredTrafficLight = TrafficLightKind::eNone;
+    bool trafficLightMaximiseActive = false;
+    GlfwPanelWindowMaximiseMode activeTrafficLightMaximiseMode =
+        GlfwPanelWindowMaximiseMode::eWidthAndHeight;
+    glm::ivec2 trafficLightRestorePosition { 0 };
+    glm::ivec2 trafficLightRestoreSize { 0 };
 
     WindowPointerAction windowPointerAction = WindowPointerAction::eNone;
     uint32_t activeResizeEdges = eResizeNone;

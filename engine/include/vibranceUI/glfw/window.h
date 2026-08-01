@@ -81,6 +81,15 @@ VIBRANCE_GLFW_API void iconify_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void maximize_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void restore_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API bool glfw_window_maximized(GLFWwindow* window);
+VIBRANCE_GLFW_API bool glfw_window_monitor_work_area(
+    GLFWwindow* window,
+    glm::ivec2& position,
+    glm::ivec2& size);
+VIBRANCE_GLFW_API bool set_glfw_window_fullscreen(
+    GLFWwindow* window,
+    bool fullscreen,
+    glm::ivec2 windowedPosition = glm::ivec2(0),
+    glm::ivec2 windowedSize = glm::ivec2(1));
 VIBRANCE_GLFW_API void set_glfw_window_user_pointer(GLFWwindow* window, void* userPointer);
 VIBRANCE_GLFW_API void* glfw_window_user_pointer(GLFWwindow* window);
 VIBRANCE_GLFW_API void set_glfw_mouse_passthrough(GLFWwindow* window, bool enabled);

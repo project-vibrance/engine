@@ -3710,11 +3710,14 @@ void Renderer2DScene::build_render_plan(
         if (const ShadowComponent* shadow = registry_.try_get<ShadowComponent>(entity))
         {
             Renderer2DBatch shadowBatch = batch;
+            const glm::vec4 sourceRect = shadowBatch.rect;
             shadowBatch.rect.x += shadow->offset.x - shadow->spread;
             shadowBatch.rect.y += shadow->offset.y - shadow->spread;
             shadowBatch.rect.z += 2.0f * shadow->spread;
             shadowBatch.rect.w += 2.0f * shadow->spread;
             shadowBatch.color0 = shadow->color;
+            shadowBatch.color1 = sourceRect;
+            shadowBatch.color2 = shape.effective_corner_radii();
             shadowBatch.effect0 = {
                 shape.cornerRadius + shadow->spread,
                 shadow->blurRadius,
@@ -3723,6 +3726,10 @@ void Renderer2DScene::build_render_plan(
             };
             shadowBatch.effect1 = shape_sdf_parameters(shape);
             shadowBatch.flags |= eRenderer2DStyleShadow;
+            if (shadow->outsideOnly)
+            {
+                shadowBatch.flags |= eRenderer2DStyleShadowOutsideOnly;
+            }
             shadowBatch.flags &= ~eRenderer2DStyleTransform2_5D;
             if ((shadowBatch.flags & eRenderer2DStyleCornerRadii) != 0u)
             {

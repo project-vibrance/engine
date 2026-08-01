@@ -11,6 +11,54 @@
 
 namespace
 {
+    GLFWmonitor* monitor_for_window(GLFWwindow* window)
+    {
+        if (!window)
+        {
+            return nullptr;
+        }
+
+        int windowX = 0;
+        int windowY = 0;
+        int windowWidth = 0;
+        int windowHeight = 0;
+        glfwGetWindowPos(window, &windowX, &windowY);
+        glfwGetWindowSize(window, &windowWidth, &windowHeight);
+
+        int monitorCount = 0;
+        GLFWmonitor** monitors = glfwGetMonitors(&monitorCount);
+        GLFWmonitor* bestMonitor = nullptr;
+        int bestArea = -1;
+        for (int i = 0; monitors && i < monitorCount; ++i)
+        {
+            int monitorX = 0;
+            int monitorY = 0;
+            int monitorWidth = 0;
+            int monitorHeight = 0;
+            glfwGetMonitorWorkarea(
+                monitors[i],
+                &monitorX,
+                &monitorY,
+                &monitorWidth,
+                &monitorHeight);
+            const int overlapWidth = std::max(
+                0,
+                std::min(windowX + windowWidth, monitorX + monitorWidth) -
+                    std::max(windowX, monitorX));
+            const int overlapHeight = std::max(
+                0,
+                std::min(windowY + windowHeight, monitorY + monitorHeight) -
+                    std::max(windowY, monitorY));
+            const int overlapArea = overlapWidth * overlapHeight;
+            if (overlapArea > bestArea)
+            {
+                bestArea = overlapArea;
+                bestMonitor = monitors[i];
+            }
+        }
+        return bestMonitor ? bestMonitor : glfwGetPrimaryMonitor();
+    }
+
     void log_window_features(GLFWwindow* window, const GlfwWindowCreateInfo& createInfo)
     {
         // Report compositor-related hints so transparency problems are easier to diagnose
@@ -315,6 +363,68 @@ void restore_glfw_window(GLFWwindow* window)
 bool glfw_window_maximized(GLFWwindow* window)
 {
     return window && glfwGetWindowAttrib(window, GLFW_MAXIMIZED) == GLFW_TRUE;
+}
+
+bool glfw_window_monitor_work_area(
+    GLFWwindow* window,
+    glm::ivec2& position,
+    glm::ivec2& size)
+{
+    position = { 0, 0 };
+    size = { 0, 0 };
+    GLFWmonitor* monitor = monitor_for_window(window);
+    if (!monitor)
+    {
+        return false;
+    }
+    glfwGetMonitorWorkarea(
+        monitor,
+        &position.x,
+        &position.y,
+        &size.x,
+        &size.y);
+    return size.x > 0 && size.y > 0;
+}
+
+bool set_glfw_window_fullscreen(
+    GLFWwindow* window,
+    bool fullscreen,
+    glm::ivec2 windowedPosition,
+    glm::ivec2 windowedSize)
+{
+    if (!window)
+    {
+        return false;
+    }
+
+    if (!fullscreen)
+    {
+        glfwSetWindowMonitor(
+            window,
+            nullptr,
+            windowedPosition.x,
+            windowedPosition.y,
+            std::max(windowedSize.x, 1),
+            std::max(windowedSize.y, 1),
+            GLFW_DONT_CARE);
+        return true;
+    }
+
+    GLFWmonitor* monitor = monitor_for_window(window);
+    const GLFWvidmode* videoMode = monitor ? glfwGetVideoMode(monitor) : nullptr;
+    if (!monitor || !videoMode)
+    {
+        return false;
+    }
+    glfwSetWindowMonitor(
+        window,
+        monitor,
+        0,
+        0,
+        videoMode->width,
+        videoMode->height,
+        videoMode->refreshRate);
+    return true;
 }
 
 void set_glfw_window_user_pointer(GLFWwindow* window, void* userPointer)

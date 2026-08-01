@@ -1,6 +1,7 @@
 #version 450
 
 const uint STYLE_CORNER_RADII = 1u << 16;
+const uint STYLE_SHADOW_OUTSIDE_ONLY = 1u << 23;
 
 const uint PRIMITIVE_RECTANGLE = 1u;
 const uint PRIMITIVE_ELLIPSE = 3u;
@@ -188,13 +189,13 @@ float sd_circular_progress(vec2 pixel, vec4 rect, vec4 arcParams) {
     return min(length(p - startPoint), length(p - endPoint)) - halfStroke;
 }
 
-float shadow_sdf(vec2 pixel) {
-    vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
-    vec2 center = pc.rect.xy + halfSize;
+float shadow_sdf_for(vec2 pixel, vec4 rect, float cornerRadius, vec4 cornerRadii) {
+    vec2 halfSize = max(rect.zw * 0.5, vec2(0.5));
+    vec2 center = rect.xy + halfSize;
     vec2 p = pixel - center;
 
     if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
-        return sd_circular_progress(pixel, pc.rect, pc.uvRect);
+        return sd_circular_progress(pixel, rect, pc.uvRect);
     }
 
     if (pc.data.x == PRIMITIVE_ELLIPSE) {
@@ -202,7 +203,7 @@ float shadow_sdf(vec2 pixel) {
         return (length(q) - 1.0) * min(halfSize.x, halfSize.y);
     }
 
-    float radius = pc.data.x == PRIMITIVE_RECTANGLE ? 0.0 : clamp(pc.effect0.x, 0.0, min(halfSize.x, halfSize.y));
+    float radius = pc.data.x == PRIMITIVE_RECTANGLE ? 0.0 : clamp(cornerRadius, 0.0, min(halfSize.x, halfSize.y));
     float squircleAmount = clamp(pc.effect1.x, 0.0, 1.0);
     float squirclePower = clamp(pc.effect1.y <= 0.001 ? 4.0 : pc.effect1.y, 2.0, 5.0);
     if (pc.data.x == PRIMITIVE_SQUIRCLE) {
@@ -211,7 +212,7 @@ float shadow_sdf(vec2 pixel) {
     if (pc.data.x == PRIMITIVE_NOTCHED_SQUIRCLE) {
         return sd_notched_squircle(
             pixel,
-            pc.rect,
+            rect,
             radius,
             squircleAmount,
             squirclePower,
@@ -219,9 +220,17 @@ float shadow_sdf(vec2 pixel) {
             pc.effect1.w);
     }
     if (pc.data.x != PRIMITIVE_RECTANGLE && (pc.data.y & STYLE_CORNER_RADII) != 0u) {
-        return sd_rounded_box_corners(p, halfSize, unpack_corner_radii(pc.data.z));
+        return sd_rounded_box_corners(p, halfSize, cornerRadii);
     }
     return sd_rounded_box(p, halfSize, radius);
+}
+
+float shadow_sdf(vec2 pixel) {
+    return shadow_sdf_for(
+        pixel,
+        pc.rect,
+        pc.effect0.x,
+        unpack_corner_radii(pc.data.z));
 }
 
 float primitive_bounds_padding() {
@@ -250,6 +259,12 @@ void main() {
 
     float sdf = shadow_sdf(p);
     float alpha = (1.0 - smoothstep(-blurRadius, blurRadius, sdf)) * pc.color0.a * pc.effect0.w;
+    if ((pc.data.y & STYLE_SHADOW_OUTSIDE_ONLY) != 0u) {
+        float sourceCornerRadius = max(pc.effect0.x - pc.effect0.z, 0.0);
+        float sourceSdf = shadow_sdf_for(p, pc.color1, sourceCornerRadius, pc.color2);
+        float clipFeather = clamp(blurRadius * 0.08, 0.75, 2.0);
+        alpha *= smoothstep(-clipFeather, clipFeather, sourceSdf);
+    }
     if (alpha <= 0.001) {
         return;
     }
