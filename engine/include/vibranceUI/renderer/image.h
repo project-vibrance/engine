@@ -117,3 +117,10 @@ void transition_image_layout(
 );
 
 void copy_image_to_image(vk::CommandBuffer commandBuffer, vk::Image src, vk::Image dst, vk::Extent2D srcSize, vk::Extent2D dstSize);
+void copy_image_region_to_image(
+    vk::CommandBuffer commandBuffer,
+    vk::Image src,
+    vk::Image dst,
+    vk::Extent2D srcSize,
+    vk::Extent2D dstSize,
+    vk::Rect2D srcRegion);

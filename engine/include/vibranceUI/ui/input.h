@@ -309,7 +309,7 @@ inline void ui_set_timed_moving_cache(Renderer2DScene& scene, entt::entity entit
 inline void ui_mark_moving_entity_dirty(
     Renderer2DScene& scene,
     entt::entity entity,
-    float activeSeconds = 0.35f)
+    float activeSeconds = 1.0f / 30.0f)
 {
     if (entity == entt::null || !scene.registry().valid(entity))
     {

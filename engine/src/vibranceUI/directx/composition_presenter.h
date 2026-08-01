@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vibranceUI/graphics/backdrop.h>
+#include <glm/glm.hpp>
 
 #if defined(_WIN32) && !defined(VK_USE_PLATFORM_WIN32_KHR)
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -15,6 +16,13 @@
 class WindowsCompositionPresenter
 {
 public:
+    enum class PresentResult : std::uint8_t
+    {
+        eFailed,
+        ePresented,
+        eDeferred
+    };
+
     WindowsCompositionPresenter();
     ~WindowsCompositionPresenter();
 
@@ -37,7 +45,11 @@ public:
     bool first_use(std::uint32_t index) const;
     void mark_used(std::uint32_t index);
     bool acquire(std::uint32_t index);
-    bool present(std::uint32_t index);
+    PresentResult present(
+        std::uint32_t index,
+        bool synchronize = false,
+        glm::uvec4 contentRect = glm::uvec4(0u),
+        glm::uvec4 damageRect = glm::uvec4(0u));
     bool set_regions(const std::vector<SystemBackdropRegion>& regions);
 
 private:

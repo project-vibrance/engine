@@ -10,7 +10,7 @@ layout (push_constant) uniform ClearScreenConstants {
 
 void main() {
 
-    ivec2 screen_pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 screen_pos = ivec2(pc.data.yz) + ivec2(gl_GlobalInvocationID.xy);
     ivec2 screen_size = imageSize(colorBuffer);
 
     if (screen_pos.x < 0 || screen_pos.x >= screen_size.x || screen_pos.y < 0 || screen_pos.y >= screen_size.y) {

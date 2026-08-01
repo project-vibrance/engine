@@ -211,6 +211,7 @@ void Frame::record_command_buffer(
 	bool clearNativeSurface,
 	vk::Image compositionImage,
 	bool compositionImageFirstUse,
+	glm::uvec4 pendingCompositionDamageRect,
 	uint32_t graphicsQueueFamilyIndex)
 {
 	// Record all passes for one swapchain image, including UI cache and final composite
@@ -249,6 +250,30 @@ void Frame::record_command_buffer(
 		);
 	};
 
+	auto clear_render_target = [&](StorageImage* image, const vk::ClearColorValue& value) {
+		transition_image_layout(commandBuffer, image->image,
+			vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+			vk::AccessFlagBits::eNone, vk::AccessFlagBits::eTransferWrite,
+			vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer
+		);
+		vk::ImageSubresourceRange range {};
+		range.aspectMask = vk::ImageAspectFlagBits::eColor;
+		range.levelCount = 1u;
+		range.layerCount = 1u;
+		commandBuffer.clearColorImage(
+			image->image,
+			vk::ImageLayout::eTransferDstOptimal,
+			value,
+			range);
+		transition_image_layout(commandBuffer, image->image,
+			vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eGeneral,
+			vk::AccessFlagBits::eTransferWrite,
+			vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+			vk::PipelineStageFlagBits::eTransfer,
+			vk::PipelineStageFlagBits::eComputeShader
+		);
+	};
+
 	auto prepare_cache_target = [&](StorageImage* image) {
 		if (!uiCacheImagesReady)
 		{
@@ -267,24 +292,24 @@ void Frame::record_command_buffer(
 	const bool renderLegacy2D = triangleCount2D > 0u;
 	const bool renderHosted3D = triangleCount3D > 0u ||
 		!scene2D.registry().view<Model3DComponent>().empty();
+	const vk::ClearColorValue transparent(
+		std::array<float, 4> { 0.0f, 0.0f, 0.0f, 0.0f });
+	const vk::ClearColorValue farDepth(
+		std::array<std::uint32_t, 4> { 0x3f800000u, 0u, 0u, 0u });
 	if (renderLegacy2D)
 	{
-		transition_image_layout(commandBuffer, depthBuffer->image,
-			vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
-			vk::AccessFlagBits::eNone, vk::AccessFlagBits::eMemoryWrite,
-			vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader
-		);
+		clear_render_target(depthBuffer, farDepth);
 	}
 
-	transition_image_layout(commandBuffer, colorBuffer->image,
-		vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
-		vk::AccessFlagBits::eNone, vk::AccessFlagBits::eMemoryWrite,
-		vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader
-	);
+	// The dynamic surface is retained per frame slot. A bounded clear is unsafe
+	// for optical effects: refraction, soft rims, and clipped blur samples can
+	// write outside an entity's nominal bounds, leaving fragments behind when
+	// that frame slot is reused after a drag. Rebuild from transparent instead.
+	clear_render_target(colorBuffer, transparent);
 	if (renderHosted3D)
 	{
-		transition_render_target(modelDepthBuffer, vk::AccessFlagBits::eMemoryWrite);
-		transition_render_target(modelColorBuffer, vk::AccessFlagBits::eMemoryWrite);
+		clear_render_target(modelDepthBuffer, farDepth);
+		clear_render_target(modelColorBuffer, transparent);
 	}
 	const bool writeNativeContent = presentNativeSurface && !clearNativeSurface;
 	if (writeNativeContent)
@@ -300,51 +325,6 @@ void Frame::record_command_buffer(
 	prepare_cache_target(uiStaticBlurSurface);
 	uiCacheImagesReady = true;
 
-	PipelineType pipelineType = PipelineType::eClear;
-	commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipelines[pipelineType]);
-	commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pipelineLayouts[pipelineType],
-		0, 1, &descriptorSets[DescriptorScope::eFrame], 0, nullptr);
-	const glm::uvec4 clear2DConstants {
-		renderLegacy2D ? 1u : 0u,
-		0u,
-		0u,
-		0u
-	};
-	commandBuffer.pushConstants(
-		pipelineLayouts[pipelineType],
-		vk::ShaderStageFlagBits::eCompute,
-		0u,
-		sizeof(clear2DConstants),
-		&clear2DConstants);
-	uint32_t workgroupCountX = (renderExtent.width + 7) / 8;
-	uint32_t workgroupCountY = (renderExtent.height + 7) / 8;
-	commandBuffer.dispatch(workgroupCountX, workgroupCountY, 1);
-	if (renderHosted3D)
-	{
-		commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pipelineLayouts[pipelineType],
-			0, 1, &descriptorSets[DescriptorScope::eModelFrame], 0, nullptr);
-		const glm::uvec4 clear3DConstants { 1u, 0u, 0u, 0u };
-		commandBuffer.pushConstants(
-			pipelineLayouts[pipelineType],
-			vk::ShaderStageFlagBits::eCompute,
-			0u,
-			sizeof(clear3DConstants),
-			&clear3DConstants);
-		const uint32_t modelWorkgroupCountX = (modelRenderExtent.width + 7) / 8;
-		const uint32_t modelWorkgroupCountY = (modelRenderExtent.height + 7) / 8;
-		commandBuffer.dispatch(modelWorkgroupCountX, modelWorkgroupCountY, 1);
-	}
-
-	if (renderLegacy2D)
-	{
-		barrier_render_target(depthBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
-	}
-	barrier_render_target(colorBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
-	if (renderHosted3D)
-	{
-		barrier_render_target(modelDepthBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
-		barrier_render_target(modelColorBuffer, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
-	}
 	barrier_render_target(uiBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
 
 	renderer2D.record(
@@ -371,6 +351,85 @@ void Frame::record_command_buffer(
 		hosted3DFramebuffer,
 		hosted3DSamples != vk::SampleCountFlagBits::e1,
 		externalBackdropAvailable);
+	glm::uvec4 contentRect = renderer2D.content_bounds();
+	glm::uvec4 damageRect = renderer2D.damage_bounds();
+	if (useExternalBackdropUnderlay)
+	{
+		contentRect = { 0u, 0u, renderExtent.width, renderExtent.height };
+		damageRect = contentRect;
+	}
+	compositionSceneDamageRect = damageRect;
+	auto union_rect = [](glm::uvec4 left, glm::uvec4 right) {
+		if (left.z == 0u || left.w == 0u)
+		{
+			return right;
+		}
+		if (right.z == 0u || right.w == 0u)
+		{
+			return left;
+		}
+		const uint32_t x = std::min(left.x, right.x);
+		const uint32_t y = std::min(left.y, right.y);
+		const uint32_t rightEdge = std::max(left.x + left.z, right.x + right.z);
+		const uint32_t bottomEdge = std::max(left.y + left.w, right.y + right.w);
+		return glm::uvec4 { x, y, rightEdge - x, bottomEdge - y };
+	};
+	// Each imported texture retains pixels between uses. Apply the current
+	// entity damage plus every change this particular texture missed while it
+	// was owned by D3D. First use starts from a transparent clear and receives
+	// the complete live content once.
+	glm::uvec4 compositionUpdateRect = union_rect(
+		damageRect,
+		pendingCompositionDamageRect);
+	if (compositionImageFirstUse)
+	{
+		compositionUpdateRect = union_rect(contentRect, compositionUpdateRect);
+	}
+	compositionContentRect = { 0u, 0u, 0u, 0u };
+	compositionDamageRect = { 0u, 0u, 0u, 0u };
+	if (compositionImage && renderExtent.width > 0u && renderExtent.height > 0u)
+	{
+		auto scale_floor = [](uint32_t value, uint32_t destination, uint32_t source) {
+			return static_cast<uint32_t>(
+				(static_cast<uint64_t>(value) * destination) / source);
+		};
+		auto scale_ceil = [](uint32_t value, uint32_t destination, uint32_t source) {
+			return static_cast<uint32_t>(
+				(static_cast<uint64_t>(value) * destination + source - 1u) / source);
+		};
+		auto map_rect = [&](glm::uvec4 rect) {
+			if (rect.z == 0u || rect.w == 0u)
+			{
+				return glm::uvec4(0u);
+			}
+			const uint32_t right = std::min(rect.x + rect.z, renderExtent.width);
+			const uint32_t bottom = std::min(rect.y + rect.w, renderExtent.height);
+			const uint32_t destinationX = scale_floor(
+				std::min(rect.x, renderExtent.width),
+				swapchain.extent.width,
+				renderExtent.width);
+			const uint32_t destinationY = scale_floor(
+				std::min(rect.y, renderExtent.height),
+				swapchain.extent.height,
+				renderExtent.height);
+			const uint32_t destinationRight = scale_ceil(
+				right,
+				swapchain.extent.width,
+				renderExtent.width);
+			const uint32_t destinationBottom = scale_ceil(
+				bottom,
+				swapchain.extent.height,
+				renderExtent.height);
+			return glm::uvec4 {
+				destinationX,
+				destinationY,
+				destinationRight - destinationX,
+				destinationBottom - destinationY
+			};
+		};
+		compositionContentRect = map_rect(contentRect);
+		compositionDamageRect = map_rect(compositionUpdateRect);
+	}
 
 	barrier_render_target(colorBuffer, vk::AccessFlagBits::eShaderRead);
 	if (renderHosted3D)
@@ -395,7 +454,8 @@ void Frame::record_command_buffer(
 			pipelineLayouts,
 			useExternalBackdropUnderlay,
 			writeNativeContent,
-			static_cast<bool>(compositionImage));
+			static_cast<bool>(compositionImage),
+			compositionImage ? compositionUpdateRect : contentRect);
 	}
 
 	if (presentNativeSurface)
@@ -472,17 +532,65 @@ void Frame::record_command_buffer(
 			nullptr,
 			acquireBarrier);
 
-		copy_image_to_image(
-			commandBuffer,
-			compositionSurface->image,
-			compositionImage,
-			compositionSurface->extent,
-			swapchain.extent);
+		// Initialise a shared texture once. Subsequent uses retain unchanged UI
+		// pixels and receive only the accumulated entity damage for that buffer.
+		vk::ImageSubresourceRange compositionRange {};
+		compositionRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+		compositionRange.levelCount = 1u;
+		compositionRange.layerCount = 1u;
+		if (compositionImageFirstUse)
+		{
+			commandBuffer.clearColorImage(
+				compositionImage,
+				vk::ImageLayout::eTransferDstOptimal,
+				transparent,
+				compositionRange);
+		}
+		if (compositionUpdateRect.z > 0u && compositionUpdateRect.w > 0u)
+		{
+			if (compositionImageFirstUse)
+			{
+			vk::ImageMemoryBarrier clearBarrier = {};
+			clearBarrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+			clearBarrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+			clearBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+			clearBarrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+			clearBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			clearBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			clearBarrier.image = compositionImage;
+			clearBarrier.subresourceRange = compositionRange;
+			commandBuffer.pipelineBarrier(
+				vk::PipelineStageFlagBits::eTransfer,
+				vk::PipelineStageFlagBits::eTransfer,
+				{},
+				nullptr,
+				nullptr,
+				clearBarrier);
+			}
+
+			copy_image_region_to_image(
+				commandBuffer,
+				compositionSurface->image,
+				compositionImage,
+				compositionSurface->extent,
+				swapchain.extent,
+				vk::Rect2D {
+					vk::Offset2D {
+						static_cast<int32_t>(compositionUpdateRect.x),
+						static_cast<int32_t>(compositionUpdateRect.y) },
+					vk::Extent2D {
+						compositionUpdateRect.z,
+						compositionUpdateRect.w }
+				});
+		}
 
 		vk::ImageMemoryBarrier releaseBarrier = {};
 		releaseBarrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
 		releaseBarrier.newLayout = vk::ImageLayout::eGeneral;
-		releaseBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		releaseBarrier.srcAccessMask =
+			compositionImageFirstUse ||
+			(compositionUpdateRect.z > 0u && compositionUpdateRect.w > 0u) ?
+			vk::AccessFlagBits::eTransferWrite : vk::AccessFlags {};
 		releaseBarrier.dstAccessMask = {};
 		releaseBarrier.srcQueueFamilyIndex = graphicsQueueFamilyIndex;
 		releaseBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR;

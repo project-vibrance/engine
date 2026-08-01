@@ -156,7 +156,8 @@ public:
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
         bool useExternalBackdropUnderlay = false,
         bool writeNativeSurface = true,
-        bool writeCompositionSurface = false
+        bool writeCompositionSurface = false,
+        glm::uvec4 contentRect = glm::uvec4(0u)
     ) const;
 };
 
@@ -213,8 +214,15 @@ public:
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
         bool useExternalBackdropUnderlay = false,
         bool writeNativeSurface = true,
-        bool writeCompositionSurface = false
+        bool writeCompositionSurface = false,
+        glm::uvec4 contentRect = glm::uvec4(0u)
     ) const;
+
+    // Pixel bounds containing every visible batch in the most recently built
+    // render plan. Composition uses this to avoid processing transparent
+    // pixels across the rest of a full-screen overlay window.
+    glm::uvec4 content_bounds() const;
+    glm::uvec4 damage_bounds() const;
 
 private:
     ShapePipeline shapePipeline;
@@ -233,4 +241,6 @@ private:
     mutable int32_t cachedLayerCutoffLayer = 0;
     mutable uint32_t cachedLayerCutoffOrder = 0;
     mutable bool cachedLayerCutoffAlwaysOnTop = false;
+    mutable glm::uvec4 contentBounds { 0u };
+    mutable glm::uvec4 damageBounds { 0u };
 };

@@ -441,14 +441,43 @@ bool WindowsCompositionPresenter::acquire(std::uint32_t index)
 #endif
 }
 
-bool WindowsCompositionPresenter::present(std::uint32_t index)
+WindowsCompositionPresenter::PresentResult WindowsCompositionPresenter::present(
+    std::uint32_t index,
+    bool synchronize,
+    glm::uvec4 contentRect,
+    glm::uvec4 damageRect)
 {
 #if defined(_WIN32)
-    return available() && index < impl->images.size() &&
-        impl->present(impl->bridge, index) != 0u;
+    if (!available() || index >= impl->images.size())
+    {
+        return PresentResult::eFailed;
+    }
+    VibranceCompositionPresentInfo presentInfo = {};
+    presentInfo.flags = synchronize ?
+        VIBRANCE_COMPOSITION_PRESENT_SYNCHRONIZE : 0u;
+    presentInfo.contentX = contentRect.x;
+    presentInfo.contentY = contentRect.y;
+    presentInfo.contentWidth = contentRect.z;
+    presentInfo.contentHeight = contentRect.w;
+    presentInfo.damageX = damageRect.x;
+    presentInfo.damageY = damageRect.y;
+    presentInfo.damageWidth = damageRect.z;
+    presentInfo.damageHeight = damageRect.w;
+    switch (impl->present(impl->bridge, index, &presentInfo))
+    {
+        case VIBRANCE_COMPOSITION_PRESENTED:
+            return PresentResult::ePresented;
+        case VIBRANCE_COMPOSITION_PRESENT_DEFERRED:
+            return PresentResult::eDeferred;
+        default:
+            return PresentResult::eFailed;
+    }
 #else
     (void)index;
-    return false;
+    (void)synchronize;
+    (void)contentRect;
+    (void)damageRect;
+    return PresentResult::eFailed;
 #endif
 }
 

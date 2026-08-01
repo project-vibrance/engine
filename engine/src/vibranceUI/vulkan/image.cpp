@@ -343,3 +343,71 @@ void copy_image_to_image(vk::CommandBuffer commandBuffer, vk::Image src, vk::Ima
 
 	commandBuffer.blitImage2(&blitInfo);
 }
+
+void copy_image_region_to_image(
+	vk::CommandBuffer commandBuffer,
+	vk::Image src,
+	vk::Image dst,
+	vk::Extent2D srcSize,
+	vk::Extent2D dstSize,
+	vk::Rect2D srcRegion)
+{
+	const uint32_t srcX = std::min(
+		static_cast<uint32_t>(std::max(srcRegion.offset.x, 0)),
+		srcSize.width);
+	const uint32_t srcY = std::min(
+		static_cast<uint32_t>(std::max(srcRegion.offset.y, 0)),
+		srcSize.height);
+	const uint32_t srcRight = std::min(
+		srcX + srcRegion.extent.width,
+		srcSize.width);
+	const uint32_t srcBottom = std::min(
+		srcY + srcRegion.extent.height,
+		srcSize.height);
+	if (srcRight <= srcX || srcBottom <= srcY ||
+		srcSize.width == 0u || srcSize.height == 0u)
+	{
+		return;
+	}
+
+	auto scale_floor = [](uint32_t value, uint32_t destination, uint32_t source) {
+		return static_cast<uint32_t>(
+			(static_cast<uint64_t>(value) * destination) / source);
+	};
+	auto scale_ceil = [](uint32_t value, uint32_t destination, uint32_t source) {
+		return static_cast<uint32_t>(
+			(static_cast<uint64_t>(value) * destination + source - 1u) / source);
+	};
+
+	vk::ImageBlit2 blitRegion = {};
+	blitRegion.srcOffsets[0] = vk::Offset3D {
+		static_cast<int32_t>(srcX),
+		static_cast<int32_t>(srcY),
+		0 };
+	blitRegion.srcOffsets[1] = vk::Offset3D {
+		static_cast<int32_t>(srcRight),
+		static_cast<int32_t>(srcBottom),
+		1 };
+	blitRegion.dstOffsets[0] = vk::Offset3D {
+		static_cast<int32_t>(scale_floor(srcX, dstSize.width, srcSize.width)),
+		static_cast<int32_t>(scale_floor(srcY, dstSize.height, srcSize.height)),
+		0 };
+	blitRegion.dstOffsets[1] = vk::Offset3D {
+		static_cast<int32_t>(scale_ceil(srcRight, dstSize.width, srcSize.width)),
+		static_cast<int32_t>(scale_ceil(srcBottom, dstSize.height, srcSize.height)),
+		1 };
+	blitRegion.srcSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+	blitRegion.srcSubresource.layerCount = 1u;
+	blitRegion.dstSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+	blitRegion.dstSubresource.layerCount = 1u;
+
+	vk::BlitImageInfo2 blitInfo = {};
+	blitInfo.srcImage = src;
+	blitInfo.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
+	blitInfo.dstImage = dst;
+	blitInfo.dstImageLayout = vk::ImageLayout::eTransferDstOptimal;
+	blitInfo.filter = vk::Filter::eNearest;
+	blitInfo.regionCount = 1u;
+	blitInfo.pRegions = &blitRegion;
+	commandBuffer.blitImage2(&blitInfo);
+}

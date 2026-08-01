@@ -76,6 +76,12 @@ class VIBRANCE_ENGINE_API Engine
 
     uint32_t target_frame_rate() const;
 
+    // Suggested cadence for CPU-side input, layout, and animation updates.
+    // draw() retains the requested/uncapped render-loop semantics; callers can
+    // use this value to avoid updating scene state more often than it can be
+    // displayed.
+    uint32_t recommended_ui_update_rate() const;
+
     // Optional camera helper for examples that also use the 3D path
     void update_camera(const CameraInput& input);
 

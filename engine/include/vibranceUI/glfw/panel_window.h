@@ -219,6 +219,8 @@ private:
     glm::ivec2 actionStartWindowSize { 0 };
     int lastRenderWidth = 0;
     int lastRenderHeight = 0;
+    double lastUiUpdateSeconds = 0.0;
+    bool hasUiUpdateSample = false;
 };
 
 struct GlfwPanelWindowHostOptions

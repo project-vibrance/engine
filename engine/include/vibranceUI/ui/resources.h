@@ -268,7 +268,7 @@ class UiResourceChangeTracker
 public:
     explicit UiResourceChangeTracker(
         UiResourceDirectories resources = {},
-        std::chrono::milliseconds pollInterval = std::chrono::milliseconds(500)) :
+        std::chrono::milliseconds pollInterval = std::chrono::milliseconds(1000)) :
         pollInterval_(std::max(pollInterval, std::chrono::milliseconds(50)))
     {
         reset(std::move(resources));

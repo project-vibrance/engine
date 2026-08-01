@@ -27,7 +27,7 @@ vec4 blend_over(vec4 dst, vec4 src) {
 }
 
 void main() {
-    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy + pc.data.yz);
     ivec2 screenSize = imageSize(sceneColorBuffer);
     if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
         return;

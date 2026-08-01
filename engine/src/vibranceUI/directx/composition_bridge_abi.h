@@ -2,8 +2,13 @@
 
 #include <cstdint>
 
-constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 5u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 8u;
 constexpr std::uint32_t VIBRANCE_COMPOSITION_MAX_BUFFERS = 3u;
+
+constexpr std::uint32_t VIBRANCE_COMPOSITION_PRESENT_SYNCHRONIZE = 1u << 0u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_PRESENT_FAILED = 0u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_PRESENTED = 1u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_PRESENT_DEFERRED = 2u;
 
 #pragma pack(push, 8)
 struct VibranceCompositionCreateInfo
@@ -23,6 +28,20 @@ struct VibranceCompositionBuffer
     std::uint32_t structSize = sizeof(VibranceCompositionBuffer);
     std::uint32_t index = 0u;
     void* sharedHandle = nullptr;
+};
+
+struct VibranceCompositionPresentInfo
+{
+    std::uint32_t structSize = sizeof(VibranceCompositionPresentInfo);
+    std::uint32_t flags = 0u;
+    std::uint32_t contentX = 0u;
+    std::uint32_t contentY = 0u;
+    std::uint32_t contentWidth = 0u;
+    std::uint32_t contentHeight = 0u;
+    std::uint32_t damageX = 0u;
+    std::uint32_t damageY = 0u;
+    std::uint32_t damageWidth = 0u;
+    std::uint32_t damageHeight = 0u;
 };
 
 struct VibranceCompositionRegion
@@ -64,7 +83,10 @@ using VibranceCompositionCreateFn = VibranceCompositionHandle(__cdecl*)(
     std::uint32_t);
 using VibranceCompositionDestroyFn = void(__cdecl*)(VibranceCompositionHandle);
 using VibranceCompositionAcquireFn = std::uint32_t(__cdecl*)(VibranceCompositionHandle, std::uint32_t);
-using VibranceCompositionPresentFn = std::uint32_t(__cdecl*)(VibranceCompositionHandle, std::uint32_t);
+using VibranceCompositionPresentFn = std::uint32_t(__cdecl*)(
+    VibranceCompositionHandle,
+    std::uint32_t,
+    const VibranceCompositionPresentInfo*);
 using VibranceCompositionSetRegionsFn = std::uint32_t(__cdecl*)(
     VibranceCompositionHandle,
     const VibranceCompositionRegion*,

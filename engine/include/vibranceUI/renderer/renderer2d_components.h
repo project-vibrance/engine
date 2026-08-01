@@ -101,7 +101,10 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleBlurInheritedShapeMask = 1u << 21,
     eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
     eRenderer2DStyleLiquidGlassOverlay = 1u << 23,
-    eRenderer2DStyleLiquidGlassRefraction = 1u << 24
+    eRenderer2DStyleLiquidGlassRefraction = 1u << 24,
+    // Internal renderer flag: near-clear liquid refraction samples the stable
+    // scene directly instead of paying for a two-pass scratch blur.
+    eRenderer2DStyleLiquidGlassDirect = 1u << 25
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -1324,6 +1327,10 @@ public:
     // Changes for any rendered entity, including dynamic entities that do not
     // invalidate the reusable static cache.
     uint64_t frame_generation() const;
+    // True when time alone can change visible output (transitions, animated
+    // media, or a timed cache refresh). Ordinary component changes are tracked
+    // by frame_generation().
+    bool requires_continuous_redraw(double currentTimeSeconds) const;
     bool hit_test(glm::vec2 point);
     entt::entity entity_at(glm::vec2 point);
     entt::entity draggable_parent_at(glm::vec2 point);
@@ -1333,7 +1340,15 @@ public:
     void build_render_plan(Renderer2DRenderPlan& plan, double currentTimeSeconds, uint64_t rendererCacheGeneration);
 
 private:
+    friend class Renderer2D;
+    bool damage_pending(entt::entity entity, double currentTimeSeconds) const;
+    void commit_presented_bounds(
+        std::vector<std::pair<entt::entity, glm::uvec4>> bounds);
+
     entt::registry registry_;
     uint64_t cacheGeneration_ = 1;
     uint64_t frameGeneration_ = 1;
+    bool fullDamagePending_ = true;
+    std::vector<entt::entity> damageEntities_;
+    std::vector<std::pair<entt::entity, glm::uvec4>> presentedBounds_;
 };

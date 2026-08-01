@@ -49,6 +49,7 @@ class Frame
         bool clearNativeSurface,
         vk::Image compositionImage = {},
         bool compositionImageFirstUse = true,
+        glm::uvec4 pendingCompositionDamageRect = glm::uvec4(0u),
         uint32_t graphicsQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
     );
 
@@ -72,6 +73,13 @@ class Frame
     vk::Semaphore renderFinishedSemaphore;
 
     vk::Fence renderFinishedFence;
+
+    // Destination-pixel bounds written into the shared Composition texture by
+    // the current command buffer. The D3D11 bridge uses the same bounds for
+    // its swapchain copy and dirty rectangle.
+    glm::uvec4 compositionContentRect { 0u };
+    glm::uvec4 compositionDamageRect { 0u };
+    glm::uvec4 compositionSceneDamageRect { 0u };
 
     std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets;
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts;

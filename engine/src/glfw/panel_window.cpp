@@ -222,6 +222,17 @@ void GlfwPanelWindow::tick()
 
     const double now = glfw_time_seconds();
     engine->update_timing(now);
+
+    const uint32_t uiUpdateRate = engine->recommended_ui_update_rate();
+    const double uiUpdateInterval = 1.0 / static_cast<double>(uiUpdateRate);
+    if (hasUiUpdateSample &&
+        now - lastUiUpdateSeconds < uiUpdateInterval)
+    {
+        engine->draw();
+        return;
+    }
+    lastUiUpdateSeconds = now;
+    hasUiUpdateSample = true;
     update_window_action();
 
     const GlfwUiPointerSample pointer = glfw_ui_pointer_sample(window, engine, true);

@@ -567,6 +567,31 @@ namespace
         return { 0u, 0u, swapchain.extent.width, swapchain.extent.height };
     }
 
+    DispatchBounds make_blur_dispatch_bounds(
+        const Swapchain& swapchain,
+        const Renderer2DBatch& batch)
+    {
+        const float opticalPadding =
+            (batch.flags & eRenderer2DStyleLiquidGlassRefraction) != 0u ?
+            std::clamp(batch.color0.x, 0.0f, 0.30f) *
+                    std::max(std::min(batch.rect.z, batch.rect.w) * 0.5f, 1.0f) +
+                std::clamp(batch.color0.y, 0.0f, 1.0f) * 8.0f +
+                std::max(batch.effect0.x, 0.0f) :
+            0.0f;
+        return make_dispatch_bounds(
+            swapchain,
+            expand_and_clip_rect(
+                batch.rect,
+                std::max(
+                    std::max(
+                        std::max(batch.effect0.x, 0.0f),
+                        std::max(batch.effect1.z, 0.0f)),
+                    opticalPadding) +
+                    notched_squircle_dispatch_padding(batch, batch.uvRect),
+                batch.clipRect),
+            0.0f);
+    }
+
     Renderer2DCacheComponent& cache_or_default(entt::registry& registry, entt::entity entity)
     {
         return registry.get_or_emplace<Renderer2DCacheComponent>(entity);
@@ -2647,7 +2672,8 @@ namespace
         std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
         std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
-        DescriptorScope frameScope)
+        DescriptorScope frameScope,
+        glm::uvec4 clearRect = glm::uvec4(0u))
     {
         const PipelineType pipelineType = PipelineType::eClear;
         if (!bind_pipeline(commandBuffer, pipelineType, pipelines))
@@ -2656,14 +2682,30 @@ namespace
         }
 
         bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
-        const glm::uvec4 clearConstants { 0u, 0u, 0u, 0u };
+        DispatchBounds bounds = make_full_screen_bounds(swapchain);
+        if (clearRect.z > 0u && clearRect.w > 0u)
+        {
+            const uint32_t x = std::min(clearRect.x, swapchain.extent.width);
+            const uint32_t y = std::min(clearRect.y, swapchain.extent.height);
+            bounds = {
+                x,
+                y,
+                std::min(clearRect.z, swapchain.extent.width - x),
+                std::min(clearRect.w, swapchain.extent.height - y)
+            };
+        }
+        if (bounds.empty())
+        {
+            return;
+        }
+        const glm::uvec4 clearConstants { 0u, bounds.x, bounds.y, 0u };
         commandBuffer.pushConstants(
             pipelineLayouts[pipelineType],
             vk::ShaderStageFlagBits::eCompute,
             0u,
             sizeof(clearConstants),
             &clearConstants);
-        dispatch_bounds(commandBuffer, make_full_screen_bounds(swapchain));
+        dispatch_bounds(commandBuffer, bounds);
         insert_compute_memory_barrier(commandBuffer);
     }
 
@@ -2957,6 +2999,8 @@ void Renderer2DScene::mark_dirty()
 {
     ++cacheGeneration_;
     ++frameGeneration_;
+    fullDamagePending_ = true;
+    damageEntities_.clear();
 }
 
 void Renderer2DScene::mark_dirty(entt::entity entity)
@@ -2968,6 +3012,12 @@ void Renderer2DScene::mark_dirty(entt::entity entity)
 
     cache_or_default(registry_, entity);
     ++frameGeneration_;
+    if (!fullDamagePending_ &&
+        std::find(damageEntities_.begin(), damageEntities_.end(), entity) ==
+            damageEntities_.end())
+    {
+        damageEntities_.push_back(entity);
+    }
     if (affects_static_cache(registry_, entity))
     {
         ++cacheGeneration_;
@@ -3057,6 +3107,112 @@ uint64_t Renderer2DScene::cache_generation() const
 uint64_t Renderer2DScene::frame_generation() const
 {
     return frameGeneration_;
+}
+
+bool Renderer2DScene::damage_pending(
+    entt::entity entity,
+    double currentTimeSeconds) const
+{
+    if (fullDamagePending_)
+    {
+        return true;
+    }
+    entt::entity current = entity;
+    for (uint32_t depth = 0u;
+        depth < 64u && current != entt::null && registry_.valid(current);
+        ++depth)
+    {
+        if (std::find(damageEntities_.begin(), damageEntities_.end(), current) !=
+            damageEntities_.end())
+        {
+            return true;
+        }
+        if (const DisplayTransition2DComponent* transition =
+                registry_.try_get<DisplayTransition2DComponent>(current);
+            transition && transition->enabled &&
+            !display_transition_complete(*transition, currentTimeSeconds))
+        {
+            return true;
+        }
+        const Parent2DComponent* parent =
+            registry_.try_get<Parent2DComponent>(current);
+        current = parent ? parent->parent : entt::null;
+    }
+    if (const Media2DComponent* media = registry_.try_get<Media2DComponent>(entity))
+    {
+        return media->animated && media->playing && media_visible(*media) &&
+            is_visible(registry_, entity);
+    }
+    return false;
+}
+
+void Renderer2DScene::commit_presented_bounds(
+    std::vector<std::pair<entt::entity, glm::uvec4>> bounds)
+{
+    presentedBounds_ = std::move(bounds);
+    fullDamagePending_ = false;
+    damageEntities_.clear();
+}
+
+bool Renderer2DScene::requires_continuous_redraw(
+    double currentTimeSeconds) const
+{
+    const auto transitionView =
+        registry_.view<const DisplayTransition2DComponent>();
+    for (const entt::entity entity : transitionView)
+    {
+        const DisplayTransition2DComponent& transition =
+            transitionView.get<const DisplayTransition2DComponent>(entity);
+        if (!transition.enabled)
+        {
+            continue;
+        }
+        if (!display_transition_complete(transition, currentTimeSeconds) ||
+            transition.removeWhenComplete ||
+            transition.destroyEntityTreeOnComplete)
+        {
+            return true;
+        }
+    }
+
+    const auto mediaView = registry_.view<const Media2DComponent>();
+    for (const entt::entity entity : mediaView)
+    {
+        const Media2DComponent& media =
+            mediaView.get<const Media2DComponent>(entity);
+        if (media.animated && media.playing && media_visible(media) &&
+            is_visible(registry_, entity))
+        {
+            return true;
+        }
+    }
+
+    const auto cacheView = registry_.view<const Renderer2DCacheComponent>();
+    for (const entt::entity entity : cacheView)
+    {
+        const Renderer2DCacheComponent& cache =
+            cacheView.get<const Renderer2DCacheComponent>(entity);
+        // Permanently dynamic entities are redrawn when their data changes;
+        // mark_dirty() advances frameGeneration_ for that purpose. They have
+        // no expiration timer, so only timed cache promotions need this
+        // continuous tail frame.
+        if (cache.mode == Renderer2DCacheMode::eTimed &&
+            (cache.pendingActiveSeconds > 0.0f ||
+                cache.activeUntilSeconds > currentTimeSeconds ||
+                cache.wasActive))
+        {
+            return true;
+        }
+        if (cache.mode == Renderer2DCacheMode::eTimed &&
+            cache.idleTickRate > 0.0f &&
+            (cache.lastDynamicSeconds < 0.0 ||
+                currentTimeSeconds - cache.lastDynamicSeconds >=
+                    1.0 / static_cast<double>(cache.idleTickRate)))
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 entt::entity Renderer2DScene::entity_at(glm::vec2 point)
@@ -4042,48 +4198,40 @@ void BlurPipeline::record_batch(
         return;
     }
 
-    const float opticalPadding =
-        (batch.flags & eRenderer2DStyleLiquidGlassRefraction) != 0u ?
-        std::clamp(batch.color0.x, 0.0f, 0.30f) *
-                std::max(std::min(batch.rect.z, batch.rect.w) * 0.5f, 1.0f) +
-            std::clamp(batch.color0.y, 0.0f, 1.0f) * 8.0f +
-            std::max(batch.effect0.x, 0.0f) :
-        0.0f;
-    const DispatchBounds bounds = make_dispatch_bounds(
-        swapchain,
-        expand_and_clip_rect(
-            batch.rect,
-            std::max(
-                std::max(std::max(batch.effect0.x, 0.0f), std::max(batch.effect1.z, 0.0f)),
-                opticalPadding) +
-                notched_squircle_dispatch_padding(batch, batch.uvRect),
-            batch.clipRect),
-        0.0f);
+    const DispatchBounds bounds = make_blur_dispatch_bounds(swapchain, batch);
     if (bounds.empty())
     {
         return;
     }
 
+    const bool directLiquidRefraction =
+        (batch.flags & eRenderer2DStyleLiquidGlassRefraction) != 0u &&
+        batch.effect0.x <= 1.5f &&
+        batch.effect0.y <= 1.0f;
+
     bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, postScope);
 
     Renderer2DPushConstants constants = {};
-    constants.rect = {
-        static_cast<float>(bounds.x),
-        static_cast<float>(bounds.y),
-        static_cast<float>(bounds.width),
-        static_cast<float>(bounds.height)
-    };
-    constants.data = {
-        static_cast<uint32_t>(Renderer2DPrimitive::eClear),
-        eRenderer2DStyleClear,
-        0u,
-        pack_dispatch_origin(bounds.x, bounds.y)
-    };
-    commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-        vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-    dispatch_bounds(commandBuffer, bounds);
-    insert_compute_memory_barrier(commandBuffer);
+    if (!directLiquidRefraction)
+    {
+        constants.rect = {
+            static_cast<float>(bounds.x),
+            static_cast<float>(bounds.y),
+            static_cast<float>(bounds.width),
+            static_cast<float>(bounds.height)
+        };
+        constants.data = {
+            static_cast<uint32_t>(Renderer2DPrimitive::eClear),
+            eRenderer2DStyleClear,
+            0u,
+            pack_dispatch_origin(bounds.x, bounds.y)
+        };
+        commandBuffer.pushConstants(pipelineLayouts[pipelineType],
+            vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+        dispatch_bounds(commandBuffer, bounds);
+        insert_compute_memory_barrier(commandBuffer);
+    }
 
     const uint32_t passCount = std::max(1u, static_cast<uint32_t>(std::round(std::max(batch.effect0.y, 1.0f))));
     Renderer2DBatch passBatch = batch;
@@ -4091,9 +4239,9 @@ void BlurPipeline::record_batch(
     passBatch.effect0.w = passCount > 1u
         ? 1.0f - std::pow(1.0f - targetOpacity, 1.0f / static_cast<float>(passCount))
         : targetOpacity;
-    for (uint32_t pass = 0; pass < passCount; ++pass)
+    if (directLiquidRefraction)
     {
-        uint32_t passData = pass;
+        uint32_t passData = 0u;
         if (includeStaticBackdrop)
         {
             passData |= kBlurUseStaticBackdrop;
@@ -4103,19 +4251,43 @@ void BlurPipeline::record_batch(
             passData |= kBlurUseExternalBackdrop;
         }
 
-        constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
-        constants.data.y |= eRenderer2DStyleBlurHorizontal;
+        constants = make_push_constants(batch, passData, bounds.x, bounds.y);
+        constants.data.y |=
+            eRenderer2DStyleBlurVertical |
+            eRenderer2DStyleLiquidGlassDirect;
         commandBuffer.pushConstants(pipelineLayouts[pipelineType],
             vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
         dispatch_bounds(commandBuffer, bounds);
         insert_compute_memory_barrier(commandBuffer);
+    }
+    else
+    {
+        for (uint32_t pass = 0; pass < passCount; ++pass)
+        {
+            uint32_t passData = pass;
+            if (includeStaticBackdrop)
+            {
+                passData |= kBlurUseStaticBackdrop;
+            }
+            if (includeExternalBackdrop)
+            {
+                passData |= kBlurUseExternalBackdrop;
+            }
 
-        constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
-        constants.data.y |= eRenderer2DStyleBlurVertical;
-        commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-            vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-        dispatch_bounds(commandBuffer, bounds);
-        insert_compute_memory_barrier(commandBuffer);
+            constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
+            constants.data.y |= eRenderer2DStyleBlurHorizontal;
+            commandBuffer.pushConstants(pipelineLayouts[pipelineType],
+                vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+            dispatch_bounds(commandBuffer, bounds);
+            insert_compute_memory_barrier(commandBuffer);
+
+            constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
+            constants.data.y |= eRenderer2DStyleBlurVertical;
+            commandBuffer.pushConstants(pipelineLayouts[pipelineType],
+                vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+            dispatch_bounds(commandBuffer, bounds);
+            insert_compute_memory_barrier(commandBuffer);
+        }
     }
 
     constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
@@ -4337,7 +4509,8 @@ void CompositePipeline::record(
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
     bool useExternalBackdropUnderlay,
     bool writeNativeSurface,
-    bool writeCompositionSurface) const
+    bool writeCompositionSurface,
+    glm::uvec4 contentRect) const
 {
     const PipelineType pipelineType = PipelineType::eComposite2D;
     if (!bind_pipeline(commandBuffer, pipelineType, pipelines))
@@ -4354,10 +4527,31 @@ void CompositePipeline::record(
         (useExternalBackdropUnderlay ? useExternalBackdropFlag : 0u) |
         (writeCompositionSurface ? writeCompositionSurfaceFlag : 0u) |
         (writeNativeSurface ? writeNativeSurfaceFlag : 0u);
-    const glm::uvec4 constants { flags, 0u, 0u, 0u };
+    DispatchBounds bounds = {};
+    if (writeNativeSurface || useExternalBackdropUnderlay)
+    {
+        bounds = make_full_screen_bounds(swapchain);
+    }
+    else if (contentRect.z > 0u && contentRect.w > 0u)
+    {
+        const uint32_t x = std::min(contentRect.x, swapchain.extent.width);
+        const uint32_t y = std::min(contentRect.y, swapchain.extent.height);
+        bounds = {
+            x,
+            y,
+            std::min(contentRect.z, swapchain.extent.width - x),
+            std::min(contentRect.w, swapchain.extent.height - y)
+        };
+    }
+    if (bounds.empty())
+    {
+        return;
+    }
+
+    const glm::uvec4 constants { flags, bounds.x, bounds.y, 0u };
     commandBuffer.pushConstants(pipelineLayouts[pipelineType],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-    dispatch_bounds(commandBuffer, make_full_screen_bounds(swapchain));
+    dispatch_bounds(commandBuffer, bounds);
     insert_compute_memory_barrier(commandBuffer);
 }
 
@@ -4798,6 +4992,194 @@ void Renderer2D::record(
             true,
             externalBackdropAvailable);
     }
+
+    DispatchBounds visibleBounds = {};
+    auto include_bounds = [&](DispatchBounds& target, const DispatchBounds& bounds) {
+        if (bounds.empty())
+        {
+            return;
+        }
+        if (target.empty())
+        {
+            target = bounds;
+            return;
+        }
+        const uint32_t left = std::min(target.x, bounds.x);
+        const uint32_t top = std::min(target.y, bounds.y);
+        const uint32_t right = std::max(
+            target.x + target.width,
+            bounds.x + bounds.width);
+        const uint32_t bottom = std::max(
+            target.y + target.height,
+            bounds.y + bounds.height);
+        target = { left, top, right - left, bottom - top };
+    };
+    auto include_batches = [&](DispatchBounds& target,
+                               const std::vector<Renderer2DBatch>& batches,
+                               DispatchBoundsMode mode) {
+        for (const Renderer2DBatch& batch : batches)
+        {
+            include_bounds(target, make_dispatch_bounds(swapchain, batch, mode));
+        }
+    };
+    auto include_blurs = [&](DispatchBounds& target,
+                             const std::vector<Renderer2DBatch>& batches) {
+        for (const Renderer2DBatch& batch : batches)
+        {
+            include_bounds(target, make_blur_dispatch_bounds(swapchain, batch));
+        }
+    };
+    auto include_plan = [&](DispatchBounds& target, const Renderer2DRenderPlan& plan) {
+        include_blurs(target, plan.panelBlurs);
+        include_batches(target, plan.shadows, DispatchBoundsMode::eShadow);
+        include_blurs(target, plan.blurs);
+        include_batches(target, plan.shapes, DispatchBoundsMode::eShape);
+        include_batches(target, plan.media, DispatchBoundsMode::eExact);
+        include_batches(target, plan.texts, DispatchBoundsMode::eText);
+        for (const Renderer3DModelBatch& model : plan.models)
+        {
+            include_bounds(target, make_dispatch_bounds(
+                swapchain,
+                intersect_rect(model.viewportRect, model.clipRect),
+                2.0f));
+        }
+    };
+
+    if (triangleCount > 0u)
+    {
+        visibleBounds = make_full_screen_bounds(swapchain);
+    }
+    else
+    {
+        include_plan(visibleBounds, renderPlanCache);
+        include_blurs(visibleBounds, renderPlanCache.cachedPanelBlurs);
+        include_batches(visibleBounds, renderPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
+        include_blurs(visibleBounds, renderPlanCache.cachedBlurs);
+        include_batches(visibleBounds, renderPlanCache.cachedShapes, DispatchBoundsMode::eShape);
+        include_batches(visibleBounds, renderPlanCache.cachedMedia, DispatchBoundsMode::eExact);
+        include_batches(visibleBounds, renderPlanCache.cachedTexts, DispatchBoundsMode::eText);
+    }
+    contentBounds = {
+        visibleBounds.x,
+        visibleBounds.y,
+        visibleBounds.width,
+        visibleBounds.height
+    };
+    std::vector<std::pair<entt::entity, glm::uvec4>> currentEntityBounds;
+    auto include_entity_bounds = [&](entt::entity entity, const DispatchBounds& bounds) {
+        if (entity == entt::null || bounds.empty())
+        {
+            return;
+        }
+        auto existing = std::find_if(
+            currentEntityBounds.begin(),
+            currentEntityBounds.end(),
+            [&](const auto& entry) { return entry.first == entity; });
+        if (existing == currentEntityBounds.end())
+        {
+            currentEntityBounds.emplace_back(
+                entity,
+                glm::uvec4 { bounds.x, bounds.y, bounds.width, bounds.height });
+            return;
+        }
+        const glm::uvec4 previous = existing->second;
+        const uint32_t x = std::min(previous.x, bounds.x);
+        const uint32_t y = std::min(previous.y, bounds.y);
+        const uint32_t right = std::max(
+            previous.x + previous.z,
+            bounds.x + bounds.width);
+        const uint32_t bottom = std::max(
+            previous.y + previous.w,
+            bounds.y + bounds.height);
+        existing->second = { x, y, right - x, bottom - y };
+    };
+    auto record_batch_bounds = [&](const std::vector<Renderer2DBatch>& batches,
+                                   DispatchBoundsMode mode) {
+        for (const Renderer2DBatch& batch : batches)
+        {
+            include_entity_bounds(
+                batch.entity,
+                make_dispatch_bounds(swapchain, batch, mode));
+        }
+    };
+    auto record_blur_bounds = [&](const std::vector<Renderer2DBatch>& batches) {
+        for (const Renderer2DBatch& batch : batches)
+        {
+            include_entity_bounds(
+                batch.entity,
+                make_blur_dispatch_bounds(swapchain, batch));
+        }
+    };
+    auto record_plan_bounds = [&](const Renderer2DRenderPlan& plan) {
+        record_blur_bounds(plan.panelBlurs);
+        record_batch_bounds(plan.shadows, DispatchBoundsMode::eShadow);
+        record_blur_bounds(plan.blurs);
+        record_batch_bounds(plan.shapes, DispatchBoundsMode::eShape);
+        record_batch_bounds(plan.media, DispatchBoundsMode::eExact);
+        record_batch_bounds(plan.texts, DispatchBoundsMode::eText);
+        for (const Renderer3DModelBatch& model : plan.models)
+        {
+            include_entity_bounds(
+                model.entity,
+                make_dispatch_bounds(
+                    swapchain,
+                    intersect_rect(model.viewportRect, model.clipRect),
+                    2.0f));
+        }
+    };
+    record_plan_bounds(renderPlanCache);
+    record_blur_bounds(renderPlanCache.cachedPanelBlurs);
+    record_batch_bounds(renderPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
+    record_blur_bounds(renderPlanCache.cachedBlurs);
+    record_batch_bounds(renderPlanCache.cachedShapes, DispatchBoundsMode::eShape);
+    record_batch_bounds(renderPlanCache.cachedMedia, DispatchBoundsMode::eExact);
+    record_batch_bounds(renderPlanCache.cachedTexts, DispatchBoundsMode::eText);
+
+    DispatchBounds trackedDamage = {};
+    if (triangleCount > 0u || rebuildCachedLayer || scene.fullDamagePending_)
+    {
+        trackedDamage = visibleBounds;
+        for (const auto& bounds : scene.presentedBounds_)
+        {
+            include_bounds(
+                trackedDamage,
+                DispatchBounds {
+                    bounds.second.x,
+                    bounds.second.y,
+                    bounds.second.z,
+                    bounds.second.w });
+        }
+    }
+    else
+    {
+        auto include_tracked = [&](const auto& bounds) {
+            if (scene.damage_pending(bounds.first, currentTimeSeconds))
+            {
+                include_bounds(
+                    trackedDamage,
+                    DispatchBounds {
+                        bounds.second.x,
+                        bounds.second.y,
+                        bounds.second.z,
+                        bounds.second.w });
+            }
+        };
+        for (const auto& bounds : currentEntityBounds)
+        {
+            include_tracked(bounds);
+        }
+        for (const auto& bounds : scene.presentedBounds_)
+        {
+            include_tracked(bounds);
+        }
+    }
+    damageBounds = {
+        trackedDamage.x,
+        trackedDamage.y,
+        trackedDamage.width,
+        trackedDamage.height
+    };
+    scene.commit_presented_bounds(std::move(currentEntityBounds));
 }
 
 void Renderer2D::record_composite(
@@ -4808,10 +5190,22 @@ void Renderer2D::record_composite(
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
     bool useExternalBackdropUnderlay,
     bool writeNativeSurface,
-    bool writeCompositionSurface) const
+    bool writeCompositionSurface,
+    glm::uvec4 contentRect) const
 {
     compositePipeline.record(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
         useExternalBackdropUnderlay,
         writeNativeSurface,
-        writeCompositionSurface);
+        writeCompositionSurface,
+        contentRect);
+}
+
+glm::uvec4 Renderer2D::content_bounds() const
+{
+    return contentBounds;
+}
+
+glm::uvec4 Renderer2D::damage_bounds() const
+{
+    return damageBounds;
 }

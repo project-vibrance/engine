@@ -36,7 +36,9 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -76,6 +78,24 @@ inline constexpr winrt::guid winrt::impl::guid_v<
 namespace
 {
 thread_local std::string lastCompositionError;
+
+constexpr HRESULT windowAlreadyComposed =
+    static_cast<HRESULT>(0x88980800u);
+
+std::mutex activeCompositionWindowsMutex;
+std::unordered_set<HWND> activeCompositionWindows;
+
+bool claim_composition_window(HWND window)
+{
+    std::lock_guard<std::mutex> lock(activeCompositionWindowsMutex);
+    return window && activeCompositionWindows.insert(window).second;
+}
+
+void release_composition_window(HWND window) noexcept
+{
+    std::lock_guard<std::mutex> lock(activeCompositionWindowsMutex);
+    activeCompositionWindows.erase(window);
+}
 
 DWORD windows_build_number() noexcept
 {
@@ -534,7 +554,13 @@ class CompositionBridge
     {
         VibranceCompositionRegion descriptor {};
         composition::ContainerVisual container { nullptr };
+        composition::ContainerVisual materialContainer { nullptr };
+        composition::SpriteVisual materialVisual { nullptr };
+        composition::SpriteVisual glazeVisual { nullptr };
+        composition::SpriteVisual tintVisual { nullptr };
+        composition::CompositionSurfaceBrush liquidSurfaceBrush { nullptr };
         std::vector<LiquidSurfaceSample> liquidBackdropSamples;
+        bool materialInset = false;
     };
 
 public:
@@ -542,7 +568,8 @@ public:
         window_(static_cast<HWND>(info.window)),
         width_(info.width),
         height_(info.height),
-        bufferCount_(info.bufferCount)
+        bufferCount_(info.bufferCount),
+        windowClaimed_(claim_composition_window(window_))
     {
         adapterLuid_.LowPart = info.adapterLuidLow;
         adapterLuid_.HighPart = info.adapterLuidHigh;
@@ -551,22 +578,12 @@ public:
     ~CompositionBridge()
     {
         reset_private_desktop();
-        if (regions_)
-        {
-            regions_.Children().RemoveAll();
-        }
-        if (target_)
-        {
-            target_.Root(nullptr);
-        }
+        release_composition_target();
         content_ = nullptr;
         regions_ = nullptr;
         root_ = nullptr;
-        target_ = nullptr;
         compositor_ = nullptr;
         privateCompositorPartner_ = nullptr;
-        compositionTarget_ = nullptr;
-        compositionDevice_ = nullptr;
         d2dDevice_ = nullptr;
         d2dFactory_ = nullptr;
         dispatcherController_ = nullptr;
@@ -583,7 +600,17 @@ public:
 
         queries_.clear();
         sharedTextures_.clear();
+        backBuffers_.clear();
+        backBufferInitialised_.clear();
+        backBufferContentRects_.clear();
+        backBufferPendingDamageRects_.clear();
+        swapchain3_ = nullptr;
         swapchain_ = nullptr;
+        if (frameLatencyWaitableObject_)
+        {
+            CloseHandle(frameLatencyWaitableObject_);
+            frameLatencyWaitableObject_ = nullptr;
+        }
         context_ = nullptr;
         device_ = nullptr;
         for (HANDLE handle : sharedHandles_)
@@ -598,6 +625,11 @@ public:
         {
             winrt::uninit_apartment();
         }
+        if (windowClaimed_)
+        {
+            release_composition_window(window_);
+            windowClaimed_ = false;
+        }
     }
 
     bool initialise(
@@ -605,6 +637,12 @@ public:
         std::uint32_t outputCount)
     {
         lastCompositionError.clear();
+        if (!windowClaimed_)
+        {
+            lastCompositionError =
+                "another vibranceUI Composition presenter already owns this HWND";
+            return false;
+        }
         if (!window_ || width_ == 0u || height_ == 0u ||
             bufferCount_ < 2u || outputCount < bufferCount_)
         {
@@ -644,7 +682,11 @@ public:
         {
             if (!initialise_composition())
             {
-                lastCompositionError = "Windows.UI.Composition initialisation failed";
+                if (lastCompositionError.empty())
+                {
+                    lastCompositionError =
+                        "Windows.UI.Composition initialisation failed";
+                }
                 return false;
             }
         }
@@ -695,35 +737,153 @@ public:
         return false;
     }
 
-    bool present(std::uint32_t index)
+    std::uint32_t present(
+        std::uint32_t index,
+        const VibranceCompositionPresentInfo* presentInfo)
     {
-        if (index >= sharedTextures_.size() || !swapchain_ || !context_)
+        if (index >= sharedTextures_.size() || !swapchain_ || !swapchain3_ ||
+            !context_ || backBuffers_.empty() || !presentInfo ||
+            presentInfo->structSize < sizeof(VibranceCompositionPresentInfo))
         {
-            return false;
+            return VIBRANCE_COMPOSITION_PRESENT_FAILED;
         }
 
-        winrt::com_ptr<IDXGISwapChain3> swapchain3;
-        if (FAILED(swapchain_->QueryInterface(swapchain3.put())))
+        const bool synchronize =
+            (presentInfo->flags & VIBRANCE_COMPOSITION_PRESENT_SYNCHRONIZE) != 0u;
+        // Avoid recording a full-size D3D copy when DWM has not consumed the
+        // previous frame. The newest completed Vulkan frame will be offered on
+        // the next display opportunity instead.
+        if (frameLatencyWaitableObject_)
         {
-            return false;
+            const DWORD waitResult = WaitForSingleObject(
+                frameLatencyWaitableObject_,
+                synchronize ? 100u : 0u);
+            if (waitResult == WAIT_TIMEOUT)
+            {
+                return VIBRANCE_COMPOSITION_PRESENT_DEFERRED;
+            }
+            if (waitResult == WAIT_FAILED)
+            {
+                return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+            }
         }
         const std::uint32_t backBufferIndex =
-            swapchain3->GetCurrentBackBufferIndex();
-        winrt::com_ptr<ID3D11Texture2D> backBuffer;
-        if (FAILED(swapchain_->GetBuffer(
-                backBufferIndex,
-                __uuidof(ID3D11Texture2D),
-                backBuffer.put_void())))
+            swapchain3_->GetCurrentBackBufferIndex();
+        if (backBufferIndex >= backBuffers_.size() ||
+            backBufferIndex >= backBufferInitialised_.size() ||
+            backBufferIndex >= backBufferContentRects_.size() ||
+            backBufferIndex >= backBufferPendingDamageRects_.size())
         {
-            return false;
+            return VIBRANCE_COMPOSITION_PRESENT_FAILED;
         }
 
-        context_->CopyResource(backBuffer.get(), sharedTextures_[index].get());
+        const LONG contentLeft = static_cast<LONG>(std::min(
+            presentInfo->contentX,
+            width_));
+        const LONG contentTop = static_cast<LONG>(std::min(
+            presentInfo->contentY,
+            height_));
+        const LONG contentRight = static_cast<LONG>(std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(presentInfo->contentX) +
+                presentInfo->contentWidth,
+            width_));
+        const LONG contentBottom = static_cast<LONG>(std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(presentInfo->contentY) +
+                presentInfo->contentHeight,
+            height_));
+        RECT contentRect {
+            contentLeft,
+            contentTop,
+            std::max(contentRight, contentLeft),
+            std::max(contentBottom, contentTop)
+        };
+        const LONG damageLeft = static_cast<LONG>(std::min(
+            presentInfo->damageX,
+            width_));
+        const LONG damageTop = static_cast<LONG>(std::min(
+            presentInfo->damageY,
+            height_));
+        const LONG damageRight = static_cast<LONG>(std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(presentInfo->damageX) +
+                presentInfo->damageWidth,
+            width_));
+        const LONG damageBottom = static_cast<LONG>(std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(presentInfo->damageY) +
+                presentInfo->damageHeight,
+            height_));
+        RECT damageRect {
+            damageLeft,
+            damageTop,
+            std::max(damageRight, damageLeft),
+            std::max(damageBottom, damageTop)
+        };
+        auto has_area = [](const RECT& rect) {
+            return rect.right > rect.left && rect.bottom > rect.top;
+        };
+        auto union_rect = [&](const RECT& left, const RECT& right) {
+            if (!has_area(left))
+            {
+                return right;
+            }
+            if (!has_area(right))
+            {
+                return left;
+            }
+            return RECT {
+                std::min(left.left, right.left),
+                std::min(left.top, right.top),
+                std::max(left.right, right.right),
+                std::max(left.bottom, right.bottom)
+            };
+        };
+
+        for (RECT& pendingDamage : backBufferPendingDamageRects_)
+        {
+            pendingDamage = union_rect(pendingDamage, damageRect);
+        }
+        RECT copyRect = backBufferPendingDamageRects_[backBufferIndex];
+        if (!backBufferInitialised_[backBufferIndex])
+        {
+            copyRect = {
+                0,
+                0,
+                static_cast<LONG>(width_),
+                static_cast<LONG>(height_)
+            };
+            context_->CopyResource(
+                backBuffers_[backBufferIndex].get(),
+                sharedTextures_[index].get());
+            backBufferInitialised_[backBufferIndex] = true;
+        }
+        else if (has_area(copyRect))
+        {
+            D3D11_BOX sourceBox {};
+            sourceBox.left = static_cast<UINT>(copyRect.left);
+            sourceBox.top = static_cast<UINT>(copyRect.top);
+            sourceBox.front = 0u;
+            sourceBox.right = static_cast<UINT>(copyRect.right);
+            sourceBox.bottom = static_cast<UINT>(copyRect.bottom);
+            sourceBox.back = 1u;
+            context_->CopySubresourceRegion(
+                backBuffers_[backBufferIndex].get(),
+                0u,
+                sourceBox.left,
+                sourceBox.top,
+                0u,
+                sharedTextures_[index].get(),
+                0u,
+                &sourceBox);
+        }
+        backBufferContentRects_[backBufferIndex] = contentRect;
         context_->End(queries_[index].get());
         queryPending_[index] = true;
-        const HRESULT presentResult = swapchain_->Present(
+        DXGI_PRESENT_PARAMETERS parameters {};
+        parameters.DirtyRectsCount = has_area(copyRect) ? 1u : 0u;
+        parameters.pDirtyRects = has_area(copyRect) ? &copyRect : nullptr;
+        const HRESULT presentResult = swapchain_->Present1(
             0u,
-            DXGI_PRESENT_DO_NOT_WAIT);
+            synchronize ? 0u : DXGI_PRESENT_DO_NOT_WAIT,
+            &parameters);
         // The compositor already has a newer queued frame. Dropping this copy
         // is preferable to blocking the Vulkan submission thread.
         if (presentResult == DXGI_ERROR_WAS_STILL_DRAWING)
@@ -731,9 +891,15 @@ public:
             // Present did not submit this command stream, so explicitly flush
             // the copy/query that releases the shared texture back to Vulkan.
             context_->Flush();
-            return true;
+            return VIBRANCE_COMPOSITION_PRESENT_DEFERRED;
         }
-        return SUCCEEDED(presentResult);
+        if (SUCCEEDED(presentResult))
+        {
+            backBufferPendingDamageRects_[backBufferIndex] = RECT {};
+        }
+        return SUCCEEDED(presentResult) ?
+            VIBRANCE_COMPOSITION_PRESENTED :
+            VIBRANCE_COMPOSITION_PRESENT_FAILED;
     }
 
     bool set_regions(
@@ -746,9 +912,9 @@ public:
         }
         try
         {
-            bool canUpdateInPlace = regionVisuals_.size() == count;
-            bool exactlyUnchanged = canUpdateInPlace;
-            if (canUpdateInPlace)
+            bool canUpdateGeometry = regionVisuals_.size() == count;
+            bool exactlyUnchanged = canUpdateGeometry;
+            if (canUpdateGeometry)
             {
                 for (std::uint32_t index = 0u; index < count; ++index)
                 {
@@ -757,11 +923,11 @@ public:
                             &regionVisuals_[index].descriptor,
                             &regions[index],
                             sizeof(regions[index])) == 0;
-                    if (!same_region_except_position(
+                    if (!same_region_effect_graph(
                             regionVisuals_[index].descriptor,
                             regions[index]))
                     {
-                        canUpdateInPlace = false;
+                        canUpdateGeometry = false;
                         break;
                     }
                 }
@@ -770,14 +936,16 @@ public:
             {
                 return true;
             }
-            if (canUpdateInPlace)
+            if (canUpdateGeometry)
             {
-                // A drag changes only offsets. Retaining the visual/effect
-                // objects lets DWM interpolate one continuous composition
-                // tree instead of flashing between destroyed trees.
+                // Position, size, radii, squircle and notch changes only alter
+                // visual geometry. Retain the effect brushes and private-DWM
+                // source graph while an island morphs; rebuilding every region
+                // on every spring sample creates a large transient GPU/resource
+                // backlog in DWM that can remain visible after hover ends.
                 for (std::uint32_t index = 0u; index < count; ++index)
                 {
-                    update_region_position(regionVisuals_[index], regions[index]);
+                    update_region_geometry(regionVisuals_[index], regions[index]);
                 }
                 return true;
             }
@@ -817,17 +985,41 @@ public:
     }
 
 private:
-    static bool same_region_except_position(
+    static bool same_region_effect_graph(
         VibranceCompositionRegion left,
         VibranceCompositionRegion right) noexcept
     {
-        // All bridge descriptors are zero-initialised before being populated,
-        // including their padding. Position is the only value allowed to
-        // change without rebuilding the shape/effect graph.
+        // These fields affect only visual geometry. Material/provider, blur,
+        // saturation, refraction, tint and vertical split still require a new
+        // effect graph.
+        left.shape = 0u;
+        right.shape = 0u;
         left.x = 0.0f;
         left.y = 0.0f;
         right.x = 0.0f;
         right.y = 0.0f;
+        left.width = 0.0f;
+        left.height = 0.0f;
+        right.width = 0.0f;
+        right.height = 0.0f;
+        left.cornerRadius = 0.0f;
+        left.topLeftRadius = 0.0f;
+        left.topRightRadius = 0.0f;
+        left.bottomRightRadius = 0.0f;
+        left.bottomLeftRadius = 0.0f;
+        right.cornerRadius = 0.0f;
+        right.topLeftRadius = 0.0f;
+        right.topRightRadius = 0.0f;
+        right.bottomRightRadius = 0.0f;
+        right.bottomLeftRadius = 0.0f;
+        left.squircleAmount = 0.0f;
+        left.squirclePower = 0.0f;
+        left.notchAmount = 0.0f;
+        left.notchDepth = 0.0f;
+        right.squircleAmount = 0.0f;
+        right.squirclePower = 0.0f;
+        right.notchAmount = 0.0f;
+        right.notchDepth = 0.0f;
         return std::memcmp(&left, &right, sizeof(left)) == 0;
     }
 
@@ -851,30 +1043,108 @@ private:
         };
     }
 
-    void update_region_position(
+    void update_region_geometry(
         RegionVisualState& state,
         const VibranceCompositionRegion& region)
     {
+        const VibranceCompositionRegion& previous = state.descriptor;
+        const bool positionChanged =
+            previous.x != region.x ||
+            previous.y != region.y;
+        const bool sizeChanged =
+            previous.width != region.width ||
+            previous.height != region.height;
+        const bool materialGeometryChanged =
+            sizeChanged ||
+            previous.verticalStart != region.verticalStart;
+        const bool clipChanged =
+            sizeChanged ||
+            previous.shape != region.shape ||
+            previous.cornerRadius != region.cornerRadius ||
+            previous.topLeftRadius != region.topLeftRadius ||
+            previous.topRightRadius != region.topRightRadius ||
+            previous.bottomRightRadius != region.bottomRightRadius ||
+            previous.bottomLeftRadius != region.bottomLeftRadius ||
+            previous.squircleAmount != region.squircleAmount ||
+            previous.squirclePower != region.squirclePower ||
+            previous.notchAmount != region.notchAmount ||
+            previous.notchDepth != region.notchDepth;
+
         if (state.container)
         {
-            state.container.Offset({ region.x, region.y, 0.0f });
+            if (positionChanged)
+            {
+                state.container.Offset({ region.x, region.y, 0.0f });
+            }
+            if (sizeChanged)
+            {
+                state.container.Size({ region.width, region.height });
+            }
+            if (clipChanged)
+            {
+                // Composition clips are immutable geometry objects. Replacing
+                // one for a pure translation allocated compositor resources
+                // every pointer sample and was the main drag-time GPU spike.
+                state.container.Clip(make_clip(region));
+            }
         }
-        if (privateDesktopSource_ && !private_desktop_geometry_current())
+
+        const float materialTop =
+            std::clamp(region.verticalStart, 0.0f, 0.98f) * region.height;
+        const float materialHeight = std::max(region.height - materialTop, 1.0f);
+        if (materialGeometryChanged && state.materialContainer)
+        {
+            if (state.materialInset)
+            {
+                state.materialContainer.Offset({ 0.0f, materialTop, 0.0f });
+            }
+            state.materialContainer.Size({ region.width, materialHeight });
+        }
+        if (materialGeometryChanged && state.materialVisual)
+        {
+            state.materialVisual.Size({ region.width, materialHeight });
+        }
+        if (materialGeometryChanged && state.glazeVisual)
+        {
+            state.glazeVisual.Size({ region.width, materialHeight });
+        }
+        if (materialGeometryChanged && state.tintVisual)
+        {
+            state.tintVisual.Size({ region.width, materialHeight });
+        }
+        if (materialGeometryChanged && state.liquidSurfaceBrush)
+        {
+            state.liquidSurfaceBrush.CenterPoint({
+                region.width * 0.5f,
+                materialHeight * 0.5f
+            });
+        }
+        if (!state.liquidBackdropSamples.empty() &&
+            privateDesktopSource_ &&
+            !private_desktop_geometry_current())
         {
             refresh_private_desktop();
         }
-        for (LiquidSurfaceSample& sample : state.liquidBackdropSamples)
+        if (positionChanged || materialGeometryChanged)
         {
-            const auto origin = sample.privateDesktop ?
-                liquid_source_offset(region) :
-                winrt::Windows::Foundation::Numerics::float2 {
-                    region.x,
-                    region.y
-                };
-            sample.surface.SourceOffset({
-                origin.x + sample.localX,
-                origin.y + sample.localY
-            });
+            for (LiquidSurfaceSample& sample : state.liquidBackdropSamples)
+            {
+                sample.localY = materialTop;
+                const auto origin = sample.privateDesktop ?
+                    liquid_source_offset(region) :
+                    winrt::Windows::Foundation::Numerics::float2 {
+                        region.x,
+                        region.y
+                    };
+                sample.surface.SourceOffset({
+                    origin.x + sample.localX,
+                    origin.y + sample.localY
+                });
+                if (materialGeometryChanged)
+                {
+                    sample.surface.SourceSize({ region.width, materialHeight });
+                }
+            }
         }
         state.descriptor = region;
     }
@@ -994,11 +1264,25 @@ private:
         swapchainDescription.Scaling = DXGI_SCALING_STRETCH;
         swapchainDescription.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         swapchainDescription.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-        if (FAILED(factory->CreateSwapChainForComposition(
+        swapchainDescription.Flags =
+            DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        HRESULT swapchainResult = factory->CreateSwapChainForComposition(
                 device_.get(),
                 &swapchainDescription,
                 nullptr,
-                swapchain_.put())))
+                swapchain_.put());
+        if (FAILED(swapchainResult))
+        {
+            // Some older DXGI implementations reject the latency flag for a
+            // Composition swapchain. Retain a fully supported fallback.
+            swapchainDescription.Flags = 0u;
+            swapchainResult = factory->CreateSwapChainForComposition(
+                device_.get(),
+                &swapchainDescription,
+                nullptr,
+                swapchain_.put());
+        }
+        if (FAILED(swapchainResult))
         {
             lastCompositionError = "IDXGIFactory2::CreateSwapChainForComposition failed";
             return false;
@@ -1009,6 +1293,29 @@ private:
             // Keep only the freshest completed Vulkan frame queued for DWM.
             // This limits Composition latency without pacing the Vulkan loop.
             (void)lowLatencySwapchain->SetMaximumFrameLatency(1u);
+            frameLatencyWaitableObject_ =
+                lowLatencySwapchain->GetFrameLatencyWaitableObject();
+        }
+        if (FAILED(swapchain_->QueryInterface(swapchain3_.put())))
+        {
+            lastCompositionError = "IDXGISwapChain3 interface query failed";
+            return false;
+        }
+        backBuffers_.resize(swapchainDescription.BufferCount);
+        backBufferInitialised_.assign(swapchainDescription.BufferCount, false);
+        backBufferContentRects_.assign(swapchainDescription.BufferCount, RECT {});
+        backBufferPendingDamageRects_.assign(swapchainDescription.BufferCount, RECT {});
+        for (std::uint32_t index = 0u;
+            index < swapchainDescription.BufferCount; ++index)
+        {
+            if (FAILED(swapchain_->GetBuffer(
+                    index,
+                    __uuidof(ID3D11Texture2D),
+                    backBuffers_[index].put_void())))
+            {
+                lastCompositionError = "D3D11 swapchain back-buffer query failed";
+                return false;
+            }
         }
 
         sharedTextures_.resize(bufferCount_);
@@ -1116,16 +1423,35 @@ private:
                 return false;
             }
             winrt::com_ptr<IDCompositionTarget> compositionTarget;
-            if (FAILED(compositionDevice->CreateTargetForHwnd(
+            HRESULT targetResult = compositionDevice->CreateTargetForHwnd(
+                window_,
+                TRUE,
+                compositionTarget.put());
+            if (targetResult == windowAlreadyComposed)
+            {
+                // An existing framework/native presenter may already own the
+                // topmost layer. Windows supports one target on each HWND
+                // layer, so use the non-topmost layer before giving up.
+                targetResult = compositionDevice->CreateTargetForHwnd(
                     window_,
-                    TRUE,
-                    compositionTarget.put())))
+                    FALSE,
+                    compositionTarget.put());
+            }
+            if (FAILED(targetResult))
             {
                 return false;
             }
             auto target = compositionTarget.try_as<composition::CompositionTarget>();
             if (!target)
             {
+                // CreateTargetForHwnd can bind the HWND before the private
+                // target is proven compatible with this Windows runtime. Undo
+                // that binding and wait for DWM before the public fallback.
+                (void)compositionTarget->SetRoot(nullptr);
+                (void)compositionDevice->Commit();
+                (void)compositionDevice->WaitForCommitCompletion();
+                compositionTarget = nullptr;
+                DwmFlush();
                 return false;
             }
 
@@ -1176,11 +1502,21 @@ private:
             const auto desktopInterop = compositor_.as<
                 ABI::Windows::UI::Composition::Desktop::ICompositorDesktopInterop>();
             composition::Desktop::DesktopWindowTarget desktopTarget { nullptr };
-            winrt::check_hresult(desktopInterop->CreateDesktopWindowTarget(
+            HRESULT targetResult = desktopInterop->CreateDesktopWindowTarget(
                 window_,
                 true,
                 reinterpret_cast<ABI::Windows::UI::Composition::Desktop::IDesktopWindowTarget**>(
-                    winrt::put_abi(desktopTarget))));
+                    winrt::put_abi(desktopTarget)));
+            if (targetResult == windowAlreadyComposed)
+            {
+                desktopTarget = nullptr;
+                targetResult = desktopInterop->CreateDesktopWindowTarget(
+                    window_,
+                    false,
+                    reinterpret_cast<ABI::Windows::UI::Composition::Desktop::IDesktopWindowTarget**>(
+                        winrt::put_abi(desktopTarget)));
+            }
+            winrt::check_hresult(targetResult);
             target_ = desktopTarget.as<composition::CompositionTarget>();
         }
 
@@ -1207,6 +1543,42 @@ private:
         root_.Children().InsertAtTop(content_);
         target_.Root(root_);
         return true;
+    }
+
+    void release_composition_target() noexcept
+    {
+        try
+        {
+            if (regions_)
+            {
+                regions_.Children().RemoveAll();
+            }
+            if (target_)
+            {
+                target_.Root(nullptr);
+            }
+        }
+        catch (...)
+        {
+        }
+        if (compositionTarget_)
+        {
+            (void)compositionTarget_->SetRoot(nullptr);
+        }
+        if (compositionDevice_)
+        {
+            (void)compositionDevice_->Commit();
+            (void)compositionDevice_->WaitForCommitCompletion();
+        }
+        target_ = nullptr;
+        compositionTarget_ = nullptr;
+        compositionDevice_ = nullptr;
+        // Target release is asynchronous with DWM. Flushing here prevents a
+        // resize/rebuild from racing the old target on the same HWND layer.
+        if (window_)
+        {
+            DwmFlush();
+        }
     }
 
     void reset_private_desktop() noexcept
@@ -2039,7 +2411,7 @@ private:
         return true;
     }
 
-    composition::CompositionBrush make_private_liquid_source_brush(
+    composition::CompositionSurfaceBrush make_private_liquid_source_brush(
         const VibranceCompositionRegion& region,
         composition::CompositionVisualSurface& visualSurface)
     {
@@ -2114,7 +2486,7 @@ private:
     bool build_liquid_lens(
         const composition::ContainerVisual& container,
         const VibranceCompositionRegion& region,
-        std::vector<LiquidSurfaceSample>& retainedSamples)
+        RegionVisualState& state)
     {
         composition::CompositionVisualSurface backdropSurface { nullptr };
         auto lensSource = make_private_liquid_source_brush(
@@ -2130,8 +2502,10 @@ private:
         lens.Brush(make_effect_brush(region, lensSource));
         container.Children().InsertAtBottom(lens);
 
-        retainedSamples.clear();
-        retainedSamples.push_back({
+        state.materialVisual = lens;
+        state.liquidSurfaceBrush = lensSource;
+        state.liquidBackdropSamples.clear();
+        state.liquidBackdropSamples.push_back({
             std::move(backdropSurface),
             0.0f,
             0.0f,
@@ -2281,14 +2655,16 @@ private:
             materialContainer.Offset({ 0.0f, materialTop, 0.0f });
             materialContainer.Size({ region.width, materialRegion.height });
             container.Children().InsertAtTop(materialContainer);
+            state.materialInset = true;
         }
+        state.materialContainer = materialContainer;
 
         if (region.material == 3u)
         {
             if (!build_liquid_lens(
                     materialContainer,
                     materialRegion,
-                    state.liquidBackdropSamples))
+                    state))
             {
                 OutputDebugStringW(
                     L"vibranceUI: liquid request resolved to off because the private DWM visual is unavailable.\n");
@@ -2303,6 +2679,7 @@ private:
             glaze.Size(materialContainer.Size());
             glaze.Brush(make_liquid_glaze());
             materialContainer.Children().InsertAtTop(glaze);
+            state.glazeVisual = glaze;
         }
         else
         {
@@ -2310,6 +2687,7 @@ private:
             backdrop.Size(materialContainer.Size());
             backdrop.Brush(make_effect_brush(materialRegion));
             materialContainer.Children().InsertAtBottom(backdrop);
+            state.materialVisual = backdrop;
         }
 
         if (region.material == 2u || region.material == 3u)
@@ -2322,6 +2700,7 @@ private:
                 region.tintBlue,
                 region.tintAlpha)));
             materialContainer.Children().InsertAtTop(tint);
+            state.tintVisual = tint;
         }
 
         regions_.Children().InsertAtTop(container);
@@ -2337,6 +2716,7 @@ private:
     bool apartmentOwned_ = false;
     bool hostBackdropEnabled_ = false;
     bool privateInteropEnabled_ = false;
+    bool windowClaimed_ = false;
     bool privateDesktopWindowAttribute_ = false;
     DWORD windowsBuild_ = 0u;
 
@@ -2344,6 +2724,12 @@ private:
     winrt::com_ptr<ID3D11Device5> device_;
     winrt::com_ptr<ID3D11DeviceContext4> context_;
     winrt::com_ptr<IDXGISwapChain1> swapchain_;
+    winrt::com_ptr<IDXGISwapChain3> swapchain3_;
+    std::vector<winrt::com_ptr<ID3D11Texture2D>> backBuffers_;
+    std::vector<bool> backBufferInitialised_;
+    std::vector<RECT> backBufferContentRects_;
+    std::vector<RECT> backBufferPendingDamageRects_;
+    HANDLE frameLatencyWaitableObject_ = nullptr;
     std::vector<winrt::com_ptr<ID3D11Texture2D>> sharedTextures_;
     std::vector<HANDLE> sharedHandles_;
     std::vector<winrt::com_ptr<ID3D11Query>> queries_;
@@ -2440,10 +2826,13 @@ vibrance_composition_acquire(
 extern "C" __declspec(dllexport) std::uint32_t __cdecl
 vibrance_composition_present(
     VibranceCompositionHandle handle,
-    std::uint32_t index)
+    std::uint32_t index,
+    const VibranceCompositionPresentInfo* presentInfo)
 {
     auto* bridge = static_cast<CompositionBridge*>(handle);
-    return bridge && bridge->present(index) ? 1u : 0u;
+    return bridge ?
+        bridge->present(index, presentInfo) :
+        VIBRANCE_COMPOSITION_PRESENT_FAILED;
 }
 
 extern "C" __declspec(dllexport) std::uint32_t __cdecl

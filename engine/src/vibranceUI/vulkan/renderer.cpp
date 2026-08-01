@@ -48,6 +48,67 @@ namespace
 	constexpr uint32_t kMaxModel3DMaterialSets = 2048;
 	constexpr uint32_t kMaxMedia2DTextures = 2048;
 
+	struct RetainedDamageTracker
+	{
+		std::vector<glm::uvec4> pendingRects;
+
+		void clear()
+		{
+			pendingRects.clear();
+		}
+
+		void reset(uint32_t bufferCount, glm::uvec4 initialDamage = glm::uvec4(0u))
+		{
+			pendingRects.assign(bufferCount, initialDamage);
+		}
+
+		void ensure_buffer_count(uint32_t bufferCount, glm::uvec4 fullDamage)
+		{
+			if (pendingRects.size() != bufferCount)
+			{
+				// A changed imported-image set has no trustworthy retained contents.
+				// Force each new buffer through one complete resynchronisation.
+				reset(bufferCount, fullDamage);
+			}
+		}
+
+		glm::uvec4 pending_for(uint32_t bufferIndex) const
+		{
+			return bufferIndex < pendingRects.size() ?
+				pendingRects[bufferIndex] : glm::uvec4(0u);
+		}
+
+		void commit(uint32_t renderedBufferIndex, glm::uvec4 sceneDamage)
+		{
+			for (glm::uvec4& pendingDamage : pendingRects)
+			{
+				pendingDamage = union_rect(pendingDamage, sceneDamage);
+			}
+			if (renderedBufferIndex < pendingRects.size())
+			{
+				pendingRects[renderedBufferIndex] = glm::uvec4(0u);
+			}
+		}
+
+	private:
+		static glm::uvec4 union_rect(glm::uvec4 left, glm::uvec4 right)
+		{
+			if (left.z == 0u || left.w == 0u)
+			{
+				return right;
+			}
+			if (right.z == 0u || right.w == 0u)
+			{
+				return left;
+			}
+			const uint32_t x = std::min(left.x, right.x);
+			const uint32_t y = std::min(left.y, right.y);
+			const uint32_t rightEdge = std::max(left.x + left.z, right.x + right.z);
+			const uint32_t bottomEdge = std::max(left.y + left.w, right.y + right.w);
+			return { x, y, rightEdge - x, bottomEdge - y };
+		}
+	};
+
 	std::string resource_file_cache_version(const std::filesystem::path& path)
 	{
 		std::error_code error;
@@ -705,6 +766,7 @@ struct Engine::Impl
 	std::vector<RendererPresentMode> available_present_modes() const;
 	void set_target_frame_rate(uint32_t frameRate);
 	uint32_t target_frame_rate() const;
+	uint32_t recommended_ui_update_rate() const;
 	void update_camera(const CameraInput& input);
 	void resize(uint32_t width, uint32_t height);
 	Model3DHandle load_model_3d(const std::filesystem::path& path);
@@ -743,6 +805,7 @@ private:
 	void make_pipelines();
 	bool rebuild_composition_presenter();
 	void update_system_backdrop_regions();
+	void publish_completed_composition_frames();
 
 	uint32_t framebufferWidth = 0;
 	uint32_t framebufferHeight = 0;
@@ -799,11 +862,15 @@ private:
 	std::chrono::steady_clock::time_point nextFrameDeadline {};
 	std::vector<bool> compositionFramePending;
 	std::vector<uint32_t> compositionFrameBufferIndices;
+	RetainedDamageTracker compositionBufferDamage;
 	uint32_t nextCompositionBufferIndex = 0u;
 	uint32_t compositionFrameRate = 60u;
 	std::chrono::steady_clock::time_point nextCompositionSubmitDeadline {};
 	std::chrono::steady_clock::time_point nextCompositionPollDeadline {};
+	std::chrono::steady_clock::time_point nextNativeSubmitDeadline {};
 	bool nativeTransparencyPrimed = false;
+	bool hasSubmittedFrame = false;
+	uint64_t lastSubmittedFrameGeneration = 0u;
 
 	std::unordered_map<uint32_t, Model3DAsset> modelAssets;
 	std::unordered_map<std::string, uint32_t> modelIdsByPath;
@@ -865,6 +932,11 @@ void Engine::set_target_frame_rate(uint32_t frameRate)
 uint32_t Engine::target_frame_rate() const
 {
 	return impl->target_frame_rate();
+}
+
+uint32_t Engine::recommended_ui_update_rate() const
+{
+	return impl->recommended_ui_update_rate();
 }
 
 void Engine::update_camera(const CameraInput& input)
@@ -1434,7 +1506,11 @@ bool Engine::Impl::rebuild_composition_presenter()
 	nativeTransparencyPrimed = false;
 	nextCompositionSubmitDeadline = {};
 	nextCompositionPollDeadline = {};
+	nextNativeSubmitDeadline = {};
 	nextCompositionBufferIndex = 0u;
+	hasSubmittedFrame = false;
+	lastSubmittedFrameGeneration = 0u;
+	compositionBufferDamage.clear();
 	std::fill(compositionFramePending.begin(), compositionFramePending.end(), false);
 	std::fill(
 		compositionFrameBufferIndices.begin(),
@@ -1459,6 +1535,9 @@ bool Engine::Impl::rebuild_composition_presenter()
 			graphicsQueueFamilyIndex))
 	{
 		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
+		compositionBufferDamage.reset(
+			compositionPresenter.buffer_count(),
+			glm::uvec4(0u));
 		return true;
 	}
 #endif
@@ -1472,20 +1551,25 @@ void Engine::Impl::update_system_backdrop_regions()
 		return;
 	}
 
-	std::vector<SystemBackdropRegion> regions;
+	struct OrderedBackdropRegion
+	{
+		entt::entity entity = entt::null;
+		SystemBackdropRegion region = {};
+	};
+	std::vector<OrderedBackdropRegion> orderedRegions;
 	entt::registry& registry = renderer2DScene.registry();
 	auto view = registry.view<
 		const Transform2DComponent,
 		const ShapeComponent,
 		const SystemBackdropComponent,
 		const RenderLayer2DComponent>();
-	regions.reserve(view.size_hint());
+	orderedRegions.reserve(view.size_hint());
 	const float outputScaleX = renderExtent.width > 0u ?
 		static_cast<float>(swapchain.extent.width) / static_cast<float>(renderExtent.width) : 1.0f;
 	const float outputScaleY = renderExtent.height > 0u ?
 		static_cast<float>(swapchain.extent.height) / static_cast<float>(renderExtent.height) : 1.0f;
 	view.each([&](
-		entt::entity,
+		entt::entity entity,
 		const Transform2DComponent& transform,
 		const ShapeComponent& shape,
 		const SystemBackdropComponent& backdrop,
@@ -1552,27 +1636,38 @@ void Engine::Impl::update_system_backdrop_regions()
 			region.bottomRightRadius *= shapeScale;
 			region.bottomLeftRadius *= shapeScale;
 		}
-		regions.push_back(region);
+		orderedRegions.push_back({ entity, region });
 	});
 
-	// EnTT storage order is not a presentation contract and can change when
-	// unrelated components move between pools. Keep the native composition
-	// regions deterministic so an unchanged frame never tears down its visual
-	// tree merely because iteration order changed.
+	// Composition retains one effect graph per vector slot. Material/provider/
+	// shape alone is not a stable identity: two equal-material entities could
+	// exchange slots when EnTT storage changed, making a moving lens reuse the
+	// other entity's backdrop history. Keep the entity id as the final key so a
+	// dragged region always updates its own retained graph.
 	std::stable_sort(
-		regions.begin(),
-		regions.end(),
-		[](const SystemBackdropRegion& left, const SystemBackdropRegion& right) {
-			if (left.material != right.material)
+		orderedRegions.begin(),
+		orderedRegions.end(),
+		[](const OrderedBackdropRegion& left, const OrderedBackdropRegion& right) {
+			if (left.region.material != right.region.material)
 			{
-				return left.material < right.material;
+				return left.region.material < right.region.material;
 			}
-			if (left.provider != right.provider)
+			if (left.region.provider != right.region.provider)
 			{
-				return left.provider < right.provider;
+				return left.region.provider < right.region.provider;
 			}
-			return left.shape < right.shape;
+			if (left.region.shape != right.region.shape)
+			{
+				return left.region.shape < right.region.shape;
+			}
+			return entt::to_integral(left.entity) < entt::to_integral(right.entity);
 		});
+	std::vector<SystemBackdropRegion> regions;
+	regions.reserve(orderedRegions.size());
+	for (const OrderedBackdropRegion& entry : orderedRegions)
+	{
+		regions.push_back(entry.region);
+	}
 
 	bool unchanged = regions.size() == appliedBackdropRegions.size();
 	if (unchanged)
@@ -1611,6 +1706,53 @@ void Engine::Impl::update_system_backdrop_regions()
 	{
 		Logger::fetch_logger()->warning(
 			"Windows Composition rejected the requested backdrop regions.");
+	}
+}
+
+void Engine::Impl::publish_completed_composition_frames()
+{
+	if (!compositionPresenter.available())
+	{
+		return;
+	}
+	for (std::size_t pending = 0u;
+		pending < compositionFramePending.size(); ++pending)
+	{
+		if (!compositionFramePending[pending])
+		{
+			continue;
+		}
+		const VkResult fenceStatus = vkGetFenceStatus(
+			logicalDevice,
+			frames[pending].renderFinishedFence);
+		if (fenceStatus == VK_NOT_READY)
+		{
+			continue;
+		}
+		if (fenceStatus != VK_SUCCESS)
+		{
+			logger->warning(
+				"Windows Composition could not query a completed Vulkan frame.");
+			compositionFramePending[pending] = false;
+			continue;
+		}
+
+		update_system_backdrop_regions();
+		const auto presentResult = compositionPresenter.present(
+			compositionFrameBufferIndices[pending],
+			false,
+			frames[pending].compositionContentRect,
+			frames[pending].compositionDamageRect);
+		if (presentResult == WindowsCompositionPresenter::PresentResult::eDeferred)
+		{
+			continue;
+		}
+		if (presentResult == WindowsCompositionPresenter::PresentResult::eFailed)
+		{
+			logger->warning(
+				"Windows Composition could not present a completed Vulkan frame.");
+		}
+		compositionFramePending[pending] = false;
 	}
 }
 
@@ -1680,6 +1822,8 @@ void Engine::Impl::draw()
 		externalBackdropAvailable = false;
 		renderer2DScene.mark_dirty();
 		frameIndex = 0;
+		hasSubmittedFrame = false;
+		lastSubmittedFrameGeneration = 0u;
 	}
 
 	uint32_t frameCountLocal = static_cast<uint32_t>(frames.size());
@@ -1688,43 +1832,63 @@ void Engine::Impl::draw()
 		return;
 	}
 
-	bool submitCompositionFrame = false;
-	if (compositionPresenter.available() &&
-		compositionPresenter.buffer_count() > 0u)
+	const bool compositionAvailable = compositionPresenter.available();
+	if (targetFrameRate == 0u)
 	{
-		if (targetFrameRate == 0u)
+		// Keep uncapped timing observably above 2000 Hz without continuously
+		// pumping Win32/GLFW work or spinning an entire CPU core.
+		constexpr uint32_t maxUncappedPollRate = 2100u;
+		const auto pollInterval =
+			std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+				std::chrono::duration<double>(
+					1.0 / static_cast<double>(maxUncappedPollRate)));
+		auto pollNow = std::chrono::steady_clock::now();
+		if (nextCompositionPollDeadline.time_since_epoch().count() != 0 &&
+			pollNow < nextCompositionPollDeadline)
 		{
-			// Uncapped means the UI/simulation remains far above display rate,
-			// but avoid a zero-work 80kHz busy loop between DWM submissions.
-			constexpr uint32_t maxCompositionPollRate = 3000u;
-			const auto pollInterval =
-				std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-					std::chrono::duration<double>(
-						1.0 / static_cast<double>(maxCompositionPollRate)));
-			auto pollNow = std::chrono::steady_clock::now();
-			if (nextCompositionPollDeadline.time_since_epoch().count() != 0 &&
-				pollNow < nextCompositionPollDeadline)
+			ensure_frame_timer_resolution();
+			if (!wait_with_high_resolution_timer(nextCompositionPollDeadline))
 			{
-				ensure_frame_timer_resolution();
-				if (!wait_with_high_resolution_timer(nextCompositionPollDeadline))
-				{
-					std::this_thread::sleep_until(nextCompositionPollDeadline);
-				}
-				pollNow = std::chrono::steady_clock::now();
+				std::this_thread::sleep_until(nextCompositionPollDeadline);
 			}
-			if (nextCompositionPollDeadline.time_since_epoch().count() == 0 ||
-				pollNow - nextCompositionPollDeadline > pollInterval * 2)
-			{
-				nextCompositionPollDeadline = pollNow + pollInterval;
-			}
-			else
-			{
-				nextCompositionPollDeadline += pollInterval;
-			}
+			pollNow = std::chrono::steady_clock::now();
+		}
+		if (nextCompositionPollDeadline.time_since_epoch().count() == 0 ||
+			pollNow - nextCompositionPollDeadline > pollInterval * 2)
+		{
+			nextCompositionPollDeadline = pollNow + pollInterval;
 		}
 		else
 		{
-			nextCompositionPollDeadline = {};
+			nextCompositionPollDeadline += pollInterval;
+		}
+	}
+	else
+	{
+		nextCompositionPollDeadline = {};
+	}
+
+	bool submitCompositionFrame = false;
+	if (compositionAvailable &&
+		compositionPresenter.buffer_count() > 0u)
+	{
+		// Interop frames are published as soon as their Vulkan fence completes,
+		// rather than waiting until the same frame slot cycles around again.
+		// This removes two to three frames of Vulkan/D3D latency.
+		publish_completed_composition_frames();
+
+		// Keep exactly one Vulkan frame in flight for the Composition bridge.
+		// DWM's latency object accepts one visible frame at a time; filling the
+		// remaining frame slots only rendered stale intermediate drag positions.
+		// Those slots could later be published out of order, leaving transparent
+		// trails and doing two or three times the useful GPU work. Once the queued
+		// frame is consumed, the next submission samples the newest scene state.
+		if (std::any_of(
+				compositionFramePending.begin(),
+				compositionFramePending.end(),
+				[](bool pending) { return pending; }))
+		{
+			return;
 		}
 
 		const auto compositionNow = std::chrono::steady_clock::now();
@@ -1767,6 +1931,42 @@ void Engine::Impl::draw()
 			return;
 		}
 	}
+	else if (targetFrameRate == 0u)
+	{
+		// Native Vulkan still presents only useful display opportunities. The
+		// public timing loop remains uncapped, while duplicate GPU submissions
+		// above the monitor refresh rate are omitted.
+		const auto now = std::chrono::steady_clock::now();
+		if (nextNativeSubmitDeadline.time_since_epoch().count() != 0 &&
+			now < nextNativeSubmitDeadline)
+		{
+			return;
+		}
+		const auto interval =
+			std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+				std::chrono::duration<double>(
+					1.0 / static_cast<double>(
+						std::max(compositionFrameRate, 30u))));
+		nextNativeSubmitDeadline = now + interval;
+	}
+	else
+	{
+		nextNativeSubmitDeadline = {};
+	}
+
+	const double renderTimeSeconds = std::chrono::duration<double>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	const uint64_t sceneFrameGeneration = renderer2DScene.frame_generation();
+	if (hasSubmittedFrame &&
+		sceneFrameGeneration == lastSubmittedFrameGeneration &&
+		!renderer2DScene.requires_continuous_redraw(renderTimeSeconds) &&
+		(!compositionAvailable || nativeTransparencyPrimed))
+	{
+		// DWM and native swapchains retain the last presented image. When no UI
+		// state or time-based content changed, another full render/copy is pure
+		// duplicate work and can be omitted safely.
+		return;
+	}
 	Frame& frame = frames[frameIndex];
     
 	vk::Result fenceResult = logicalDevice.waitForFences(frame.renderFinishedFence, false, UINT64_MAX);
@@ -1776,24 +1976,6 @@ void Engine::Impl::draw()
 		return;
 	}
 
-	// Publish the Composition image produced the last time this in-flight
-	// frame was used. Its Vulkan fence is now complete, so D3D11 can read the
-	// shared texture without a same-frame CPU/GPU serialization point.
-	if (frameIndex < compositionFramePending.size() &&
-		compositionFramePending[frameIndex])
-	{
-		update_system_backdrop_regions();
-		const uint32_t completedBuffer =
-			compositionFrameBufferIndices[frameIndex];
-		if (!compositionPresenter.present(completedBuffer))
-		{
-			logger->warning(
-				"Windows Composition could not present the completed shared Vulkan frame.");
-		}
-		compositionFramePending[frameIndex] = false;
-	}
-
-	const bool compositionAvailable = compositionPresenter.available();
 	const bool clearNativeSurface =
 		compositionAvailable && !nativeTransparencyPrimed;
 	const bool presentNativeSurface =
@@ -1829,26 +2011,27 @@ void Engine::Impl::draw()
 		}
 	}
 
-	vk::Result result = logicalDevice.resetFences(frame.renderFinishedFence);
-	if (result != vk::Result::eSuccess)
-	{
-		logger->vulkan("Failed to reset fences.");
-		return;
-	}
-
-	const double renderTimeSeconds = std::chrono::duration<double>(
-		std::chrono::steady_clock::now().time_since_epoch()).count();
 	const bool useExternalBackdropUnderlay =
 		externalBackdropAvailable &&
 		swapchain.compositeAlpha == vk::CompositeAlphaFlagBitsKHR::eOpaque;
 	uint32_t compositionBufferIndex = 0u;
 	vk::Image compositionImage {};
 	bool compositionImageFirstUse = true;
+	glm::uvec4 pendingCompositionDamageRect { 0u };
 	if (compositionPresenter.available() && compositionPresenter.buffer_count() > 0u)
 	{
+		const uint32_t compositionBufferCount =
+			compositionPresenter.buffer_count();
+		// Some drivers publish the imported images after presenter creation.
+		// Synchronise retained-buffer history at first use as well as at creation;
+		// otherwise only the newest texture is cleared and older drag positions
+		// reappear whenever another shared buffer rotates into view.
+		compositionBufferDamage.ensure_buffer_count(
+			compositionBufferCount,
+			glm::uvec4 { 0u, 0u, renderExtent.width, renderExtent.height });
 		if (submitCompositionFrame)
 		{
-			const uint32_t bufferCount = compositionPresenter.buffer_count();
+			const uint32_t bufferCount = compositionBufferCount;
 			for (uint32_t offset = 0u; offset < bufferCount; ++offset)
 			{
 				const uint32_t candidate =
@@ -1872,10 +2055,26 @@ void Engine::Impl::draw()
 				compositionBufferIndex = candidate;
 				compositionImage = compositionPresenter.image(candidate);
 				compositionImageFirstUse = compositionPresenter.first_use(candidate);
+				pendingCompositionDamageRect =
+					compositionBufferDamage.pending_for(candidate);
 				nextCompositionBufferIndex = (candidate + 1u) % bufferCount;
 				break;
 			}
 		}
+	}
+	// If all interop buffers are still in use, there is nowhere for this frame
+	// to become visible. Do not record and submit a full offscreen Vulkan pass;
+	// retry with the freshest scene state at the next Composition opportunity.
+	if (compositionAvailable && submitCompositionFrame && !compositionImage)
+	{
+		return;
+	}
+
+	vk::Result result = logicalDevice.resetFences(frame.renderFinishedFence);
+	if (result != vk::Result::eSuccess)
+	{
+		logger->vulkan("Failed to reset fences.");
+		return;
 	}
 	frame.record_command_buffer(
 		imageIndex,
@@ -1887,6 +2086,7 @@ void Engine::Impl::draw()
 		clearNativeSurface,
 		compositionImage,
 		compositionImageFirstUse,
+		pendingCompositionDamageRect,
 		graphicsQueueFamilyIndex);
 	vk::SubmitInfo submitInfo = {};
 	submitInfo.commandBufferCount = 1;
@@ -1908,6 +2108,14 @@ void Engine::Impl::draw()
 	{
 		logger->vulkan("Failed to submit buffer to graphics queue.");
 		return;
+	}
+	hasSubmittedFrame = true;
+	lastSubmittedFrameGeneration = sceneFrameGeneration;
+	if (compositionImage)
+	{
+		compositionBufferDamage.commit(
+			compositionBufferIndex,
+			frame.compositionSceneDamageRect);
 	}
 	if (compositionImage)
 	{
@@ -1955,11 +2163,12 @@ void Engine::Impl::draw()
 		}
 	}
 
-	// Normal and high-rate rendering stays pipelined. Very low explicit rates
-	// publish synchronously so a one-off frame is not delayed by several long
-	// frame intervals.
+	// Uncapped/high-rate rendering remains pipelined. Explicit rates at or below
+	// the monitor cadence publish in the same frame so Vulkan content and the
+	// D3D Composition regions cannot drift apart by multiple frame slots.
 	const bool pipelineComposition =
-		targetFrameRate == 0u || targetFrameRate >= 30u;
+		targetFrameRate == 0u ||
+		targetFrameRate > compositionFrameRate + 2u;
 	if (compositionImage && !pipelineComposition)
 	{
 		const vk::Result compositionFenceResult = logicalDevice.waitForFences(
@@ -1969,11 +2178,19 @@ void Engine::Impl::draw()
 		if (compositionFenceResult == vk::Result::eSuccess)
 		{
 			update_system_backdrop_regions();
-			if (!compositionPresenter.present(compositionBufferIndex))
+			const auto presentResult = compositionPresenter.present(
+				compositionBufferIndex,
+				true,
+				frame.compositionContentRect,
+				frame.compositionDamageRect);
+			if (presentResult ==
+				WindowsCompositionPresenter::PresentResult::eFailed)
 			{
 				logger->warning("Windows Composition could not present the shared Vulkan frame.");
 			}
-			if (frameIndex < compositionFramePending.size())
+			if (frameIndex < compositionFramePending.size() &&
+				presentResult !=
+					WindowsCompositionPresenter::PresentResult::eDeferred)
 			{
 				compositionFramePending[frameIndex] = false;
 			}
@@ -2284,12 +2501,34 @@ void Engine::Impl::set_target_frame_rate(uint32_t frameRate)
 	nextFrameDeadline = {};
 	nextCompositionSubmitDeadline = {};
 	nextCompositionPollDeadline = {};
+	nextNativeSubmitDeadline = {};
 	nextCompositionBufferIndex = 0u;
 }
 
 uint32_t Engine::Impl::target_frame_rate() const
 {
 	return targetFrameRate;
+}
+
+uint32_t Engine::Impl::recommended_ui_update_rate() const
+{
+	uint32_t visibleRate = targetFrameRate;
+	if (compositionPresenter.available())
+	{
+		const uint32_t displayRate = std::max(compositionFrameRate, 30u);
+		visibleRate = visibleRate > 0u ?
+			std::min(visibleRate, displayRate) : displayRate;
+	}
+	else if (visibleRate == 0u)
+	{
+		// Native uncapped rendering remains uncapped. This only prevents input,
+		// layout, and media state from being recomputed thousands of times/sec.
+		visibleRate = 180u;
+	}
+	// Sampling input and animation once per visible frame is sufficient.  The
+	// previous 2x oversampling dirtied dynamic UI twice for every frame DWM
+	// could display and needlessly doubled CPU-side scene work.
+	return std::clamp(visibleRate, 60u, 240u);
 }
 
 AudioClipHandle Engine::Impl::load_audio_clip(const std::filesystem::path& path)
