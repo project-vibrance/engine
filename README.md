@@ -69,13 +69,33 @@ desktop capture. D3D11 is intentionally used for this bridge: Composition
 consumes a DXGI surface, and D3D11 has the smaller interop and synchronization
 surface. A future D3D12 renderer remains independent of this choice.
 
-`SystemBackdropRegion` supports the extensible material set `eOff`, `eBlur`,
-`eFrosted`, and `eLiquid`, with rectangle, per-corner rounded rectangle, and
-ellipse clipping. The engine provider builds shaped HostBackdrop effect
-visuals. On non-Windows systems these regions resolve to off. Native DWM
+`GlassMaterial` separates the two ownership models. `eSystemGlass` is the only
+material accepted by `SystemBackdropRegion`; it builds one shaped HostBackdrop
+blur/saturation/tint graph with rectangle, per-corner rounded rectangle,
+squircle, notch, or ellipse clipping. `eLiquid` is represented separately by
+`LiquidGlassComponent` and is never forwarded to the OS compositor. The engine
+renderer backend and the reserved `eMacOSNative` backend currently report
+unavailable, so an `eLiquid` request safely leaves the entity's normal
+translucent paint visible. On non-Windows systems system-glass regions
+resolve to off. Native DWM
 Acrylic and Mica providers are also exposed on Windows, but the raw Win32 DWM
 API is window-scoped; the engine therefore accepts them only for a full-window
 rectangle and rejects requests that could leak outside their requested shape.
+
+Stock buttons, icon buttons, search fields, and navigation clusters expose a
+`UiGlassOptions glass` member. Custom shapes can use the same route directly:
+
+```cpp
+UiGlassOptions glass = ui_system_glass_options(
+    8.0f,
+    1.0f,
+    { 1.0f, 1.0f, 1.0f, 0.03f });
+ui_apply_glass_material(ui, entity, glass);
+```
+
+Use `ui_liquid_glass_options()` for an engine-owned liquid request. On a future
+macOS implementation the same call will select `eMacOSNative`; no macOS Liquid
+Glass code is compiled for now.
 
 MinGW builds the reusable engine normally and invokes MSVC only for the small
 C++/WinRT companion `vibrance_win32_composition.dll`. Installing the engine

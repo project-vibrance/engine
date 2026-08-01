@@ -496,7 +496,9 @@ bool WindowsCompositionPresenter::set_regions(
     nativeRegions.reserve(regions.size());
     for (const SystemBackdropRegion& region : regions)
     {
-        if (region.material == SystemBackdropMaterial::eOff ||
+        // The native bridge accepts only eSystemGlass. Renderer-owned liquid
+        // requests use LiquidGlassComponent and can never enter this path.
+        if (region.material != GlassMaterial::eSystemGlass ||
             region.width <= 0.0f || region.height <= 0.0f)
         {
             continue;
@@ -521,7 +523,6 @@ bool WindowsCompositionPresenter::set_regions(
         native.verticalStart = region.verticalStart;
         native.blurRadius = region.blurRadius;
         native.saturation = region.saturation;
-        native.refraction = region.refraction;
         native.tintRed = region.tint.red;
         native.tintGreen = region.tint.green;
         native.tintBlue = region.tint.blue;

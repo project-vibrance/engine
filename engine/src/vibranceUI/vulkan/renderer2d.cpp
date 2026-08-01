@@ -571,22 +571,13 @@ namespace
         const Swapchain& swapchain,
         const Renderer2DBatch& batch)
     {
-        const float opticalPadding =
-            (batch.flags & eRenderer2DStyleLiquidGlassRefraction) != 0u ?
-            std::clamp(batch.color0.x, 0.0f, 0.30f) *
-                    std::max(std::min(batch.rect.z, batch.rect.w) * 0.5f, 1.0f) +
-                std::clamp(batch.color0.y, 0.0f, 1.0f) * 8.0f +
-                std::max(batch.effect0.x, 0.0f) :
-            0.0f;
         return make_dispatch_bounds(
             swapchain,
             expand_and_clip_rect(
                 batch.rect,
                 std::max(
-                    std::max(
-                        std::max(batch.effect0.x, 0.0f),
-                        std::max(batch.effect1.z, 0.0f)),
-                    opticalPadding) +
+                    std::max(batch.effect0.x, 0.0f),
+                    std::max(batch.effect1.z, 0.0f)) +
                     notched_squircle_dispatch_padding(batch, batch.uvRect),
                 batch.clipRect),
             0.0f);
@@ -3640,15 +3631,13 @@ void Renderer2DScene::build_render_plan(
         }
 
         Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
-        const LiquidGlassOverlayComponent* liquidOverlay =
-            registry_.try_get<LiquidGlassOverlayComponent>(entity);
         const RenderLayer2DKey layer = render_layer_key(registry_, entity);
         const bool dynamicBatch = is_entity_dynamic_by_hierarchy(
             registry_,
             entity,
             currentTimeSeconds,
             dynamicMemo,
-            dynamicStack) || (liquidOverlay && liquidOverlay->enabled);
+            dynamicStack);
         const bool cachedBatch = !dynamicBatch && cache.mode != Renderer2DCacheMode::eDynamic && plan.rebuildCachedLayer;
 
         if (!dynamicBatch && !cachedBatch)
@@ -3692,61 +3681,6 @@ void Renderer2DScene::build_render_plan(
         const uint32_t transformFlags = transform2_5d_flags(transform);
         batch.effect1 = transformFlags == 0u ? shape_sdf_parameters(shape) : transform2_5d_effect(transform);
         batch.flags = shape_flags(shape, style) | transformFlags;
-        if (const LiquidGlassOverlayComponent* liquid = liquidOverlay;
-            liquid && liquid->enabled &&
-            shape.primitive != Renderer2DPrimitive::eCircularProgress)
-        {
-            batch.color1 = liquid->rimColor;
-            batch.uvRect = {
-                std::clamp(liquid->edgeWidth, 0.02f, 1.0f),
-                std::clamp(liquid->rimIntensity, 0.0f, 2.0f),
-                std::clamp(liquid->chromaticAberration, 0.0f, 1.0f),
-                std::clamp(liquid->edgeDarkening, 0.0f, 1.0f)
-            };
-            batch.flags |= eRenderer2DStyleLiquidGlassOverlay;
-
-            // Refract the Vulkan UI accumulated below this layer before the
-            // transparent highlight/tint shape is drawn. The blur pipeline
-            // already provides a race-free scratch image, so neighbouring
-            // samples never read pixels another invocation is overwriting.
-            if (transformFlags == 0u)
-            {
-                Renderer2DBatch refractionBatch = batch;
-                refractionBatch.color0 = {
-                    std::clamp(liquid->refractionStrength, 0.0f, 0.30f),
-                    std::clamp(liquid->chromaticAberration, 0.0f, 1.0f),
-                    std::clamp(liquid->edgeWidth, 0.02f, 1.0f),
-                    0.0f
-                };
-                refractionBatch.color1 = liquid->rimColor;
-                refractionBatch.color2 = glm::vec4(0.0f);
-                refractionBatch.uvRect = shape_sdf_parameters(shape);
-                refractionBatch.effect0 = {
-                    std::clamp(liquid->internalBlurRadius, 0.0f, 8.0f),
-                    1.0f,
-                    0.0f,
-                    displayTransition.opacity
-                };
-                refractionBatch.effect1 = {
-                    shape.cornerRadius,
-                    std::max(style.edgeSoftness, 0.75f),
-                    0.0f,
-                    0.0f
-                };
-                refractionBatch.flags &= ~(
-                    eRenderer2DStyleGradient |
-                    eRenderer2DStyleRadialGradient |
-                    eRenderer2DStyleTransform2_5D |
-                    eRenderer2DStyleCornerRadii |
-                    eRenderer2DStyleShapeMask |
-                    eRenderer2DStyleLiquidGlassOverlay);
-                refractionBatch.flags |=
-                    eRenderer2DStyleBlur |
-                    eRenderer2DStyleLiquidGlassRefraction;
-                refractionBatch.packedData = 0u;
-                plan.blurs.push_back(refractionBatch);
-            }
-        }
         if (transitionShapeBlur > 0.001f && transformFlags == 0u)
         {
             batch.flags |= eRenderer2DStyleBlur;
@@ -3789,9 +3723,7 @@ void Renderer2DScene::build_render_plan(
             };
             shadowBatch.effect1 = shape_sdf_parameters(shape);
             shadowBatch.flags |= eRenderer2DStyleShadow;
-            shadowBatch.flags &= ~(
-                eRenderer2DStyleTransform2_5D |
-                eRenderer2DStyleLiquidGlassOverlay);
+            shadowBatch.flags &= ~eRenderer2DStyleTransform2_5D;
             if ((shadowBatch.flags & eRenderer2DStyleCornerRadii) != 0u)
             {
                 shadowBatch.packedData = pack_corner_radii(padded_corner_radii(shape, shadow->spread));
@@ -3858,8 +3790,7 @@ void Renderer2DScene::build_render_plan(
             blurBatch.flags &= ~(
                 eRenderer2DStyleTransform2_5D |
                 eRenderer2DStyleCornerRadii |
-                eRenderer2DStyleShapeMask |
-                eRenderer2DStyleLiquidGlassOverlay);
+                eRenderer2DStyleShapeMask);
             blurBatch.packedData = 0u;
             (cachedBatch ? plan.cachedBlurs : plan.blurs).push_back(blurBatch);
         }
@@ -4204,34 +4135,26 @@ void BlurPipeline::record_batch(
         return;
     }
 
-    const bool directLiquidRefraction =
-        (batch.flags & eRenderer2DStyleLiquidGlassRefraction) != 0u &&
-        batch.effect0.x <= 1.5f &&
-        batch.effect0.y <= 1.0f;
-
     bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, postScope);
 
     Renderer2DPushConstants constants = {};
-    if (!directLiquidRefraction)
-    {
-        constants.rect = {
-            static_cast<float>(bounds.x),
-            static_cast<float>(bounds.y),
-            static_cast<float>(bounds.width),
-            static_cast<float>(bounds.height)
-        };
-        constants.data = {
-            static_cast<uint32_t>(Renderer2DPrimitive::eClear),
-            eRenderer2DStyleClear,
-            0u,
-            pack_dispatch_origin(bounds.x, bounds.y)
-        };
-        commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-            vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-        dispatch_bounds(commandBuffer, bounds);
-        insert_compute_memory_barrier(commandBuffer);
-    }
+    constants.rect = {
+        static_cast<float>(bounds.x),
+        static_cast<float>(bounds.y),
+        static_cast<float>(bounds.width),
+        static_cast<float>(bounds.height)
+    };
+    constants.data = {
+        static_cast<uint32_t>(Renderer2DPrimitive::eClear),
+        eRenderer2DStyleClear,
+        0u,
+        pack_dispatch_origin(bounds.x, bounds.y)
+    };
+    commandBuffer.pushConstants(pipelineLayouts[pipelineType],
+        vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+    dispatch_bounds(commandBuffer, bounds);
+    insert_compute_memory_barrier(commandBuffer);
 
     const uint32_t passCount = std::max(1u, static_cast<uint32_t>(std::round(std::max(batch.effect0.y, 1.0f))));
     Renderer2DBatch passBatch = batch;
@@ -4239,9 +4162,9 @@ void BlurPipeline::record_batch(
     passBatch.effect0.w = passCount > 1u
         ? 1.0f - std::pow(1.0f - targetOpacity, 1.0f / static_cast<float>(passCount))
         : targetOpacity;
-    if (directLiquidRefraction)
+    for (uint32_t pass = 0; pass < passCount; ++pass)
     {
-        uint32_t passData = 0u;
+        uint32_t passData = pass;
         if (includeStaticBackdrop)
         {
             passData |= kBlurUseStaticBackdrop;
@@ -4251,43 +4174,19 @@ void BlurPipeline::record_batch(
             passData |= kBlurUseExternalBackdrop;
         }
 
-        constants = make_push_constants(batch, passData, bounds.x, bounds.y);
-        constants.data.y |=
-            eRenderer2DStyleBlurVertical |
-            eRenderer2DStyleLiquidGlassDirect;
+        constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
+        constants.data.y |= eRenderer2DStyleBlurHorizontal;
         commandBuffer.pushConstants(pipelineLayouts[pipelineType],
             vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
         dispatch_bounds(commandBuffer, bounds);
         insert_compute_memory_barrier(commandBuffer);
-    }
-    else
-    {
-        for (uint32_t pass = 0; pass < passCount; ++pass)
-        {
-            uint32_t passData = pass;
-            if (includeStaticBackdrop)
-            {
-                passData |= kBlurUseStaticBackdrop;
-            }
-            if (includeExternalBackdrop)
-            {
-                passData |= kBlurUseExternalBackdrop;
-            }
 
-            constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
-            constants.data.y |= eRenderer2DStyleBlurHorizontal;
-            commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-                vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-            dispatch_bounds(commandBuffer, bounds);
-            insert_compute_memory_barrier(commandBuffer);
-
-            constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
-            constants.data.y |= eRenderer2DStyleBlurVertical;
-            commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-                vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-            dispatch_bounds(commandBuffer, bounds);
-            insert_compute_memory_barrier(commandBuffer);
-        }
+        constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
+        constants.data.y |= eRenderer2DStyleBlurVertical;
+        commandBuffer.pushConstants(pipelineLayouts[pipelineType],
+            vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+        dispatch_bounds(commandBuffer, bounds);
+        insert_compute_memory_barrier(commandBuffer);
     }
 
     constants = make_push_constants(batch, 0u, bounds.x, bounds.y);

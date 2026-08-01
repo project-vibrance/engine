@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 8u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 12u;
 constexpr std::uint32_t VIBRANCE_COMPOSITION_MAX_BUFFERS = 3u;
 
 constexpr std::uint32_t VIBRANCE_COMPOSITION_PRESENT_SYNCHRONIZE = 1u << 0u;
@@ -66,7 +66,6 @@ struct VibranceCompositionRegion
     float verticalStart = 0.0f;
     float blurRadius = 0.0f;
     float saturation = 1.0f;
-    float refraction = 0.035f;
     float tintRed = 1.0f;
     float tintGreen = 1.0f;
     float tintBlue = 1.0f;

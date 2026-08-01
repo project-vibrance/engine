@@ -302,7 +302,7 @@ void Frame::record_command_buffer(
 	}
 
 	// The dynamic surface is retained per frame slot. A bounded clear is unsafe
-	// for optical effects: refraction, soft rims, and clipped blur samples can
+	// for optical effects: soft rims and clipped blur samples can
 	// write outside an entity's nominal bounds, leaving fragments behind when
 	// that frame slot is reused after a drag. Rebuild from transparent instead.
 	clear_render_target(colorBuffer, transparent);

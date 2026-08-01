@@ -4,17 +4,23 @@
 
 #include <cstdint>
 
-// Backdrop material names are platform-neutral. Backdrop rendering is only
-// available when a platform presenter explicitly reports support; otherwise
-// every requested material resolves to eOff.
-enum class SystemBackdropMaterial : std::uint32_t
+// Glass material names are platform-neutral, but their owners are explicit:
+// eSystemGlass is supplied by the platform compositor while eLiquid belongs
+// to the engine renderer. Neither material silently substitutes for the other.
+enum class GlassMaterial : std::uint32_t
 {
     eOff = 0u,
-    eBlur = 1u,
-    eFrosted = 2u,
-    // Uses the Windows-private compositor visual backend when runtime probing
-    // succeeds. It resolves to eOff on unsupported Windows builds/platforms.
-    eLiquid = 3u
+    eSystemGlass = 1u,
+    eLiquid = 2u
+};
+
+enum class LiquidGlassBackend : std::uint32_t
+{
+    // Renderer-owned implementation used by the cross-platform engine.
+    eEngineRenderer = 0u,
+    // Reserved for Apple's native Liquid Glass implementation. The slot is
+    // intentionally present now, but reports unavailable until implemented.
+    eMacOSNative = 1u
 };
 
 enum class SystemBackdropProvider : std::uint32_t
@@ -45,7 +51,9 @@ struct SystemBackdropColor
 
 struct SystemBackdropRegion
 {
-    SystemBackdropMaterial material = SystemBackdropMaterial::eOff;
+    // Only eOff and eSystemGlass are valid here. eLiquid is represented by a
+    // LiquidGlassComponent and is never forwarded to a platform compositor.
+    GlassMaterial material = GlassMaterial::eOff;
     SystemBackdropProvider provider = SystemBackdropProvider::eEngine;
     SystemBackdropShape shape = SystemBackdropShape::eRoundedRectangle;
     // Most regions follow their renderer entity automatically. Set this false
@@ -74,15 +82,14 @@ struct SystemBackdropRegion
     // outer shape clip still covers the complete entity.
     float verticalStart = 0.0f;
 
-    // Engine material controls. Windows Acrylic/Mica may ignore these values.
+    // System-glass controls. Windows Acrylic/Mica may ignore these values.
     float blurRadius = 24.0f;
     float saturation = 1.0f;
-    // Fractional optical magnification for the liquid material. This moves the
-    // compositor-owned desktop visual without ever exposing capture pixels.
-    float refraction = 0.035f;
     SystemBackdropColor tint { 1.0f, 1.0f, 1.0f, 0.14f };
 };
 
-VIBRANCE_ENGINE_API const char* system_backdrop_material_name(SystemBackdropMaterial material);
+VIBRANCE_ENGINE_API const char* glass_material_name(GlassMaterial material);
 VIBRANCE_ENGINE_API const char* system_backdrop_provider_name(SystemBackdropProvider provider);
 VIBRANCE_ENGINE_API bool system_backdrop_platform_supported();
+VIBRANCE_ENGINE_API LiquidGlassBackend default_liquid_glass_backend();
+VIBRANCE_ENGINE_API bool liquid_glass_backend_supported(LiquidGlassBackend backend);

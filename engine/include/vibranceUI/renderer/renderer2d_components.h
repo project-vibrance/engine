@@ -99,12 +99,7 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleMediaTintAsMask = 1u << 19,
     eRenderer2DStyleBlurFollowsFillAlpha = 1u << 20,
     eRenderer2DStyleBlurInheritedShapeMask = 1u << 21,
-    eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
-    eRenderer2DStyleLiquidGlassOverlay = 1u << 23,
-    eRenderer2DStyleLiquidGlassRefraction = 1u << 24,
-    // Internal renderer flag: near-clear liquid refraction samples the stable
-    // scene directly instead of paying for a two-pass scratch blur.
-    eRenderer2DStyleLiquidGlassDirect = 1u << 25
+    eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -562,8 +557,18 @@ struct ShapeComponent
 struct SystemBackdropComponent
 {
     // Bounds and shape are resolved from the entity every frame. This value
-    // only describes the requested material/provider recipe.
+    // only describes the requested eSystemGlass provider recipe.
     SystemBackdropRegion region {};
+};
+
+struct LiquidGlassComponent
+{
+    // Renderer-owned liquid glass request. It is intentionally separate from
+    // SystemBackdropComponent so eLiquid can never enter a native compositor
+    // effect graph. The entity supplies bounds and shape when a backend is
+    // implemented.
+    GlassMaterial material = GlassMaterial::eOff;
+    LiquidGlassBackend backend = LiquidGlassBackend::eEngineRenderer;
 };
 
 struct DragHandle2DComponent
@@ -665,24 +670,6 @@ struct ShapeStyleComponent
         backdropBlurPasses = std::max(passes, 1u);
         backdropBlurOpacity = std::clamp(blurOpacity, 0.0f, 1.0f);
     }
-};
-
-struct LiquidGlassOverlayComponent
-{
-    // The compositor supplies OS pixels below the window. Vulkan refracts UI
-    // content already rendered below this entity, then adds tint, chromatic
-    // edges, highlights and reflections above both sources.
-    bool enabled = true;
-    glm::vec4 rimColor { 0.86f, 0.95f, 1.0f, 0.82f };
-    // Width is expressed as a fraction of the shape radius.
-    float edgeWidth = 0.34f;
-    float rimIntensity = 0.88f;
-    float chromaticAberration = 0.14f;
-    float edgeDarkening = 0.20f;
-    // Fraction of the shortest shape radius used for edge displacement.
-    float refractionStrength = 0.10f;
-    // Keep this low for clear glass; it only softens Vulkan content beneath it.
-    float internalBlurRadius = 1.25f;
 };
 
 struct ShadowComponent

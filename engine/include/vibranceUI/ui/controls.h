@@ -18,6 +18,7 @@
 #include <vibranceUI/renderer/present_mode.h>
 #include <vibranceUI/renderer/renderer2d_components.h>
 #include <vibranceUI/ui/builder.h>
+#include <vibranceUI/ui/glass.h>
 #include <vibranceUI/ui/input.h>
 #include <vibranceUI/ui/resources.h>
 #include <vibranceUI/ui/styles.h>
@@ -173,6 +174,7 @@ struct UiButtonOptions
     float hoveredOutlineWidth = 0.9f;
     float pressedOutlineWidth = 1.0f;
     float disabledOutlineWidth = 0.6f;
+    UiGlassOptions glass {};
     std::function<void(const PointerInputEvent&)> onClick;
 };
 
@@ -193,6 +195,7 @@ struct UiIconButtonOptions
     float backdropBlurRadius = 0.0f;
     uint32_t backdropBlurPasses = 1u;
     float backdropBlurOpacity = 0.85f;
+    UiGlassOptions glass {};
     std::string iconTint = "#55585EFF";
     std::string disabledIconTint = "#B1B4BAFF";
     std::function<void(const PointerInputEvent&)> onClick;
@@ -219,6 +222,7 @@ struct UiSearchFieldOptions
     float backdropBlurRadius = 0.0f;
     uint32_t backdropBlurPasses = 1u;
     float backdropBlurOpacity = 0.85f;
+    UiGlassOptions glass {};
     std::string caretColor = "#0D6FFFFF";
     float caretWidth = 1.5f;
     float caretHeight = 16.0f;
@@ -584,6 +588,7 @@ struct UiNavClusterOptions
     float backdropBlurRadius = 0.0f;
     uint32_t backdropBlurPasses = 1u;
     float backdropBlurOpacity = 0.85f;
+    UiGlassOptions glass {};
     std::string dividerColor = "rgba(0, 0, 0, 0.08)";
     std::string iconTint = "#55585EFF";
     std::string disabledIconTint = "#B1B4BAFF";
@@ -1208,7 +1213,8 @@ inline ShapeStyleComponent ui_icon_button_style(
     const std::string bottom = options.backgroundBottomColor.empty() ?
         std::string(fill) :
         options.backgroundBottomColor;
-    if (options.backdropBlurRadius > 0.0f)
+    if (options.glass.material == GlassMaterial::eOff &&
+        options.backdropBlurRadius > 0.0f)
     {
         return ui_macos26_frosted_control_style(
             ui,
@@ -1840,6 +1846,7 @@ inline UiControlHandle ui_create_text_button(
     ui.set_shape(handle.root, options.cornerRadius);
     ui.set_layer(handle.root, layer, order);
     ui.set_padding(handle.root, options.padding.x, options.padding.y, options.padding.z, options.padding.w);
+    ui_apply_glass_material(ui, handle.root, options.glass);
 
     ButtonInputComponent button = {};
     button.enabled = options.enabled;
@@ -1934,6 +1941,7 @@ inline UiControlHandle ui_create_icon_button(
         alignment,
         scaled_offset(offset.x, offset.y, ui.scale()),
         scaled_size(size.x, size.y, ui.scale()));
+    ui_apply_glass_material(ui, handle.root, options.glass);
 
     ButtonInputComponent button = {};
     button.enabled = options.enabled;
@@ -2687,7 +2695,8 @@ inline UiControlHandle ui_create_search_field(
     const std::string focusedBackgroundBottom = options.focusedBackgroundBottomColor.empty() ?
         options.focusedBackgroundColor :
         options.focusedBackgroundBottomColor;
-    const bool frosted = options.backdropBlurRadius > 0.0f;
+    const bool frosted = options.glass.material == GlassMaterial::eOff &&
+        options.backdropBlurRadius > 0.0f;
     const ShapeStyleComponent idleStyle = frosted ?
         ui_macos26_frosted_control_style(
             ui,
@@ -2731,6 +2740,7 @@ inline UiControlHandle ui_create_search_field(
     ui.set_shape(handle.root, size.y * 0.5f);
     ui.set_layer(handle.root, layer, order);
     ui.attach_aligned(handle.root, parent, alignment, scaled_offset(offset.x, offset.y, ui.scale()), scaled_size(size.x, size.y, ui.scale()));
+    ui_apply_glass_material(ui, handle.root, options.glass);
     scene.enable_mask(handle.root, false);
     const float iconOffset = options.icon.valid() ? 28.0f : 10.0f;
     if (options.icon.valid())
@@ -2818,7 +2828,9 @@ inline UiControlHandle ui_create_nav_cluster(
     const std::string backgroundBottom = options.backgroundBottomColor.empty() ?
         options.backgroundColor :
         options.backgroundBottomColor;
-    const ShapeStyleComponent rootStyle = options.backdropBlurRadius > 0.0f ?
+    const ShapeStyleComponent rootStyle =
+        options.glass.material == GlassMaterial::eOff &&
+        options.backdropBlurRadius > 0.0f ?
         ui_macos26_frosted_control_style(
             ui,
             options.backgroundColor,
@@ -2850,6 +2862,7 @@ inline UiControlHandle ui_create_nav_cluster(
         alignment,
         scaled_offset(offset.x, offset.y, ui.scale()),
         scaled_size(safeSize.x, safeSize.y, ui.scale()));
+    ui_apply_glass_material(ui, handle.root, options.glass);
     scene.enable_mask(handle.root, false);
     auto make_button_visual = [&ui]() {
         ButtonVisualComponent visual = {};

@@ -167,7 +167,6 @@ namespace
 			close(left.verticalStart, right.verticalStart) &&
 			close(left.blurRadius, right.blurRadius) &&
 			close(left.saturation, right.saturation) &&
-			close(left.refraction, right.refraction) &&
 			close(left.tint.red, right.tint.red) &&
 			close(left.tint.green, right.tint.green) &&
 			close(left.tint.blue, right.tint.blue) &&
@@ -1574,7 +1573,7 @@ void Engine::Impl::update_system_backdrop_regions()
 		const ShapeComponent& shape,
 		const SystemBackdropComponent& backdrop,
 		const RenderLayer2DComponent& layer) {
-		if (!layer.visible || backdrop.region.material == SystemBackdropMaterial::eOff ||
+		if (!layer.visible || backdrop.region.material != GlassMaterial::eSystemGlass ||
 			std::abs(transform.rotationRadians) > 0.0001f ||
 			glm::length(transform.rotation3DRadians) > 0.0001f)
 		{

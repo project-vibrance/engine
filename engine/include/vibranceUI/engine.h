@@ -6,6 +6,7 @@
 #include <vibranceUI/localisation/localisation.h>
 #include <vibranceUI/renderer/renderer.h>
 #include <vibranceUI/ui/builder.h>
+#include <vibranceUI/ui/glass.h>
 #include <vibranceUI/ui/input.h>
 #include <vibranceUI/ui/interactions.h>
 #include <vibranceUI/ui/layout.h>

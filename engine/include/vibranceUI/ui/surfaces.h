@@ -543,7 +543,7 @@ inline entt::entity ui_create_panel_background_layer(
 
     const glm::vec4 corners = ui_panel_background_corners(layer);
     ui.set_shape_corners(entity, corners.x, corners.y, corners.z, corners.w, layer.sdfEdges);
-    if (layer.systemBackdrop && layer.systemBackdrop->material != SystemBackdropMaterial::eOff)
+    if (layer.systemBackdrop && layer.systemBackdrop->material == GlassMaterial::eSystemGlass)
     {
         ui.registry().emplace_or_replace<SystemBackdropComponent>(
             entity,
