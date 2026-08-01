@@ -3730,6 +3730,10 @@ void Renderer2DScene::build_render_plan(
             {
                 shadowBatch.flags |= eRenderer2DStyleShadowOutsideOnly;
             }
+            if (shadow->excludeShapeExtensions)
+            {
+                shadowBatch.flags |= eRenderer2DStyleShadowExcludeShapeExtensions;
+            }
             shadowBatch.flags &= ~eRenderer2DStyleTransform2_5D;
             if ((shadowBatch.flags & eRenderer2DStyleCornerRadii) != 0u)
             {

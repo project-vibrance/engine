@@ -100,7 +100,8 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleBlurFollowsFillAlpha = 1u << 20,
     eRenderer2DStyleBlurInheritedShapeMask = 1u << 21,
     eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
-    eRenderer2DStyleShadowOutsideOnly = 1u << 23
+    eRenderer2DStyleShadowOutsideOnly = 1u << 23,
+    eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -683,6 +684,10 @@ struct ShadowComponent
     // Removes shadow coverage beneath the source primitive. This is useful for
     // translucent glass because the shadow cannot darken the material itself.
     bool outsideOnly = false;
+    // Draw the shadow from the primitive's base silhouette. Optional extensions
+    // such as a notched-squircle flare remain visible but cannot create isolated
+    // shadow lobes at their endpoints.
+    bool excludeShapeExtensions = false;
 
     bool set_color(std::string_view hexColor)
     {

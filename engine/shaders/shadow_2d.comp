@@ -2,6 +2,7 @@
 
 const uint STYLE_CORNER_RADII = 1u << 16;
 const uint STYLE_SHADOW_OUTSIDE_ONLY = 1u << 23;
+const uint STYLE_SHADOW_EXCLUDE_SHAPE_EXTENSIONS = 1u << 24;
 
 const uint PRIMITIVE_RECTANGLE = 1u;
 const uint PRIMITIVE_ELLIPSE = 3u;
@@ -226,6 +227,18 @@ float shadow_sdf_for(vec2 pixel, vec4 rect, float cornerRadius, vec4 cornerRadii
 }
 
 float shadow_sdf(vec2 pixel) {
+    if ((pc.data.y & STYLE_SHADOW_EXCLUDE_SHAPE_EXTENSIONS) != 0u &&
+        pc.data.x == PRIMITIVE_NOTCHED_SQUIRCLE) {
+        vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
+        vec2 p = pixel - (pc.rect.xy + halfSize);
+        float radius = clamp(pc.effect0.x, 0.0, min(halfSize.x, halfSize.y));
+        return sd_squircle_box(
+            p,
+            halfSize,
+            radius,
+            clamp(pc.effect1.x, 0.0, 1.0),
+            clamp(pc.effect1.y <= 0.001 ? 4.0 : pc.effect1.y, 2.0, 5.0));
+    }
     return shadow_sdf_for(
         pixel,
         pc.rect,
