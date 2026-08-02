@@ -41,16 +41,6 @@ struct EngineCreateInfo
     Renderer2DFontAtlasLoadOptions defaultRenderer2DFontOptions {};
 };
 
-struct CameraInput
-{
-    float right = 0.0f;
-    float up = 0.0f;
-    float forward = 0.0f;
-    float yawDelta = 0.0f;
-    float pitchDelta = 0.0f;
-    float deltaSeconds = 0.0f;
-};
-
 class VIBRANCE_ENGINE_API Engine
 {
     public:
@@ -81,9 +71,6 @@ class VIBRANCE_ENGINE_API Engine
     // use this value to avoid updating scene state more often than it can be
     // displayed.
     uint32_t recommended_ui_update_rate() const;
-
-    // Optional camera helper for examples that also use the 3D path
-    void update_camera(const CameraInput& input);
 
     // Resizes swapchain-dependent renderer resources
     void resize(uint32_t framebufferWidth, uint32_t framebufferHeight);

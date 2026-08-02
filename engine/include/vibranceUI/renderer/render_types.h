@@ -6,8 +6,6 @@ enum class PipelineType
     // Stable keys for pipeline maps built during renderer initialisation
     eClear,
     eRasteriseSmall,
-    eRasteriseBig,
-    eWriteColour,
     eShape2D,
     eShadow2D,
     eBlur2D,

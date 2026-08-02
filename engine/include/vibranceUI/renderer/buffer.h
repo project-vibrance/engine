@@ -19,9 +19,6 @@ class StorageBuffer
 	vk::DeviceSize vertexDataOffset = 0;
 	uint32_t vertexCount = 0;
 	uint32_t triangleCount = 0;
-	uint32_t triangleCount2D = 0;
-	uint32_t firstTriangle3D = 0;
-	uint32_t triangleCount3D = 0;
 };
 
 struct Model3DTexture

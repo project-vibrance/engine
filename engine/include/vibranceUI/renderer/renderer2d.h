@@ -10,7 +10,6 @@
 #include <vibranceUI/renderer/renderer2d_components.h>
 #include <vibranceUI/renderer/media2d.h>
 
-class Camera;
 class Renderer3D;
 class StorageImage;
 
@@ -186,15 +185,9 @@ public:
         std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
         std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
-        uint32_t firstTriangle,
-        uint32_t triangleCount,
         Renderer2DScene& scene,
         double currentTimeSeconds,
         Renderer3D* renderer3D = nullptr,
-        const Camera* camera = nullptr,
-        uint32_t defaultFirstTriangle3D = 0,
-        uint32_t defaultTriangleCount3D = 0,
-        StorageBuffer* vertexBuffer = nullptr,
         std::unordered_map<uint32_t, Model3DAsset>* modelAssets = nullptr,
         std::unordered_map<uint32_t, Media2DAsset>* mediaAssets = nullptr,
         StorageImage* dynamicRenderTarget = nullptr,

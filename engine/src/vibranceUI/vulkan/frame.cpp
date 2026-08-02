@@ -114,26 +114,10 @@ namespace
 			updates.push_back(writeOp);
 		};
 
-		auto add_buffer_write = [&](DescriptorScope scope, uint32_t binding, StorageBuffer* buffer) {
-			vk::WriteDescriptorSet writeOp = {};
-			writeOp.dstSet = frame.descriptorSets[scope];
-			writeOp.dstBinding = binding;
-			writeOp.dstArrayElement = 0;
-			writeOp.descriptorCount = 1;
-			writeOp.descriptorType = vk::DescriptorType::eStorageBuffer;
-			writeOp.pBufferInfo = &(buffer->descriptor);
-			updates.push_back(writeOp);
-		};
-
 		add_image_write(DescriptorScope::eFrame, 0, frame.depthBuffer);
 		add_image_write(DescriptorScope::eFrame, 1, frame.colorBuffer);
 		add_image_write(DescriptorScope::eModelFrame, 0, frame.modelDepthBuffer);
 		add_image_write(DescriptorScope::eModelFrame, 1, frame.modelColorBuffer);
-		if (frame.vertexBuffer != nullptr)
-		{
-			add_buffer_write(DescriptorScope::eDrawCall, 0, frame.vertexBuffer);
-		}
-
 		add_image_write(DescriptorScope::ePost, 0, frame.tempSurface);
 		add_image_write(DescriptorScope::ePost, 1, frame.modelColorBuffer);
 		add_image_write(DescriptorScope::ePost, 2, frame.uiBlurSurface);
@@ -173,7 +157,6 @@ Frame::Frame(
 	std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
 	std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
 	VmaAllocator& allocator,
-	StorageBuffer* vertexBuffer,
 	std::unordered_map<uint32_t, Model3DAsset>* modelAssets,
 	std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
 	Renderer2DScene& scene2D,
@@ -184,7 +167,7 @@ Frame::Frame(
 	hosted3DSamples(hosted3DSamples),
 	descriptorSets(descriptorSets), 
 	pipelineLayouts(pipelineLayouts),
-	allocator(allocator), fontAtlasImage(fontAtlasImage), vertexBuffer(vertexBuffer), modelAssets(modelAssets),
+	allocator(allocator), fontAtlasImage(fontAtlasImage), modelAssets(modelAssets),
 	mediaAssets(mediaAssets), scene2D(scene2D), queue(queue)
 {   
 	this->commandBuffer = commandBuffer;
@@ -192,18 +175,12 @@ Frame::Frame(
 	imageAcquiredSemaphore = make_semaphore(logicalDevice, deletionQueue);
 	renderFinishedSemaphore = make_semaphore(logicalDevice, deletionQueue);
 	renderFinishedFence = make_fence(logicalDevice, deletionQueue);
-	triangleCount = vertexBuffer != nullptr ? vertexBuffer->triangleCount : 0;
-	triangleCount2D = vertexBuffer != nullptr ? vertexBuffer->triangleCount2D : 0;
-	firstTriangle3D = vertexBuffer != nullptr ? vertexBuffer->firstTriangle3D : 0;
-	triangleCount3D = vertexBuffer != nullptr ? vertexBuffer->triangleCount3D : 0;
-
 	create_frame_storage_images(*this);
 	update_frame_descriptor_sets(*this);
 }
 
 void Frame::record_command_buffer(
 	uint32_t imageIndex,
-	const Camera& camera,
 	double currentTimeSeconds,
 	bool externalBackdropAvailable,
 	bool useExternalBackdropUnderlay,
@@ -289,18 +266,12 @@ void Frame::record_command_buffer(
 		);
 	};
 
-	const bool renderLegacy2D = triangleCount2D > 0u;
-	const bool renderHosted3D = triangleCount3D > 0u ||
+	const bool renderHosted3D =
 		!scene2D.registry().view<Model3DComponent>().empty();
 	const vk::ClearColorValue transparent(
 		std::array<float, 4> { 0.0f, 0.0f, 0.0f, 0.0f });
 	const vk::ClearColorValue farDepth(
 		std::array<std::uint32_t, 4> { 0x3f800000u, 0u, 0u, 0u });
-	if (renderLegacy2D)
-	{
-		clear_render_target(depthBuffer, farDepth);
-	}
-
 	// The dynamic surface is retained per frame slot. A bounded clear is unsafe
 	// for optical effects: soft rims and clipped blur samples can
 	// write outside an entity's nominal bounds, leaving fragments behind when
@@ -333,15 +304,9 @@ void Frame::record_command_buffer(
 		pipelines,
 		descriptorSets,
 		pipelineLayouts,
-		0,
-		triangleCount2D,
 		scene2D,
 		currentTimeSeconds,
 		&renderer3D,
-		&camera,
-		firstTriangle3D,
-		triangleCount3D,
-		vertexBuffer,
 		modelAssets,
 		mediaAssets,
 		colorBuffer,

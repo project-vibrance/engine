@@ -184,14 +184,6 @@ VIBRANCE_GLFW_API void glfw_handle_ui_drop(
     int pathCount,
     const char** paths);
 
-VIBRANCE_GLFW_API CameraInput poll_glfw_camera_input(
-    GLFWwindow* window,
-    double now,
-    double& lastFrameTime,
-    double& lastMouseX,
-    double& lastMouseY,
-    bool& hasMousePosition);
-
 VIBRANCE_GLFW_API bool update_glfw_mouse_passthrough(
     GLFWwindow* window,
     bool requested,

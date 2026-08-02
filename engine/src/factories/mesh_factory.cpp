@@ -151,8 +151,7 @@ namespace
 		VmaAllocator& allocator,
 		std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
 		vk::CommandBuffer commandBuffer,
-		vk::Queue queue,
-		uint32_t triangleCount2D = 0)
+		vk::Queue queue)
 	{
 		Logger* logger = Logger::fetch_logger();
 
@@ -208,9 +207,6 @@ namespace
 		mesh.vertexDataOffset = headerSize;
 		mesh.vertexCount = static_cast<uint32_t>(vertices.size());
 		mesh.triangleCount = header.triangleCount;
-		mesh.triangleCount2D = std::min(triangleCount2D, mesh.triangleCount);
-		mesh.firstTriangle3D = mesh.triangleCount2D;
-		mesh.triangleCount3D = mesh.triangleCount - mesh.triangleCount2D;
 
 		copy(stagingBuffer, bufferHandle, uploadSize, queue, commandBuffer);
 		vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
@@ -2454,8 +2450,8 @@ namespace
 		if (asset.drawRanges.empty() && asset.buffer.triangleCount > 0)
 		{
 			asset.drawRanges.push_back({
-				asset.buffer.firstTriangle3D,
-				asset.buffer.triangleCount3D > 0 ? asset.buffer.triangleCount3D : asset.buffer.triangleCount,
+				0u,
+				asset.buffer.triangleCount,
 				asset.fallbackMaterialDescriptorSet
 			});
 		}
@@ -2581,8 +2577,8 @@ Model3DAsset load_gltf_mesh(
 		if (asset.buffer.triangleCount > 0)
 		{
 			asset.drawRanges.push_back({
-				asset.buffer.firstTriangle3D,
-				asset.buffer.triangleCount3D > 0 ? asset.buffer.triangleCount3D : asset.buffer.triangleCount,
+				0u,
+				asset.buffer.triangleCount,
 				asset.fallbackMaterialDescriptorSet
 			});
 		}
@@ -2603,12 +2599,9 @@ Model3DAsset load_gltf_mesh(
 
 		Model3DAsset asset = {};
 		std::vector<Vertex> vertices = std::move(modelVertices);
-		const uint32_t triangleCount2D = 0;
-
 		logger->print("Uploading " + std::string(label) + " with " +
-			std::to_string(vertices.size() / 3) + " 3D triangles and " +
-			std::to_string(triangleCount2D) + " 2D triangles.");
-		asset.buffer = upload_vertices(vertices, allocator, vmaDeletionQueue, commandBuffer, queue, triangleCount2D);
+			std::to_string(vertices.size() / 3) + " triangles.");
+		asset.buffer = upload_vertices(vertices, allocator, vmaDeletionQueue, commandBuffer, queue);
 		TextureBindingSet textureBindings = upload_model_textures(
 			asset,
 			images,

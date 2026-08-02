@@ -8,7 +8,6 @@
 #include <vibranceUI/renderer/frame.h>
 #include <vibranceUI/renderer/swapchain.h>
 #include <vibranceUI/factories/mesh_factory.h>
-#include <vibranceUI/core/camera.h>
 #include "../directx/composition_presenter.h"
 #include <sstream>
 #include <string_view>
@@ -766,7 +765,6 @@ struct Engine::Impl
 	void set_target_frame_rate(uint32_t frameRate);
 	uint32_t target_frame_rate() const;
 	uint32_t recommended_ui_update_rate() const;
-	void update_camera(const CameraInput& input);
 	void resize(uint32_t width, uint32_t height);
 	Model3DHandle load_model_3d(const std::filesystem::path& path);
 	Media2DHandle load_media_2d(const std::filesystem::path& path, const Media2DLoadOptions& options);
@@ -880,7 +878,6 @@ private:
 	AudioEngine audioEngine;
 	Localisation localisation_;
 	bool externalBackdropAvailable = false;
-	Camera camera;
 };
 
 Engine::Engine(const EngineCreateInfo& createInfo) : impl(std::make_unique<Impl>(createInfo))
@@ -936,11 +933,6 @@ uint32_t Engine::target_frame_rate() const
 uint32_t Engine::recommended_ui_update_rate() const
 {
 	return impl->recommended_ui_update_rate();
-}
-
-void Engine::update_camera(const CameraInput& input)
-{
-	impl->update_camera(input);
 }
 
 void Engine::resize(uint32_t framebufferWidth, uint32_t framebufferHeight)
@@ -1264,8 +1256,6 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	const std::array requiredPipelines = {
 		PipelineType::eClear,
 		PipelineType::eRasteriseSmall,
-		PipelineType::eRasteriseBig,
-		PipelineType::eWriteColour,
 		PipelineType::eShape2D,
 		PipelineType::eShadow2D,
 		PipelineType::eBlur2D,
@@ -1359,7 +1349,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 			hosted3DSamples,
 			commandBuffer, graphicsQueue, deviceDeletionQueue,
 			descriptorSets[i], pipelineLayouts,
-			allocator, nullptr, &modelAssets, &mediaAssets, renderer2DScene, renderer2DFontAtlas.image()
+			allocator, &modelAssets, &mediaAssets, renderer2DScene, renderer2DFontAtlas.image()
 		));
 	}
 	compositionFramePending.assign(frameCount, false);
@@ -1417,11 +1407,6 @@ void Engine::Impl::make_pipeline_layouts()
 	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(RasterPushConstants));
 	vk::PipelineLayout renderLayout = builder.build(deviceDeletionQueue);
 	pipelineLayouts[PipelineType::eRasteriseSmall] = renderLayout;
-	pipelineLayouts[PipelineType::eRasteriseBig] = renderLayout;
-
-	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
-	builder.add(descriptorSetLayouts[DescriptorScope::ePost]);
-	pipelineLayouts[PipelineType::eWriteColour] = builder.build(deviceDeletionQueue);
 
 	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
 	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(Renderer2DPushConstants));
@@ -1465,12 +1450,6 @@ void Engine::Impl::make_pipelines()
 	);
 	pipelines[PipelineType::eRasteriseSmall] = make_compute_pipeline(
 		logicalDevice, "rasterise_small", pipelineLayouts[PipelineType::eRasteriseSmall], deviceDeletionQueue
-	);
-	pipelines[PipelineType::eRasteriseBig] = make_compute_pipeline(
-		logicalDevice, "rasterise_big", pipelineLayouts[PipelineType::eRasteriseBig], deviceDeletionQueue
-	);
-	pipelines[PipelineType::eWriteColour] = make_compute_pipeline(
-		logicalDevice, "write_color", pipelineLayouts[PipelineType::eWriteColour], deviceDeletionQueue
 	);
 	pipelines[PipelineType::eShape2D] = make_compute_pipeline(
 		logicalDevice, "shape_2d", pipelineLayouts[PipelineType::eShape2D], deviceDeletionQueue
@@ -2077,7 +2056,6 @@ void Engine::Impl::draw()
 	}
 	frame.record_command_buffer(
 		imageIndex,
-		camera,
 		renderTimeSeconds,
 		externalBackdropAvailable,
 		useExternalBackdropUnderlay,
@@ -2283,14 +2261,6 @@ int Engine::Impl::update_timing(double currentTimeSeconds)
 	return 0;
 }
 
-void Engine::Impl::update_camera(const CameraInput& input)
-{
-	camera.velocity = glm::vec3(input.right, input.up, input.forward);
-	camera.yaw += input.yawDelta;
-	camera.pitch += input.pitchDelta;
-	camera.update(input.deltaSeconds);
-}
-
 bool Engine::Impl::recreate_surface()
 {
 	if (!createSurface || !instance)
@@ -2359,8 +2329,8 @@ Model3DHandle Engine::Impl::load_model_3d(const std::filesystem::path& path)
 		{
 			const StorageBuffer& buffer = modelIt->second.buffer;
 			handle.id = existing->second;
-			handle.firstTriangle = buffer.firstTriangle3D;
-			handle.triangleCount = buffer.triangleCount3D > 0 ? buffer.triangleCount3D : buffer.triangleCount;
+			handle.firstTriangle = 0u;
+			handle.triangleCount = buffer.triangleCount;
 			return handle;
 		}
 	}
@@ -2390,8 +2360,8 @@ Model3DHandle Engine::Impl::load_model_3d(const std::filesystem::path& path)
 	const uint32_t modelId = nextModelId++;
 	const StorageBuffer& buffer = asset.buffer;
 	handle.id = modelId;
-	handle.firstTriangle = buffer.firstTriangle3D;
-	handle.triangleCount = buffer.triangleCount3D > 0 ? buffer.triangleCount3D : buffer.triangleCount;
+	handle.firstTriangle = 0u;
+	handle.triangleCount = buffer.triangleCount;
 	modelAssets.emplace(modelId, std::move(asset));
 	modelIdsByPath.emplace(cacheKey, modelId);
 	logger->vulkan("Registered app-owned 3D model " + absolutePath.string() +

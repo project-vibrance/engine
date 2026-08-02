@@ -12,7 +12,6 @@
 #include <vibranceUI/renderer/render_types.h>
 #include <vibranceUI/renderer/renderer2d.h>
 #include <vibranceUI/renderer/renderer3d.h>
-#include <vibranceUI/core/camera.h>
 
 class Frame
 {
@@ -32,7 +31,6 @@ class Frame
         std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
         VmaAllocator& allocator,
-        StorageBuffer* vertexBuffer,
         std::unordered_map<uint32_t, Model3DAsset>* modelAssets,
         std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
         Renderer2DScene& scene2D,
@@ -41,7 +39,6 @@ class Frame
 
     void record_command_buffer(
         uint32_t imageIndex,
-        const Camera& camera,
         double currentTimeSeconds,
         bool externalBackdropAvailable,
         bool useExternalBackdropUnderlay,
@@ -96,16 +93,11 @@ class Frame
     ColorAttachmentImage* hosted3DColorBuffer = nullptr;
     DepthImage* hosted3DDepthBuffer = nullptr;
     vk::Framebuffer hosted3DFramebuffer = nullptr;
-    StorageBuffer* vertexBuffer = nullptr;
     std::unordered_map<uint32_t, Model3DAsset>* modelAssets = nullptr;
     std::unordered_map<uint32_t, Media2DAsset>* mediaAssets = nullptr;
     Renderer2D renderer2D;
     Renderer3D renderer3D;
     Renderer2DScene& scene2D;
-    uint32_t triangleCount = 0;
-    uint32_t triangleCount2D = 0;
-    uint32_t firstTriangle3D = 0;
-    uint32_t triangleCount3D = 0;
 
     std::deque<std::function<void(VmaAllocator)>> vmaDeletionQueue;
     std::deque<std::function<void(vk::Device)>> deviceDeletionQueue;

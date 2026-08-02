@@ -1,7 +1,5 @@
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <vibranceUI/renderer/renderer2d.h>
 #include <vibranceUI/renderer/renderer3d.h>
-#include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -12,8 +10,6 @@
 
 namespace
 {
-    constexpr uint32_t kDepthPass = 0;
-    constexpr uint32_t kColorPass = 1;
     constexpr uint32_t kTextPassAll = 0;
     constexpr uint32_t kTextPassUnderlay = 1;
     constexpr uint32_t kTextPassForeground = 2;
@@ -82,25 +78,6 @@ namespace
         uint32_t order = 0;
         bool alwaysOnTop = false;
     };
-
-    RasterPushConstants make_orthographic_constants(const Swapchain& swapchain)
-    {
-        const float width = static_cast<float>(std::max(swapchain.extent.width, 1u));
-        const float height = static_cast<float>(std::max(swapchain.extent.height, 1u));
-        const float aspect = width / height;
-
-        RasterPushConstants constants = {};
-        if (aspect >= 1.0f)
-        {
-            constants.worldToClip = glm::ortho(-aspect, aspect, -1.0f, 1.0f, 0.0f, 1.0f);
-        }
-        else
-        {
-            constants.worldToClip = glm::ortho(-1.0f, 1.0f, -1.0f / aspect, 1.0f / aspect, 0.0f, 1.0f);
-        }
-        constants.worldToClip[1][1] *= -1.0f;
-        return constants;
-    }
 
     void insert_compute_memory_barrier(vk::CommandBuffer commandBuffer)
     {
@@ -2804,45 +2781,6 @@ namespace
         }
     }
 
-    void record_legacy_triangle_mesh(
-        vk::CommandBuffer commandBuffer,
-        Swapchain& swapchain,
-        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
-        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
-        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
-        uint32_t firstTriangle,
-        uint32_t triangleCount)
-    {
-        if (triangleCount == 0 || !bind_pipeline(commandBuffer, PipelineType::eRasteriseBig, pipelines))
-        {
-            return;
-        }
-
-        PipelineType pipelineType = PipelineType::eRasteriseBig;
-        bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts);
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pipelineLayouts[pipelineType],
-            1, 1, &descriptorSets[DescriptorScope::eDrawCall], 0, nullptr);
-
-        RasterPushConstants constants = make_orthographic_constants(swapchain);
-        constants.firstTriangle = firstTriangle;
-        constants.triangleCount = triangleCount;
-
-        const uint32_t workgroupCountX = workgroup_count(swapchain.extent.width);
-        const uint32_t workgroupCountY = workgroup_count(swapchain.extent.height);
-        constants.pass = kDepthPass;
-        commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-            vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-        commandBuffer.dispatch(workgroupCountX, workgroupCountY, triangleCount);
-
-        insert_compute_memory_barrier(commandBuffer);
-
-        constants.pass = kColorPass;
-        commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-            vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-        commandBuffer.dispatch(workgroupCountX, workgroupCountY, triangleCount);
-
-        insert_compute_memory_barrier(commandBuffer);
-    }
 }
 
 bool Renderer2DRenderPlan::empty() const
@@ -4616,15 +4554,9 @@ void Renderer2D::record(
     std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
     std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
-    uint32_t firstTriangle,
-    uint32_t triangleCount,
     Renderer2DScene& scene,
     double currentTimeSeconds,
     Renderer3D* renderer3D,
-    const Camera* camera,
-    uint32_t defaultFirstTriangle3D,
-    uint32_t defaultTriangleCount3D,
-    StorageBuffer* vertexBuffer,
     std::unordered_map<uint32_t, Model3DAsset>* modelAssets,
     std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
     StorageImage* dynamicRenderTarget,
@@ -4635,11 +4567,7 @@ void Renderer2D::record(
     bool hosted3DUsesResolveAttachment,
     bool externalBackdropAvailable) const
 {
-    record_legacy_triangle_mesh(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts, firstTriangle, triangleCount);
-
     scene.build_render_plan(renderPlanCache, currentTimeSeconds, cachedLayerGeneration);
-
-    (void)camera;
 
     auto record_layered_ops = [&](
         const std::vector<Renderer2DBatch>& panelBlurs,
@@ -4705,9 +4633,9 @@ void Renderer2D::record(
                         frameScope == DescriptorScope::eUICache ? staticRenderTarget : dynamicRenderTarget;
 
                     Model3DAsset* modelAsset = nullptr;
-                    StorageBuffer* modelVertexBuffer = vertexBuffer;
-                    uint32_t modelDefaultFirstTriangle = defaultFirstTriangle3D;
-                    uint32_t modelDefaultTriangleCount = defaultTriangleCount3D;
+                    StorageBuffer* modelVertexBuffer = nullptr;
+                    uint32_t modelDefaultFirstTriangle = 0u;
+                    uint32_t modelDefaultTriangleCount = 0u;
                     if (op.model->modelId != 0)
                     {
                         modelVertexBuffer = nullptr;
@@ -4718,10 +4646,8 @@ void Renderer2D::record(
                             {
                                 modelAsset = &modelIt->second;
                                 modelVertexBuffer = &modelAsset->buffer;
-                                modelDefaultFirstTriangle = modelVertexBuffer->firstTriangle3D;
-                                modelDefaultTriangleCount = modelVertexBuffer->triangleCount3D > 0
-                                    ? modelVertexBuffer->triangleCount3D
-                                    : modelVertexBuffer->triangleCount;
+                                modelDefaultFirstTriangle = 0u;
+                                modelDefaultTriangleCount = modelVertexBuffer->triangleCount;
                             }
                         }
                     }
@@ -5061,20 +4987,13 @@ void Renderer2D::record(
         }
     };
 
-    if (triangleCount > 0u)
-    {
-        visibleBounds = make_full_screen_bounds(swapchain);
-    }
-    else
-    {
-        include_plan(visibleBounds, renderPlanCache);
-        include_blurs(visibleBounds, renderPlanCache.cachedPanelBlurs);
-        include_batches(visibleBounds, renderPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
-        include_blurs(visibleBounds, renderPlanCache.cachedBlurs);
-        include_batches(visibleBounds, renderPlanCache.cachedShapes, DispatchBoundsMode::eShape);
-        include_batches(visibleBounds, renderPlanCache.cachedMedia, DispatchBoundsMode::eExact);
-        include_batches(visibleBounds, renderPlanCache.cachedTexts, DispatchBoundsMode::eText);
-    }
+    include_plan(visibleBounds, renderPlanCache);
+    include_blurs(visibleBounds, renderPlanCache.cachedPanelBlurs);
+    include_batches(visibleBounds, renderPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
+    include_blurs(visibleBounds, renderPlanCache.cachedBlurs);
+    include_batches(visibleBounds, renderPlanCache.cachedShapes, DispatchBoundsMode::eShape);
+    include_batches(visibleBounds, renderPlanCache.cachedMedia, DispatchBoundsMode::eExact);
+    include_batches(visibleBounds, renderPlanCache.cachedTexts, DispatchBoundsMode::eText);
     contentBounds = {
         visibleBounds.x,
         visibleBounds.y,
@@ -5152,7 +5071,7 @@ void Renderer2D::record(
     record_batch_bounds(renderPlanCache.cachedTexts, DispatchBoundsMode::eText);
 
     DispatchBounds trackedDamage = {};
-    if (triangleCount > 0u || rebuildCachedLayer || scene.fullDamagePending_)
+    if (rebuildCachedLayer || scene.fullDamagePending_)
     {
         trackedDamage = visibleBounds;
         for (const auto& bounds : scene.presentedBounds_)

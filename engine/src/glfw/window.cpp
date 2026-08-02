@@ -934,53 +934,6 @@ void glfw_handle_ui_drop(
     ui_handle_drop(engine.renderer2d_scene(), input);
 }
 
-CameraInput poll_glfw_camera_input(
-    GLFWwindow* window,
-    double now,
-    double& lastFrameTime,
-    double& lastMouseX,
-    double& lastMouseY,
-    bool& hasMousePosition)
-{
-    CameraInput input = {};
-    input.deltaSeconds = static_cast<float>(std::max(0.0, now - lastFrameTime));
-    lastFrameTime = now;
-
-    if (!window)
-    {
-        return input;
-    }
-
-    input.forward += glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS ? -1.0f : 0.0f;
-    input.forward += glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS ? 1.0f : 0.0f;
-    input.right += glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS ? 1.0f : 0.0f;
-    input.right += glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS ? -1.0f : 0.0f;
-    input.up += glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS ? 1.0f : 0.0f;
-    input.up += glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS ? -1.0f : 0.0f;
-
-    double mouseX = 0.0;
-    double mouseY = 0.0;
-    glfwGetCursorPos(window, &mouseX, &mouseY);
-    if (!hasMousePosition)
-    {
-        lastMouseX = mouseX;
-        lastMouseY = mouseY;
-        hasMousePosition = true;
-    }
-
-    const bool looking = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-    if (looking)
-    {
-        constexpr float sensitivity = 0.0025f;
-        input.yawDelta = static_cast<float>(mouseX - lastMouseX) * sensitivity;
-        input.pitchDelta = static_cast<float>(mouseY - lastMouseY) * sensitivity;
-    }
-
-    lastMouseX = mouseX;
-    lastMouseY = mouseY;
-    return input;
-}
-
 bool update_glfw_mouse_passthrough(
     GLFWwindow* window,
     bool requested,
