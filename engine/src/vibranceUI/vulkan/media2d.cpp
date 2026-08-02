@@ -1,12 +1,12 @@
 #include <vibranceUI/renderer/media2d.h>
 #include <vibranceUI/renderer/descriptors.h>
+#include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
 #include "../animation/lottie.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -182,36 +182,6 @@ namespace
         }
 
         return Media2DSourceType::eRasterImage;
-    }
-
-    std::vector<unsigned char> read_binary_file(const std::filesystem::path& path)
-    {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file)
-        {
-            return {};
-        }
-
-        const std::streamsize size = file.tellg();
-        if (size <= 0)
-        {
-            return {};
-        }
-
-        std::vector<unsigned char> data(static_cast<std::size_t>(size));
-        file.seekg(0, std::ios::beg);
-        file.read(reinterpret_cast<char*>(data.data()), size);
-        return data;
-    }
-
-    std::string read_text_file(const std::filesystem::path& path)
-    {
-        const std::vector<unsigned char> bytes = read_binary_file(path);
-        if (bytes.empty())
-        {
-            return {};
-        }
-        return std::string(bytes.begin(), bytes.end());
     }
 
     bool has_any(std::string_view text, std::initializer_list<std::string_view> needles)

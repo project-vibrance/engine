@@ -1,8 +1,36 @@
-file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
+set(ENGINE_SOURCES
+    src/audio/audio.cpp
+    src/core/camera.cpp
+    src/core/file.cpp
+    src/core/logger.cpp
+    src/core/vma_usage.cpp
+    src/factories/mesh_factory.cpp
+    src/glfw/panel_window.cpp
+    src/glfw/window.cpp
+    src/localisation/localisation.cpp
+    src/ui/resource_loading.cpp
+    src/ui/theme.cpp
+    src/vibranceUI/animation/lottie.cpp
+    src/vibranceUI/backdrop.cpp
+    src/vibranceUI/directx/composition_presenter.cpp
+    src/vibranceUI/vulkan/buffer.cpp
+    src/vibranceUI/vulkan/command.cpp
+    src/vibranceUI/vulkan/descriptors.cpp
+    src/vibranceUI/vulkan/device.cpp
+    src/vibranceUI/vulkan/font_atlas.cpp
+    src/vibranceUI/vulkan/frame.cpp
+    src/vibranceUI/vulkan/image.cpp
+    src/vibranceUI/vulkan/instance.cpp
+    src/vibranceUI/vulkan/media2d.cpp
+    src/vibranceUI/vulkan/renderer.cpp
+    src/vibranceUI/vulkan/renderer2d.cpp
+    src/vibranceUI/vulkan/renderer3d.cpp
+    src/vibranceUI/vulkan/shader.cpp
+    src/vibranceUI/vulkan/swapchain.cpp
+    src/vibranceUI/vulkan/synchronisation.cpp
+)
 # C++/WinRT stays in its MSVC companion DLL and must never enter the MinGW
 # engine target. The MinGW side talks to it through a versioned POD C ABI.
-list(FILTER ENGINE_SOURCES EXCLUDE REGEX "composition_bridge\\.cpp$")
 
 set(ENGINE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${ENGINE_GENERATED_DIR}")
@@ -19,9 +47,7 @@ configure_file(
 list(APPEND ENGINE_SOURCES "${ENGINE_MANIFEST_CPP}")
 
 if(APPLE)
-    file(GLOB_RECURSE ENGINE_OBJCXX_SOURCES CONFIGURE_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.mm")
-    list(APPEND ENGINE_SOURCES ${ENGINE_OBJCXX_SOURCES})
+    list(APPEND ENGINE_SOURCES src/glfw/window_macos.mm)
 endif()
 
 # Compile shader sources once, then turn the SPIR-V binaries into a generated

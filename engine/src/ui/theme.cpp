@@ -1,13 +1,12 @@
 #include <vibranceUI/ui/styles.h>
 
+#include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
 
 #include <cctype>
 #include <filesystem>
-#include <fstream>
 #include <initializer_list>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -16,19 +15,6 @@
 namespace
 {
     using ThemeEntries = std::unordered_map<std::string, std::string>;
-
-    std::string read_text_file(const std::filesystem::path& path)
-    {
-        std::ifstream file(path, std::ios::binary);
-        if (!file)
-        {
-            return {};
-        }
-
-        std::ostringstream out;
-        out << file.rdbuf();
-        return out.str();
-    }
 
     class ThemeJsonParser
     {

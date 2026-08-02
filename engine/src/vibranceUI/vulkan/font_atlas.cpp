@@ -1,11 +1,11 @@
 #include <vibranceUI/renderer/font_atlas.h>
 #include <vibranceUI/renderer/image.h>
+#include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <limits>
 #include <unordered_set>
 #include <vector>
@@ -21,26 +21,6 @@ namespace
     constexpr uint32_t kAtlasHeight = 4096;
     constexpr int kSdfPadding = 48;
     constexpr unsigned char kSdfOnEdgeValue = 180;
-
-    std::vector<unsigned char> read_binary_file(const std::filesystem::path& path)
-    {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file)
-        {
-            return {};
-        }
-
-        const std::streamsize size = file.tellg();
-        if (size <= 0)
-        {
-            return {};
-        }
-
-        std::vector<unsigned char> data(static_cast<size_t>(size));
-        file.seekg(0, std::ios::beg);
-        file.read(reinterpret_cast<char*>(data.data()), size);
-        return data;
-    }
 
     bool upload_rgba_to_image(
         VmaAllocator& allocator,

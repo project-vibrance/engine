@@ -1,10 +1,10 @@
 #include <vibranceUI/localisation/localisation.h>
+#include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
 #include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <optional>
 #include <sstream>
@@ -308,18 +308,6 @@ namespace
         std::string_view source_;
         std::size_t position_ = 0u;
     };
-
-    std::string read_text_file(const std::filesystem::path& path)
-    {
-        std::ifstream file(path, std::ios::binary);
-        if (!file)
-        {
-            return {};
-        }
-        std::ostringstream out;
-        out << file.rdbuf();
-        return out.str();
-    }
 
     std::string format_pattern(std::string pattern, const std::vector<std::string>& arguments)
     {
