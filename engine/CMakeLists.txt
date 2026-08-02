@@ -312,6 +312,12 @@ target_link_libraries(vibrance_engine PRIVATE
     ${FREETYPE_LIBRARIES}
     ${GLFW_LIBRARIES})
 
+if(TARGET simdjson::simdjson)
+    # The native Lottie reader uses simdjson privately; it remains folded into
+    # the engine DLL and is not exposed as an application dependency.
+    target_link_libraries(vibrance_engine PRIVATE simdjson::simdjson)
+endif()
+
 if(SOLOUD_FOUND)
     target_compile_definitions(vibrance_engine PRIVATE VIBRANCE_HAS_SOLOUD=1)
     target_link_libraries(vibrance_engine PRIVATE soloud)

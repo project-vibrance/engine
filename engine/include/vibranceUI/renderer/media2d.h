@@ -21,11 +21,14 @@ struct Media2DLoadOptions
     bool srgb = false;
     bool generateMipmaps = true;
     bool premultiplyAlpha = false;
-    // Maximum decoded/uploaded GIF/APNG/SVG frames; set to 0 to keep all generated/source frames
+    // Maximum decoded/uploaded GIF/APNG/SVG/Lottie frames; set to 0 to keep all generated/source frames
     uint32_t maxAnimationFrames = 0;
     // Explicit animated SVG frame count; set to 0 to derive frames from duration * svgAnimationFrameRate
     uint32_t svgAnimationFrames = 0;
     double svgAnimationFrameRate = 60.0;
+    // Lottie keeps its authored composition cadence by default. A requested
+    // count resamples the same duration without changing playback speed.
+    uint32_t lottieAnimationFrames = 0;
     // Maximum decoded/uploaded video frame samples; set to 0 to decode every
     // source frame. Sampling preserves source duration/frame-rate metadata but
     // reduces the number of unique frames available during playback.

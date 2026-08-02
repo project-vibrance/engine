@@ -1,6 +1,7 @@
 #include <vibranceUI/renderer/media2d.h>
 #include <vibranceUI/renderer/descriptors.h>
 #include <vibranceUI/core/logger.h>
+#include "../animation/lottie.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -167,6 +168,11 @@ namespace
         if (extension == ".svg" || extension == ".svgz")
         {
             return Media2DSourceType::eSvg;
+        }
+
+        if (extension == ".json")
+        {
+            return Media2DSourceType::eLottie;
         }
 
         if (extension == ".mp4" || extension == ".mov" || extension == ".m4v" ||
@@ -2603,6 +2609,33 @@ namespace
     }
 #endif
 
+    DecodedMediaAnimation decode_lottie_animation(
+        const vibrance::animation::LottieSvgAnimation& source,
+        const Media2DLoadOptions& options)
+    {
+        DecodedMediaAnimation animation = {};
+        if (!source.valid())
+        {
+            return animation;
+        }
+
+        animation.sourceDurationSeconds = source.durationSeconds;
+        animation.sourceFrameRate = source.frameRate;
+        animation.frames.reserve(source.frames.size());
+        for (const vibrance::animation::LottieSvgFrame& sourceFrame : source.frames)
+        {
+            DecodedMediaFrame frame = decode_svg_text(sourceFrame.svg, options);
+            if (!frame.valid())
+            {
+                animation.frames.clear();
+                return animation;
+            }
+            frame.durationSeconds = sourceFrame.durationSeconds;
+            animation.frames.push_back(std::move(frame));
+        }
+        return animation;
+    }
+
     DecodedMediaAnimation make_css_svg_animation_frames(
         std::string_view svgText,
         const Media2DLoadOptions& options)
@@ -3119,6 +3152,51 @@ Media2DHandle load_media_2d_asset(
         if (outAsset.animated && !animation.valid())
         {
             animation = make_svg_animation_frames(frame, svgText, options);
+        }
+    }
+    else if (outAsset.sourceType == Media2DSourceType::eLottie)
+    {
+        const std::string jsonText = read_text_file(outAsset.path);
+        const vibrance::animation::LottieSvgAnimation lottie =
+            vibrance::animation::make_lottie_svg_animation(
+                jsonText,
+                options.lottieAnimationFrames,
+                options.maxAnimationFrames);
+        if (!lottie.valid())
+        {
+            logger->vulkan(
+                "Failed to parse Lottie animation " + outAsset.path.string() +
+                (lottie.error.empty() ? "." : ": " + lottie.error));
+            return {};
+        }
+
+        if (lottie.ignoredExpressionCount > 0u)
+        {
+            logger->warning(
+                "Lottie animation " + outAsset.path.string() + " contains " +
+                std::to_string(lottie.ignoredExpressionCount) +
+                " After Effects expression(s); authored keyframes are used as the portable fallback.");
+        }
+        if (lottie.unsupportedFeatureCount > 0u)
+        {
+            logger->warning(
+                "Lottie animation " + outAsset.path.string() + " contains " +
+                std::to_string(lottie.unsupportedFeatureCount) +
+                " unsupported feature(s); supported vector layers continue rendering.");
+        }
+
+        outAsset.animated = lottie.frames.size() > 1u;
+        animation = decode_lottie_animation(lottie, options);
+        if (animation.valid())
+        {
+            frame = animation.frames.front();
+        }
+        else
+        {
+            logger->vulkan(
+                "Failed to rasterize Lottie animation frames: " +
+                outAsset.path.string());
+            return {};
         }
     }
     else if (outAsset.sourceType == Media2DSourceType::eVideo)

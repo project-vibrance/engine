@@ -327,6 +327,17 @@ if(DEFINED SIMDJSON_PATH AND EXISTS "${SIMDJSON_PATH}/simdjson.cpp")
     add_library(simdjson::simdjson ALIAS simdjson)
     target_include_directories(simdjson PUBLIC "${SIMDJSON_PATH}")
     target_compile_features(simdjson PUBLIC cxx_std_17)
+    if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # simdjson's MinGW AVX2/AVX-512 kernels can fault while executing from
+        # the engine DLL even when CPUID advertises the matching feature set.
+        # Prefer correctness for asset loading; Lottie JSON is small enough
+        # that the portable implementation has no measurable frame-time cost.
+        target_compile_definitions(simdjson PRIVATE
+            SIMDJSON_IMPLEMENTATION_ICELAKE=0
+            SIMDJSON_IMPLEMENTATION_HASWELL=0
+            SIMDJSON_IMPLEMENTATION_WESTMERE=0
+            SIMDJSON_IMPLEMENTATION_FALLBACK=1)
+    endif()
     set_target_properties(simdjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
 elseif(DEFINED SIMDJSON_PATH)
     message(FATAL_ERROR "SIMDJSON_PATH must point to a directory containing simdjson.cpp and simdjson.h.")

@@ -1906,6 +1906,76 @@ namespace
         media.currentFrame = media_frame_for_time(media);
     }
 
+    Media2DComponent* media_component(entt::registry& registry, entt::entity entity)
+    {
+        return registry.valid(entity)
+            ? registry.try_get<Media2DComponent>(entity)
+            : nullptr;
+    }
+
+    const Media2DComponent* media_component(const entt::registry& registry, entt::entity entity)
+    {
+        return registry.valid(entity)
+            ? registry.try_get<Media2DComponent>(entity)
+            : nullptr;
+    }
+
+    bool apply_media_playback_operation(
+        Media2DComponent& media,
+        Media2DPlaybackCommand operation,
+        double value = 0.0)
+    {
+        switch (operation)
+        {
+        case Media2DPlaybackCommand::ePlay:
+            if (media.playing)
+            {
+                return false;
+            }
+            media.playing = true;
+            media.lastPlaybackUpdateSeconds = -1.0;
+            return true;
+        case Media2DPlaybackCommand::ePause:
+            if (!media.playing)
+            {
+                return false;
+            }
+            media.playing = false;
+            media.lastPlaybackUpdateSeconds = -1.0;
+            return true;
+        case Media2DPlaybackCommand::eStop:
+            media.playing = false;
+            media.playbackSeconds = 0.0;
+            media.lastPlaybackUpdateSeconds = -1.0;
+            media.currentFrame = 0u;
+            return true;
+        case Media2DPlaybackCommand::eRestart:
+            media.playing = true;
+            media.playbackSeconds = 0.0;
+            media.lastPlaybackUpdateSeconds = -1.0;
+            media.currentFrame = 0u;
+            return true;
+        case Media2DPlaybackCommand::eSeek:
+        {
+            const double maximum = std::max(media.durationSeconds, 0.0);
+            media.playbackSeconds = maximum > 0.0
+                ? std::clamp(value, 0.0, maximum)
+                : std::max(value, 0.0);
+            media.lastPlaybackUpdateSeconds = -1.0;
+            media.currentFrame = media_frame_for_time(media);
+            return true;
+        }
+        case Media2DPlaybackCommand::eSetLooping:
+            if (media.loop == (value != 0.0))
+            {
+                return false;
+            }
+            media.loop = value != 0.0;
+            return true;
+        }
+        return false;
+    }
+
     glm::vec4 make_model_viewport(
         const entt::registry& registry,
         entt::entity entity,
@@ -2932,6 +3002,42 @@ entt::entity Renderer2DScene::create_media(
 
     mark_dirty();
     return entity;
+}
+
+bool Renderer2DScene::control_media(
+    entt::entity entity,
+    Media2DPlaybackCommand command,
+    double value)
+{
+    Media2DComponent* media = media_component(registry_, entity);
+    if (media == nullptr)
+    {
+        return false;
+    }
+    if (apply_media_playback_operation(*media, command, value))
+    {
+        mark_dirty(entity);
+    }
+    return true;
+}
+
+std::optional<Media2DPlaybackState> Renderer2DScene::media_playback_state(entt::entity entity) const
+{
+    const Media2DComponent* media = media_component(registry_, entity);
+    if (media == nullptr)
+    {
+        return std::nullopt;
+    }
+
+    return Media2DPlaybackState {
+        media->playbackSeconds,
+        media->durationSeconds,
+        media->currentFrame,
+        media->frameCount,
+        media->animated,
+        media->playing,
+        media->loop
+    };
 }
 
 bool Renderer2DScene::enable_mask(entt::entity entity, bool useContentRect, float effectPadding)

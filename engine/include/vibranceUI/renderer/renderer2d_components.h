@@ -62,7 +62,8 @@ enum class Media2DSourceType : uint32_t
     eUnknown = 0,
     eRasterImage = 1,
     eSvg = 2,
-    eVideo = 3
+    eVideo = 3,
+    eLottie = 4
 };
 
 enum class Media2DFit : uint32_t
@@ -802,7 +803,7 @@ struct Model3DComponent
 
 struct Media2DComponent
 {
-    // Media components draw uploaded raster, SVG, GIF, APNG, or video frames
+    // Media components draw uploaded raster, SVG, Lottie, GIF, APNG, or video frames
     uint32_t mediaId = 0;
     Media2DSourceType sourceType = Media2DSourceType::eUnknown;
     glm::uvec2 sourcePixelSize { 0u };
@@ -852,6 +853,10 @@ struct Media2DComponent
         drawable = handle.drawable;
         sourceHasBlackBackground = handle.hasBlackBackground;
         premultipliedAlpha = handle.premultipliedAlpha;
+        playbackSeconds = 0.0;
+        lastPlaybackUpdateSeconds = -1.0;
+        currentFrame = 0;
+        playing = true;
     }
 
     void set_tint(glm::vec4 color)
@@ -955,6 +960,27 @@ struct Media2DComponent
     {
         autoLiftBlack = enabled;
     }
+};
+
+struct Media2DPlaybackState
+{
+    double playbackSeconds = 0.0;
+    double durationSeconds = 0.0;
+    uint32_t currentFrame = 0;
+    uint32_t frameCount = 1;
+    bool animated = false;
+    bool playing = false;
+    bool looping = true;
+};
+
+enum class Media2DPlaybackCommand : uint32_t
+{
+    ePlay = 0,
+    ePause = 1,
+    eStop = 2,
+    eRestart = 3,
+    eSeek = 4,
+    eSetLooping = 5
 };
 
 struct Renderer2DCacheComponent
@@ -1305,6 +1331,49 @@ public:
         Media2DHandle media,
         Media2DFit fit = Media2DFit::eStretch
     );
+    // Generic playback controls shared by Lottie, animated SVG, GIF, APNG,
+    // and video media.
+    // These functions preserve the current position unless their name explicitly
+    // resets it, and return false only when entity is not a media entity. The
+    // generic value is seconds for eSeek and a boolean value for eSetLooping.
+    bool control_media(
+        entt::entity entity,
+        Media2DPlaybackCommand command,
+        double value = 0.0);
+    bool set_media_playing(entt::entity entity, bool playing)
+    {
+        return control_media(
+            entity,
+            playing ? Media2DPlaybackCommand::ePlay : Media2DPlaybackCommand::ePause);
+    }
+    bool play_media(entt::entity entity)
+    {
+        return control_media(entity, Media2DPlaybackCommand::ePlay);
+    }
+    bool pause_media(entt::entity entity)
+    {
+        return control_media(entity, Media2DPlaybackCommand::ePause);
+    }
+    bool stop_media(entt::entity entity)
+    {
+        return control_media(entity, Media2DPlaybackCommand::eStop);
+    }
+    bool restart_media(entt::entity entity)
+    {
+        return control_media(entity, Media2DPlaybackCommand::eRestart);
+    }
+    bool seek_media(entt::entity entity, double playbackSeconds)
+    {
+        return control_media(entity, Media2DPlaybackCommand::eSeek, playbackSeconds);
+    }
+    bool set_media_looping(entt::entity entity, bool looping)
+    {
+        return control_media(
+            entity,
+            Media2DPlaybackCommand::eSetLooping,
+            looping ? 1.0 : 0.0);
+    }
+    std::optional<Media2DPlaybackState> media_playback_state(entt::entity entity) const;
     bool enable_mask(entt::entity entity, bool useContentRect = true, float effectPadding = 0.0f);
     bool disable_mask(entt::entity entity);
 
