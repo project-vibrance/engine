@@ -96,6 +96,36 @@ inline LayoutScale make_layout_scale(
     };
 }
 
+inline LayoutScale make_fixed_layout_scale(
+    int framebufferWidth,
+    int framebufferHeight,
+    glm::vec2 contentScale,
+    glm::vec2 designSize = { kDefaultDesignWidth, kDefaultDesignHeight },
+    glm::vec2 viewportAnchor = { 0.5f, 0.5f },
+    glm::vec2 designAnchor = { 0.5f, 0.5f })
+{
+    // A fixed canvas keeps logical controls at their DPI-correct size while
+    // the window or monitor only changes the surrounding available area.
+    // Independent viewport/design anchors support top bars, side rails,
+    // centred overlays and corner widgets without introducing app concepts.
+    const float dpiScale = std::max(
+        std::min(contentScale.x, contentScale.y),
+        0.25f);
+    const glm::vec2 framebufferSize {
+        static_cast<float>(std::max(framebufferWidth, 1)),
+        static_cast<float>(std::max(framebufferHeight, 1))
+    };
+    const glm::vec2 safeDesignSize = glm::max(designSize, glm::vec2(1.0f));
+    const glm::vec2 renderScale { dpiScale };
+    const glm::vec2 canvasSize = safeDesignSize * renderScale;
+    return {
+        renderScale,
+        framebufferSize * viewportAnchor - canvasSize * designAnchor,
+        contentScale,
+        framebufferSize / dpiScale
+    };
+}
+
 inline glm::vec2 scaled_point(float x, float y, const LayoutScale& scale)
 {
     return scale.origin + glm::vec2 { x, y } * scale.factor;
