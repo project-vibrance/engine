@@ -49,7 +49,6 @@ struct Media2DAsset
     uint32_t frameCount = 1;
     bool animated = false;
     bool drawable = false;
-    bool metadataOnly = false;
     bool hasBlackBackground = false;
     bool premultipliedAlpha = false;
     std::unique_ptr<StorageImage> image;

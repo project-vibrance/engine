@@ -414,11 +414,6 @@ inline glm::vec4 renderer2d_hex_color(std::string_view value, glm::vec4 fallback
     return renderer2d_parse_hex_color(value).value_or(fallback);
 }
 
-inline glm::vec4 renderer2d_color(std::string_view value, glm::vec4 fallback = glm::vec4(1.0f))
-{
-    return renderer2d_hex_color(value, fallback);
-}
-
 struct Transform2DComponent
 {
     // Framebuffer-space transform applied after layout has resolved

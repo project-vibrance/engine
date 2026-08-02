@@ -3142,7 +3142,6 @@ Media2DHandle load_media_2d_asset(
         }
         if (!frame.valid())
         {
-            outAsset.metadataOnly = true;
             logger->vulkan(
                 "Registered SVG media metadata for " + outAsset.path.string() +
                 ". SVG rasterization is not available in this build.");
@@ -3209,7 +3208,6 @@ Media2DHandle load_media_2d_asset(
         }
         else
         {
-            outAsset.metadataOnly = true;
             logger->vulkan(
                 "Registered video media metadata for " + outAsset.path.string() +
                 ". No available video decoder produced frames.");

@@ -794,9 +794,6 @@ struct UiSidebarRichButtonOptions
     std::function<void(const PointerInputEvent&)> onClick;
 };
 
-using UiSidebarAccountButtonHandle = UiSidebarRichButtonHandle;
-using UiSidebarAccountButtonOptions = UiSidebarRichButtonOptions;
-
 struct UiCommonIconSet
 {
     // Common controls use these icons, but callers decide where assets live
@@ -1478,34 +1475,6 @@ inline UiSidebarRichButtonHandle ui_create_sidebar_rich_button(
     return handle;
 }
 
-inline void ui_apply_sidebar_account_button_state(
-    Renderer2DScene& scene,
-    const UiSidebarAccountButtonHandle& handle,
-    bool selected,
-    UiSidebarAccountButtonOptions options = {})
-{
-    ui_apply_sidebar_rich_button_state(scene, handle, selected, std::move(options));
-}
-
-inline UiSidebarAccountButtonHandle ui_create_sidebar_account_button(
-    UiBuilder& ui,
-    const Renderer2DFontAtlas& fontAtlas,
-    entt::entity parent,
-    float y,
-    int32_t layer,
-    uint32_t order,
-    UiSidebarAccountButtonOptions options = {})
-{
-    return ui_create_sidebar_rich_button(
-        ui,
-        fontAtlas,
-        parent,
-        y,
-        layer,
-        order,
-        std::move(options));
-}
-
 inline UiSidebarNavItemHandle ui_create_sidebar_nav_item(
     UiBuilder& ui,
     const Renderer2DFontAtlas& fontAtlas,
@@ -1625,11 +1594,6 @@ inline TextInputVisualComponent ui_macos26_search_visual(UiBuilder& ui)
     visual.hasDisabled = true;
     visual.maxDisplayCharacters = 36u;
     return visual;
-}
-
-inline void ui_tint_media(Renderer2DScene& scene, entt::entity entity, std::string_view color)
-{
-    ui_set_media_tint(scene, entity, color);
 }
 
 inline void ui_tint_icon_media(Renderer2DScene& scene, entt::entity entity, std::string_view color)

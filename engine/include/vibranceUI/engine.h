@@ -10,6 +10,7 @@
 #include <vibranceUI/ui/input.h>
 #include <vibranceUI/ui/interactions.h>
 #include <vibranceUI/ui/layout.h>
+#include <vibranceUI/ui/resource_loading.h>
 #include <vibranceUI/ui/styles.h>
 #include <vibranceUI/ui/surfaces.h>
 #include <vibranceUI/ui/text.h>

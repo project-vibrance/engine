@@ -56,6 +56,16 @@ inline std::filesystem::path ui_env_path(const char* name)
     return ui_absolute_path(std::filesystem::path(value));
 }
 
+inline void ui_append_unique_path(
+    std::vector<std::filesystem::path>& paths,
+    const std::filesystem::path& path)
+{
+    if (!path.empty() && std::find(paths.begin(), paths.end(), path) == paths.end())
+    {
+        paths.push_back(path);
+    }
+}
+
 struct UiResourceDirectories
 {
     // Packaged defaults are immutable fallback layers. User roots contain only
