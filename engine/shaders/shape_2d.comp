@@ -301,6 +301,13 @@ float circular_progress_gradient_t(vec2 pixel) {
     float progress = clamp(pc.uvRect.x, 0.0, 1.0);
     float sweep = max(TWO_PI * progress, 0.00001);
     float relativeAngle = circular_progress_relative_angle(p, pc.uvRect);
+    if (progress >= 0.99999) {
+        // A complete angular gradient is a closed loop. Returning to the start
+        // colour at one revolution removes the end-to-start seam while still
+        // reaching the end colour opposite the configured start angle.
+        float loopT = clamp(relativeAngle / TWO_PI, 0.0, 1.0);
+        return 0.5 - 0.5 * cos(TWO_PI * loopT);
+    }
     if (relativeAngle <= sweep || progress >= 0.99999) {
         return clamp(relativeAngle / sweep, 0.0, 1.0);
     }

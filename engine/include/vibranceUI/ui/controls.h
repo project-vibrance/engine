@@ -430,6 +430,10 @@ struct UiCircularProgressComponent
     float value = 0.0f;
     float minValue = 0.0f;
     float maxValue = 1.0f;
+    glm::vec4 progressColor { 1.0f };
+    glm::vec4 progressEndColor { 1.0f };
+    bool progressUsesGradient = false;
+    bool contentUsesProgressColor = false;
 };
 
 struct UiCircularProgressOptions
@@ -445,6 +449,10 @@ struct UiCircularProgressOptions
     std::string trackEndColor {};
     std::string progressColor = "#6EE77CFF";
     std::string progressEndColor {};
+    // Bound centre content inherits the solid progress colour or the complete
+    // progress gradient. Call ui_apply_circular_progress_content_color after
+    // creating the text, media, icon, or shape inside the progress root.
+    bool contentUsesProgressColor = false;
     float opacity = 1.0f;
     float edgeSoftness = 0.8f;
 };
@@ -3348,6 +3356,82 @@ inline bool ui_set_circular_progress(
     return true;
 }
 
+inline bool ui_apply_circular_progress_content_color(
+    Renderer2DScene& scene,
+    entt::entity root,
+    entt::entity content,
+    bool mediaAsMask = false)
+{
+    entt::registry& registry = scene.registry();
+    const UiCircularProgressComponent* control =
+        registry.try_get<UiCircularProgressComponent>(root);
+    if (!control || !control->contentUsesProgressColor ||
+        content == entt::null || !registry.valid(content))
+    {
+        return false;
+    }
+
+    const glm::vec4 startColor = control->progressColor;
+    const glm::vec4 endColor = control->progressEndColor;
+    bool applied = false;
+    if (TextStyleComponent* text =
+        registry.try_get<TextStyleComponent>(content))
+    {
+        if (control->progressUsesGradient)
+        {
+            text->set_gradient(
+                startColor,
+                endColor,
+                { 0.0f, 0.0f },
+                { 1.0f, 0.0f });
+        }
+        else
+        {
+            text->set_color(startColor);
+        }
+        applied = true;
+    }
+    if (ShapeStyleComponent* shape =
+        registry.try_get<ShapeStyleComponent>(content))
+    {
+        shape->fill = control->progressUsesGradient ?
+            Renderer2DFill::eLinearGradient :
+            Renderer2DFill::eSolid;
+        shape->color0 = startColor;
+        shape->color1 = control->progressUsesGradient ? endColor : startColor;
+        shape->gradientStart = { 0.0f, 0.0f };
+        shape->gradientEnd = { 1.0f, 0.0f };
+        applied = true;
+    }
+    if (Media2DComponent* media =
+        registry.try_get<Media2DComponent>(content))
+    {
+        if (control->progressUsesGradient)
+        {
+            media->set_tint_gradient(
+                startColor,
+                endColor,
+                { 0.0f, 0.0f },
+                { 1.0f, 0.0f });
+        }
+        else
+        {
+            media->set_tint(startColor);
+        }
+        if (mediaAsMask)
+        {
+            media->set_tint_as_mask(true);
+        }
+        applied = true;
+    }
+
+    if (applied)
+    {
+        scene.mark_dirty(content);
+    }
+    return applied;
+}
+
 inline UiControlHandle ui_create_circular_progress(
     UiBuilder& ui,
     entt::entity parent,
@@ -3422,13 +3506,23 @@ inline UiControlHandle ui_create_circular_progress(
 
     const float low = std::min(options.minValue, options.maxValue);
     const float high = std::max(options.minValue, options.maxValue);
+    const glm::vec4 progressColor =
+        renderer2d_hex_color(options.progressColor);
+    const bool progressUsesGradient = !options.progressEndColor.empty();
+    const glm::vec4 progressEndColor = progressUsesGradient ?
+        renderer2d_hex_color(options.progressEndColor) :
+        progressColor;
     registry.emplace<UiCircularProgressComponent>(
         handle.root,
         UiCircularProgressComponent {
             handle.indicator,
             std::clamp(options.value, low, high),
             low,
-            high
+            high,
+            progressColor,
+            progressEndColor,
+            progressUsesGradient,
+            options.contentUsesProgressColor
         });
     return handle;
 }
