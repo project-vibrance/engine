@@ -291,6 +291,23 @@ inline void ui_emit_slider_change_if_needed(
     slider.onChanged(event);
 }
 
+inline void ui_emit_slider_commit(
+    SliderInputComponent& slider,
+    entt::entity entity,
+    glm::vec2 point)
+{
+    if (!slider.onCommitted)
+    {
+        return;
+    }
+    slider.onCommitted({
+        entity,
+        point,
+        slider.value,
+        ui_slider_normalized_value(slider)
+    });
+}
+
 inline bool ui_scrollbar_point_hits_thumb(
     const entt::registry& registry,
     const ScrollBarInputComponent& scrollBar,
@@ -337,10 +354,21 @@ inline bool ui_apply_scrollbar_point(
     const float thumbTop = std::clamp(point.y - trackRect.y - grabOffsetY, 0.0f, thumbTravel);
     const float normalized = thumbTop / thumbTravel;
     const float previousOffset = scroll->offset;
-    scroll->offset = std::clamp(
+    float nextOffset = std::clamp(
         scroll->minOffset + normalized * scrollRange,
         scroll->minOffset,
         scroll->maxOffset);
+    // Scroll offsets are framebuffer-space values. Sub-pixel pointer jitter
+    // cannot produce a distinct sharp frame, so coalesce it to the nearest
+    // display pixel while preserving the exact range endpoints.
+    if (nextOffset > scroll->minOffset && nextOffset < scroll->maxOffset)
+    {
+        nextOffset = std::clamp(
+            std::round(nextOffset),
+            scroll->minOffset,
+            scroll->maxOffset);
+    }
+    scroll->offset = nextOffset;
     if (std::abs(scroll->offset - previousOffset) <= 1e-4f)
     {
         scrollBar->wakeRequested = true;
@@ -353,8 +381,6 @@ inline bool ui_apply_scrollbar_point(
         ScrollInputEvent event { scrollBar->scrollTarget, point, 0.0, 0.0, modifiers };
         scroll->onScroll(event);
     }
-    scene.activate_dynamic(scrollBarEntity, 0.25f);
-    scene.mark_dirty(scrollBarEntity);
     return true;
 }
 
@@ -373,12 +399,13 @@ inline void ui_wake_scrollbars_for_scroll_target(Renderer2DScene& scene, entt::e
             return;
         }
         scrollBar.wakeRequested = true;
-        scene.activate_dynamic(entity, scrollBar.idleDelaySeconds + scrollBar.fadeDurationSeconds + 0.1f);
         if (scrollBar.thumb != entt::null && registry.valid(scrollBar.thumb))
         {
-            scene.activate_dynamic(scrollBar.thumb, scrollBar.idleDelaySeconds + scrollBar.fadeDurationSeconds + 0.1f);
+            ui_mark_direct_manipulation_dirty(
+                scene,
+                scrollBar.thumb,
+                scrollBar.idleDelaySeconds + scrollBar.fadeDurationSeconds + 0.1f);
         }
-        scene.mark_dirty(entity);
     });
 }
 
@@ -408,7 +435,7 @@ inline void ui_update_scrollbar_fade(Renderer2DScene& scene, double currentTimeS
                 if (std::abs(style->opacity - scrollBar.hiddenOpacity) > 0.001f)
                 {
                     style->opacity = scrollBar.hiddenOpacity;
-                    ui_mark_moving_entity_dirty(scene, scrollBar.thumb, 1.0f / 15.0f);
+                    ui_mark_direct_manipulation_dirty(scene, scrollBar.thumb, 1.0f / 15.0f);
                 }
             }
             scrollBar.wakeRequested = false;
@@ -422,7 +449,7 @@ inline void ui_update_scrollbar_fade(Renderer2DScene& scene, double currentTimeS
                 if (std::abs(style->opacity - scrollBar.visibleOpacity) > 0.001f)
                 {
                     style->opacity = scrollBar.visibleOpacity;
-                    ui_mark_moving_entity_dirty(scene, scrollBar.thumb, 1.0f / 15.0f);
+                    ui_mark_direct_manipulation_dirty(scene, scrollBar.thumb, 1.0f / 15.0f);
                 }
             }
             return;
@@ -454,8 +481,7 @@ inline void ui_update_scrollbar_fade(Renderer2DScene& scene, double currentTimeS
             if (std::abs(style->opacity - opacity) > 0.001f)
             {
                 style->opacity = opacity;
-                ui_mark_moving_entity_dirty(scene, entity, 1.0f / 15.0f);
-                ui_mark_moving_entity_dirty(scene, scrollBar.thumb, 1.0f / 15.0f);
+                ui_mark_direct_manipulation_dirty(scene, scrollBar.thumb, 1.0f / 15.0f);
             }
         }
     });
@@ -674,6 +700,10 @@ inline void ui_handle_pointer_button(
                         ui_update_slider_visual(scene, fontAtlas, state.activeSlider);
                     }
                 }
+                ui_emit_slider_commit(
+                    *slider,
+                    state.activeSlider,
+                    input.hasPoint ? input.point : glm::vec2(0.0f));
                 state.activeSlider = entt::null;
                 state.pointerInputCapture = entt::null;
             }
@@ -1132,6 +1162,10 @@ inline bool ui_update_slider_drag(
 
     if (!leftButtonPressed)
     {
+        ui_emit_slider_commit(
+            *slider,
+            state.activeSlider,
+            hasPoint ? point : glm::vec2(0.0f));
         slider->dragging = false;
         state.activeSlider = entt::null;
         state.pointerInputCapture = entt::null;

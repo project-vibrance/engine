@@ -7,6 +7,7 @@ const uint STYLE_GLOW = 1u << 4;
 const uint STYLE_BLUR = 1u << 5;
 const uint STYLE_ATLAS_TEXT = 1u << 8;
 const uint STYLE_SHAPE_MASK = 1u << 15;
+const uint STYLE_TEXT_EDGE_FADE = 1u << 25;
 const uint PRIMITIVE_RECTANGLE = 1u;
 const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
 const uint PRIMITIVE_ELLIPSE = 3u;
@@ -20,6 +21,15 @@ const uint TEXT_WEIGHT_SHIFT = 2u;
 const uint TEXT_WEIGHT_MASK = 4095u;
 const int TEXT_WEIGHT_BIAS = 2048;
 const float TEXT_WEIGHT_SCALE = 256.0;
+const uint TEXT_EDGE_FADE_MASK = 255u;
+const uint TEXT_EDGE_FADE_START_SHIFT = 14u;
+const uint TEXT_EDGE_FADE_END_SHIFT = 22u;
+const uint TEXT_EDGE_FADE_MODE_SHIFT = 30u;
+const uint TEXT_EDGE_FADE_MODE_MASK = 3u;
+const uint TEXT_EDGE_FADE_LEFT = 1u;
+const uint TEXT_EDGE_FADE_RIGHT = 2u;
+const int TEXT_EDGE_FADE_BIAS = 128;
+const float TEXT_EDGE_FADE_SCALE = 4.0;
 const float SDF_EDGE = 180.0 / 255.0;
 
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -121,6 +131,36 @@ float glyph_signed_distance_pixels(vec2 localUv, bool atlasText) {
 float glyph_weight_expansion_pixels() {
     uint packed = (pc.data.z >> TEXT_WEIGHT_SHIFT) & TEXT_WEIGHT_MASK;
     return float(int(packed) - TEXT_WEIGHT_BIAS) / TEXT_WEIGHT_SCALE;
+}
+
+float text_edge_fade_alpha(vec2 samplePoint) {
+    if ((pc.data.y & STYLE_TEXT_EDGE_FADE) == 0u) {
+        return 1.0;
+    }
+    uint mode =
+        (pc.data.z >> TEXT_EDGE_FADE_MODE_SHIFT) &
+        TEXT_EDGE_FADE_MODE_MASK;
+    float fadeStart = float(int(
+        (pc.data.z >> TEXT_EDGE_FADE_START_SHIFT) & TEXT_EDGE_FADE_MASK) -
+        TEXT_EDGE_FADE_BIAS) / TEXT_EDGE_FADE_SCALE;
+    float fadeEnd = float(int(
+        (pc.data.z >> TEXT_EDGE_FADE_END_SHIFT) & TEXT_EDGE_FADE_MASK) -
+        TEXT_EDGE_FADE_BIAS) / TEXT_EDGE_FADE_SCALE;
+    float localX = samplePoint.x - pc.rect.x;
+    float t = clamp(
+        (localX - fadeStart) / max(fadeEnd - fadeStart, 0.001),
+        0.0,
+        1.0);
+    // Smootherstep gives zero slope at both ends while still reaching exact
+    // opaque and transparent endpoints inside the clipping rectangle.
+    t = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    if (mode == TEXT_EDGE_FADE_LEFT) {
+        return t;
+    }
+    if (mode == TEXT_EDGE_FADE_RIGHT) {
+        return 1.0 - t;
+    }
+    return 1.0;
 }
 
 float sd_rounded_box(vec2 p, vec2 halfSize, float radius) {
@@ -379,7 +419,8 @@ vec4 shade_text_sample(
         src = blend_over(src, fillLayer);
     }
 
-    src.a *= inherited_shape_mask_alpha(samplePoint);
+    src.a *= inherited_shape_mask_alpha(samplePoint) *
+        text_edge_fade_alpha(samplePoint);
     return src.a > 0.001 ? src : vec4(0.0);
 }
 

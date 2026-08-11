@@ -34,7 +34,8 @@ public:
         std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
         const Renderer2DBatch& batch,
-        DescriptorScope frameScope = DescriptorScope::eFrame
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        bool synchronize = true
     ) const;
 };
 
@@ -58,7 +59,8 @@ public:
         std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
         const Renderer2DBatch& batch,
-        DescriptorScope frameScope = DescriptorScope::eFrame
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        bool synchronize = true
     ) const;
 };
 
@@ -114,7 +116,8 @@ public:
         const Renderer2DBatch& batch,
         DescriptorScope frameScope = DescriptorScope::eFrame,
         DescriptorScope postScope = DescriptorScope::ePost,
-        uint32_t textPass = 0
+        uint32_t textPass = 0,
+        bool synchronize = true
     ) const;
 };
 
@@ -140,7 +143,8 @@ public:
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
         const Renderer2DBatch& batch,
         std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
-        DescriptorScope frameScope = DescriptorScope::eFrame
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        bool synchronize = true
     ) const;
 };
 
@@ -217,6 +221,10 @@ public:
     glm::uvec4 content_bounds() const;
     glm::uvec4 damage_bounds() const;
 
+    // Call when the frame slot receives a new dynamic storage image. The next
+    // record clears the complete image once before returning to bounded clears.
+    void invalidate_dynamic_surface();
+
 private:
     ShapePipeline shapePipeline;
     ShadowPipeline shadowPipeline;
@@ -234,6 +242,11 @@ private:
     mutable int32_t cachedLayerCutoffLayer = 0;
     mutable uint32_t cachedLayerCutoffOrder = 0;
     mutable bool cachedLayerCutoffAlwaysOnTop = false;
+    mutable glm::uvec4 cachedLayerCutoffBounds { 0u };
+    mutable bool dynamicSurfaceInitialized = false;
+    mutable std::vector<uint32_t> cachedDynamicEntities;
+    mutable std::vector<std::pair<entt::entity, glm::uvec4>> presentedBounds;
+    mutable glm::uvec4 dynamicSurfaceBounds { 0u };
     mutable glm::uvec4 contentBounds { 0u };
     mutable glm::uvec4 damageBounds { 0u };
 };

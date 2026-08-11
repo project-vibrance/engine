@@ -179,9 +179,13 @@ inline void ui_set_text_input_caret_visible(
 
     if (RenderLayer2DComponent* layer = registry.try_get<RenderLayer2DComponent>(caret))
     {
+        if (layer->visible == visible)
+        {
+            return;
+        }
         layer->visible = visible;
+        scene.mark_dirty(caret);
     }
-    scene.mark_dirty(caret);
 }
 
 inline void ui_update_text_input_caret_layout(
@@ -552,6 +556,58 @@ inline void ui_update_slider_visual(
     DisabledVisualComponent* disabledVisual = registry.try_get<DisabledVisualComponent>(entity);
     const bool dimWhen = disabledVisual ? disabledVisual->dimWhenDisabled : slider->dimWhenDisabled;
     const float normalized = ui_slider_visual_normalized_value(*slider);
+    const float expansion = std::clamp(slider->hoverExpansion, 0.0f, 1.0f);
+    const float desiredTrackHeight = glm::mix(
+        slider->trackHeight,
+        slider->hoveredTrackHeight,
+        expansion);
+    const glm::vec2 desiredThumbSize = glm::mix(
+        slider->thumbSize,
+        slider->hoveredThumbSize,
+        expansion);
+
+    const auto resize_shape = [&](entt::entity target, glm::vec2 desiredSize)
+    {
+        if (target == entt::null || !registry.valid(target))
+        {
+            return;
+        }
+        bool changed = false;
+        if (ShapeComponent* shape = registry.try_get<ShapeComponent>(target))
+        {
+            if (glm::length(shape->size - desiredSize) > 0.001f)
+            {
+                shape->size = desiredSize;
+                shape->set_corner_radius(
+                    std::min(desiredSize.x, desiredSize.y) * 0.5f);
+                changed = true;
+            }
+        }
+        if (Layout2DComponent* layout = registry.try_get<Layout2DComponent>(target))
+        {
+            if (glm::length(layout->size - desiredSize) > 0.001f)
+            {
+                layout->size = desiredSize;
+                changed = true;
+            }
+        }
+        if (changed)
+        {
+            scene.mark_dirty(target);
+        }
+    };
+
+    if (ShapeComponent* track = registry.try_get<ShapeComponent>(entity))
+    {
+        resize_shape(entity, { track->size.x, desiredTrackHeight });
+    }
+    if (slider->maskEntity != entt::null && registry.valid(slider->maskEntity))
+    {
+        if (ShapeComponent* mask = registry.try_get<ShapeComponent>(slider->maskEntity))
+        {
+            resize_shape(slider->maskEntity, { mask->size.x, desiredTrackHeight });
+        }
+    }
 
     if (slider->labelEntity != entt::null && registry.valid(slider->labelEntity))
     {
@@ -592,10 +648,13 @@ inline void ui_update_slider_visual(
             if (fillShape)
             {
                 fillShape->size.x = desiredWidth;
+                fillShape->size.y = desiredTrackHeight;
+                fillShape->set_corner_radius(desiredTrackHeight * 0.5f);
             }
             if (fillLayout)
             {
                 fillLayout->size.x = desiredWidth;
+                fillLayout->size.y = desiredTrackHeight;
             }
             if (ShapeStyleComponent* fillStyle = registry.try_get<ShapeStyleComponent>(slider->fillEntity))
             {
@@ -607,6 +666,7 @@ inline void ui_update_slider_visual(
 
     if (slider->thumbEntity != entt::null && registry.valid(slider->thumbEntity))
     {
+        resize_shape(slider->thumbEntity, desiredThumbSize);
         if (Layout2DComponent* thumbLayout = registry.try_get<Layout2DComponent>(slider->thumbEntity))
         {
             thumbLayout->offset.x = size.x * normalized;
@@ -634,13 +694,6 @@ inline void ui_update_slider_smoothing(
     for (entt::entity entity : view)
     {
         SliderInputComponent& slider = view.get<SliderInputComponent>(entity);
-        if (!slider.smoothScrubbing)
-        {
-            slider.visualValue = slider.value;
-            slider.lastVisualUpdateSeconds = currentTimeSeconds;
-            continue;
-        }
-
         if (slider.lastVisualUpdateSeconds <= 0.0)
         {
             slider.lastVisualUpdateSeconds = currentTimeSeconds;
@@ -657,18 +710,45 @@ inline void ui_update_slider_smoothing(
             continue;
         }
 
-        const float target = std::clamp(slider.value, slider.minValue, slider.maxValue);
+        const float target = std::clamp(
+            slider.value,
+            slider.minValue,
+            slider.maxValue);
         const float previous = slider.visualValue;
-        const float rate = std::max(slider.visualSmoothingRate, 0.0f);
-        const float alpha = rate <= 0.0f ? 1.0f : 1.0f - std::exp(-rate * deltaSeconds);
-        slider.visualValue = std::clamp(previous + (target - previous) * alpha, slider.minValue, slider.maxValue);
+        if (slider.smoothScrubbing)
+        {
+            const float rate = std::max(slider.visualSmoothingRate, 0.0f);
+            const float alpha = rate <= 0.0f ?
+                1.0f : 1.0f - std::exp(-rate * deltaSeconds);
+            slider.visualValue = std::clamp(
+                previous + (target - previous) * alpha,
+                slider.minValue,
+                slider.maxValue);
+        }
+        else
+        {
+            slider.visualValue = target;
+        }
 
         if (std::abs(slider.visualValue - target) < 0.0005f)
         {
             slider.visualValue = target;
         }
 
-        if (std::abs(slider.visualValue - previous) > 0.00001f)
+        const float previousExpansion = slider.hoverExpansion;
+        const float expansionTarget = slider.hovered || slider.dragging ? 1.0f : 0.0f;
+        const float expansionRate = std::max(slider.hoverExpansionRate, 0.0f);
+        const float expansionAlpha = expansionRate <= 0.0f ?
+            1.0f : 1.0f - std::exp(-expansionRate * deltaSeconds);
+        slider.hoverExpansion +=
+            (expansionTarget - slider.hoverExpansion) * expansionAlpha;
+        if (std::abs(slider.hoverExpansion - expansionTarget) < 0.001f)
+        {
+            slider.hoverExpansion = expansionTarget;
+        }
+
+        if (std::abs(slider.visualValue - previous) > 0.00001f ||
+            std::abs(slider.hoverExpansion - previousExpansion) > 0.0001f)
         {
             ui_mark_moving_entity_dirty(scene, entity, 1.0f / 30.0f);
             if (slider.fillEntity != entt::null && registry.valid(slider.fillEntity))

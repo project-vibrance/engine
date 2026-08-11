@@ -161,6 +161,7 @@ struct ScrollBarInputComponent
 
 struct SliderInputComponent
 {
+    entt::entity maskEntity = entt::null;
     entt::entity fillEntity = entt::null;
     entt::entity thumbEntity = entt::null;
     entt::entity labelEntity = entt::null;
@@ -176,11 +177,20 @@ struct SliderInputComponent
     float maxValue = 1.0f;
     float step = 0.0f;
     float normalisedStep = 0.0f;
+    float trackHeight = 0.0f;
+    float hoveredTrackHeight = 0.0f;
+    glm::vec2 thumbSize { 0.0f };
+    glm::vec2 hoveredThumbSize { 0.0f };
+    float hoverExpansion = 0.0f;
+    float hoverExpansionRate = 20.0f;
     // Smooth scrubbing lets the visual thumb chase the real value without delaying callbacks
     bool smoothScrubbing = false;
     float visualSmoothingRate = 24.0f;
     double lastVisualUpdateSeconds = 0.0;
     std::function<void(const SliderInputEvent&)> onChanged;
+    // Fired once when pointer scrubbing ends. Use this for expensive or
+    // externally observable operations such as media seeking.
+    std::function<void(const SliderInputEvent&)> onCommitted;
 };
 
 struct DisabledVisualComponent
@@ -317,6 +327,39 @@ inline void ui_mark_moving_entity_dirty(
     }
 
     ui_set_timed_moving_cache(scene, entity);
+    scene.activate_dynamic(entity, std::max(activeSeconds, 1.0f / 60.0f));
+    scene.mark_dirty(entity);
+}
+
+inline void ui_mark_direct_manipulation_dirty(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    float activeSeconds = 1.0f / 30.0f)
+{
+    if (entity == entt::null || !scene.registry().valid(entity))
+    {
+        return;
+    }
+
+    // Pointer-driven movement explicitly marks every visible state. It does
+    // not need a time-based tick in between pointer samples; leaving one active
+    // submits duplicate frames while a thumb is merely held in place.
+    entt::registry& registry = scene.registry();
+    Renderer2DCacheComponent& cache =
+        registry.get_or_emplace<Renderer2DCacheComponent>(entity);
+    // Direct pointer input can arrive at 500-1000 Hz. A 144 Hz visible ceiling
+    // remains fluid on high-refresh displays while preventing an expensive
+    // scroll subtree from saturating low-end GPUs. Displays below it retain
+    // their native cadence, and non-interactive animation is unaffected.
+    cache.activeFrameRateLimit = 144u;
+    if (cache.mode == Renderer2DCacheMode::eStatic)
+    {
+        cache.mode = Renderer2DCacheMode::eTimed;
+        cache.idleTickRate = 0.0f;
+        cache.activeTickRate = 0.0f;
+        cache.propagateToChildren = true;
+        cache.restoreStaticWhenIdle = true;
+    }
     scene.activate_dynamic(entity, std::max(activeSeconds, 1.0f / 60.0f));
     scene.mark_dirty(entity);
 }

@@ -2554,7 +2554,9 @@ namespace
         NSVGrasterizer* rasterizer = nsvgCreateRasterizer();
         if (rasterizer != nullptr)
         {
-            nsvgRasterize(rasterizer, svg, 0.0f, 0.0f, scale,
+            const float xOffset = (static_cast<float>(frame.width) - svg->width * scale) * 0.5f;
+            const float yOffset = (static_cast<float>(frame.height) - svg->height * scale) * 0.5f;
+            nsvgRasterize(rasterizer, svg, xOffset, yOffset, scale,
                 frame.rgba.data(), static_cast<int>(frame.width), static_cast<int>(frame.height),
                 static_cast<int>(frame.width * 4u));
             nsvgDeleteRasterizer(rasterizer);

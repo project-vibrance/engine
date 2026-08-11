@@ -410,6 +410,9 @@ struct UiSliderOptions
     UiSliderFillStyle fillStyle = UiSliderFillStyle::eFlatFillClippedByTrack;
     float thumbDiameter = 22.0f;
     glm::vec2 thumbSize { 0.0f, 0.0f };
+    // Values at or below the normal size disable hover expansion.
+    float hoveredTrackHeight = 0.0f;
+    float hoveredThumbScale = 1.0f;
     std::string trackColor = "#E2E2E4FF";
     std::string fillColor = "#007AFFFF";
     std::string thumbColor = "#FFFFFFFF";
@@ -421,6 +424,7 @@ struct UiSliderOptions
     bool smoothScrubbing = false;
     float visualSmoothingRate = 24.0f;
     std::function<void(const SliderInputEvent&)> onChanged;
+    std::function<void(const SliderInputEvent&)> onCommitted;
 };
 
 struct UiCircularProgressComponent
@@ -3189,6 +3193,10 @@ inline UiControlHandle ui_create_slider(
         std::max(requestedThumbSize.x, trackHeight),
         std::max(requestedThumbSize.y, trackHeight)
     };
+    const float hoveredTrackHeight = std::max(options.hoveredTrackHeight, trackHeight);
+    const glm::vec2 hoveredThumbSize = glm::max(
+        thumbSize * std::max(options.hoveredThumbScale, 1.0f),
+        glm::vec2(hoveredTrackHeight));
     const float initialNormalized = options.maxValue > options.minValue ?
         std::clamp((options.value - options.minValue) / (options.maxValue - options.minValue), 0.0f, 1.0f) :
         0.0f;
@@ -3257,6 +3265,7 @@ inline UiControlHandle ui_create_slider(
         scaled_size(thumbSize.x, thumbSize.y, ui.scale()));
 
     SliderInputComponent slider = {};
+    slider.maskEntity = fillMask;
     slider.fillEntity = handle.indicator;
     slider.thumbEntity = handle.knob;
     slider.enabled = options.enabled;
@@ -3270,9 +3279,17 @@ inline UiControlHandle ui_create_slider(
         options.snapPercentage / 100.0f :
         options.snapPercentage;
     slider.normalisedStep = std::clamp(rawSnapPercentage, 0.0f, 1.0f);
+    slider.trackHeight = scaled_scalar(trackHeight, ui.scale());
+    slider.hoveredTrackHeight = scaled_scalar(hoveredTrackHeight, ui.scale());
+    slider.thumbSize = scaled_size(thumbSize.x, thumbSize.y, ui.scale());
+    slider.hoveredThumbSize = scaled_size(
+        hoveredThumbSize.x,
+        hoveredThumbSize.y,
+        ui.scale());
     slider.smoothScrubbing = options.smoothScrubbing;
     slider.visualSmoothingRate = std::max(options.visualSmoothingRate, 0.0f);
     slider.onChanged = std::move(options.onChanged);
+    slider.onCommitted = std::move(options.onCommitted);
     registry.emplace<SliderInputComponent>(handle.root, std::move(slider));
     registry.emplace<DisabledVisualComponent>(handle.root, DisabledVisualComponent { options.dimWhenDisabled, false });
     return handle;

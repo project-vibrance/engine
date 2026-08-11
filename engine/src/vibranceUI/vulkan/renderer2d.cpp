@@ -16,6 +16,15 @@ namespace
     constexpr uint32_t kTextPackedExpansionMask = 0xfffu;
     constexpr uint32_t kTextPackedExpansionBias = 2048u;
     constexpr float kTextPackedExpansionScale = 256.0f;
+    constexpr uint32_t kTextPackedEdgeFadeMask = 0xffu;
+    constexpr uint32_t kTextPackedEdgeFadeStartShift = 14u;
+    constexpr uint32_t kTextPackedEdgeFadeEndShift = 22u;
+    constexpr uint32_t kTextPackedEdgeFadeModeShift = 30u;
+    constexpr uint32_t kTextPackedEdgeFadeModeMask = 0x3u;
+    constexpr uint32_t kTextEdgeFadeLeft = 1u;
+    constexpr uint32_t kTextEdgeFadeRight = 2u;
+    constexpr int32_t kTextPackedEdgeFadeBias = 128;
+    constexpr float kTextPackedEdgeFadeScale = 4.0f;
     constexpr uint32_t kDispatchOriginMask = 0xffffu;
     constexpr uint32_t kBlurUseStaticBackdrop = 1u << 31u;
     constexpr uint32_t kBlurUseExternalBackdrop = 1u << 30u;
@@ -34,6 +43,43 @@ namespace
             return width == 0 || height == 0;
         }
     };
+
+    bool dispatch_bounds_overlap(
+        const DispatchBounds& left,
+        const DispatchBounds& right)
+    {
+        if (left.empty() || right.empty())
+        {
+            return false;
+        }
+        return left.x < right.x + right.width &&
+            right.x < left.x + left.width &&
+            left.y < right.y + right.height &&
+            right.y < left.y + left.height;
+    }
+
+    DispatchBounds union_dispatch_bounds(
+        const DispatchBounds& left,
+        const DispatchBounds& right)
+    {
+        if (left.empty())
+        {
+            return right;
+        }
+        if (right.empty())
+        {
+            return left;
+        }
+        const uint32_t x = std::min(left.x, right.x);
+        const uint32_t y = std::min(left.y, right.y);
+        const uint32_t rightEdge = std::max(
+            left.x + left.width,
+            right.x + right.width);
+        const uint32_t bottomEdge = std::max(
+            left.y + left.height,
+            right.y + right.height);
+        return { x, y, rightEdge - x, bottomEdge - y };
+    }
 
     enum class DispatchBoundsMode
     {
@@ -310,6 +356,33 @@ namespace
             kTextPackedExpansionScale;
     }
 
+    uint32_t pack_text_edge_fade(
+        uint32_t packedData,
+        float startOffset,
+        float endOffset,
+        uint32_t mode)
+    {
+        const auto packOffset = [](float offset) {
+            const int32_t scaled = static_cast<int32_t>(std::round(
+                offset * kTextPackedEdgeFadeScale));
+            return static_cast<uint32_t>(std::clamp(
+                scaled + kTextPackedEdgeFadeBias,
+                0,
+                static_cast<int32_t>(kTextPackedEdgeFadeMask)));
+        };
+        const uint32_t payloadMask =
+            (kTextPackedEdgeFadeMask << kTextPackedEdgeFadeStartShift) |
+            (kTextPackedEdgeFadeMask << kTextPackedEdgeFadeEndShift) |
+            (kTextPackedEdgeFadeModeMask << kTextPackedEdgeFadeModeShift);
+        return (packedData & ~payloadMask) |
+            ((packOffset(startOffset) & kTextPackedEdgeFadeMask) <<
+                kTextPackedEdgeFadeStartShift) |
+            ((packOffset(endOffset) & kTextPackedEdgeFadeMask) <<
+                kTextPackedEdgeFadeEndShift) |
+            ((mode & kTextPackedEdgeFadeModeMask) <<
+                kTextPackedEdgeFadeModeShift);
+    }
+
     uint32_t pack_shape_mask_data(Renderer2DPrimitive primitive, float radius)
     {
         const uint32_t packedRadius = static_cast<uint32_t>(
@@ -544,6 +617,26 @@ namespace
         return { 0u, 0u, swapchain.extent.width, swapchain.extent.height };
     }
 
+    DispatchBounds align_dispatch_bounds_to_workgroups(
+        const Swapchain& swapchain,
+        const DispatchBounds& bounds)
+    {
+        if (bounds.empty())
+        {
+            return {};
+        }
+        constexpr uint32_t groupSize = 8u;
+        const uint32_t x = bounds.x - bounds.x % groupSize;
+        const uint32_t y = bounds.y - bounds.y % groupSize;
+        const uint32_t right = std::min(
+            ((bounds.x + bounds.width + groupSize - 1u) / groupSize) * groupSize,
+            swapchain.extent.width);
+        const uint32_t bottom = std::min(
+            ((bounds.y + bounds.height + groupSize - 1u) / groupSize) * groupSize,
+            swapchain.extent.height);
+        return { x, y, right - x, bottom - y };
+    }
+
     DispatchBounds make_blur_dispatch_bounds(
         const Swapchain& swapchain,
         const Renderer2DBatch& batch)
@@ -613,6 +706,7 @@ namespace
         {
             cache.wasActive = false;
             cache.detachedFromStaticLayer = false;
+            cache.activeFrameRateLimit = 0u;
             if (cache.restoreStaticWhenIdle)
             {
                 cache.mode = Renderer2DCacheMode::eStatic;
@@ -2311,6 +2405,27 @@ namespace
         layoutView.each([&](entt::entity entity, Transform2DComponent&, const Parent2DComponent&, const Layout2DComponent&) {
             resolve_entity_layout(registry, entity, stack, resolved);
         });
+
+        auto visualView = registry.view<
+            Transform2DComponent,
+            const VisualTransform2DComponent,
+            const Layout2DComponent>();
+        visualView.each([&](
+            entt::entity entity,
+            Transform2DComponent& transform,
+            const VisualTransform2DComponent& visual,
+            const Layout2DComponent&) {
+            const glm::vec2 baseSize = entity_layout_size(registry, entity);
+            const glm::vec2 baseMin =
+                transform.position - transform.origin * baseSize;
+            transform.scale *= glm::max(visual.scale, glm::vec2(0.001f));
+            transform.origin = glm::clamp(
+                visual.pivot,
+                glm::vec2(0.0f),
+                glm::vec2(1.0f));
+            transform.position =
+                baseMin + baseSize * transform.origin + visual.offset;
+        });
     }
 
     uint32_t shape_flags(const ShapeComponent& shape, const ShapeStyleComponent& style)
@@ -3227,18 +3342,28 @@ bool Renderer2DScene::requires_continuous_redraw(
     {
         const Renderer2DCacheComponent& cache =
             cacheView.get<const Renderer2DCacheComponent>(entity);
-        // Permanently dynamic entities are redrawn when their data changes;
-        // mark_dirty() advances frameGeneration_ for that purpose. They have
-        // no expiration timer, so only timed cache promotions need this
-        // continuous tail frame.
-        if (cache.mode == Renderer2DCacheMode::eTimed &&
-            (cache.pendingActiveSeconds > 0.0f ||
-                cache.activeUntilSeconds > currentTimeSeconds ||
-                cache.wasActive))
+        if (cache.mode != Renderer2DCacheMode::eTimed)
+        {
+            continue;
+        }
+        // A pending activation and the final expiry frame change cache
+        // ownership. While the entity remains active, however, only request a
+        // time-driven frame when its declared tick interval is due. Component
+        // mutations still advance frameGeneration_ independently.
+        if (cache.pendingActiveSeconds > 0.0f ||
+            (cache.wasActive && cache.activeUntilSeconds <= currentTimeSeconds))
         {
             return true;
         }
-        if (cache.mode == Renderer2DCacheMode::eTimed &&
+        if (cache.activeUntilSeconds > currentTimeSeconds &&
+            cache.activeTickRate > 0.0f &&
+            (cache.lastDynamicSeconds < 0.0 ||
+                currentTimeSeconds - cache.lastDynamicSeconds >=
+                    1.0 / static_cast<double>(cache.activeTickRate)))
+        {
+            return true;
+        }
+        if (cache.activeUntilSeconds <= currentTimeSeconds &&
             cache.idleTickRate > 0.0f &&
             (cache.lastDynamicSeconds < 0.0 ||
                 currentTimeSeconds - cache.lastDynamicSeconds >=
@@ -3248,6 +3373,28 @@ bool Renderer2DScene::requires_continuous_redraw(
         }
     }
     return false;
+}
+
+uint32_t Renderer2DScene::active_frame_rate_limit(
+    double currentTimeSeconds) const
+{
+    uint32_t limit = 0u;
+    const auto cacheView = registry_.view<const Renderer2DCacheComponent>();
+    for (const entt::entity entity : cacheView)
+    {
+        const Renderer2DCacheComponent& cache =
+            cacheView.get<const Renderer2DCacheComponent>(entity);
+        const bool active = cache.pendingActiveSeconds > 0.0f ||
+            cache.activeUntilSeconds > currentTimeSeconds;
+        if (!active || cache.activeFrameRateLimit == 0u)
+        {
+            continue;
+        }
+        limit = limit == 0u ?
+            cache.activeFrameRateLimit :
+            std::min(limit, cache.activeFrameRateLimit);
+    }
+    return limit;
 }
 
 entt::entity Renderer2DScene::entity_at(glm::vec2 point)
@@ -3274,7 +3421,10 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
         const auto& shape = shapeView.get<const ShapeComponent>(entity);
         const ShapeStyleComponent* stylePtr = registry_.try_get<ShapeStyleComponent>(entity);
         const ShapeStyleComponent& style = stylePtr ? *stylePtr : defaultShapeStyle;
-        if (!shape_fill_visible(style) && !shape_outline_visible(style))
+        const HitRegion2DComponent* hitRegion =
+            registry_.try_get<HitRegion2DComponent>(entity);
+        if (!shape_fill_visible(style) && !shape_outline_visible(style) &&
+            (!hitRegion || !hitRegion->enabled))
         {
             continue;
         }
@@ -3306,7 +3456,7 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
 
         const auto& transform = mediaView.get<const Transform2DComponent>(entity);
         if (point_in_primitive(
-            Renderer2DPrimitive::eRoundedRectangle,
+            media.primitive,
             media_bounds_from_component(transform, media),
             media.cornerRadius,
             point))
@@ -3416,9 +3566,12 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
         const auto& shape = shapeView.get<const ShapeComponent>(entity);
         const ShapeStyleComponent* stylePtr = registry_.try_get<ShapeStyleComponent>(entity);
         const ShapeStyleComponent& style = stylePtr ? *stylePtr : defaultShapeStyle;
+        const HitRegion2DComponent* hitRegion =
+            registry_.try_get<HitRegion2DComponent>(entity);
 
         const glm::vec4 rect = make_bounds(transform, shape.size);
-        if (shape_fill_visible(style) || shape_outline_visible(style))
+        if (shape_fill_visible(style) || shape_outline_visible(style) ||
+            (hitRegion && hitRegion->enabled))
         {
             const float edgePadding = std::max(style.outlineWidth, 0.0f) + std::max(style.edgeSoftness, 0.0f);
             if (point_in_primitive(
@@ -3524,7 +3677,7 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
 
         const auto& transform = mediaView.get<const Transform2DComponent>(entity);
         if (point_in_primitive(
-            Renderer2DPrimitive::eRoundedRectangle,
+            media.primitive,
             media_bounds_from_component(transform, media),
             media.cornerRadius,
             point))
@@ -3620,8 +3773,7 @@ void Renderer2DScene::build_render_plan(
     auto mediaView = registry_.view<const Transform2DComponent, Media2DComponent>();
     auto modelView = registry_.view<const Transform2DComponent, const Model3DComponent>();
 
-    auto update_entity_cache_state = [&](entt::entity entity) {
-        Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
+    auto update_entity_cache_state = [&](entt::entity entity, Renderer2DCacheComponent& cache) {
         if (update_cache_activity(cache, currentTimeSeconds) ||
             should_refresh_idle_cache(cache, currentTimeSeconds))
         {
@@ -3629,17 +3781,12 @@ void Renderer2DScene::build_render_plan(
         }
     };
 
-    shapeView.each([&](entt::entity entity, const Transform2DComponent&, const ShapeComponent&) {
-        update_entity_cache_state(entity);
-    });
-    textView.each([&](entt::entity entity, const Transform2DComponent&, const TextComponent&) {
-        update_entity_cache_state(entity);
-    });
-    mediaView.each([&](entt::entity entity, const Transform2DComponent&, Media2DComponent&) {
-        update_entity_cache_state(entity);
-    });
-    modelView.each([&](entt::entity entity, const Transform2DComponent&, const Model3DComponent&) {
-        update_entity_cache_state(entity);
+    // Cache policy is also attached to non-drawable hierarchy roots (for example,
+    // scroll content containers). Advance every policy exactly once so a timed
+    // root cannot remain active forever merely because it has no render component.
+    auto cacheView = registry_.view<Renderer2DCacheComponent>();
+    cacheView.each([&](entt::entity entity, Renderer2DCacheComponent& cache) {
+        update_entity_cache_state(entity, cache);
     });
 
     bool hasVisibleHostedModels = false;
@@ -3698,6 +3845,9 @@ void Renderer2DScene::build_render_plan(
         const ShapeStyleComponent& style = stylePtr ? *stylePtr : defaultShapeStyle;
         const DisplayTransitionEffect2D displayTransition =
             inherited_visual_effect(registry_, entity, currentTimeSeconds);
+        const bool foregroundVisible =
+            alpha_visible(displayTransition.opacity) &&
+            (shape_fill_visible(style) || shape_outline_visible(style));
 
         Renderer2DBatch batch = {};
         batch.entity = entity;
@@ -3751,7 +3901,9 @@ void Renderer2DScene::build_render_plan(
             }
         }
 
-        if (const ShadowComponent* shadow = registry_.try_get<ShadowComponent>(entity))
+        if (const ShadowComponent* shadow = registry_.try_get<ShadowComponent>(entity);
+            shadow && alpha_visible(
+                shadow->color.a * shadow->opacity * displayTransition.opacity))
         {
             Renderer2DBatch shadowBatch = batch;
             const glm::vec4 sourceRect = shadowBatch.rect;
@@ -3790,7 +3942,12 @@ void Renderer2DScene::build_render_plan(
         // Display-transition blur is a foreground primitive effect handled by
         // the shape pipeline above. Only explicit backdrop blur belongs here;
         // otherwise transparent layout roots create temporary rectangular panes.
-        if (blur || style_backdrop_blur_visible(style))
+        const bool explicitBlurVisible = blur &&
+            alpha_visible(blur->opacity * displayTransition.opacity);
+        const bool styleBlurVisible = !blur &&
+            style_backdrop_blur_visible(style) &&
+            alpha_visible(displayTransition.opacity);
+        if (explicitBlurVisible || styleBlurVisible)
         {
             Renderer2DBatch blurBatch = batch;
             const float blurCornerRadius = blurBatch.effect0.x;
@@ -3850,7 +4007,10 @@ void Renderer2DScene::build_render_plan(
             (cachedBatch ? plan.cachedBlurs : plan.blurs).push_back(blurBatch);
         }
 
-        (cachedBatch ? plan.cachedShapes : plan.shapes).push_back(batch);
+        if (foregroundVisible)
+        {
+            (cachedBatch ? plan.cachedShapes : plan.shapes).push_back(batch);
+        }
     });
 
     mediaView.each([&](entt::entity entity, const Transform2DComponent& transform, Media2DComponent& media)
@@ -3863,6 +4023,10 @@ void Renderer2DScene::build_render_plan(
 
         const DisplayTransitionEffect2D displayTransition =
             inherited_visual_effect(registry_, entity, currentTimeSeconds);
+        if (!alpha_visible(displayTransition.opacity))
+        {
+            return;
+        }
         const glm::vec4 rect = apply_display_transition_scale(
             media_bounds_from_component(transform, media),
             displayTransition);
@@ -3904,7 +4068,10 @@ void Renderer2DScene::build_render_plan(
         batch.layer = layer.layer;
         batch.order = layer.order;
         batch.alwaysOnTop = layer.alwaysOnTop;
-        batch.primitive = Renderer2DPrimitive::eMedia;
+        // The media pipeline is selected by the render operation. Preserve
+        // the component's visual primitive in the push constants so its own
+        // pixels, hit testing, and any inherited mask use the same geometry.
+        batch.primitive = media.primitive;
         batch.mediaId = media.mediaId;
         batch.frameIndex = media.currentFrame;
         batch.rect = rect;
@@ -3969,10 +4136,60 @@ void Renderer2DScene::build_render_plan(
 
         const TextStyleComponent* stylePtr = registry_.try_get<TextStyleComponent>(entity);
         const TextStyleComponent& style = stylePtr ? *stylePtr : defaultTextStyle;
+        const TextEdgeFade2DComponent* edgeFade =
+            registry_.try_get<TextEdgeFade2DComponent>(entity);
         const DisplayTransitionEffect2D displayTransition =
             inherited_visual_effect(registry_, entity, currentTimeSeconds);
+        if (!text_visible(style) || !alpha_visible(displayTransition.opacity))
+        {
+            return;
+        }
 
         const glm::vec4 textBounds = text_bounds_from_component(transform, text);
+
+        const auto apply_text_edge_fade = [edgeFade](Renderer2DBatch& batch) {
+            if (!edgeFade || !edgeFade->enabled ||
+                (edgeFade->leftWidth <= 0.0f &&
+                    edgeFade->rightWidth <= 0.0f) ||
+                rect_empty(batch.clipRect))
+            {
+                return;
+            }
+            const float glyphLeft = batch.rect.x;
+            const float glyphRight = batch.rect.x + batch.rect.z;
+            const float clipLeft = batch.clipRect.x;
+            const float clipRight = batch.clipRect.x + batch.clipRect.z;
+            const float leftOpaque = clipLeft +
+                std::max(edgeFade->leftWidth, 0.0f);
+            const float rightOpaque = clipRight -
+                std::max(edgeFade->rightWidth, 0.0f);
+            const bool intersectsLeft = edgeFade->leftWidth > 0.0f &&
+                glyphRight > clipLeft && glyphLeft < leftOpaque;
+            const bool intersectsRight = edgeFade->rightWidth > 0.0f &&
+                glyphRight > rightOpaque && glyphLeft < clipRight;
+            if (!intersectsLeft && !intersectsRight)
+            {
+                return;
+            }
+
+            uint32_t mode = kTextEdgeFadeLeft;
+            float fadeStart = clipLeft + 1.0f;
+            float fadeEnd = std::max(leftOpaque, fadeStart + 0.25f);
+            if (intersectsRight && (!intersectsLeft ||
+                glyphLeft + batch.rect.z * 0.5f >=
+                    clipLeft + batch.clipRect.z * 0.5f))
+            {
+                mode = kTextEdgeFadeRight;
+                fadeEnd = clipRight - 1.0f;
+                fadeStart = std::min(rightOpaque, fadeEnd - 0.25f);
+            }
+            batch.packedData = pack_text_edge_fade(
+                batch.packedData,
+                fadeStart - glyphLeft,
+                fadeEnd - glyphLeft,
+                mode);
+            batch.flags |= eRenderer2DStyleTextEdgeFade;
+        };
 
         auto make_text_batch = [&]() {
             Renderer2DBatch batch = {};
@@ -4036,6 +4253,7 @@ void Renderer2DScene::build_render_plan(
                 batch.rect = apply_display_transition_scale(batch.rect, displayTransition);
                 batch.uvRect = { glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y };
                 batch.flags |= eRenderer2DStyleAtlasText;
+                apply_text_edge_fade(batch);
                 targetTexts.push_back(batch);
             }
             return;
@@ -4044,6 +4262,7 @@ void Renderer2DScene::build_render_plan(
         Renderer2DBatch batch = make_text_batch();
         batch.rect = apply_display_transition_scale(textBounds, displayTransition);
         batch.uvRect = { style.gradientStart.x, style.gradientStart.y, style.gradientEnd.x, style.gradientEnd.y };
+        apply_text_edge_fade(batch);
         targetTexts.push_back(batch);
     });
 
@@ -4128,7 +4347,8 @@ void ShadowPipeline::record_batch(
     std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
     const Renderer2DBatch& batch,
-    DescriptorScope frameScope) const
+    DescriptorScope frameScope,
+    bool synchronize) const
 {
     if (!bind_pipeline(commandBuffer, PipelineType::eShadow2D, pipelines))
     {
@@ -4146,7 +4366,10 @@ void ShadowPipeline::record_batch(
     commandBuffer.pushConstants(pipelineLayouts[PipelineType::eShadow2D],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
     dispatch_bounds(commandBuffer, bounds);
-    insert_compute_memory_barrier(commandBuffer);
+    if (synchronize)
+    {
+        insert_compute_memory_barrier(commandBuffer);
+    }
 }
 
 void BlurPipeline::record(
@@ -4272,7 +4495,8 @@ void ShapePipeline::record_batch(
     std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
     const Renderer2DBatch& batch,
-    DescriptorScope frameScope) const
+    DescriptorScope frameScope,
+    bool synchronize) const
 {
     if (!bind_pipeline(commandBuffer, PipelineType::eShape2D, pipelines))
     {
@@ -4290,7 +4514,10 @@ void ShapePipeline::record_batch(
     commandBuffer.pushConstants(pipelineLayouts[PipelineType::eShape2D],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
     dispatch_bounds(commandBuffer, bounds);
-    insert_compute_memory_barrier(commandBuffer);
+    if (synchronize)
+    {
+        insert_compute_memory_barrier(commandBuffer);
+    }
 }
 
 void MediaPipeline::record(
@@ -4317,7 +4544,8 @@ void MediaPipeline::record_batch(
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
     const Renderer2DBatch& batch,
     std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
-    DescriptorScope frameScope) const
+    DescriptorScope frameScope,
+    bool synchronize) const
 {
     if (mediaAssets == nullptr || batch.mediaId == 0)
     {
@@ -4363,7 +4591,10 @@ void MediaPipeline::record_batch(
     commandBuffer.pushConstants(pipelineLayouts[pipelineType],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
     dispatch_bounds(commandBuffer, bounds);
-    insert_compute_memory_barrier(commandBuffer);
+    if (synchronize)
+    {
+        insert_compute_memory_barrier(commandBuffer);
+    }
 }
 
 void TextPipeline::record(
@@ -4401,7 +4632,8 @@ void TextPipeline::record_batch(
     const Renderer2DBatch& batch,
     DescriptorScope frameScope,
     DescriptorScope postScope,
-    uint32_t textPass) const
+    uint32_t textPass,
+    bool synchronize) const
 {
     const PipelineType pipelineType = PipelineType::eTextMSDF;
     if (!bind_pipeline(commandBuffer, pipelineType, pipelines))
@@ -4423,7 +4655,10 @@ void TextPipeline::record_batch(
         commandBuffer.pushConstants(pipelineLayouts[pipelineType],
             vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
         dispatch_bounds(commandBuffer, bounds);
-        insert_compute_memory_barrier(commandBuffer);
+        if (synchronize)
+        {
+            insert_compute_memory_barrier(commandBuffer);
+        }
     };
 
     if (textPass == kTextPassUnderlay)
@@ -4569,6 +4804,89 @@ void Renderer2D::record(
 {
     scene.build_render_plan(renderPlanCache, currentTimeSeconds, cachedLayerGeneration);
 
+    const auto collect_dynamic_entities = [](const Renderer2DRenderPlan& plan) {
+        std::vector<uint32_t> entities;
+        const auto append_batches = [&](const std::vector<Renderer2DBatch>& batches) {
+            for (const Renderer2DBatch& batch : batches)
+            {
+                if (batch.entity != entt::null)
+                {
+                    entities.push_back(entity_key(batch.entity));
+                }
+            }
+        };
+        append_batches(plan.panelBlurs);
+        append_batches(plan.shadows);
+        append_batches(plan.blurs);
+        append_batches(plan.shapes);
+        append_batches(plan.media);
+        append_batches(plan.texts);
+        for (const Renderer3DModelBatch& model : plan.models)
+        {
+            if (model.entity != entt::null)
+            {
+                entities.push_back(entity_key(model.entity));
+            }
+        }
+        std::sort(entities.begin(), entities.end());
+        entities.erase(std::unique(entities.begin(), entities.end()), entities.end());
+        return entities;
+    };
+
+    std::vector<uint32_t> currentDynamicEntities =
+        collect_dynamic_entities(renderPlanCache);
+    if (currentDynamicEntities != cachedDynamicEntities &&
+        !renderPlanCache.rebuildCachedLayer)
+    {
+        // Cache modes are public components and can be changed directly. Never
+        // trust a missed mark_dirty() to leave old pixels in the static image:
+        // an ownership-set change always rebuilds the static layer before the
+        // same entity can be emitted dynamically (or restored to static).
+        scene.build_render_plan(renderPlanCache, currentTimeSeconds, 0u);
+        currentDynamicEntities = collect_dynamic_entities(renderPlanCache);
+    }
+    cachedDynamicEntities = std::move(currentDynamicEntities);
+
+    // Every in-flight slot owns a retained dynamic image. Clear it atomically
+    // before reuse: inferred primitive envelopes cannot safely describe every
+    // pixel written by blur, text, masks, and replayed cache overlays, and one
+    // missed pixel survives indefinitely when that slot rotates back in.
+    clear_frame_surface(
+        commandBuffer,
+        swapchain,
+        pipelines,
+        descriptorSets,
+        pipelineLayouts,
+        DescriptorScope::eFrame);
+    dynamicSurfaceInitialized = true;
+
+    DispatchBounds currentDynamicSurfaceBounds = {};
+    const auto include_dynamic_surface_bounds = [&](const DispatchBounds& bounds) {
+        if (bounds.empty())
+        {
+            return;
+        }
+        if (currentDynamicSurfaceBounds.empty())
+        {
+            currentDynamicSurfaceBounds = bounds;
+            return;
+        }
+        const uint32_t left = std::min(currentDynamicSurfaceBounds.x, bounds.x);
+        const uint32_t top = std::min(currentDynamicSurfaceBounds.y, bounds.y);
+        const uint32_t right = std::max(
+            currentDynamicSurfaceBounds.x + currentDynamicSurfaceBounds.width,
+            bounds.x + bounds.width);
+        const uint32_t bottom = std::max(
+            currentDynamicSurfaceBounds.y + currentDynamicSurfaceBounds.height,
+            bounds.y + bounds.height);
+        currentDynamicSurfaceBounds = {
+            left,
+            top,
+            right - left,
+            bottom - top
+        };
+    };
+
     auto record_layered_ops = [&](
         const std::vector<Renderer2DBatch>& panelBlurs,
         const std::vector<Renderer2DBatch>& shadows,
@@ -4621,13 +4939,64 @@ void Renderer2D::record(
         }
         sort_render_ops(ops);
 
+        // Most UI primitives write independent rectangles into the same storage image. Vulkan
+        // does not require a memory dependency between disjoint writes, so defer the compute
+        // barrier until a later primitive overlaps one of them or a multi-pass effect needs the
+        // accumulated image. This is especially important for text, where a marquee can otherwise
+        // emit one full pipeline barrier per glyph on every submitted frame.
+        std::vector<DispatchBounds> pendingWrites;
+        pendingWrites.reserve(ops.size());
+
+        const auto flush_pending_writes = [&]() {
+            if (pendingWrites.empty())
+            {
+                return;
+            }
+            insert_compute_memory_barrier(commandBuffer);
+            pendingWrites.clear();
+        };
+
+        const auto prepare_simple_write = [&](const DispatchBounds& bounds) {
+            if (bounds.empty())
+            {
+                return false;
+            }
+            // Static surfaces live for many frames and across cache ownership
+            // handoffs. Build them deterministically: an underestimated optical
+            // bound must never turn two storage-image writes into an unordered
+            // race whose missing pixels then remain cached. Dynamic surfaces
+            // keep the cheaper overlap-aware batching on every motion frame.
+            const bool overlapsPendingWrite =
+                frameScope == DescriptorScope::eUICache ||
+                std::any_of(
+                    pendingWrites.begin(),
+                    pendingWrites.end(),
+                    [&](const DispatchBounds& pending) {
+                        return dispatch_bounds_overlap(pending, bounds);
+                    });
+            if (overlapsPendingWrite)
+            {
+                flush_pending_writes();
+            }
+            pendingWrites.push_back(bounds);
+            return true;
+        };
+
         uint32_t modelOrdinal = 0;
         for (const Renderer2DRenderOp& op : ops)
         {
             if (op.type == Renderer2DRenderOpType::eModel3D)
             {
+                flush_pending_writes();
                 if (renderer3D != nullptr && op.model != nullptr)
                 {
+                    if (frameScope == DescriptorScope::eFrame)
+                    {
+                        include_dynamic_surface_bounds(make_dispatch_bounds(
+                            swapchain,
+                            intersect_rect(op.model->viewportRect, op.model->clipRect),
+                            2.0f));
+                    }
                     const uint32_t depthLayer = kHostedModelDepthMax - std::min(modelOrdinal, kHostedModelDepthMax);
                     StorageImage* modelCompositeTarget =
                         frameScope == DescriptorScope::eUICache ? staticRenderTarget : dynamicRenderTarget;
@@ -4719,37 +5088,100 @@ void Renderer2D::record(
             switch (op.type)
             {
             case Renderer2DRenderOpType::ePanelBlur:
+                flush_pending_writes();
+                if (frameScope == DescriptorScope::eFrame)
+                {
+                    include_dynamic_surface_bounds(
+                        make_blur_dispatch_bounds(swapchain, *op.batch));
+                }
                 blurPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
                     *op.batch, frameScope, blurPostScope, includeStaticBackdrop, includeExternalBackdrop);
                 break;
             case Renderer2DRenderOpType::eShadow:
-                shadowPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
-                    *op.batch, frameScope);
+            {
+                const DispatchBounds bounds = make_dispatch_bounds(
+                    swapchain, *op.batch, DispatchBoundsMode::eShadow);
+                if (prepare_simple_write(bounds))
+                {
+                    if (frameScope == DescriptorScope::eFrame)
+                    {
+                        include_dynamic_surface_bounds(bounds);
+                    }
+                    shadowPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
+                        *op.batch, frameScope, false);
+                }
                 break;
+            }
             case Renderer2DRenderOpType::eBlur:
+                flush_pending_writes();
+                if (frameScope == DescriptorScope::eFrame)
+                {
+                    include_dynamic_surface_bounds(
+                        make_blur_dispatch_bounds(swapchain, *op.batch));
+                }
                 blurPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
                     *op.batch, frameScope, blurPostScope, includeStaticBackdrop, includeExternalBackdrop);
                 break;
             case Renderer2DRenderOpType::eShape:
-                shapePipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
-                    *op.batch, frameScope);
+            {
+                const DispatchBounds bounds = make_dispatch_bounds(
+                    swapchain, *op.batch, DispatchBoundsMode::eShape);
+                if (prepare_simple_write(bounds))
+                {
+                    if (frameScope == DescriptorScope::eFrame)
+                    {
+                        include_dynamic_surface_bounds(bounds);
+                    }
+                    shapePipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
+                        *op.batch, frameScope, false);
+                }
                 break;
+            }
             case Renderer2DRenderOpType::eMedia:
-                mediaPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
-                    *op.batch, mediaAssets, frameScope);
+            {
+                const DispatchBounds bounds = make_dispatch_bounds(
+                    swapchain, *op.batch, DispatchBoundsMode::eExact);
+                if (prepare_simple_write(bounds))
+                {
+                    if (frameScope == DescriptorScope::eFrame)
+                    {
+                        include_dynamic_surface_bounds(bounds);
+                    }
+                    mediaPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
+                        *op.batch, mediaAssets, frameScope, false);
+                }
                 break;
+            }
             case Renderer2DRenderOpType::eModel3D:
                 break;
             case Renderer2DRenderOpType::eTextUnderlay:
+                flush_pending_writes();
+                if (frameScope == DescriptorScope::eFrame)
+                {
+                    include_dynamic_surface_bounds(make_dispatch_bounds(
+                        swapchain, *op.batch, DispatchBoundsMode::eTextUnderlay));
+                }
                 textPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
                     *op.batch, frameScope, textPostScope, kTextPassUnderlay);
                 break;
             case Renderer2DRenderOpType::eText:
-                textPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
-                    *op.batch, frameScope, textPostScope, kTextPassForeground);
+            {
+                const DispatchBounds bounds = make_dispatch_bounds(
+                    swapchain, *op.batch, DispatchBoundsMode::eTextForeground);
+                if (prepare_simple_write(bounds))
+                {
+                    if (frameScope == DescriptorScope::eFrame)
+                    {
+                        include_dynamic_surface_bounds(bounds);
+                    }
+                    textPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
+                        *op.batch, frameScope, textPostScope, kTextPassForeground, false);
+                }
                 break;
             }
+            }
         }
+        flush_pending_writes();
     };
 
     auto include_dynamic_layer = [](
@@ -4782,9 +5214,51 @@ void Renderer2D::record(
         include_dynamic_layer(render_layer_key(model), hasDynamicLayer, lowestDynamicLayer);
     }
 
+    DispatchBounds dynamicCoverageBounds = {};
+    auto include_dynamic_coverage = [&](const std::vector<Renderer2DBatch>& batches) {
+        for (const Renderer2DBatch& batch : batches)
+        {
+            dynamicCoverageBounds = union_dispatch_bounds(
+                dynamicCoverageBounds,
+                make_dispatch_bounds(swapchain, batch.clipRect, 0.0f));
+        }
+    };
+    include_dynamic_coverage(renderPlanCache.panelBlurs);
+    include_dynamic_coverage(renderPlanCache.shadows);
+    include_dynamic_coverage(renderPlanCache.blurs);
+    include_dynamic_coverage(renderPlanCache.shapes);
+    include_dynamic_coverage(renderPlanCache.media);
+    include_dynamic_coverage(renderPlanCache.texts);
+    for (const Renderer3DModelBatch& model : renderPlanCache.models)
+    {
+        dynamicCoverageBounds = union_dispatch_bounds(
+            dynamicCoverageBounds,
+            make_dispatch_bounds(swapchain, model.clipRect, 0.0f));
+    }
+    dynamicCoverageBounds = align_dispatch_bounds_to_workgroups(
+        swapchain,
+        dynamicCoverageBounds);
+
+    auto cached_batch_overlays_dynamic = [&] (
+        const Renderer2DBatch& batch,
+        DispatchBoundsMode mode,
+        bool blurBounds) {
+        if (!hasDynamicLayer ||
+            !render_layer_key_less(lowestDynamicLayer, render_layer_key(batch)))
+        {
+            return false;
+        }
+        const DispatchBounds bounds = blurBounds ?
+            make_blur_dispatch_bounds(swapchain, batch) :
+            make_dispatch_bounds(swapchain, batch, mode);
+        return dispatch_bounds_overlap(dynamicCoverageBounds, bounds);
+    };
+
     auto append_cached_overlays = [&](
         std::vector<Renderer2DBatch>& target,
-        const std::vector<Renderer2DBatch>& cached) {
+        const std::vector<Renderer2DBatch>& cached,
+        DispatchBoundsMode mode,
+        bool blurBounds = false) {
         if (!hasDynamicLayer)
         {
             return;
@@ -4792,8 +5266,7 @@ void Renderer2D::record(
 
         for (const Renderer2DBatch& batch : cached)
         {
-            const RenderLayer2DKey layer = render_layer_key(batch);
-            if (render_layer_key_less(lowestDynamicLayer, layer))
+            if (cached_batch_overlays_dynamic(batch, mode, blurBounds))
             {
                 target.push_back(batch);
             }
@@ -4816,7 +5289,11 @@ void Renderer2D::record(
                 cachedLayerCutoffStackOrder == lowestDynamicLayer.stackOrder &&
                 cachedLayerCutoffLayer == lowestDynamicLayer.layer &&
                 cachedLayerCutoffOrder == lowestDynamicLayer.order &&
-                cachedLayerCutoffAlwaysOnTop == lowestDynamicLayer.alwaysOnTop));
+                cachedLayerCutoffAlwaysOnTop == lowestDynamicLayer.alwaysOnTop &&
+                cachedLayerCutoffBounds.x == dynamicCoverageBounds.x &&
+                cachedLayerCutoffBounds.y == dynamicCoverageBounds.y &&
+                cachedLayerCutoffBounds.z == dynamicCoverageBounds.width &&
+                cachedLayerCutoffBounds.w == dynamicCoverageBounds.height));
     const bool rebuildForDynamicCutoff = !cachedCutoffMatches;
     const bool rebuildCachedLayer = renderPlanCache.rebuildCachedLayer || rebuildForDynamicCutoff;
 
@@ -4839,22 +5316,25 @@ void Renderer2D::record(
         {
             // Higher cached batches are replayed with the moving subtree to preserve
             // z-order. Remove them from the static surface first so they are blended once.
-            auto remove_replayed_overlays = [&](std::vector<Renderer2DBatch>& batches) {
+            auto remove_replayed_overlays = [&] (
+                std::vector<Renderer2DBatch>& batches,
+                DispatchBoundsMode mode,
+                bool blurBounds = false) {
                 batches.erase(
                     std::remove_if(
                         batches.begin(),
                         batches.end(),
                         [&](const Renderer2DBatch& batch) {
-                            return render_layer_key_less(lowestDynamicLayer, render_layer_key(batch));
+                            return cached_batch_overlays_dynamic(batch, mode, blurBounds);
                         }),
                     batches.end());
             };
-            remove_replayed_overlays(cachedPanelBlurs);
-            remove_replayed_overlays(cachedShadows);
-            remove_replayed_overlays(cachedBlurs);
-            remove_replayed_overlays(cachedShapes);
-            remove_replayed_overlays(cachedMedia);
-            remove_replayed_overlays(cachedTexts);
+            remove_replayed_overlays(cachedPanelBlurs, DispatchBoundsMode::eExact, true);
+            remove_replayed_overlays(cachedShadows, DispatchBoundsMode::eShadow);
+            remove_replayed_overlays(cachedBlurs, DispatchBoundsMode::eExact, true);
+            remove_replayed_overlays(cachedShapes, DispatchBoundsMode::eShape);
+            remove_replayed_overlays(cachedMedia, DispatchBoundsMode::eExact);
+            remove_replayed_overlays(cachedTexts, DispatchBoundsMode::eText);
         }
 
         clear_frame_surface(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts, DescriptorScope::eUICache);
@@ -4884,6 +5364,15 @@ void Renderer2D::record(
             cachedLayerCutoffLayer = lowestDynamicLayer.layer;
             cachedLayerCutoffOrder = lowestDynamicLayer.order;
             cachedLayerCutoffAlwaysOnTop = lowestDynamicLayer.alwaysOnTop;
+            cachedLayerCutoffBounds = {
+                dynamicCoverageBounds.x,
+                dynamicCoverageBounds.y,
+                dynamicCoverageBounds.width,
+                dynamicCoverageBounds.height };
+        }
+        else
+        {
+            cachedLayerCutoffBounds = glm::uvec4(0u);
         }
     }
 
@@ -4897,12 +5386,32 @@ void Renderer2D::record(
         std::vector<Renderer2DBatch> media = renderPlanCache.media;
         std::vector<Renderer2DBatch> texts = renderPlanCache.texts;
 
-        append_cached_overlays(panelBlurs, cachedLayerPlanCache.cachedPanelBlurs);
-        append_cached_overlays(shadows, cachedLayerPlanCache.cachedShadows);
-        append_cached_overlays(blurs, cachedLayerPlanCache.cachedBlurs);
-        append_cached_overlays(shapes, cachedLayerPlanCache.cachedShapes);
-        append_cached_overlays(media, cachedLayerPlanCache.cachedMedia);
-        append_cached_overlays(texts, cachedLayerPlanCache.cachedTexts);
+        append_cached_overlays(
+            panelBlurs,
+            cachedLayerPlanCache.cachedPanelBlurs,
+            DispatchBoundsMode::eExact,
+            true);
+        append_cached_overlays(
+            shadows,
+            cachedLayerPlanCache.cachedShadows,
+            DispatchBoundsMode::eShadow);
+        append_cached_overlays(
+            blurs,
+            cachedLayerPlanCache.cachedBlurs,
+            DispatchBoundsMode::eExact,
+            true);
+        append_cached_overlays(
+            shapes,
+            cachedLayerPlanCache.cachedShapes,
+            DispatchBoundsMode::eShape);
+        append_cached_overlays(
+            media,
+            cachedLayerPlanCache.cachedMedia,
+            DispatchBoundsMode::eExact);
+        append_cached_overlays(
+            texts,
+            cachedLayerPlanCache.cachedTexts,
+            DispatchBoundsMode::eText);
 
         record_layered_ops(
             panelBlurs,
@@ -5074,7 +5583,7 @@ void Renderer2D::record(
     if (rebuildCachedLayer || scene.fullDamagePending_)
     {
         trackedDamage = visibleBounds;
-        for (const auto& bounds : scene.presentedBounds_)
+        for (const auto& bounds : presentedBounds)
         {
             include_bounds(
                 trackedDamage,
@@ -5087,33 +5596,87 @@ void Renderer2D::record(
     }
     else
     {
+        const auto include_entity_rect = [&](const auto& bounds) {
+            include_bounds(
+                trackedDamage,
+                DispatchBounds {
+                    bounds.second.x,
+                    bounds.second.y,
+                    bounds.second.z,
+                    bounds.second.w });
+        };
+        const auto same_rect = [](glm::uvec4 left, glm::uvec4 right) {
+            return left.x == right.x && left.y == right.y &&
+                left.z == right.z && left.w == right.w;
+        };
+
+        // Every Renderer2D instance owns one in-flight frame slot. Compare its
+        // current entity envelope with what that same slot presented last time;
+        // a scene-global previous-bounds list can be consumed by another slot
+        // first and leave moved/destroyed pixels behind when buffers rotate.
+        for (const auto& current : currentEntityBounds)
+        {
+            const auto previous = std::find_if(
+                presentedBounds.begin(),
+                presentedBounds.end(),
+                [&](const auto& entry) { return entry.first == current.first; });
+            if (previous == presentedBounds.end())
+            {
+                include_entity_rect(current);
+            }
+            else if (!same_rect(current.second, previous->second))
+            {
+                include_entity_rect(current);
+                include_entity_rect(*previous);
+            }
+        }
+        for (const auto& previous : presentedBounds)
+        {
+            const auto current = std::find_if(
+                currentEntityBounds.begin(),
+                currentEntityBounds.end(),
+                [&](const auto& entry) { return entry.first == previous.first; });
+            if (current == currentEntityBounds.end())
+            {
+                include_entity_rect(previous);
+            }
+        }
+
         auto include_tracked = [&](const auto& bounds) {
             if (scene.damage_pending(bounds.first, currentTimeSeconds))
             {
-                include_bounds(
-                    trackedDamage,
-                    DispatchBounds {
-                        bounds.second.x,
-                        bounds.second.y,
-                        bounds.second.z,
-                        bounds.second.w });
+                include_entity_rect(bounds);
             }
         };
         for (const auto& bounds : currentEntityBounds)
         {
             include_tracked(bounds);
         }
-        for (const auto& bounds : scene.presentedBounds_)
-        {
-            include_tracked(bounds);
-        }
+    for (const auto& bounds : presentedBounds)
+    {
+        include_tracked(bounds);
     }
+    }
+
+    // Compute shaders dispatch in 8x8 groups. Retained clears, damage copies,
+    // and compositor updates must own the same complete workgroups; tracking an
+    // exact pixel rect can otherwise leave a one-pixel edge from an older slot.
+    const DispatchBounds alignedDamage = align_dispatch_bounds_to_workgroups(
+        swapchain,
+        trackedDamage);
     damageBounds = {
-        trackedDamage.x,
-        trackedDamage.y,
-        trackedDamage.width,
-        trackedDamage.height
-    };
+        alignedDamage.x,
+        alignedDamage.y,
+        alignedDamage.width,
+        alignedDamage.height };
+    const DispatchBounds alignedDynamicSurface =
+        align_dispatch_bounds_to_workgroups(swapchain, currentDynamicSurfaceBounds);
+    dynamicSurfaceBounds = {
+        alignedDynamicSurface.x,
+        alignedDynamicSurface.y,
+        alignedDynamicSurface.width,
+        alignedDynamicSurface.height };
+    presentedBounds = currentEntityBounds;
     scene.commit_presented_bounds(std::move(currentEntityBounds));
 }
 
@@ -5143,4 +5706,19 @@ glm::uvec4 Renderer2D::content_bounds() const
 glm::uvec4 Renderer2D::damage_bounds() const
 {
     return damageBounds;
+}
+
+void Renderer2D::invalidate_dynamic_surface()
+{
+    dynamicSurfaceInitialized = false;
+    cachedLayerGeneration = 0u;
+    cachedLayerHasDynamicCutoff = false;
+    cachedLayerCutoffBounds = glm::uvec4(0u);
+    cachedDynamicEntities.clear();
+    presentedBounds.clear();
+    renderPlanCache.clear();
+    cachedLayerPlanCache.clear();
+    dynamicSurfaceBounds = glm::uvec4(0u);
+    contentBounds = glm::uvec4(0u);
+    damageBounds = glm::uvec4(0u);
 }

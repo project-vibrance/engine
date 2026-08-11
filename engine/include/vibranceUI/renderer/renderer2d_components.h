@@ -102,7 +102,8 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleBlurInheritedShapeMask = 1u << 21,
     eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
     eRenderer2DStyleShadowOutsideOnly = 1u << 23,
-    eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24
+    eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24,
+    eRenderer2DStyleTextEdgeFade = 1u << 25
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -429,6 +430,22 @@ struct Transform2DComponent
         rotation3DRadians = tiltRadians;
         perspective = std::max(perspectiveStrength, 0.0f);
     }
+};
+
+struct VisualTransform2DComponent
+{
+    // Optional post-layout transform for interaction and transition motion.
+    // It is applied after anchors/grid layout resolve, so layout cannot erase it.
+    glm::vec2 offset { 0.0f };
+    glm::vec2 scale { 1.0f };
+    glm::vec2 pivot { 0.5f };
+};
+
+struct HitRegion2DComponent
+{
+    // Keeps an entity interactive even when its shape is intentionally fully
+    // transparent. This separates pointer geometry from visible paint.
+    bool enabled = true;
 };
 
 struct RenderLayer2DComponent
@@ -810,6 +827,9 @@ struct Media2DComponent
     glm::vec2 gradientEnd { 1.0f, 0.0f };
     glm::vec4 uvRect { 0.0f, 0.0f, 1.0f, 1.0f };
     Media2DFit fit = Media2DFit::eStretch;
+    // Media owns its clipping geometry. This avoids wrapping artwork in a
+    // masked shape merely to obtain rounded or squircle corners.
+    Renderer2DPrimitive primitive = Renderer2DPrimitive::eRoundedRectangle;
     float opacity = 1.0f;
     float cornerRadius = 0.0f;
     float edgeSoftness = 1.0f;
@@ -987,6 +1007,9 @@ struct Renderer2DCacheComponent
     float pendingActiveSeconds = 0.0f;
     double activeUntilSeconds = 0.0;
     double lastDynamicSeconds = -1.0;
+    // Optional visible-submit ceiling while this cache is actively manipulated.
+    // Zero preserves the engine/display cadence.
+    uint32_t activeFrameRateLimit = 0u;
     bool wasActive = false;
     bool propagateToChildren = true;
     bool restoreStaticWhenIdle = false;
@@ -1002,6 +1025,16 @@ struct ScrollEdgeFade2DComponent
     float bottomHeight = 0.0f;
     float minimumOpacity = 0.0f;
     float maximumBlurRadius = 0.0f;
+};
+
+struct TextEdgeFade2DComponent
+{
+    // Multiplies rendered glyph alpha near the horizontal edges of the
+    // nearest inherited mask. This is a true transparency fade, so it works
+    // over any backdrop without painting a colour over the text.
+    bool enabled = false;
+    float leftWidth = 0.0f;
+    float rightWidth = 0.0f;
 };
 
 struct DisplayTransition2DComponent
@@ -1391,6 +1424,9 @@ public:
     // media, or a timed cache refresh). Ordinary component changes are tracked
     // by frame_generation().
     bool requires_continuous_redraw(double currentTimeSeconds) const;
+    // Lowest opt-in submission ceiling among currently active cache policies.
+    // Used for expensive pointer-driven redraws without globally limiting UI.
+    uint32_t active_frame_rate_limit(double currentTimeSeconds) const;
     bool hit_test(glm::vec2 point);
     entt::entity entity_at(glm::vec2 point);
     entt::entity draggable_parent_at(glm::vec2 point);

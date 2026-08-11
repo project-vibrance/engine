@@ -172,6 +172,32 @@ float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float p
     return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
 }
 
+float media_primitive_mask(vec2 p) {
+    uint primitive = pc.data.x;
+    if (primitive == PRIMITIVE_RECTANGLE) {
+        return 1.0;
+    }
+
+    vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
+    vec2 local = p - (pc.rect.xy + halfSize);
+    float softness = max(pc.effect0.y, 0.0);
+    float sdf;
+    if (primitive == PRIMITIVE_ELLIPSE) {
+        vec2 q = local / halfSize;
+        sdf = (length(q) - 1.0) * min(halfSize.x, halfSize.y);
+    } else if (primitive == PRIMITIVE_SQUIRCLE) {
+        float radius = clamp(pc.effect0.x, 0.0, min(halfSize.x, halfSize.y));
+        sdf = sd_squircle_box(local, halfSize, radius, 1.0, 4.0);
+    } else {
+        return rounded_rect_mask(p);
+    }
+
+    if (softness <= 0.001) {
+        return sdf <= 0.0 ? 1.0 : 0.0;
+    }
+    return 1.0 - smoothstep(0.0, softness, sdf);
+}
+
 float corner_radius_for(vec2 p, vec4 radii) {
     if (p.y < 0.0) {
         return p.x < 0.0 ? radii.x : radii.y;
@@ -433,7 +459,7 @@ vec4 shade_media_sample(vec2 samplePoint, float backgroundFactor) {
     src.rgb = apply_media_color_adjustment(src.rgb);
     src.rgb = apply_media_auto_black_lift(src.rgb, src.a, backgroundFactor);
     src.a *= media_alpha_mask(localUv) * pc.effect0.w;
-    src.a *= rounded_rect_mask(pc.rect.xy + localUv * pc.rect.zw);
+    src.a *= media_primitive_mask(pc.rect.xy + localUv * pc.rect.zw);
     src.a *= inherited_shape_mask_alpha(samplePoint);
     return src.a > 0.001 ? src : vec4(0.0);
 }

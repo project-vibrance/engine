@@ -272,11 +272,10 @@ void Frame::record_command_buffer(
 		std::array<float, 4> { 0.0f, 0.0f, 0.0f, 0.0f });
 	const vk::ClearColorValue farDepth(
 		std::array<std::uint32_t, 4> { 0x3f800000u, 0u, 0u, 0u });
-	// The dynamic surface is retained per frame slot. A bounded clear is unsafe
-	// for optical effects: soft rims and clipped blur samples can
-	// write outside an entity's nominal bounds, leaving fragments behind when
-	// that frame slot is reused after a drag. Rebuild from transparent instead.
-	clear_render_target(colorBuffer, transparent);
+	// The 2D renderer retains this per-frame-slot image and clears the previous
+	// dispatch envelope itself. Preserve its contents here so a small moving
+	// island does not force a full-screen transfer clear on every frame.
+	prepare_cache_target(colorBuffer);
 	if (renderHosted3D)
 	{
 		clear_render_target(modelDepthBuffer, farDepth);
@@ -631,5 +630,6 @@ void Frame::free_resources()
 	delete hosted3DDepthBuffer;
 	hosted3DDepthBuffer = nullptr;
 	hosted3DFramebuffer = nullptr;
+	renderer2D.invalidate_dynamic_surface();
 	uiCacheImagesReady = false;
 }

@@ -77,6 +77,16 @@ namespace
 				pendingRects[bufferIndex] : glm::uvec4(0u);
 		}
 
+		bool has_pending() const
+		{
+			return std::any_of(
+				pendingRects.begin(),
+				pendingRects.end(),
+				[](const glm::uvec4& rect) {
+					return rect.z > 0u && rect.w > 0u;
+				});
+		}
+
 		void commit(uint32_t renderedBufferIndex, glm::uvec4 sceneDamage)
 		{
 			for (glm::uvec4& pendingDamage : pendingRects)
@@ -1811,6 +1821,14 @@ void Engine::Impl::draw()
 	}
 
 	const bool compositionAvailable = compositionPresenter.available();
+	const double schedulingTimeSeconds = std::chrono::duration<double>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	const uint32_t activeUiFrameRateLimit =
+		renderer2DScene.active_frame_rate_limit(schedulingTimeSeconds);
+	const uint32_t effectiveCompositionFrameRate =
+		activeUiFrameRateLimit > 0u ?
+			std::min(compositionFrameRate, activeUiFrameRateLimit) :
+			compositionFrameRate;
 	if (targetFrameRate == 0u)
 	{
 		// Keep uncapped timing observably above 2000 Hz without continuously
@@ -1875,7 +1893,7 @@ void Engine::Impl::draw()
 		// a nominal 200 Hz mode; running two near-identical clocks creates a
 		// visible beat even though both counters look fast.
 		if (targetFrameRate > 0u &&
-			targetFrameRate <= compositionFrameRate + 2u)
+			targetFrameRate <= effectiveCompositionFrameRate + 2u)
 		{
 			submitCompositionFrame = true;
 			nextCompositionSubmitDeadline = {};
@@ -1887,7 +1905,7 @@ void Engine::Impl::draw()
 			const auto interval =
 				std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 					std::chrono::duration<double>(
-						1.0 / static_cast<double>(compositionFrameRate)));
+						1.0 / static_cast<double>(effectiveCompositionFrameRate)));
 			if (nextCompositionSubmitDeadline.time_since_epoch().count() == 0 ||
 				compositionNow - nextCompositionSubmitDeadline > interval * 2)
 			{
@@ -1924,7 +1942,7 @@ void Engine::Impl::draw()
 			std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 				std::chrono::duration<double>(
 					1.0 / static_cast<double>(
-						std::max(compositionFrameRate, 30u))));
+						std::max(effectiveCompositionFrameRate, 30u))));
 		nextNativeSubmitDeadline = now + interval;
 	}
 	else
@@ -1935,14 +1953,18 @@ void Engine::Impl::draw()
 	const double renderTimeSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
 	const uint64_t sceneFrameGeneration = renderer2DScene.frame_generation();
+	const bool retainedCompositionBuffersNeedSync =
+		compositionAvailable && compositionBufferDamage.has_pending();
 	if (hasSubmittedFrame &&
 		sceneFrameGeneration == lastSubmittedFrameGeneration &&
 		!renderer2DScene.requires_continuous_redraw(renderTimeSeconds) &&
+		!retainedCompositionBuffersNeedSync &&
 		(!compositionAvailable || nativeTransparencyPrimed))
 	{
-		// DWM and native swapchains retain the last presented image. When no UI
-		// state or time-based content changed, another full render/copy is pure
-		// duplicate work and can be omitted safely.
+		// DWM and native swapchains retain the last presented image. Stop only
+		// after every imported Composition image has received the newest damage;
+		// otherwise a later frame-slot/cache handoff can expose an older scroll
+		// position even though the scene generation itself has gone idle.
 		return;
 	}
 	Frame& frame = frames[frameIndex];
@@ -2145,7 +2167,7 @@ void Engine::Impl::draw()
 	// D3D Composition regions cannot drift apart by multiple frame slots.
 	const bool pipelineComposition =
 		targetFrameRate == 0u ||
-		targetFrameRate > compositionFrameRate + 2u;
+		targetFrameRate > effectiveCompositionFrameRate + 2u;
 	if (compositionImage && !pipelineComposition)
 	{
 		const vk::Result compositionFenceResult = logicalDevice.waitForFences(

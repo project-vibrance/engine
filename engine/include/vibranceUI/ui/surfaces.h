@@ -776,11 +776,6 @@ inline UiScrollBarHandle ui_create_scrollbar_indicator(
     const float hitWidth = std::max(scaled_scalar(options.hitWidth, ui.scale()), width);
     const float radius = width * 0.5f;
     ShapeStyleComponent trackStyle = make_solid_style(options.trackColor, "rgba(0, 0, 0, 0)", 0.0f, 1.0f);
-    if (std::max(trackStyle.color0.a, trackStyle.color1.a) <= 0.001f)
-    {
-        trackStyle.color0.a = 0.002f;
-        trackStyle.color1.a = 0.002f;
-    }
     trackStyle.edgeSoftness = 0.75f;
     ShapeStyleComponent thumbStyle = make_solid_style(
         options.thumbColor,
@@ -823,8 +818,18 @@ inline UiScrollBarHandle ui_create_scrollbar_indicator(
         glm::vec2(0.0f),
         { width, std::max(scaled_scalar(options.minThumbHeight, ui.scale()), width) });
 
+    if (options.dynamicCache)
+    {
+        // The thumb changes position and opacity frequently. Keeping it out of
+        // the static surface avoids a cache hand-off on every drag/fade cycle.
+        ui.set_dynamic_cache(handle.thumb, false);
+    }
+
     if (options.interactive)
     {
+        // The wide rail is a hit target, not a painted track. Keeping this
+        // separate avoids the faint one-pixel line produced by fake alpha.
+        ui.registry().emplace<HitRegion2DComponent>(handle.track);
         ScrollBarInputComponent input = {};
         input.scrollTarget = parent;
         input.thumb = handle.thumb;
@@ -905,7 +910,7 @@ inline void ui_update_scrollbar_indicator(
         std::min(handle.minThumbHeight, trackHeight),
         trackHeight);
     const float normalized = std::clamp((scrollOffset - minOffset) / scrollRange, 0.0f, 1.0f);
-    const float thumbY = (trackHeight - thumbHeight) * normalized;
+    const float thumbY = std::round((trackHeight - thumbHeight) * normalized);
 
     bool thumbChanged = false;
     if (Layout2DComponent* layout = registry.try_get<Layout2DComponent>(handle.thumb))
@@ -935,7 +940,7 @@ inline void ui_update_scrollbar_indicator(
     }
     if (thumbChanged)
     {
-        ui_mark_moving_entity_dirty(scene, handle.thumb, 0.35f);
+        ui_mark_direct_manipulation_dirty(scene, handle.thumb, 0.35f);
     }
     else if (visibilityChanged)
     {
@@ -1096,7 +1101,7 @@ inline UiScrollViewHandle ui_create_scroll_view(
                 layout->offset.y = initialOffset - scrollInput->offset;
                 if (cacheMovingContent)
                 {
-                    ui_mark_moving_entity_dirty(*scenePtr, content, movingContentActiveSeconds);
+                    ui_mark_direct_manipulation_dirty(*scenePtr, content, movingContentActiveSeconds);
                 }
                 else
                 {
