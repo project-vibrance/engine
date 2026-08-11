@@ -5,6 +5,7 @@
 #include <GLFW/glfw3.h>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <vector>
 #include <glm/glm.hpp>
 #include <vibranceUI/renderer/renderer.h>
@@ -18,6 +19,26 @@ struct GlfwWindowCreateInfo
     const char* name = "vibranceUI";
     bool transparentFramebuffer = false;
     bool decorated = true;
+    bool alwaysOnTop = false;
+};
+
+struct GlfwMonitorInfo
+{
+    GLFWmonitor* handle = nullptr;
+    // Stable platform identity used for persisted monitor selections.
+    std::string id;
+    std::string name;
+    glm::ivec2 position { 0 };
+    glm::ivec2 size { 0 };
+    bool primary = false;
+};
+
+struct GlfwWindowPlacement
+{
+    glm::ivec2 position { 0 };
+    glm::ivec2 size { 1 };
+    bool decorated = true;
+    bool alwaysOnTop = false;
 };
 
 struct GlfwCursorSet
@@ -57,6 +78,11 @@ VIBRANCE_GLFW_API GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& crea
 VIBRANCE_GLFW_API GLFWwindow* build_glfw_window(int width, int height, const char* name, bool transparent);
 VIBRANCE_GLFW_API void destroy_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void terminate_glfw();
+VIBRANCE_GLFW_API std::vector<GlfwMonitorInfo> glfw_connected_monitors();
+VIBRANCE_GLFW_API std::string glfw_monitor_identifier(GLFWmonitor* monitor);
+VIBRANCE_GLFW_API bool glfw_screen_cursor_position(
+    GLFWwindow* referenceWindow,
+    glm::ivec2& position);
 
 VIBRANCE_GLFW_API int vibrance_glfw_create_surface(void* instance, void* userData, void* surfaceOut);
 // Wrappers below keep app and engine code from depending on raw GLFW calls
@@ -72,6 +98,15 @@ VIBRANCE_GLFW_API double glfw_time_seconds();
 VIBRANCE_GLFW_API bool glfw_window_should_close(GLFWwindow* window);
 VIBRANCE_GLFW_API void poll_glfw_events();
 VIBRANCE_GLFW_API void set_glfw_window_title(GLFWwindow* window, const char* title);
+VIBRANCE_GLFW_API void set_glfw_window_decorated(
+    GLFWwindow* window,
+    bool decorated);
+VIBRANCE_GLFW_API void set_glfw_window_always_on_top(
+    GLFWwindow* window,
+    bool alwaysOnTop);
+VIBRANCE_GLFW_API bool apply_glfw_window_placement(
+    GLFWwindow* window,
+    const GlfwWindowPlacement& placement);
 VIBRANCE_GLFW_API void set_glfw_window_position(GLFWwindow* window, int x, int y);
 VIBRANCE_GLFW_API void set_glfw_window_size(GLFWwindow* window, int width, int height);
 VIBRANCE_GLFW_API void set_glfw_window_should_close(GLFWwindow* window, bool shouldClose);

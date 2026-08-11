@@ -930,7 +930,7 @@ public:
                 {
                     update_region_geometry(regionVisuals_[index], regions[index]);
                 }
-                return true;
+                return commit_composition_changes();
             }
 
             regions_.Children().RemoveAll();
@@ -948,7 +948,7 @@ public:
                     continue;
                 }
             }
-            return true;
+            return commit_composition_changes();
         }
         catch (const winrt::hresult_error& error)
         {
@@ -968,6 +968,27 @@ public:
     }
 
 private:
+    bool commit_composition_changes()
+    {
+        // The private Win32 interop compositor uses IDComposition and does not
+        // auto-commit Windows.UI.Composition property changes. Without this
+        // transaction, an island can collapse in the Vulkan surface while its
+        // old expanded HostBackdrop geometry remains cached by DWM.
+        if (!compositionDevice_)
+        {
+            return true;
+        }
+        const HRESULT result = compositionDevice_->Commit();
+        if (FAILED(result))
+        {
+            lastCompositionError =
+                "commit backdrop geometry: HRESULT " +
+                std::to_string(static_cast<std::int32_t>(result));
+            return false;
+        }
+        return true;
+    }
+
     static bool same_region_effect_graph(
         VibranceCompositionRegion left,
         VibranceCompositionRegion right) noexcept

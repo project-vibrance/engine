@@ -3,6 +3,8 @@
 #include <vibranceUI/ui/controls.h>
 #include <algorithm>
 #include <sstream>
+#include <unordered_map>
+#include <utility>
 
 #if defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -107,6 +109,10 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     {
         glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
     }
+    if (createInfo.alwaysOnTop)
+    {
+        glfwWindowHint(GLFW_FLOATING, GLFW_TRUE);
+    }
 
     if (createInfo.transparentFramebuffer)
     {
@@ -119,6 +125,9 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     GLFWwindow* window = glfwCreateWindow(createInfo.width, createInfo.height, createInfo.name, nullptr, nullptr);
     if (window)
     {
+        set_glfw_window_always_on_top(
+            window,
+            createInfo.alwaysOnTop);
         log_window_features(window, createInfo);
 
         std::stringstream line;
@@ -156,6 +165,108 @@ void destroy_glfw_window(GLFWwindow* window)
 void terminate_glfw()
 {
     glfwTerminate();
+}
+
+std::vector<GlfwMonitorInfo> glfw_connected_monitors()
+{
+    std::vector<GlfwMonitorInfo> result;
+    if (glfwInit() != GLFW_TRUE)
+    {
+        return result;
+    }
+    int count = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&count);
+    GLFWmonitor* primary = glfwGetPrimaryMonitor();
+    std::unordered_map<std::string, std::uint32_t> idOccurrences;
+    result.reserve(static_cast<std::size_t>(std::max(count, 0)));
+    for (int index = 0; monitors && index < count; ++index)
+    {
+        GLFWmonitor* monitor = monitors[index];
+        const GLFWvidmode* videoMode = glfwGetVideoMode(monitor);
+        if (!monitor || !videoMode || videoMode->width <= 0 ||
+            videoMode->height <= 0)
+        {
+            continue;
+        }
+        GlfwMonitorInfo info = {};
+        info.handle = monitor;
+        info.primary = monitor == primary;
+        if (const char* name = glfwGetMonitorName(monitor))
+        {
+            info.name = name;
+        }
+        glfwGetMonitorPos(
+            monitor,
+            &info.position.x,
+            &info.position.y);
+        info.size = { videoMode->width, videoMode->height };
+        std::string baseId = glfw_monitor_identifier(monitor);
+        if (baseId.empty())
+        {
+            int physicalWidth = 0;
+            int physicalHeight = 0;
+            glfwGetMonitorPhysicalSize(
+                monitor,
+                &physicalWidth,
+                &physicalHeight);
+            baseId = "display:" + info.name + ":" +
+                std::to_string(physicalWidth) + "x" +
+                std::to_string(physicalHeight);
+        }
+        const std::uint32_t occurrence = idOccurrences[baseId]++;
+        info.id = occurrence == 0u ?
+            std::move(baseId) :
+            baseId + "#" + std::to_string(occurrence + 1u);
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+#if !defined(__APPLE__)
+std::string glfw_monitor_identifier(GLFWmonitor* monitor)
+{
+    if (!monitor)
+    {
+        return {};
+    }
+#if defined(_WIN32)
+    if (const char* device = glfwGetWin32Monitor(monitor);
+        device && device[0] != '\0')
+    {
+        return "windows:" + std::string(device);
+    }
+#endif
+    return {};
+}
+#endif
+
+bool glfw_screen_cursor_position(
+    GLFWwindow* referenceWindow,
+    glm::ivec2& position)
+{
+#if defined(_WIN32)
+    POINT point {};
+    if (GetCursorPos(&point))
+    {
+        position = { point.x, point.y };
+        return true;
+    }
+#endif
+    if (!referenceWindow)
+    {
+        return false;
+    }
+    int windowX = 0;
+    int windowY = 0;
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    glfwGetWindowPos(referenceWindow, &windowX, &windowY);
+    glfwGetCursorPos(referenceWindow, &cursorX, &cursorY);
+    position = {
+        windowX + static_cast<int>(cursorX),
+        windowY + static_cast<int>(cursorY)
+    };
+    return true;
 }
 
 int vibrance_glfw_create_surface(void* instance, void* userData, void* surfaceOut)
@@ -293,6 +404,116 @@ void set_glfw_window_title(GLFWwindow* window, const char* title)
         glfwSetWindowTitle(window, title);
     }
 }
+
+void set_glfw_window_decorated(GLFWwindow* window, bool decorated)
+{
+    if (!window)
+    {
+        return;
+    }
+    glfwSetWindowAttrib(
+        window,
+        GLFW_DECORATED,
+        decorated ? GLFW_TRUE : GLFW_FALSE);
+#if defined(_WIN32)
+    HWND nativeWindow = glfwGetWin32Window(window);
+    if (nativeWindow)
+    {
+        LONG_PTR style = GetWindowLongPtrW(nativeWindow, GWL_STYLE);
+        if (decorated)
+        {
+            style |= WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+                WS_MAXIMIZEBOX | WS_SYSMENU;
+        }
+        else
+        {
+            style &= ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX |
+                WS_MAXIMIZEBOX | WS_SYSMENU);
+        }
+        SetWindowLongPtrW(nativeWindow, GWL_STYLE, style);
+        SetWindowPos(
+            nativeWindow,
+            nullptr,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    }
+#endif
+}
+
+void set_glfw_window_always_on_top(GLFWwindow* window, bool alwaysOnTop)
+{
+    if (!window)
+    {
+        return;
+    }
+    glfwSetWindowAttrib(
+        window,
+        GLFW_FLOATING,
+        alwaysOnTop ? GLFW_TRUE : GLFW_FALSE);
+#if defined(_WIN32)
+    HWND nativeWindow = glfwGetWin32Window(window);
+    if (nativeWindow)
+    {
+        SetWindowPos(
+            nativeWindow,
+            alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+#endif
+}
+
+#if !defined(__APPLE__)
+bool apply_glfw_window_placement(
+    GLFWwindow* window,
+    const GlfwWindowPlacement& placement)
+{
+    if (!window || placement.size.x <= 0 || placement.size.y <= 0)
+    {
+        return false;
+    }
+    set_glfw_window_decorated(window, placement.decorated);
+#if defined(_WIN32)
+    // Win32 applies bounds, z-order, and the frame change atomically. This is
+    // important for transparent composition windows: separate move/resize
+    // mutations can expose an old retained surface between DWM transactions.
+    glfwSetWindowAttrib(
+        window,
+        GLFW_FLOATING,
+        placement.alwaysOnTop ? GLFW_TRUE : GLFW_FALSE);
+    HWND nativeWindow = glfwGetWin32Window(window);
+    if (!nativeWindow)
+    {
+        return false;
+    }
+    return SetWindowPos(
+        nativeWindow,
+        placement.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+        placement.position.x,
+        placement.position.y,
+        placement.size.x,
+        placement.size.y,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED) != FALSE;
+#else
+    // GLFW maps these operations to the active Unix window system (X11 or
+    // Wayland), including the compositor's supported always-above hint.
+    glfwSetWindowPos(window, placement.position.x, placement.position.y);
+    glfwSetWindowSize(window, placement.size.x, placement.size.y);
+    glfwSetWindowAttrib(
+        window,
+        GLFW_FLOATING,
+        placement.alwaysOnTop ? GLFW_TRUE : GLFW_FALSE);
+    return true;
+#endif
+}
+#endif
 
 void set_glfw_window_position(GLFWwindow* window, int x, int y)
 {
