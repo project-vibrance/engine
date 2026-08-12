@@ -5582,17 +5582,7 @@ void Renderer2D::record(
     DispatchBounds trackedDamage = {};
     if (rebuildCachedLayer || scene.fullDamagePending_)
     {
-        trackedDamage = visibleBounds;
-        for (const auto& bounds : presentedBounds)
-        {
-            include_bounds(
-                trackedDamage,
-                DispatchBounds {
-                    bounds.second.x,
-                    bounds.second.y,
-                    bounds.second.z,
-                    bounds.second.w });
-        }
+        trackedDamage = make_full_screen_bounds(swapchain);
     }
     else
     {

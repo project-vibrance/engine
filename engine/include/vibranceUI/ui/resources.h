@@ -292,6 +292,26 @@ public:
         initialised_ = true;
     }
 
+    // Runtime state often lives beside user configuration but must not be
+    // treated as a hot-reloadable UI resource. Paths are relative to the
+    // user/packaged config roots; directory paths ignore their whole subtree.
+    void ignore_config_path(std::filesystem::path relativePath)
+    {
+        relativePath = relativePath.lexically_normal();
+        if (relativePath.empty() || relativePath == ".")
+        {
+            return;
+        }
+        if (std::find(
+                ignoredConfigPaths_.begin(),
+                ignoredConfigPaths_.end(),
+                relativePath) == ignoredConfigPaths_.end())
+        {
+            ignoredConfigPaths_.push_back(std::move(relativePath));
+            snapshot_ = capture_snapshot();
+        }
+    }
+
     UiResourceChangeSet poll(bool force = false)
     {
         if (!initialised_)
@@ -380,11 +400,38 @@ private:
         return changes;
     }
 
-    static void scan_root(
+    static bool path_has_prefix(
+        const std::filesystem::path& path,
+        const std::filesystem::path& prefix)
+    {
+        auto pathIt = path.begin();
+        for (auto prefixIt = prefix.begin();
+            prefixIt != prefix.end(); ++prefixIt, ++pathIt)
+        {
+            if (pathIt == path.end() || *pathIt != *prefixIt)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool config_path_ignored(
+        const std::filesystem::path& relativePath) const
+    {
+        return std::any_of(
+            ignoredConfigPaths_.begin(),
+            ignoredConfigPaths_.end(),
+            [&relativePath](const std::filesystem::path& ignored) {
+                return path_has_prefix(relativePath, ignored);
+            });
+    }
+
+    void scan_root(
         Snapshot& snapshot,
         const std::filesystem::path& root,
         ResourceKind kind,
-        std::string_view layerName)
+        std::string_view layerName) const
     {
         if (!ui_directory_exists(root))
         {
@@ -407,6 +454,17 @@ private:
                 {
                     error.clear();
                     relativePath = entry.path().lexically_relative(root);
+                }
+
+                if (kind == ResourceKind::eConfig &&
+                    config_path_ignored(relativePath))
+                {
+                    iterator.increment(error);
+                    if (error)
+                    {
+                        error.clear();
+                    }
+                    continue;
                 }
 
                 FileStamp stamp = {};
@@ -467,6 +525,7 @@ private:
     }
 
     UiResourceDirectories resources_ {};
+    std::vector<std::filesystem::path> ignoredConfigPaths_ {};
     Snapshot snapshot_ {};
     std::chrono::milliseconds pollInterval_ { 500 };
     std::chrono::steady_clock::time_point nextPoll_ {};
