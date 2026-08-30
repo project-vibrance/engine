@@ -15,6 +15,8 @@
 #include <vibranceUI/ui/layout.h>
 #include <vibranceUI/ui/text.h>
 
+class UiPlacement;
+
 class UiBuilder
 {
 public:
@@ -40,6 +42,134 @@ public:
     {
         return scale_;
     }
+
+    // Compact factories create renderer objects without also forcing a
+    // placement strategy. Chain place(...) afterwards to author layout in
+    // logical pixels.
+    entt::entity root(
+        int32_t layer = 0,
+        uint32_t order = 0)
+    {
+        const glm::vec2 safeContentScale = glm::max(
+            scale_.contentScale,
+            glm::vec2(0.25f));
+        ShapeStyleComponent transparentStyle = {};
+        transparentStyle.set_color(glm::vec4(0.0f));
+        transparentStyle.outlineColor = glm::vec4(0.0f);
+        transparentStyle.opacity = 0.0f;
+        entt::entity entity = scene_.create_shape(
+            glm::vec2(0.0f),
+            glm::max(scale_.logicalSize * safeContentScale, glm::vec2(1.0f)),
+            transparentStyle,
+            Renderer2DPrimitive::eRectangle);
+        if (Transform2DComponent* transform =
+                registry_.try_get<Transform2DComponent>(entity))
+        {
+            transform->position = glm::vec2(0.0f);
+            transform->origin = glm::vec2(0.0f);
+        }
+        set_layer(entity, layer, order);
+        return entity;
+    }
+
+    // A non-painting, input-transparent parent for positioning several freely
+    // placed entities as one measured composition. Place and size the group,
+    // then place children relative to it; unrelated window controls remain
+    // free to use the original page or window root.
+    entt::entity layout_group(
+        int32_t layer = 0,
+        uint32_t order = 0)
+    {
+        ShapeStyleComponent transparentStyle = {};
+        transparentStyle.set_color(glm::vec4(0.0f));
+        transparentStyle.outlineColor = glm::vec4(0.0f);
+        transparentStyle.opacity = 0.0f;
+        entt::entity entity = scene_.create_shape(
+            glm::vec2(0.0f),
+            glm::vec2(1.0f),
+            transparentStyle,
+            Renderer2DPrimitive::eRectangle);
+        set_layer(entity, layer, order);
+        registry_.emplace_or_replace<InputTransparent2DComponent>(entity);
+        return entity;
+    }
+
+    entt::entity block(
+        const ShapeStyleComponent& style,
+        float cornerRadius = 0.0f,
+        Renderer2DPrimitive primitive =
+            Renderer2DPrimitive::eRoundedRectangle)
+    {
+        entt::entity entity = scene_.create_shape(
+            glm::vec2(0.0f),
+            glm::vec2(1.0f),
+            style,
+            primitive);
+        set_shape(entity, cornerRadius);
+        return entity;
+    }
+
+    entt::entity block(
+        std::string_view color,
+        float cornerRadius = 0.0f,
+        Renderer2DPrimitive primitive =
+            Renderer2DPrimitive::eRoundedRectangle)
+    {
+        ShapeStyleComponent style = {};
+        style.set_color(color);
+        style.outlineColor = glm::vec4(0.0f);
+        return block(style, cornerRadius, primitive);
+    }
+
+    entt::entity text(
+        std::string value,
+        const Renderer2DFontAtlas& fontAtlas,
+        float fontSize,
+        const TextStyleComponent& style)
+    {
+        entt::entity entity = scene_.create_text(
+            std::move(value),
+            glm::vec2(0.0f),
+            scaled_scalar(fontSize, scale_),
+            style);
+        apply_font_layout(fontAtlas, registry_, entity);
+        return entity;
+    }
+
+    entt::entity text(
+        std::string value,
+        const Renderer2DFontAtlas& fontAtlas,
+        float fontSize = 16.0f,
+        std::string_view color = "#FFFFFFFF")
+    {
+        TextStyleComponent style = {};
+        style.set_color(color);
+        style.shadowColor = glm::vec4(0.0f);
+        style.effectColor = glm::vec4(0.0f);
+        return text(
+            std::move(value),
+            fontAtlas,
+            fontSize,
+            style);
+    }
+
+    entt::entity media(
+        Media2DHandle handle,
+        glm::vec2 logicalSize = glm::vec2(1.0f),
+        Media2DFit fit = Media2DFit::eContain)
+    {
+        if (!handle.valid())
+        {
+            return entt::null;
+        }
+        return scene_.create_media(
+            glm::vec2(0.0f),
+            scaled_size(logicalSize.x, logicalSize.y, scale_),
+            handle,
+            fit);
+    }
+
+    UiPlacement place(entt::entity entity);
 
     RenderLayer2DComponent& set_layer(
         entt::entity entity,
@@ -951,3 +1081,198 @@ private:
     LayoutScale scale_;
     bool activateTimedAnimations_ = true;
 };
+
+// Fluent, logical-pixel placement for entities created by either the compact
+// factories above or the lower-level scene/control APIs.
+class UiPlacement
+{
+public:
+    UiPlacement(UiBuilder& builder, entt::entity entity) :
+        builder_(&builder),
+        entity_(entity)
+    {
+    }
+
+    bool valid() const
+    {
+        return builder_ && entity_ != entt::null &&
+            builder_->registry().valid(entity_);
+    }
+
+    entt::entity entity() const
+    {
+        return entity_;
+    }
+
+    operator entt::entity() const
+    {
+        return entity_;
+    }
+
+    UiPlacement& inside(entt::entity parent)
+    {
+        if (valid())
+        {
+            builder_->registry().emplace_or_replace<Parent2DComponent>(
+                entity_,
+                Parent2DComponent { parent });
+        }
+        return *this;
+    }
+
+    UiPlacement& at(UiAlignment alignment)
+    {
+        if (Layout2DComponent* value = layout())
+        {
+            value->anchorMin = ui_alignment_anchor(alignment);
+            value->anchorMax = value->anchorMin;
+            value->pivot = ui_alignment_pivot(alignment);
+        }
+        return *this;
+    }
+
+    UiPlacement& offset(float x, float y)
+    {
+        if (Layout2DComponent* value = layout())
+        {
+            value->offset = scaled_offset(x, y, builder_->scale());
+        }
+        return *this;
+    }
+
+    UiPlacement& offset(glm::vec2 value)
+    {
+        return offset(value.x, value.y);
+    }
+
+    UiPlacement& size(float width, float height)
+    {
+        if (Layout2DComponent* value = layout())
+        {
+            value->size = scaled_size(width, height, builder_->scale());
+        }
+        return *this;
+    }
+
+    UiPlacement& size(glm::vec2 value)
+    {
+        return size(value.x, value.y);
+    }
+
+    UiPlacement& fill(float margin = 0.0f)
+    {
+        return fill(glm::vec4(margin));
+    }
+
+    UiPlacement& fill(glm::vec4 margin)
+    {
+        if (Layout2DComponent* value = layout())
+        {
+            value->anchorMin = glm::vec2(0.0f);
+            value->anchorMax = glm::vec2(1.0f);
+            value->pivot = glm::vec2(0.0f);
+            value->margin = scaled_edges(
+                margin.x,
+                margin.y,
+                margin.z,
+                margin.w,
+                builder_->scale());
+            value->offset = glm::vec2(0.0f);
+            value->size = glm::vec2(0.0f);
+        }
+        return *this;
+    }
+
+    UiPlacement& grid(
+        uint32_t column,
+        uint32_t row,
+        uint32_t columnSpan = 1u,
+        uint32_t rowSpan = 1u,
+        glm::vec4 margin = glm::vec4(0.0f))
+    {
+        if (valid())
+        {
+            builder_->set_grid_cell(
+                entity_,
+                column,
+                row,
+                columnSpan,
+                rowSpan,
+                margin);
+        }
+        return *this;
+    }
+
+    UiPlacement& layer(
+        int32_t layer,
+        uint32_t order = 0,
+        bool alwaysOnTop = false)
+    {
+        if (valid())
+        {
+            builder_->set_layer(entity_, layer, order, alwaysOnTop);
+        }
+        return *this;
+    }
+
+    UiPlacement& padding(float all)
+    {
+        return padding(glm::vec4(all));
+    }
+
+    UiPlacement& padding(glm::vec4 edges)
+    {
+        if (valid())
+        {
+            builder_->set_padding(
+                entity_,
+                edges.x,
+                edges.y,
+                edges.z,
+                edges.w);
+        }
+        return *this;
+    }
+
+    UiPlacement& corner_radius(float radius)
+    {
+        if (valid() &&
+            builder_->registry().all_of<ShapeComponent>(entity_))
+        {
+            builder_->set_shape(entity_, radius);
+        }
+        return *this;
+    }
+
+    UiPlacement& visible(bool isVisible)
+    {
+        if (valid())
+        {
+            RenderLayer2DComponent& renderLayer =
+                builder_->registry().get_or_emplace<
+                    RenderLayer2DComponent>(entity_);
+            renderLayer.visible = isVisible;
+            builder_->scene().mark_dirty(entity_);
+        }
+        return *this;
+    }
+
+private:
+    Layout2DComponent* layout()
+    {
+        if (!valid())
+        {
+            return nullptr;
+        }
+        return &builder_->registry().get_or_emplace<Layout2DComponent>(
+            entity_);
+    }
+
+    UiBuilder* builder_ = nullptr;
+    entt::entity entity_ = entt::null;
+};
+
+inline UiPlacement UiBuilder::place(entt::entity entity)
+{
+    return UiPlacement(*this, entity);
+}

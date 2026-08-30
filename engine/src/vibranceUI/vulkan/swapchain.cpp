@@ -404,7 +404,8 @@ vk::PresentModeKHR Swapchain::choose_present_mode(const std::vector<vk::PresentM
     return vk::PresentModeKHR::eFifo;
 }
 
-vk::SurfaceFormatKHR Swapchain::choose_surface_format(std::vector<vk::SurfaceFormatKHR> formats)
+vk::SurfaceFormatKHR Swapchain::choose_surface_format(
+    const std::vector<vk::SurfaceFormatKHR>& formats)
 {
     for (vk::SurfaceFormatKHR format : formats)
     {

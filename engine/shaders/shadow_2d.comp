@@ -93,7 +93,7 @@ float notch_flare_size(vec2 size, float amount, float depth) {
     const float morphThreshold = 0.85;
     float progress = clamp((clamp(amount, 0.0, 1.0) - morphThreshold) / (1.0 - morphThreshold), 0.0, 1.0);
     float depthTarget = depth > 0.5 ? depth : clamp(size.y * 0.62, 0.0, 92.0);
-    float flareTarget = clamp(depthTarget * 0.18, 0.0, min(size.y * 0.5, size.x * 0.18));
+    float flareTarget = clamp(depthTarget * 0.18, 0.0, size.y * 0.5);
     float sizeRatio = clamp((size.y * 0.5) / max(flareTarget, 0.001), 0.0, 1.0);
     float flareT = sizeRatio * progress;
     return flareTarget * flareT * flareT;

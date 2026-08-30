@@ -1,13 +1,33 @@
 set(ENGINE_SOURCES
     src/audio/audio.cpp
+    src/audio/loopback_capture.cpp
+    src/audio/spectrum.cpp
     src/core/camera.cpp
     src/core/file.cpp
     src/core/logger.cpp
+    src/core/secure_credential.cpp
+    src/core/single_instance.cpp
     src/core/vma_usage.cpp
+    src/display/placement.cpp
+    src/display/preferences.cpp
     src/factories/mesh_factory.cpp
     src/glfw/panel_window.cpp
+    src/glfw/ui_surface.cpp
+    src/glfw/ui_window.cpp
     src/glfw/window.cpp
     src/localisation/localisation.cpp
+    src/media/artwork.cpp
+    src/media/artwork_view.cpp
+    src/media/presentation.cpp
+    src/media/session.cpp
+    src/notifications/card.cpp
+    src/notifications/provider.cpp
+    src/notifications/stack_layout.cpp
+    src/platform/native_dialog.cpp
+    src/time/countdown_timer.cpp
+    src/ui/animated_text_view.cpp
+    src/ui/context_menu.cpp
+    src/ui/dialog_controls.cpp
     src/ui/resource_loading.cpp
     src/ui/theme.cpp
     src/vibranceUI/animation/lottie.cpp
@@ -28,6 +48,7 @@ set(ENGINE_SOURCES
     src/vibranceUI/vulkan/shader.cpp
     src/vibranceUI/vulkan/swapchain.cpp
     src/vibranceUI/vulkan/synchronisation.cpp
+    src/vibranceUI/vulkan/text_direction.cpp
 )
 # C++/WinRT stays in its MSVC companion DLL and must never enter the MinGW
 # engine target. The MinGW side talks to it through a versioned POD C ABI.
@@ -246,6 +267,88 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
     endif()
 endif()
 
+set(VIBRANCE_WIN32_INTEROP_AVAILABLE OFF)
+if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
+    if(NOT VIBRANCE_VSWHERE_EXECUTABLE)
+        find_program(
+            VIBRANCE_VSWHERE_EXECUTABLE
+            NAMES vswhere.exe
+            PATHS
+                "C:/Program Files (x86)/Microsoft Visual Studio/Installer"
+                "$ENV{ProgramFiles\(x86\)}/Microsoft Visual Studio/Installer"
+            NO_DEFAULT_PATH)
+    endif()
+    if(VIBRANCE_VSWHERE_EXECUTABLE AND NOT VIBRANCE_VISUAL_STUDIO_ROOT)
+        execute_process(
+            COMMAND
+                "${VIBRANCE_VSWHERE_EXECUTABLE}"
+                -latest
+                -products *
+                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+                -property installationPath
+            OUTPUT_VARIABLE VIBRANCE_VISUAL_STUDIO_ROOT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+
+    set(VIBRANCE_VCVARSALL
+        "${VIBRANCE_VISUAL_STUDIO_ROOT}/VC/Auxiliary/Build/vcvarsall.bat")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+            set(VIBRANCE_WIN32_INTEROP_ARCH amd64_arm64)
+        else()
+            set(VIBRANCE_WIN32_INTEROP_ARCH x64)
+        endif()
+    else()
+        set(VIBRANCE_WIN32_INTEROP_ARCH x86)
+    endif()
+
+    if(EXISTS "${VIBRANCE_VCVARSALL}")
+        set(VIBRANCE_WIN32_INTEROP_DIRECTORY
+            "${CMAKE_CURRENT_BINARY_DIR}/win32-interop")
+        set(VIBRANCE_WIN32_INTEROP_DLL
+            "${VIBRANCE_WIN32_INTEROP_DIRECTORY}/vibrance_win32_interop.dll")
+        set(VIBRANCE_WIN32_INTEROP_OBJECT_DIRECTORY
+            "${VIBRANCE_WIN32_INTEROP_DIRECTORY}/obj")
+        set(VIBRANCE_WIN32_INTEROP_SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/interop_bridge.cpp")
+        set(VIBRANCE_WIN32_INTEROP_ABI_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/platform/win32_interop_abi.h")
+        set(VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT
+            "${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/build_interop_bridge.bat")
+
+        add_custom_command(
+            OUTPUT "${VIBRANCE_WIN32_INTEROP_DLL}"
+            COMMAND
+                "${VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT}"
+                "${VIBRANCE_VCVARSALL}"
+                "${VIBRANCE_WIN32_INTEROP_ARCH}"
+                "${VIBRANCE_WIN32_INTEROP_SOURCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/include"
+                "${VIBRANCE_WIN32_INTEROP_DLL}"
+                "${VIBRANCE_WIN32_INTEROP_OBJECT_DIRECTORY}"
+            DEPENDS
+                "${VIBRANCE_WIN32_INTEROP_SOURCE}"
+                "${VIBRANCE_WIN32_INTEROP_ABI_HEADER}"
+                "${VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT}"
+            BYPRODUCTS
+                "${VIBRANCE_WIN32_INTEROP_DIRECTORY}/vibrance_win32_interop.exp"
+                "${VIBRANCE_WIN32_INTEROP_DIRECTORY}/vibrance_win32_interop.lib"
+            COMMENT "Building media/notification Win32 interop companion with MSVC"
+            VERBATIM)
+        add_custom_target(vibrance_win32_interop ALL
+            DEPENDS "${VIBRANCE_WIN32_INTEROP_DLL}")
+        add_dependencies(vibrance_engine vibrance_win32_interop)
+        set(VIBRANCE_WIN32_INTEROP_AVAILABLE ON)
+        message(STATUS
+            "Win32 media/notification interop: enabled (${VIBRANCE_WIN32_INTEROP_ARCH}, MSVC)")
+    else()
+        message(WARNING
+            "VIBRANCE_ENABLE_WIN32_INTEROP is ON, but MSVC was not found. "
+            "Media-session and notification providers will remain unavailable.")
+    endif()
+endif()
+
 set_target_properties(vibrance_engine PROPERTIES
     EXPORT_NAME engine
     OUTPUT_NAME vibrance_engine
@@ -360,9 +463,12 @@ endif()
 if(WIN32)
     target_compile_definitions(vibrance_engine PRIVATE VK_USE_PLATFORM_WIN32_KHR)
     target_link_libraries(vibrance_engine PRIVATE
-        ole32 winmm user32 gdi32 shell32)
+        advapi32 dwmapi mmdevapi ole32 uuid winmm user32 gdi32 shell32)
 elseif(APPLE)
-    target_link_libraries(vibrance_engine PRIVATE "-framework Cocoa")
+    target_link_libraries(vibrance_engine PRIVATE
+        "-framework Cocoa"
+        "-framework CoreFoundation"
+        "-framework Security")
 else()
     target_link_libraries(vibrance_engine PRIVATE pthread dl m)
 endif()
@@ -385,6 +491,10 @@ install(TARGETS vibrance_engine
     INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
     install(FILES "${VIBRANCE_COMPOSITION_DLL}"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+if(VIBRANCE_WIN32_INTEROP_AVAILABLE)
+    install(FILES "${VIBRANCE_WIN32_INTEROP_DLL}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
 
@@ -433,3 +543,7 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/vibrance_engineConfig.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/vibrance_engineConfigVersion.cmake"
     DESTINATION "${CONFIG_INSTALL_DIR}")
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

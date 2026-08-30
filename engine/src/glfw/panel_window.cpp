@@ -540,6 +540,14 @@ void GlfwPanelWindow::load_template_font()
     {
         logger->warning("Panel window could not load font profile: " + options.fontProfilePath.string());
     }
+    // Profiles may intentionally stay small, but literal UI text can contain a
+    // script that is not part of the active locale. Add packaged and available
+    // platform fallbacks so controls do not need localisation-only font tricks.
+    for (const std::filesystem::path& path :
+        renderer2d_common_font_fallbacks(fontDirectory))
+    {
+        addFallback(path);
+    }
     if (primaryFontPath.empty() && !fontOptions.fallbackFontPaths.empty())
     {
         primaryFontPath = fontOptions.fallbackFontPaths.front();
@@ -1233,8 +1241,16 @@ bool GlfwPanelWindow::title_hit_test(glm::vec2 windowPoint) const
     const float panelY = panelGeometry.position.y;
     const float panelWidth = panelGeometry.size.x;
     const float panelHeight = panelGeometry.size.y;
+    const float dragHeight = options.topDragHeight.value_or(
+        logical_title_height(options));
+    if (dragHeight <= 0.0f)
+    {
+        return false;
+    }
     const float titleBottom = panelY +
-        std::min(scaled_scalar(logical_title_height(options), panelGeometry.scale), panelHeight);
+        std::min(
+            scaled_scalar(dragHeight, panelGeometry.scale),
+            panelHeight);
     return windowPoint.x >= panelX &&
         windowPoint.x <= panelX + panelWidth &&
         windowPoint.y >= panelY &&
@@ -1645,6 +1661,20 @@ bool GlfwPanelWindowHost::open()
     windowCreateInfo.name = hostOptions.title.c_str();
     windowCreateInfo.transparentFramebuffer = hostOptions.transparentFramebuffer;
     windowCreateInfo.decorated = hostOptions.decorated;
+    windowCreateInfo.alwaysOnTop = hostOptions.alwaysOnTop;
+    windowCreateInfo.focusOnShow = hostOptions.focusOnShow;
+    windowCreateInfo.showInTaskbar = hostOptions.showInTaskbar;
+    windowCreateInfo.showInAltTab = hostOptions.showInAltTab;
+    if (hostOptions.positioning)
+    {
+        windowCreateInfo.position = resolve_glfw_window_position(
+            { hostOptions.width, hostOptions.height },
+            *hostOptions.positioning);
+    }
+    if (!windowCreateInfo.position && hostOptions.hasInitialPosition)
+    {
+        windowCreateInfo.position = { hostOptions.x, hostOptions.y };
+    }
 
     hostedWindow = build_glfw_window(windowCreateInfo);
     if (!hostedWindow)
@@ -1654,11 +1684,6 @@ bool GlfwPanelWindowHost::open()
             logger->error("Panel window host could not create a GLFW window.");
         }
         return false;
-    }
-
-    if (hostOptions.hasInitialPosition)
-    {
-        set_glfw_window_position(hostedWindow, hostOptions.x, hostOptions.y);
     }
 
     hostedEngine = build_engine_for_window();
@@ -1718,6 +1743,16 @@ bool GlfwPanelWindowHost::is_open() const
 bool GlfwPanelWindowHost::should_close() const
 {
     return hostedPanel && hostedPanel->should_close();
+}
+
+bool GlfwPanelWindowHost::refresh_template()
+{
+    if (!hostedPanel || !hostedEngine)
+    {
+        return false;
+    }
+    hostedPanel->set_template_options(make_template_options());
+    return true;
 }
 
 bool GlfwPanelWindowHost::is_hovered() const
@@ -1783,9 +1818,17 @@ Engine* GlfwPanelWindowHost::build_engine_for_window()
 
 GlfwPanelWindowTemplateOptions GlfwPanelWindowHost::make_template_options()
 {
+    GlfwPanelWindowTemplateOptions options = {};
     if (hostedEngine && hostOptions.makeTemplateOptions)
     {
-        return hostOptions.makeTemplateOptions(*hostedEngine);
+        options = hostOptions.makeTemplateOptions(*hostedEngine);
     }
-    return {};
+    if (hostOptions.topDragHeight)
+    {
+        options.topDragHeight = std::max(
+            *hostOptions.topDragHeight,
+            0.0f);
+        options.draggable = *options.topDragHeight > 0.0f;
+    }
+    return options;
 }

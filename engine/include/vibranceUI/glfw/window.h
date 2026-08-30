@@ -5,6 +5,9 @@
 #include <GLFW/glfw3.h>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <glm/glm.hpp>
@@ -20,6 +23,14 @@ struct GlfwWindowCreateInfo
     bool transparentFramebuffer = false;
     bool decorated = true;
     bool alwaysOnTop = false;
+    // Initial desktop-shell behavior is applied before the window is first
+    // shown so overlays do not flash, steal focus, or briefly enter switchers.
+    bool focusOnShow = true;
+    bool showInTaskbar = true;
+    bool showInAltTab = true;
+    // When supplied, the window is created hidden, positioned, and only then
+    // shown. This prevents the default-position flash common to secondary UI.
+    std::optional<glm::ivec2> position {};
 };
 
 struct GlfwMonitorInfo
@@ -30,7 +41,34 @@ struct GlfwMonitorInfo
     std::string name;
     glm::ivec2 position { 0 };
     glm::ivec2 size { 0 };
+    glm::ivec2 workPosition { 0 };
+    glm::ivec2 workSize { 0 };
     bool primary = false;
+};
+
+enum class GlfwWindowAlignment : std::uint8_t
+{
+    eTopLeft,
+    eTopCenter,
+    eTopRight,
+    eMiddleLeft,
+    eCenter,
+    eMiddleRight,
+    eBottomLeft,
+    eBottomCenter,
+    eBottomRight
+};
+
+struct GlfwWindowPositionOptions
+{
+    // Empty monitorId and referencePoint select the primary monitor. A stable
+    // id wins over the reference point when both are supplied.
+    GlfwWindowAlignment alignment = GlfwWindowAlignment::eCenter;
+    std::string monitorId {};
+    std::optional<glm::ivec2> referencePoint {};
+    // left, top, right, bottom inset inside the selected work area.
+    glm::ivec4 margins { 0 };
+    glm::ivec2 offset { 0 };
 };
 
 struct GlfwWindowPlacement
@@ -74,12 +112,83 @@ struct GlfwUiPointerSample
     glm::vec2 point { 0.0f };
 };
 
+using GlfwWindowEngineConfigurator = std::function<void(EngineCreateInfo&)>;
+
+struct GlfwWindowHostOptions
+{
+    // The common window + renderer settings live together so callers do not
+    // have to manually copy native surface details into EngineCreateInfo.
+    std::string title = "vibranceUI";
+    glm::ivec2 size { 1280, 720 };
+    std::optional<glm::ivec2> position {};
+    std::optional<GlfwWindowPositionOptions> positioning {};
+    std::optional<GlfwWindowPlacement> placement {};
+    bool transparentFramebuffer = false;
+    bool decorated = true;
+    bool alwaysOnTop = false;
+    bool focusOnShow = true;
+    bool showInTaskbar = true;
+    bool showInAltTab = true;
+    bool enableAudio = true;
+    uint32_t maxRenderPixels = 0;
+    uint32_t msaaSamples = 4;
+    RendererPresentMode presentMode = RendererPresentMode::eAuto;
+    RenderBackend renderBackend = RenderBackend::eVulkan;
+    // Empty selects native presentation, except transparent Win32 windows,
+    // which request Composition and safely fall back inside Engine.
+    std::optional<PresentationBackend> presentationBackend {};
+    uint32_t targetFrameRate = 0;
+    GlfwWindowEngineConfigurator configureEngine {};
+};
+
+// Owns the native window and its surface-bound Engine in the required order.
+// Interface/controller objects should be destroyed before close() is called.
+class VIBRANCE_GLFW_API GlfwWindowHost
+{
+public:
+    explicit GlfwWindowHost(GlfwWindowHostOptions options = {});
+    ~GlfwWindowHost();
+
+    GlfwWindowHost(const GlfwWindowHost&) = delete;
+    GlfwWindowHost& operator=(const GlfwWindowHost&) = delete;
+    GlfwWindowHost(GlfwWindowHost&& other) noexcept;
+    GlfwWindowHost& operator=(GlfwWindowHost&& other) noexcept;
+
+    void set_options(GlfwWindowHostOptions options);
+    const GlfwWindowHostOptions& options() const;
+
+    bool open();
+    void close();
+    bool is_open() const;
+
+    GLFWwindow* window() const;
+    Engine* engine() const;
+
+private:
+    GlfwWindowHostOptions hostOptions {};
+    GLFWwindow* hostedWindow = nullptr;
+    std::unique_ptr<Engine> hostedEngine {};
+};
+
 VIBRANCE_GLFW_API GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo);
 VIBRANCE_GLFW_API GLFWwindow* build_glfw_window(int width, int height, const char* name, bool transparent);
 VIBRANCE_GLFW_API void destroy_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void terminate_glfw();
 VIBRANCE_GLFW_API std::vector<GlfwMonitorInfo> glfw_connected_monitors();
 VIBRANCE_GLFW_API std::string glfw_monitor_identifier(GLFWmonitor* monitor);
+// Pure geometry helper for tests and callers that already own an area.
+VIBRANCE_GLFW_API glm::ivec2 glfw_aligned_window_position(
+    glm::ivec2 areaPosition,
+    glm::ivec2 areaSize,
+    glm::ivec2 windowSize,
+    GlfwWindowAlignment alignment = GlfwWindowAlignment::eCenter,
+    glm::ivec4 margins = glm::ivec4(0),
+    glm::ivec2 offset = glm::ivec2(0));
+// Resolves a reusable policy against connected monitor work areas.
+VIBRANCE_GLFW_API std::optional<glm::ivec2>
+resolve_glfw_window_position(
+    glm::ivec2 windowSize,
+    const GlfwWindowPositionOptions& options = {});
 VIBRANCE_GLFW_API bool glfw_screen_cursor_position(
     GLFWwindow* referenceWindow,
     glm::ivec2& position);
@@ -97,6 +206,7 @@ VIBRANCE_GLFW_API glm::vec2 glfw_content_scale(GLFWwindow* window);
 VIBRANCE_GLFW_API double glfw_time_seconds();
 VIBRANCE_GLFW_API bool glfw_window_should_close(GLFWwindow* window);
 VIBRANCE_GLFW_API void poll_glfw_events();
+VIBRANCE_GLFW_API void focus_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void set_glfw_window_title(GLFWwindow* window, const char* title);
 VIBRANCE_GLFW_API void set_glfw_window_decorated(
     GLFWwindow* window,
@@ -104,6 +214,10 @@ VIBRANCE_GLFW_API void set_glfw_window_decorated(
 VIBRANCE_GLFW_API void set_glfw_window_always_on_top(
     GLFWwindow* window,
     bool alwaysOnTop);
+VIBRANCE_GLFW_API void set_glfw_window_application_presence(
+    GLFWwindow* window,
+    bool showInTaskbar,
+    bool showInAltTab);
 VIBRANCE_GLFW_API bool apply_glfw_window_placement(
     GLFWwindow* window,
     const GlfwWindowPlacement& placement);

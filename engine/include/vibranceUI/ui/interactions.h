@@ -487,6 +487,404 @@ inline void ui_update_scrollbar_fade(Renderer2DScene& scene, double currentTimeS
     });
 }
 
+inline StretchDynamicsEvent ui_stretch_dynamics_event(
+    entt::entity entity,
+    glm::vec2 point,
+    const StretchDynamicsComponent& dynamics)
+{
+    return {
+        entity,
+        point,
+        dynamics.displacement,
+        dynamics.scale,
+        dynamics.inwardProgress,
+        dynamics.inwardProgress >= 1.0f
+    };
+}
+
+inline void ui_apply_stretch_dynamics_visual(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    StretchDynamicsComponent& dynamics)
+{
+    entt::registry& registry = scene.registry();
+    InteractiveVisual2DComponent& visual =
+        registry.get_or_emplace<InteractiveVisual2DComponent>(entity);
+    visual.enabled = dynamics.options.enabled;
+    visual.affectSelf = dynamics.options.stretchSelf;
+    visual.inheritToChildren = dynamics.options.stretchDescendants;
+    visual.blurSelf = dynamics.options.inwardBlurSelf;
+    visual.scale = glm::max(dynamics.scale, glm::vec2(0.001f));
+    visual.scaleOrigin = dynamics.scaleOrigin;
+    visual.blurRadius = std::max(dynamics.blurRadius, 0.0f);
+    visual.opacity = 1.0f;
+    ui_mark_direct_manipulation_dirty(scene, entity, 0.08f);
+}
+
+inline bool ui_begin_stretch_dynamics(
+    Renderer2DScene& scene,
+    UiInputState& state,
+    entt::entity entity,
+    glm::vec2 point)
+{
+    entt::registry& registry = scene.registry();
+    StretchDynamicsComponent* dynamics =
+        registry.try_get<StretchDynamicsComponent>(entity);
+    if (!dynamics || !dynamics->options.enabled)
+    {
+        return false;
+    }
+
+    dynamics->dragging = true;
+    dynamics->settling = false;
+    dynamics->pressPoint = point;
+    dynamics->baseRect = ui_entity_base_framebuffer_rect(registry, entity);
+    const glm::vec2 baseCenter {
+        dynamics->baseRect.x + dynamics->baseRect.z * 0.5f,
+        dynamics->baseRect.y + dynamics->baseRect.w * 0.5f
+    };
+    dynamics->grabSide = {
+        point.x < baseCenter.x ? -1.0f : 1.0f,
+        point.y < baseCenter.y ? -1.0f : 1.0f
+    };
+    const auto applyAnchor = [](float automaticSide, StretchDynamicsAnchor anchor) {
+        if (anchor == StretchDynamicsAnchor::eMinimum)
+        {
+            return 1.0f;
+        }
+        if (anchor == StretchDynamicsAnchor::eMaximum)
+        {
+            return -1.0f;
+        }
+        return automaticSide;
+    };
+    dynamics->grabSide.x = applyAnchor(
+        dynamics->grabSide.x,
+        dynamics->options.horizontalAnchor);
+    dynamics->grabSide.y = applyAnchor(
+        dynamics->grabSide.y,
+        dynamics->options.verticalAnchor);
+    dynamics->outwardAxes = eStretchDynamicsNone;
+    dynamics->displacement = glm::vec2(0.0f);
+    dynamics->scale = glm::vec2(1.0f);
+    dynamics->scaleVelocity = glm::vec2(0.0f);
+    dynamics->scaleOrigin = {
+        dynamics->baseRect.x + dynamics->baseRect.z * 0.5f,
+        dynamics->baseRect.y + dynamics->baseRect.w * 0.5f
+    };
+    dynamics->blurRadius = 0.0f;
+    dynamics->blurVelocity = 0.0f;
+    dynamics->inwardProgress = 0.0f;
+    dynamics->lastUpdateSeconds = 0.0;
+    state.activeStretchDynamics = entity;
+    ui_apply_stretch_dynamics_visual(scene, entity, *dynamics);
+    return true;
+}
+
+inline bool ui_update_stretch_dynamics_drag(
+    Renderer2DScene& scene,
+    UiInputState& state,
+    bool leftButtonPressed,
+    bool hasPoint,
+    glm::vec2 point);
+
+inline bool ui_release_stretch_dynamics(
+    Renderer2DScene& scene,
+    UiInputState& state,
+    bool hasPoint,
+    glm::vec2 point)
+{
+    const entt::entity entity = state.activeStretchDynamics;
+    if (entity == entt::null)
+    {
+        return false;
+    }
+
+    entt::registry& registry = scene.registry();
+    if (!registry.valid(entity))
+    {
+        state.activeStretchDynamics = entt::null;
+        return false;
+    }
+
+    if (hasPoint)
+    {
+        // Sample the release point even when no cursor-move event arrived
+        // between the final physical motion and the button release.
+        ui_update_stretch_dynamics_drag(
+            scene,
+            state,
+            true,
+            true,
+            point);
+    }
+    state.activeStretchDynamics = entt::null;
+
+    StretchDynamicsComponent* dynamics =
+        registry.try_get<StretchDynamicsComponent>(entity);
+    if (!dynamics)
+    {
+        return false;
+    }
+    dynamics->dragging = false;
+    dynamics->settling = true;
+    const StretchDynamicsEvent event = ui_stretch_dynamics_event(
+        entity,
+        hasPoint ? point : dynamics->pressPoint + dynamics->displacement,
+        *dynamics);
+    const bool inwardReleaseArmed = event.inwardReleaseArmed;
+    const auto onRelease = dynamics->options.onRelease;
+    const auto onInwardRelease = dynamics->options.onInwardRelease;
+    const float returnActiveSeconds =
+        std::max(dynamics->options.returnResponse * 4.0f, 0.2f);
+    if (onRelease)
+    {
+        onRelease(event);
+    }
+    if (inwardReleaseArmed && onInwardRelease)
+    {
+        onInwardRelease(event);
+    }
+    ui_mark_moving_entity_dirty(
+        scene,
+        entity,
+        returnActiveSeconds);
+    return inwardReleaseArmed;
+}
+
+inline bool ui_update_stretch_dynamics_drag(
+    Renderer2DScene& scene,
+    UiInputState& state,
+    bool leftButtonPressed,
+    bool hasPoint,
+    glm::vec2 point)
+{
+    const entt::entity entity = state.activeStretchDynamics;
+    if (entity == entt::null)
+    {
+        return false;
+    }
+
+    entt::registry& registry = scene.registry();
+    StretchDynamicsComponent* dynamics = registry.valid(entity) ?
+        registry.try_get<StretchDynamicsComponent>(entity) :
+        nullptr;
+    if (!dynamics || !dynamics->options.enabled)
+    {
+        state.activeStretchDynamics = entt::null;
+        return false;
+    }
+    if (!leftButtonPressed)
+    {
+        ui_release_stretch_dynamics(scene, state, hasPoint, point);
+        return false;
+    }
+    if (!hasPoint)
+    {
+        return true;
+    }
+
+    dynamics->displacement = point - dynamics->pressPoint;
+    const StretchDynamicsOptions& options = dynamics->options;
+    const auto updateDirectionAwareSide = [&options, dynamics](
+        std::size_t axis,
+        uint32_t axisFlag,
+        StretchDynamicsAnchor anchor) {
+        if (!options.directionAware ||
+            anchor != StretchDynamicsAnchor::eAutomatic ||
+            (options.axes & axisFlag) == 0u)
+        {
+            return;
+        }
+
+        const float displacement = dynamics->displacement[axis];
+        if (std::abs(displacement) <= std::max(options.dragDeadZone, 0.0f))
+        {
+            return;
+        }
+
+        if (displacement * dynamics->grabSide[axis] > 0.0f)
+        {
+            dynamics->outwardAxes |= axisFlag;
+        }
+        if ((dynamics->outwardAxes & axisFlag) != 0u)
+        {
+            dynamics->grabSide[axis] = displacement < 0.0f ? -1.0f : 1.0f;
+        }
+    };
+    updateDirectionAwareSide(
+        0u,
+        eStretchDynamicsHorizontal,
+        options.horizontalAnchor);
+    updateDirectionAwareSide(
+        1u,
+        eStretchDynamicsVertical,
+        options.verticalAnchor);
+    dynamics->scale = glm::vec2(1.0f);
+    if ((options.axes & eStretchDynamicsHorizontal) != 0u)
+    {
+        dynamics->scale.x = ui_stretch_scale_for_axis(
+            dynamics->displacement.x,
+            dynamics->grabSide.x,
+            dynamics->baseRect.z,
+            options.dragResistance,
+            options.maximumStretch,
+            options.maximumCompression,
+            options.dragDeadZone);
+    }
+    if ((options.axes & eStretchDynamicsVertical) != 0u)
+    {
+        dynamics->scale.y = ui_stretch_scale_for_axis(
+            dynamics->displacement.y,
+            dynamics->grabSide.y,
+            dynamics->baseRect.w,
+            options.dragResistance,
+            options.maximumStretch,
+            options.maximumCompression,
+            options.dragDeadZone);
+    }
+
+    dynamics->scaleOrigin = {
+        (options.axes & eStretchDynamicsHorizontal) != 0u ?
+            dynamics->baseRect.x +
+                (dynamics->grabSide.x < 0.0f ? dynamics->baseRect.z : 0.0f) :
+            dynamics->baseRect.x + dynamics->baseRect.z * 0.5f,
+        (options.axes & eStretchDynamicsVertical) != 0u ?
+            dynamics->baseRect.y +
+                (dynamics->grabSide.y < 0.0f ? dynamics->baseRect.w : 0.0f) :
+            dynamics->baseRect.y + dynamics->baseRect.w * 0.5f
+    };
+
+    dynamics->inwardProgress = 0.0f;
+    const float inwardDirectionLength = glm::length(options.inwardDirection);
+    if (options.inwardReleaseDistance > 0.0f &&
+        inwardDirectionLength > 0.0001f)
+    {
+        const glm::vec2 inwardDirection =
+            options.inwardDirection / inwardDirectionLength;
+        const float inwardDistance = std::max(
+            glm::dot(dynamics->displacement, inwardDirection),
+            0.0f);
+        dynamics->inwardProgress = std::clamp(
+            inwardDistance / options.inwardReleaseDistance,
+            0.0f,
+            1.0f);
+    }
+    const float blurProgress = dynamics->inwardProgress *
+        dynamics->inwardProgress *
+        (3.0f - 2.0f * dynamics->inwardProgress);
+    dynamics->blurRadius =
+        std::max(options.inwardBlurRadius, 0.0f) * blurProgress;
+    dynamics->scaleVelocity = glm::vec2(0.0f);
+    dynamics->blurVelocity = 0.0f;
+    ui_apply_stretch_dynamics_visual(scene, entity, *dynamics);
+
+    if (options.onChanged)
+    {
+        options.onChanged(ui_stretch_dynamics_event(entity, point, *dynamics));
+    }
+    return true;
+}
+
+inline float ui_stretch_dynamics_spring_step(
+    float value,
+    float& velocity,
+    float target,
+    double deltaSeconds,
+    float response,
+    float dampingFraction)
+{
+    constexpr float twoPi = 6.28318530718f;
+    const float dt = static_cast<float>(
+        std::clamp(deltaSeconds, 0.0, 1.0 / 30.0));
+    if (dt <= 0.0f)
+    {
+        return value;
+    }
+    const float frequency = twoPi / std::max(response, 0.001f);
+    const float acceleration =
+        -frequency * frequency * (value - target) -
+        2.0f * std::max(dampingFraction, 0.0f) * frequency * velocity;
+    velocity += acceleration * dt;
+    value += velocity * dt;
+    if (std::abs(value - target) < 0.0005f &&
+        std::abs(velocity) < 0.0005f)
+    {
+        value = target;
+        velocity = 0.0f;
+    }
+    return value;
+}
+
+inline void ui_update_stretch_dynamics_settling(
+    Renderer2DScene& scene,
+    UiInputState& state,
+    double currentTimeSeconds)
+{
+    entt::registry& registry = scene.registry();
+    auto view = registry.view<StretchDynamicsComponent>();
+    view.each([&](entt::entity entity, StretchDynamicsComponent& dynamics) {
+        if (dynamics.dragging && state.activeStretchDynamics != entity)
+        {
+            dynamics.dragging = false;
+            dynamics.settling = true;
+        }
+        if (dynamics.dragging)
+        {
+            dynamics.lastUpdateSeconds = currentTimeSeconds;
+            return;
+        }
+        if (!dynamics.settling)
+        {
+            return;
+        }
+
+        if (dynamics.lastUpdateSeconds <= 0.0)
+        {
+            dynamics.lastUpdateSeconds = currentTimeSeconds;
+            return;
+        }
+        const double deltaSeconds = std::max(
+            currentTimeSeconds - dynamics.lastUpdateSeconds,
+            0.0);
+        dynamics.lastUpdateSeconds = currentTimeSeconds;
+        for (int axis = 0; axis < 2; ++axis)
+        {
+            dynamics.scale[axis] = ui_stretch_dynamics_spring_step(
+                dynamics.scale[axis],
+                dynamics.scaleVelocity[axis],
+                1.0f,
+                deltaSeconds,
+                dynamics.options.returnResponse,
+                dynamics.options.returnDampingFraction);
+        }
+        dynamics.blurRadius = ui_stretch_dynamics_spring_step(
+            dynamics.blurRadius,
+            dynamics.blurVelocity,
+            0.0f,
+            deltaSeconds,
+            dynamics.options.returnResponse,
+            dynamics.options.returnDampingFraction);
+        dynamics.inwardProgress = 0.0f;
+
+        const bool settled =
+            glm::length(dynamics.scale - glm::vec2(1.0f)) < 0.0008f &&
+            glm::length(dynamics.scaleVelocity) < 0.0008f &&
+            std::abs(dynamics.blurRadius) < 0.0008f &&
+            std::abs(dynamics.blurVelocity) < 0.0008f;
+        if (settled)
+        {
+            dynamics.scale = glm::vec2(1.0f);
+            dynamics.scaleVelocity = glm::vec2(0.0f);
+            dynamics.blurRadius = 0.0f;
+            dynamics.blurVelocity = 0.0f;
+            dynamics.settling = false;
+            dynamics.lastUpdateSeconds = 0.0;
+        }
+        ui_apply_stretch_dynamics_visual(scene, entity, dynamics);
+    });
+}
+
 inline void ui_handle_pointer_button(
     Renderer2DScene& scene,
     const Renderer2DFontAtlas& fontAtlas,
@@ -503,10 +901,29 @@ inline void ui_handle_pointer_button(
     // Resolve all possible owners from the same hit so priority stays explicit below
     const entt::entity buttonOwner = ui_component_owner<ButtonInputComponent>(registry, hit);
     const entt::entity textOwner = ui_component_owner<TextInputComponent>(registry, hit);
+    const entt::entity scrollOwner = ui_component_owner<ScrollInputComponent>(registry, hit);
     const entt::entity scrollBarOwner = ui_component_owner<ScrollBarInputComponent>(registry, hit);
     const entt::entity sliderOwner = ui_component_owner<SliderInputComponent>(registry, hit);
+    const entt::entity stretchOwner = ui_component_owner<StretchDynamicsComponent>(registry, hit);
+    const entt::entity stretchBlockerOwner =
+        ui_component_owner<StretchDynamicsBlockerComponent>(registry, hit);
+    const StretchDynamicsBlockerComponent* stretchBlocker =
+        stretchBlockerOwner != entt::null ?
+            registry.try_get<StretchDynamicsBlockerComponent>(stretchBlockerOwner) :
+            nullptr;
+    bool stretchConsumedRelease = false;
     uint32_t resizeEdges = ePanelResizeNone;
     entt::entity resizeOwner = entt::null;
+
+    if (input.button == PointerButton::eLeft &&
+        input.action == UiInputAction::eRelease)
+    {
+        stretchConsumedRelease = ui_release_stretch_dynamics(
+            scene,
+            state,
+            input.hasPoint,
+            input.point);
+    }
 
     if (input.button == PointerButton::eLeft &&
         input.action == UiInputAction::eRelease &&
@@ -542,6 +959,18 @@ inline void ui_handle_pointer_button(
     {
         // Text focus follows left-click ownership before any drag-only controls react
         ui_focus_text_input(scene, fontAtlas, state, textOwner);
+        if (input.hasPoint && stretchOwner != entt::null &&
+            sliderOwner == entt::null && scrollOwner == entt::null &&
+            scrollBarOwner == entt::null &&
+            (!stretchBlocker || !stretchBlocker->enabled) &&
+            textOwner == entt::null)
+        {
+            ui_begin_stretch_dynamics(
+                scene,
+                state,
+                stretchOwner,
+                input.point);
+        }
     }
 
     if (input.action == UiInputAction::ePress)
@@ -726,7 +1155,7 @@ inline void ui_handle_pointer_button(
         button->onRelease(event);
     }
 
-    if (releasedEntity == buttonOwner)
+    if (releasedEntity == buttonOwner && !stretchConsumedRelease)
     {
         if (input.button == PointerButton::eRight && button->onRightClick)
         {

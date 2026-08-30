@@ -74,5 +74,6 @@ class Swapchain
 
     vk::PresentModeKHR choose_present_mode(const std::vector<vk::PresentModeKHR>& presentModes) const;
 
-    vk::SurfaceFormatKHR choose_surface_format(std::vector<vk::SurfaceFormatKHR> formats);
+    vk::SurfaceFormatKHR choose_surface_format(
+        const std::vector<vk::SurfaceFormatKHR>& formats);
 };

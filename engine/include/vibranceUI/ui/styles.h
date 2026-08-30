@@ -172,6 +172,19 @@ inline TextStyleComponent make_label_text_style(
     return style;
 }
 
+struct UiSystemAccentPalette
+{
+    // The native accent is preserved verbatim; derived tones provide
+    // consistent hover, press, and vertical-gradient states to controls.
+    std::string accent = "#007AFFFF";
+    std::string hovered = "#1487FFFF";
+    std::string pressed = "#006BE0FF";
+    std::string gradientBottom = "#0066D6FF";
+};
+
+VIBRANCE_ENGINE_API UiSystemAccentPalette ui_system_accent_palette(
+    float lowerTone = 0.84f);
+
 struct UiTheme
 {
     // Theme values are strings so JSON can use hex, rgba, or future colour formats

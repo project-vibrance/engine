@@ -3,10 +3,18 @@
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
 
+#ifdef _WIN32
+#include <dwmapi.h>
+#include <windows.h>
+#endif
+
+#include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <iomanip>
 #include <initializer_list>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -14,6 +22,35 @@
 
 namespace
 {
+    std::string rgba_colour(unsigned red, unsigned green, unsigned blue)
+    {
+        std::ostringstream result;
+        result << '#'
+            << std::uppercase << std::hex
+            << std::setw(2) << std::setfill('0') << red
+            << std::setw(2) << green
+            << std::setw(2) << blue
+            << "FF";
+        return result.str();
+    }
+
+    unsigned scale_channel(unsigned channel, float scale)
+    {
+        return static_cast<unsigned>(std::clamp(
+            static_cast<float>(channel) * scale,
+            0.0f,
+            255.0f));
+    }
+
+    unsigned lighten_channel(unsigned channel, float amount)
+    {
+        return static_cast<unsigned>(std::clamp(
+            static_cast<float>(channel) +
+                (255.0f - static_cast<float>(channel)) * amount,
+            0.0f,
+            255.0f));
+    }
+
     using ThemeEntries = std::unordered_map<std::string, std::string>;
 
     class ThemeJsonParser
@@ -479,6 +516,45 @@ namespace
     }
 
 }
+
+UiSystemAccentPalette ui_system_accent_palette(float lowerTone)
+{
+    unsigned red = 0u;
+    unsigned green = 122u;
+    unsigned blue = 255u;
+
+#ifdef _WIN32
+    DWORD colour = 0;
+    BOOL opaqueBlend = FALSE;
+    if (DwmGetColorizationColor(&colour, &opaqueBlend) == S_OK)
+    {
+        red = (colour >> 16u) & 0xFFu;
+        green = (colour >> 8u) & 0xFFu;
+        blue = colour & 0xFFu;
+    }
+#endif
+
+    constexpr float hoverLightening = 0.08f;
+    constexpr float pressedTone = 0.88f;
+    const float clampedLowerTone = std::clamp(lowerTone, 0.0f, 1.0f);
+
+    UiSystemAccentPalette palette;
+    palette.accent = rgba_colour(red, green, blue);
+    palette.hovered = rgba_colour(
+        lighten_channel(red, hoverLightening),
+        lighten_channel(green, hoverLightening),
+        lighten_channel(blue, hoverLightening));
+    palette.pressed = rgba_colour(
+        scale_channel(red, pressedTone),
+        scale_channel(green, pressedTone),
+        scale_channel(blue, pressedTone));
+    palette.gradientBottom = rgba_colour(
+        scale_channel(red, clampedLowerTone),
+        scale_channel(green, clampedLowerTone),
+        scale_channel(blue, clampedLowerTone));
+    return palette;
+}
+
 bool ui_load_theme_file(const std::filesystem::path& path, UiTheme& theme)
 {
     const std::string source = read_text_file(path);

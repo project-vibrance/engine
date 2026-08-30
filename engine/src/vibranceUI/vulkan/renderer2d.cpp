@@ -168,6 +168,13 @@ namespace
         return true;
     }
 
+    bool is_input_transparent(const entt::registry& registry, entt::entity entity)
+    {
+        const auto* inputTransparent =
+            registry.try_get<InputTransparent2DComponent>(entity);
+        return inputTransparent && inputTransparent->enabled;
+    }
+
     uint32_t entity_key(entt::entity entity)
     {
         return static_cast<uint32_t>(entt::to_integral(entity));
@@ -324,6 +331,13 @@ namespace
         return packedX | (packedY << 16u);
     }
 
+    uint32_t pack_dispatch_extent(uint32_t width, uint32_t height)
+    {
+        const uint32_t packedWidth = std::min(width, kDispatchOriginMask);
+        const uint32_t packedHeight = std::min(height, kDispatchOriginMask);
+        return packedWidth | (packedHeight << 16u);
+    }
+
     uint32_t pack_unorm8(float value)
     {
         return static_cast<uint32_t>(std::round(std::clamp(value, 0.0f, 1.0f) * 255.0f));
@@ -471,7 +485,7 @@ namespace
         const float flareTarget = std::clamp(
             depthTarget * 0.18f,
             0.0f,
-            std::min(size.y * 0.5f, size.x * 0.18f));
+            size.y * 0.5f);
         const float sizeRatio = std::clamp((size.y * 0.5f) / std::max(flareTarget, 0.001f), 0.0f, 1.0f);
         const float flareT = sizeRatio * progress;
         return flareTarget * flareT * flareT;
@@ -1477,7 +1491,12 @@ namespace
             if (const Mask2DComponent* mask = registry.try_get<Mask2DComponent>(parent->parent);
                 mask && mask->enabled)
             {
-                clip = intersect_rect(clip, entity_mask_rect(registry, parent->parent, *mask));
+                clip = intersect_rect(
+                    clip,
+                    renderer2d_apply_interactive_visual_rect(
+                        registry,
+                        parent->parent,
+                        entity_mask_rect(registry, parent->parent, *mask)));
                 if (rect_empty(clip))
                 {
                     break;
@@ -1507,7 +1526,12 @@ namespace
                 return {
                     true,
                     shape->primitive,
-                    rect_from_layout(entity_layout_bounds(registry, parent->parent)),
+                    renderer2d_apply_interactive_visual_rect(
+                        registry,
+                        parent->parent,
+                        rect_from_layout(entity_layout_bounds(
+                            registry,
+                            parent->parent))),
                     shape->cornerRadius,
                     shape->squircleAmount,
                     shape->squirclePower,
@@ -2373,8 +2397,8 @@ namespace
         }
         else
         {
-            const float anchorX = contentRect.position.x + contentRect.size.x * layout->anchorMin.x +
-                scaledOffset.x;
+            const float anchorX = contentRect.position.x +
+                contentRect.size.x * layout->anchorMin.x + scaledOffset.x;
             minPosition.x = anchorX - layout->pivot.x * resolvedSize.x;
         }
 
@@ -2495,6 +2519,10 @@ namespace
         if (media.blurRadius > 0.0f)
         {
             flags |= eRenderer2DStyleBlur;
+        }
+        if (media.sampleBlurOncePerPixel && media.blurRadius > 0.0f)
+        {
+            flags |= eRenderer2DStyleMediaSingleBlurSample;
         }
         if (std::abs(media.brightness) > 0.0001f ||
             std::abs(media.contrast - 1.0f) > 0.0001f ||
@@ -3408,7 +3436,7 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
     auto shapeView = registry_.view<const Transform2DComponent, const ShapeComponent>();
     for (auto entity : shapeView)
     {
-        if (!is_visible(registry_, entity))
+        if (is_input_transparent(registry_, entity) || !is_visible(registry_, entity))
         {
             continue;
         }
@@ -3429,7 +3457,10 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
             continue;
         }
 
-        const glm::vec4 rect = make_bounds(transform, shape.size);
+        const glm::vec4 rect = renderer2d_apply_interactive_visual_rect(
+            registry_,
+            entity,
+            make_bounds(transform, shape.size));
         const float edgePadding = std::max(style.outlineWidth, 0.0f) + std::max(style.edgeSoftness, 0.0f);
         if (point_in_primitive(
             shape.primitive,
@@ -3445,7 +3476,8 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
     for (auto entity : mediaView)
     {
         const auto& media = mediaView.get<const Media2DComponent>(entity);
-        if (!media_visible(media) || !is_visible(registry_, entity))
+        if (is_input_transparent(registry_, entity) ||
+            !media_visible(media) || !is_visible(registry_, entity))
         {
             continue;
         }
@@ -3457,7 +3489,10 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
         const auto& transform = mediaView.get<const Transform2DComponent>(entity);
         if (point_in_primitive(
             media.primitive,
-            media_bounds_from_component(transform, media),
+            renderer2d_apply_interactive_visual_rect(
+                registry_,
+                entity,
+                media_bounds_from_component(transform, media)),
             media.cornerRadius,
             point))
         {
@@ -3469,13 +3504,17 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
     for (auto entity : modelView)
     {
         const auto& model = modelView.get<const Model3DComponent>(entity);
-        if (!model.visible || !is_visible(registry_, entity) || !alpha_visible(model.materialColor.a))
+        if (is_input_transparent(registry_, entity) ||
+            !model.visible || !is_visible(registry_, entity) || !alpha_visible(model.materialColor.a))
         {
             continue;
         }
 
         const auto& transform = modelView.get<const Transform2DComponent>(entity);
-        const glm::vec4 viewport = make_model_viewport(registry_, entity, transform, model);
+        const glm::vec4 viewport = renderer2d_apply_interactive_visual_rect(
+            registry_,
+            entity,
+            make_model_viewport(registry_, entity, transform, model));
         const glm::vec4 clipRect = make_model_clip_rect(registry_, entity, viewport, model);
         if (point_in_rect(intersect_rect(viewport, clipRect), point))
         {
@@ -3486,7 +3525,7 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
     auto textView = registry_.view<const Transform2DComponent, const TextComponent>();
     for (auto entity : textView)
     {
-        if (!is_visible(registry_, entity))
+        if (is_input_transparent(registry_, entity) || !is_visible(registry_, entity))
         {
             continue;
         }
@@ -3516,12 +3555,16 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
                     continue;
                 }
 
-                const glm::vec4 glyphRect {
+                const glm::vec4 glyphRect =
+                    renderer2d_apply_interactive_visual_rect(
+                        registry_,
+                        entity,
+                        glm::vec4 {
                     textBounds.x + glyph.position.x * transform.scale.x,
                     textBounds.y + glyph.position.y * transform.scale.y,
                     glyph.size.x * transform.scale.x,
                     glyph.size.y * transform.scale.y
-                };
+                        });
                 if (point_in_rect(expand_rect(glyphRect, padding), point))
                 {
                     hit = true;
@@ -3531,7 +3574,14 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
         }
         else
         {
-            hit = point_in_rect(expand_rect(textBounds, padding), point);
+            hit = point_in_rect(
+                expand_rect(
+                    renderer2d_apply_interactive_visual_rect(
+                        registry_,
+                        entity,
+                        textBounds),
+                    padding),
+                point);
         }
 
         if (hit)
@@ -3553,7 +3603,7 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
     auto shapeView = registry_.view<const Transform2DComponent, const ShapeComponent>();
     for (auto entity : shapeView)
     {
-        if (!is_visible(registry_, entity))
+        if (is_input_transparent(registry_, entity) || !is_visible(registry_, entity))
         {
             continue;
         }
@@ -3569,7 +3619,10 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
         const HitRegion2DComponent* hitRegion =
             registry_.try_get<HitRegion2DComponent>(entity);
 
-        const glm::vec4 rect = make_bounds(transform, shape.size);
+        const glm::vec4 rect = renderer2d_apply_interactive_visual_rect(
+            registry_,
+            entity,
+            make_bounds(transform, shape.size));
         if (shape_fill_visible(style) || shape_outline_visible(style) ||
             (hitRegion && hitRegion->enabled))
         {
@@ -3613,7 +3666,7 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
     auto textView = registry_.view<const Transform2DComponent, const TextComponent>();
     for (auto entity : textView)
     {
-        if (!is_visible(registry_, entity))
+        if (is_input_transparent(registry_, entity) || !is_visible(registry_, entity))
         {
             continue;
         }
@@ -3642,12 +3695,16 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
                     continue;
                 }
 
-                const glm::vec4 glyphRect {
+                const glm::vec4 glyphRect =
+                    renderer2d_apply_interactive_visual_rect(
+                        registry_,
+                        entity,
+                        glm::vec4 {
                     textBounds.x + glyph.position.x * transform.scale.x,
                     textBounds.y + glyph.position.y * transform.scale.y,
                     glyph.size.x * transform.scale.x,
                     glyph.size.y * transform.scale.y
-                };
+                        });
                 if (point_in_rect(expand_rect(glyphRect, padding), point))
                 {
                     return true;
@@ -3656,7 +3713,14 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
             continue;
         }
 
-        if (point_in_rect(expand_rect(textBounds, padding), point))
+        if (point_in_rect(
+            expand_rect(
+                renderer2d_apply_interactive_visual_rect(
+                    registry_,
+                    entity,
+                    textBounds),
+                padding),
+            point))
         {
             return true;
         }
@@ -3666,7 +3730,8 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
     for (auto entity : mediaView)
     {
         const auto& media = mediaView.get<const Media2DComponent>(entity);
-        if (!media_visible(media) || !is_visible(registry_, entity))
+        if (is_input_transparent(registry_, entity) ||
+            !media_visible(media) || !is_visible(registry_, entity))
         {
             continue;
         }
@@ -3678,7 +3743,10 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
         const auto& transform = mediaView.get<const Transform2DComponent>(entity);
         if (point_in_primitive(
             media.primitive,
-            media_bounds_from_component(transform, media),
+            renderer2d_apply_interactive_visual_rect(
+                registry_,
+                entity,
+                media_bounds_from_component(transform, media)),
             media.cornerRadius,
             point))
         {
@@ -3690,13 +3758,17 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
     for (auto entity : modelView)
     {
         const auto& model = modelView.get<const Model3DComponent>(entity);
-        if (!model.visible || !is_visible(registry_, entity) || !alpha_visible(model.materialColor.a))
+        if (is_input_transparent(registry_, entity) ||
+            !model.visible || !is_visible(registry_, entity) || !alpha_visible(model.materialColor.a))
         {
             continue;
         }
 
         const auto& transform = modelView.get<const Transform2DComponent>(entity);
-        const glm::vec4 viewport = make_model_viewport(registry_, entity, transform, model);
+        const glm::vec4 viewport = renderer2d_apply_interactive_visual_rect(
+            registry_,
+            entity,
+            make_model_viewport(registry_, entity, transform, model));
         const glm::vec4 clipRect = make_model_clip_rect(registry_, entity, viewport, model);
         if (point_in_rect(intersect_rect(viewport, clipRect), point))
         {
@@ -3791,7 +3863,10 @@ void Renderer2DScene::build_render_plan(
 
     bool hasVisibleHostedModels = false;
     modelView.each([&](entt::entity entity, const Transform2DComponent& transform, const Model3DComponent& model) {
-        const glm::vec4 viewport = make_model_viewport(registry_, entity, transform, model);
+        const glm::vec4 viewport = renderer2d_apply_interactive_visual_rect(
+            registry_,
+            entity,
+            make_model_viewport(registry_, entity, transform, model));
         const glm::vec4 clipRect = make_model_clip_rect(registry_, entity, viewport, model);
         if (model.visible && is_visible(registry_, entity) && !rect_empty(intersect_rect(viewport, clipRect)))
         {
@@ -3845,8 +3920,12 @@ void Renderer2DScene::build_render_plan(
         const ShapeStyleComponent& style = stylePtr ? *stylePtr : defaultShapeStyle;
         const DisplayTransitionEffect2D displayTransition =
             inherited_visual_effect(registry_, entity, currentTimeSeconds);
+        const glm::vec2 interactiveEffects =
+            renderer2d_interactive_visual_effects(registry_, entity);
+        const float visualOpacity =
+            displayTransition.opacity * interactiveEffects.y;
         const bool foregroundVisible =
-            alpha_visible(displayTransition.opacity) &&
+            alpha_visible(visualOpacity) &&
             (shape_fill_visible(style) || shape_outline_visible(style));
 
         Renderer2DBatch batch = {};
@@ -3857,20 +3936,37 @@ void Renderer2DScene::build_render_plan(
         batch.order = layer.order;
         batch.alwaysOnTop = layer.alwaysOnTop;
         batch.primitive = shape.primitive;
-        batch.rect = apply_display_transition_scale(make_bounds(transform, shape.size), displayTransition);
+        batch.rect = apply_display_transition_scale(
+            renderer2d_apply_interactive_visual_rect(
+                registry_,
+                entity,
+                make_bounds(transform, shape.size)),
+            displayTransition);
         batch.clipRect = inherited_mask_clip_rect(registry_, entity);
         batch.uvRect = shape.primitive == Renderer2DPrimitive::eCircularProgress ?
             circular_progress_parameters(shape) :
-            glm::vec4(style.gradientStart.x, style.gradientStart.y, style.gradientEnd.x, style.gradientEnd.y);
+            (shape.primitive == Renderer2DPrimitive::eLiquidBridge ?
+                glm::vec4(
+                    std::clamp(shape.notchAmount, 0.0f, 1.0f),
+                    0.0f,
+                    0.0f,
+                    0.0f) :
+                glm::vec4(
+                    style.gradientStart.x,
+                    style.gradientStart.y,
+                    style.gradientEnd.x,
+                    style.gradientEnd.y));
         batch.color0 = style.color0;
         batch.color1 = style.color1;
         batch.color2 = style.outlineColor;
-        const float transitionShapeBlur = std::max(displayTransition.blurRadius, 0.0f);
+        const float transitionShapeBlur = std::max(
+            displayTransition.blurRadius,
+            interactiveEffects.x);
         batch.effect0 = {
             shape.cornerRadius,
             style.outlineWidth,
             std::max(std::max(style.edgeSoftness, 0.5f), transitionShapeBlur),
-            style.opacity * displayTransition.opacity
+            style.opacity * visualOpacity
         };
         const uint32_t transformFlags = transform2_5d_flags(transform);
         batch.effect1 = transformFlags == 0u ? shape_sdf_parameters(shape) : transform2_5d_effect(transform);
@@ -3903,7 +3999,7 @@ void Renderer2DScene::build_render_plan(
 
         if (const ShadowComponent* shadow = registry_.try_get<ShadowComponent>(entity);
             shadow && alpha_visible(
-                shadow->color.a * shadow->opacity * displayTransition.opacity))
+                shadow->color.a * shadow->opacity * visualOpacity))
         {
             Renderer2DBatch shadowBatch = batch;
             const glm::vec4 sourceRect = shadowBatch.rect;
@@ -3918,7 +4014,7 @@ void Renderer2DScene::build_render_plan(
                 shape.cornerRadius + shadow->spread,
                 shadow->blurRadius,
                 shadow->spread,
-                shadow->opacity * displayTransition.opacity
+                shadow->opacity * visualOpacity
             };
             shadowBatch.effect1 = shape_sdf_parameters(shape);
             shadowBatch.flags |= eRenderer2DStyleShadow;
@@ -3943,10 +4039,10 @@ void Renderer2DScene::build_render_plan(
         // the shape pipeline above. Only explicit backdrop blur belongs here;
         // otherwise transparent layout roots create temporary rectangular panes.
         const bool explicitBlurVisible = blur &&
-            alpha_visible(blur->opacity * displayTransition.opacity);
+            alpha_visible(blur->opacity * visualOpacity);
         const bool styleBlurVisible = !blur &&
             style_backdrop_blur_visible(style) &&
-            alpha_visible(displayTransition.opacity);
+            alpha_visible(visualOpacity);
         if (explicitBlurVisible || styleBlurVisible)
         {
             Renderer2DBatch blurBatch = batch;
@@ -3958,7 +4054,7 @@ void Renderer2DScene::build_render_plan(
                 blur->opacity :
                 style.backdropBlurOpacity;
             const float blurRadius = baseBlurRadius;
-            const float blurOpacity = baseBlurOpacity * displayTransition.opacity;
+            const float blurOpacity = baseBlurOpacity * visualOpacity;
             blurBatch.color2 = {
                 style.gradientStart.x,
                 style.gradientStart.y,
@@ -4023,12 +4119,19 @@ void Renderer2DScene::build_render_plan(
 
         const DisplayTransitionEffect2D displayTransition =
             inherited_visual_effect(registry_, entity, currentTimeSeconds);
-        if (!alpha_visible(displayTransition.opacity))
+        const glm::vec2 interactiveEffects =
+            renderer2d_interactive_visual_effects(registry_, entity);
+        const float visualOpacity =
+            displayTransition.opacity * interactiveEffects.y;
+        if (!alpha_visible(visualOpacity))
         {
             return;
         }
         const glm::vec4 rect = apply_display_transition_scale(
-            media_bounds_from_component(transform, media),
+            renderer2d_apply_interactive_visual_rect(
+                registry_,
+                entity,
+                media_bounds_from_component(transform, media)),
             displayTransition);
         if (rect_empty(rect))
         {
@@ -4080,20 +4183,78 @@ void Renderer2DScene::build_render_plan(
         batch.color0 = media.tint;
         batch.color1 = media.tintFill == Renderer2DFill::eSolid ? media.tint : media.tintEnd;
         batch.color2 = { media.gradientStart.x, media.gradientStart.y, media.gradientEnd.x, media.gradientEnd.y };
+        if (media.primitive == Renderer2DPrimitive::eBarVisualiser)
+        {
+            // Primitive payload is authored in the media component's pixel
+            // space. Apply entity/display-transition scale so the analytic bar
+            // mask remains locked to the projected artwork throughout scale-in
+            // and scale-out animations.
+            const float scaleX = rect.z /
+                std::max(std::abs(media.size.x), 0.001f);
+            const float scaleY = rect.w /
+                std::max(std::abs(media.size.y), 0.001f);
+            batch.color1 = media.primitiveData0 * scaleY;
+            batch.color2 = {
+                media.primitiveData1.x * scaleY,
+                media.primitiveData1.y * scaleY,
+                media.primitiveData1.z * scaleX,
+                media.primitiveData1.w * scaleX
+            };
+
+            // The compound primitive occupies the full horizontal span but
+            // only the tallest live bar vertically. Tightening the clip keeps
+            // dispatch, retained-surface clearing, and compositor damage from
+            // expanding to the visualiser's maximum height while the bars are
+            // near their idle dot state.
+            const float maximumBarHeight = std::clamp(
+                std::max(
+                    std::max(
+                        std::max(batch.color1.x, batch.color1.y),
+                        std::max(batch.color1.z, batch.color1.w)),
+                    std::max(batch.color2.x, batch.color2.y)),
+                0.0f,
+                rect.w);
+            if (maximumBarHeight > 0.001f)
+            {
+                const float barSpan = std::min(
+                    batch.color2.z * 6.0f + batch.color2.w * 5.0f,
+                    rect.z);
+                batch.clipRect = intersect_rect(
+                    batch.clipRect,
+                    {
+                        rect.x,
+                        rect.y + (rect.w - maximumBarHeight) * 0.5f,
+                        std::max(barSpan, 0.0f),
+                        maximumBarHeight
+                    });
+            }
+        }
         batch.effect0 = {
             media.cornerRadius,
             media.edgeSoftness,
-            std::max(media.blurRadius, displayTransition.blurRadius),
-            media.opacity * displayTransition.opacity
+            std::max(
+                media.blurRadius,
+                std::max(displayTransition.blurRadius, interactiveEffects.x)),
+            media.opacity * visualOpacity
         };
         batch.effect1 = transform2_5d_effect(transform);
         batch.flags = media_flags(media) | transform2_5d_flags(transform);
+        if (media.primitive == Renderer2DPrimitive::eBarVisualiser)
+        {
+            // color1/color2 carry geometry for this primitive, so a component
+            // tint gradient cannot share those slots. The visualiser uses its
+            // solid tint while the artwork itself still supplies all colour.
+            batch.flags &= ~(
+                eRenderer2DStyleGradient |
+                eRenderer2DStyleRadialGradient);
+        }
         if (batch.effect0.z > 0.0f)
         {
             batch.flags |= eRenderer2DStyleBlur;
         }
         if (const ShapeMaskClip mask = inherited_shape_mask_clip(registry_, entity);
             mask.enabled &&
+            media.primitive != Renderer2DPrimitive::eBarVisualiser &&
             (batch.flags & eRenderer2DStyleTransform2_5D) == 0u &&
             (batch.flags & eRenderer2DStyleGradient) == 0u)
         {
@@ -4108,6 +4269,13 @@ void Renderer2DScene::build_render_plan(
     textView.each([&](entt::entity entity, const Transform2DComponent& transform, const TextComponent& text)
     {
         if (!is_visible(registry_, entity))
+        {
+            return;
+        }
+        // An empty string has no drawable fallback. Emitting the legacy
+        // non-atlas text batch for it produces a small uninitialised glyph
+        // rectangle, commonly visible behind icon-only controls.
+        if (text.text.empty())
         {
             return;
         }
@@ -4140,7 +4308,11 @@ void Renderer2DScene::build_render_plan(
             registry_.try_get<TextEdgeFade2DComponent>(entity);
         const DisplayTransitionEffect2D displayTransition =
             inherited_visual_effect(registry_, entity, currentTimeSeconds);
-        if (!text_visible(style) || !alpha_visible(displayTransition.opacity))
+        const glm::vec2 interactiveEffects =
+            renderer2d_interactive_visual_effects(registry_, entity);
+        const float visualOpacity =
+            displayTransition.opacity * interactiveEffects.y;
+        if (!text_visible(style) || !alpha_visible(visualOpacity))
         {
             return;
         }
@@ -4209,13 +4381,15 @@ void Renderer2DScene::build_render_plan(
                 std::max(text.msdfPixelRange, 1.0f),
                 style.outlineWidth,
                 style.glowRadius,
-                style.opacity * displayTransition.opacity
+                style.opacity * visualOpacity
             };
             batch.effect1 = {
                 style.shadowOffset.x,
                 style.shadowOffset.y,
                 style.shadowBlur,
-                std::max(style.blurRadius, displayTransition.blurRadius)
+                std::max(
+                    style.blurRadius,
+                    std::max(displayTransition.blurRadius, interactiveEffects.x))
             };
             batch.flags = text_flags(text, style);
             batch.packedData = pack_text_weight_expansion(style.fontWeightExpansion);
@@ -4250,7 +4424,12 @@ void Renderer2DScene::build_render_plan(
                     glyph.size.x * transform.scale.x,
                     glyph.size.y * transform.scale.y
                 };
-                batch.rect = apply_display_transition_scale(batch.rect, displayTransition);
+                batch.rect = apply_display_transition_scale(
+                    renderer2d_apply_interactive_visual_rect(
+                        registry_,
+                        entity,
+                        batch.rect),
+                    displayTransition);
                 batch.uvRect = { glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y };
                 batch.flags |= eRenderer2DStyleAtlasText;
                 apply_text_edge_fade(batch);
@@ -4260,7 +4439,12 @@ void Renderer2DScene::build_render_plan(
         }
 
         Renderer2DBatch batch = make_text_batch();
-        batch.rect = apply_display_transition_scale(textBounds, displayTransition);
+        batch.rect = apply_display_transition_scale(
+            renderer2d_apply_interactive_visual_rect(
+                registry_,
+                entity,
+                textBounds),
+            displayTransition);
         batch.uvRect = { style.gradientStart.x, style.gradientStart.y, style.gradientEnd.x, style.gradientEnd.y };
         apply_text_edge_fade(batch);
         targetTexts.push_back(batch);
@@ -4273,7 +4457,10 @@ void Renderer2DScene::build_render_plan(
             return;
         }
 
-        const glm::vec4 viewport = make_model_viewport(registry_, entity, transform, model);
+        const glm::vec4 viewport = renderer2d_apply_interactive_visual_rect(
+            registry_,
+            entity,
+            make_model_viewport(registry_, entity, transform, model));
         const glm::vec4 clipRect = make_model_clip_rect(registry_, entity, viewport, model);
         if (rect_empty(viewport) || rect_empty(clipRect))
         {
@@ -4286,6 +4473,8 @@ void Renderer2DScene::build_render_plan(
         const RenderLayer2DKey layer = render_layer_key(registry_, entity);
         const DisplayTransitionEffect2D displayTransition =
             inherited_visual_effect(registry_, entity, currentTimeSeconds);
+        const glm::vec2 interactiveEffects =
+            renderer2d_interactive_visual_effects(registry_, entity);
 
         Renderer3DModelBatch batch = {};
         batch.entity = entity;
@@ -4306,7 +4495,8 @@ void Renderer2DScene::build_render_plan(
         batch.cameraTarget = model.cameraTarget;
         batch.lightDirection = model.lightDirection;
         batch.materialColor = model.materialColor;
-        batch.materialColor.a *= displayTransition.opacity;
+        batch.materialColor.a *=
+            displayTransition.opacity * interactiveEffects.y;
         batch.fieldOfViewRadians = model.fieldOfViewRadians;
         batch.nearPlane = model.nearPlane;
         batch.farPlane = model.farPlane;
@@ -4528,11 +4718,21 @@ void MediaPipeline::record(
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
     const std::vector<Renderer2DBatch>& batches,
     std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
-    DescriptorScope frameScope) const
+    DescriptorScope frameScope,
+    DescriptorScope postScope) const
 {
     for (const Renderer2DBatch& batch : batches)
     {
-        record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts, batch, mediaAssets, frameScope);
+        record_batch(
+            commandBuffer,
+            swapchain,
+            pipelines,
+            descriptorSets,
+            pipelineLayouts,
+            batch,
+            mediaAssets,
+            frameScope,
+            postScope);
     }
 }
 
@@ -4545,6 +4745,7 @@ void MediaPipeline::record_batch(
     const Renderer2DBatch& batch,
     std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
     DescriptorScope frameScope,
+    DescriptorScope postScope,
     bool synchronize) const
 {
     if (mediaAssets == nullptr || batch.mediaId == 0)
@@ -4586,13 +4787,83 @@ void MediaPipeline::record_batch(
     }
     commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pipelineLayouts[pipelineType],
         1, 1, &mediaSet, 0, nullptr);
+    commandBuffer.bindDescriptorSets(
+        vk::PipelineBindPoint::eCompute,
+        pipelineLayouts[pipelineType],
+        2,
+        1,
+        &descriptorSets[postScope],
+        0,
+        nullptr);
 
-    Renderer2DPushConstants constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
+    // Media primitive values occupy four bits. Carry the exact dispatch extent
+    // in the remaining bits so the shader can reject spare invocations in the
+    // final 8x8 workgroup before running an expensive source filter. A zero
+    // extent is the fallback for an unusually large (>16K) batch.
+    constexpr uint32_t kMediaDispatchExtentMask = 0x3fffu;
+    const auto make_media_constants = [&] (
+        const DispatchBounds& dispatchBounds,
+        uint32_t extraFlags) {
+        Renderer2DPushConstants constants = make_push_constants(
+            batch,
+            0u,
+            dispatchBounds.x,
+            dispatchBounds.y);
+        constants.data.y |= extraFlags;
+        if (dispatchBounds.width <= kMediaDispatchExtentMask &&
+            dispatchBounds.height <= kMediaDispatchExtentMask)
+        {
+            constants.data.x =
+                (static_cast<uint32_t>(batch.primitive) & 0x0fu) |
+                ((dispatchBounds.width & kMediaDispatchExtentMask) << 4u) |
+                ((dispatchBounds.height & kMediaDispatchExtentMask) << 18u);
+        }
+        return constants;
+    };
+
+    const uint32_t blurRadius = static_cast<uint32_t>(
+        std::clamp(std::lround(batch.effect0.z), 0l, 32l));
+    const bool useSeparableBlur =
+        blurRadius > 0u &&
+        (batch.flags & eRenderer2DStyleMediaSingleBlurSample) != 0u &&
+        (batch.flags & eRenderer2DStyleTransform2_5D) == 0u;
+    if (useSeparableBlur)
+    {
+        const uint32_t horizontalTop =
+            bounds.y > blurRadius ? bounds.y - blurRadius : 0u;
+        const uint32_t horizontalBottom = std::min(
+            bounds.y + bounds.height + blurRadius,
+            swapchain.extent.height);
+        const DispatchBounds horizontalBounds {
+            bounds.x,
+            horizontalTop,
+            bounds.width,
+            horizontalBottom - horizontalTop
+        };
+        Renderer2DPushConstants horizontalConstants = make_media_constants(
+            horizontalBounds,
+            eRenderer2DStyleMediaBlurHorizontal);
+        commandBuffer.pushConstants(
+            pipelineLayouts[pipelineType],
+            vk::ShaderStageFlagBits::eCompute,
+            0,
+            sizeof(horizontalConstants),
+            &horizontalConstants);
+        dispatch_bounds(commandBuffer, horizontalBounds);
+        insert_compute_memory_barrier(commandBuffer);
+    }
+
+    Renderer2DPushConstants constants = make_media_constants(
+        bounds,
+        useSeparableBlur ? eRenderer2DStyleMediaBlurVertical : 0u);
     commandBuffer.pushConstants(pipelineLayouts[pipelineType],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
     dispatch_bounds(commandBuffer, bounds);
-    if (synchronize)
+    if (synchronize || useSeparableBlur)
     {
+        // A following media batch may reuse overlapping horizontal scratch
+        // even when its final destination is disjoint. Always finish vertical
+        // scratch reads before allowing the next horizontal writer to begin.
         insert_compute_memory_barrier(commandBuffer);
     }
 }
@@ -4652,6 +4923,10 @@ void TextPipeline::record_batch(
         }
 
         Renderer2DPushConstants constants = make_push_constants(drawBatch, drawPass, bounds.x, bounds.y);
+        // Text does not use data.x for a primitive type. Carry the exact
+        // dispatch extent there so the shader can reject spare invocations in
+        // the final 8x8 workgroup instead of drawing beyond a scrolling mask.
+        constants.data.x = pack_dispatch_extent(bounds.width, bounds.height);
         commandBuffer.pushConstants(pipelineLayouts[pipelineType],
             vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
         dispatch_bounds(commandBuffer, bounds);
@@ -4847,17 +5122,25 @@ void Renderer2D::record(
     }
     cachedDynamicEntities = std::move(currentDynamicEntities);
 
-    // Every in-flight slot owns a retained dynamic image. Clear it atomically
-    // before reuse: inferred primitive envelopes cannot safely describe every
-    // pixel written by blur, text, masks, and replayed cache overlays, and one
-    // missed pixel survives indefinitely when that slot rotates back in.
-    clear_frame_surface(
-        commandBuffer,
-        swapchain,
-        pipelines,
-        descriptorSets,
-        pipelineLayouts,
-        DescriptorScope::eFrame);
+    // Every in-flight slot owns a retained dynamic image. On first use it has no
+    // trustworthy contents, so clear it completely. Afterwards, clear exactly
+    // the workgroup-aligned envelope written by this same slot on its previous
+    // use. The envelope is accumulated from the actual dispatch bounds below,
+    // including multi-pass blur, shadow, text, masks, replayed overlays and 3D.
+    // This removes stale pixels without clearing an entire ultrawide surface for
+    // a small island visualiser update.
+    if (!dynamicSurfaceInitialized ||
+        (dynamicSurfaceBounds.z > 0u && dynamicSurfaceBounds.w > 0u))
+    {
+        clear_frame_surface(
+            commandBuffer,
+            swapchain,
+            pipelines,
+            descriptorSets,
+            pipelineLayouts,
+            DescriptorScope::eFrame,
+            dynamicSurfaceInitialized ? dynamicSurfaceBounds : glm::uvec4(0u));
+    }
     dynamicSurfaceInitialized = true;
 
     DispatchBounds currentDynamicSurfaceBounds = {};
@@ -5148,7 +5431,7 @@ void Renderer2D::record(
                         include_dynamic_surface_bounds(bounds);
                     }
                     mediaPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
-                        *op.batch, mediaAssets, frameScope, false);
+                        *op.batch, mediaAssets, frameScope, blurPostScope, false);
                 }
                 break;
             }

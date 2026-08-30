@@ -52,6 +52,11 @@ class Frame
 
     void resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModelRenderExtent);
 
+    // Rebinds the font image sampled by both the live UI and retained UI cache.
+    // The graphics queue must be idle before changing descriptors for frames
+    // that may already have been submitted.
+    void set_font_atlas_image(StorageImage* image);
+
     void free_resources();
 
     vk::Device& logicalDevice;
@@ -88,7 +93,8 @@ class Frame
     // output separate from tempSurface, whose straight alpha is required by
     // Vulkan surfaces that advertise post-multiplied composition.
     StorageImage* compositionSurface = nullptr;
-    StorageImage* uiBlurSurface = nullptr, *uiStaticSurface = nullptr, *uiStaticBlurSurface = nullptr;
+    StorageImage* uiBlurSurface = nullptr, *mediaBlurSurface = nullptr;
+    StorageImage* uiStaticSurface = nullptr, *uiStaticBlurSurface = nullptr;
     StorageImage* externalBackdropSurface = nullptr, *fontAtlasImage = nullptr;
     ColorAttachmentImage* hosted3DColorBuffer = nullptr;
     DepthImage* hosted3DDepthBuffer = nullptr;

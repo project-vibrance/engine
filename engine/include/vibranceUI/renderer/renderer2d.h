@@ -132,7 +132,8 @@ public:
         std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
         const std::vector<Renderer2DBatch>& batches,
         std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
-        DescriptorScope frameScope = DescriptorScope::eFrame
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        DescriptorScope postScope = DescriptorScope::ePost
     ) const;
 
     void record_batch(
@@ -144,6 +145,7 @@ public:
         const Renderer2DBatch& batch,
         std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
         DescriptorScope frameScope = DescriptorScope::eFrame,
+        DescriptorScope postScope = DescriptorScope::ePost,
         bool synchronize = true
     ) const;
 };

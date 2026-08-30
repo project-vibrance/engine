@@ -15,6 +15,7 @@ const uint PRIMITIVE_ELLIPSE = 3u;
 const uint PRIMITIVE_SQUIRCLE = 6u;
 const uint PRIMITIVE_NOTCHED_SQUIRCLE = 7u;
 const uint PRIMITIVE_CIRCULAR_PROGRESS = 8u;
+const uint PRIMITIVE_LIQUID_BRIDGE = 9u;
 const float TWO_PI = 6.28318530718;
 const uint MASK_RADIUS_BITS = 255u;
 const uint MASK_PRIMITIVE_SHIFT = 8u;
@@ -194,7 +195,7 @@ float notch_flare_size(vec2 size, float amount, float depth) {
     const float morphThreshold = 0.85;
     float progress = clamp((clamp(amount, 0.0, 1.0) - morphThreshold) / (1.0 - morphThreshold), 0.0, 1.0);
     float depthTarget = depth > 0.5 ? depth : clamp(size.y * 0.62, 0.0, 92.0);
-    float flareTarget = clamp(depthTarget * 0.18, 0.0, min(size.y * 0.5, size.x * 0.18));
+    float flareTarget = clamp(depthTarget * 0.18, 0.0, size.y * 0.5);
     float sizeRatio = clamp((size.y * 0.5) / max(flareTarget, 0.001), 0.0, 1.0);
     float flareT = sizeRatio * progress;
     return flareTarget * flareT * flareT;
@@ -295,6 +296,29 @@ float sd_circular_progress(vec2 pixel, vec4 rect, vec4 arcParams) {
     return min(length(p - startPoint), length(p - endPoint)) - halfStroke;
 }
 
+// Polynomial smooth union of the main island's real circular end cap and the
+// detached island's real circular shell. The rect spans both complete circles,
+// so the liquid neck shares their exact SDF instead of approximating endpoints.
+float sd_liquid_bridge(vec2 p, vec2 halfSize, float amount) {
+    float radius = max(halfSize.y, 0.5);
+    float centerOffset = max(halfSize.x - radius, 0.0);
+    float left = length(p - vec2(-centerOffset, 0.0)) - radius;
+    float right = length(p - vec2(centerOffset, 0.0)) - radius;
+    float centerDistance = centerOffset * 2.0;
+    float surfaceGap = max(centerDistance - radius * 2.0, 0.0);
+    float easedAmount = smoothstep(0.0, 1.0, clamp(amount, 0.0, 1.0));
+    float separationFactor = smoothstep(0.0, radius * 0.9, centerDistance);
+    float smoothing = mix(
+        surfaceGap * 2.0 + 0.5,
+        surfaceGap * 2.0 + radius * 0.95,
+        easedAmount) * separationFactor;
+    if (smoothing <= 0.001) {
+        return min(left, right);
+    }
+    float blend = clamp(0.5 + 0.5 * (right - left) / smoothing, 0.0, 1.0);
+    return mix(right, left, blend) - smoothing * blend * (1.0 - blend);
+}
+
 float circular_progress_gradient_t(vec2 pixel) {
     vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
     vec2 p = pixel - (pc.rect.xy + halfSize);
@@ -355,6 +379,9 @@ float primitive_sdf(
             shapeParams.z,
             shapeParams.w);
     }
+    if (primitive == PRIMITIVE_LIQUID_BRIDGE) {
+        return sd_liquid_bridge(p, halfSize, pc.uvRect.x);
+    }
     if (primitive != PRIMITIVE_RECTANGLE && useCornerRadii) {
         return sd_rounded_box_corners(p, halfSize, cornerRadii);
     }
@@ -365,7 +392,6 @@ float shape_sdf(vec2 pixel) {
     if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
         return sd_circular_progress(pixel, pc.rect, pc.uvRect);
     }
-
     bool useCornerRadii = (pc.data.y & STYLE_CORNER_RADII) != 0u;
     vec4 cornerRadii = useCornerRadii ? unpack_corner_radii(pc.data.z) : vec4(pc.effect0.x);
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;

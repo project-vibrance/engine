@@ -2,6 +2,8 @@
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/ui/controls.h>
 #include <algorithm>
+#include <exception>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -9,6 +11,8 @@
 #if defined(_WIN32)
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
+#include <objbase.h>
+#include <shobjidl.h>
 #endif
 
 namespace
@@ -98,6 +102,25 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    glfwWindowHint(
+        GLFW_FOCUSED,
+        createInfo.focusOnShow ? GLFW_TRUE : GLFW_FALSE);
+#ifdef GLFW_FOCUS_ON_SHOW
+    glfwWindowHint(
+        GLFW_FOCUS_ON_SHOW,
+        createInfo.focusOnShow ? GLFW_TRUE : GLFW_FALSE);
+#endif
+    const bool deferInitialShow =
+        !createInfo.focusOnShow ||
+        !createInfo.showInTaskbar ||
+        !createInfo.showInAltTab ||
+        createInfo.position.has_value();
+    if (deferInitialShow)
+    {
+        // Apply native task-switching styles while hidden to prevent a
+        // one-frame taskbar/Alt-Tab flash during creation.
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    }
 #ifdef GLFW_SCALE_TO_MONITOR
     glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
 #endif
@@ -125,9 +148,29 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     GLFWwindow* window = glfwCreateWindow(createInfo.width, createInfo.height, createInfo.name, nullptr, nullptr);
     if (window)
     {
+        if (createInfo.position)
+        {
+            glfwSetWindowPos(
+                window,
+                createInfo.position->x,
+                createInfo.position->y);
+        }
         set_glfw_window_always_on_top(
             window,
             createInfo.alwaysOnTop);
+        set_glfw_window_application_presence(
+            window,
+            createInfo.showInTaskbar,
+            createInfo.showInAltTab);
+        if (deferInitialShow)
+        {
+            glfwShowWindow(window);
+            // Some shells decide taskbar membership only after first show.
+            set_glfw_window_application_presence(
+                window,
+                createInfo.showInTaskbar,
+                createInfo.showInAltTab);
+        }
         log_window_features(window, createInfo);
 
         std::stringstream line;
@@ -152,6 +195,195 @@ GLFWwindow* build_glfw_window(int width, int height, const char* name, bool tran
     createInfo.name = name;
     createInfo.transparentFramebuffer = transparent;
     return build_glfw_window(createInfo);
+}
+
+GlfwWindowHost::GlfwWindowHost(GlfwWindowHostOptions options) :
+    hostOptions(std::move(options))
+{
+}
+
+GlfwWindowHost::~GlfwWindowHost()
+{
+    close();
+}
+
+GlfwWindowHost::GlfwWindowHost(GlfwWindowHost&& other) noexcept :
+    hostOptions(std::move(other.hostOptions)),
+    hostedWindow(other.hostedWindow),
+    hostedEngine(std::move(other.hostedEngine))
+{
+    other.hostedWindow = nullptr;
+}
+
+GlfwWindowHost& GlfwWindowHost::operator=(GlfwWindowHost&& other) noexcept
+{
+    if (this == &other)
+    {
+        return *this;
+    }
+
+    close();
+    hostOptions = std::move(other.hostOptions);
+    hostedWindow = other.hostedWindow;
+    hostedEngine = std::move(other.hostedEngine);
+    other.hostedWindow = nullptr;
+    return *this;
+}
+
+void GlfwWindowHost::set_options(GlfwWindowHostOptions options)
+{
+    const bool reopen = is_open();
+    close();
+    hostOptions = std::move(options);
+    if (reopen)
+    {
+        open();
+    }
+}
+
+const GlfwWindowHostOptions& GlfwWindowHost::options() const
+{
+    return hostOptions;
+}
+
+bool GlfwWindowHost::open()
+{
+    close();
+
+    GlfwWindowCreateInfo windowInfo = {};
+    windowInfo.width = std::max(hostOptions.size.x, 1);
+    windowInfo.height = std::max(hostOptions.size.y, 1);
+    windowInfo.name = hostOptions.title.c_str();
+    windowInfo.transparentFramebuffer = hostOptions.transparentFramebuffer;
+    windowInfo.decorated = hostOptions.decorated;
+    windowInfo.alwaysOnTop = hostOptions.alwaysOnTop;
+    windowInfo.focusOnShow = hostOptions.focusOnShow;
+    windowInfo.showInTaskbar = hostOptions.showInTaskbar;
+    windowInfo.showInAltTab = hostOptions.showInAltTab;
+    if (hostOptions.placement)
+    {
+        windowInfo.width = std::max(hostOptions.placement->size.x, 1);
+        windowInfo.height = std::max(hostOptions.placement->size.y, 1);
+        windowInfo.decorated = hostOptions.placement->decorated;
+        windowInfo.alwaysOnTop = hostOptions.placement->alwaysOnTop;
+        windowInfo.position = hostOptions.placement->position;
+    }
+    else if (hostOptions.position)
+    {
+        windowInfo.position = hostOptions.position;
+    }
+    else if (hostOptions.positioning)
+    {
+        windowInfo.position = resolve_glfw_window_position(
+            { windowInfo.width, windowInfo.height },
+            *hostOptions.positioning);
+    }
+
+    hostedWindow = build_glfw_window(windowInfo);
+    if (!hostedWindow)
+    {
+        return false;
+    }
+
+    if (hostOptions.placement)
+    {
+        if (!apply_glfw_window_placement(hostedWindow, *hostOptions.placement))
+        {
+            close();
+            return false;
+        }
+    }
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    if (!glfw_framebuffer_size(
+            hostedWindow,
+            framebufferWidth,
+            framebufferHeight))
+    {
+        close();
+        return false;
+    }
+
+    uint32_t extensionCount = 0;
+    const char** extensions =
+        glfw_required_instance_extensions(extensionCount);
+
+    EngineCreateInfo engineInfo = {};
+    engineInfo.applicationName = hostOptions.title.c_str();
+    engineInfo.framebufferWidth = static_cast<uint32_t>(
+        std::max(framebufferWidth, 0));
+    engineInfo.framebufferHeight = static_cast<uint32_t>(
+        std::max(framebufferHeight, 0));
+    engineInfo.maxRenderPixels = hostOptions.maxRenderPixels;
+    engineInfo.msaaSamples = hostOptions.msaaSamples;
+    engineInfo.presentMode = hostOptions.presentMode;
+    engineInfo.renderBackend = hostOptions.renderBackend;
+    engineInfo.presentationBackend =
+        hostOptions.presentationBackend.value_or(
+#if defined(_WIN32)
+            hostOptions.transparentFramebuffer ?
+                PresentationBackend::eWindowsCompositionD3D11 :
+                PresentationBackend::eNative
+#else
+            PresentationBackend::eNative
+#endif
+        );
+    engineInfo.targetFrameRate = hostOptions.targetFrameRate;
+    engineInfo.instanceExtensionCount = extensionCount;
+    engineInfo.instanceExtensions = extensions;
+    engineInfo.surfaceUserData = hostedWindow;
+    engineInfo.nativeWindowHandle =
+        glfw_native_window_handle(hostedWindow);
+    engineInfo.createSurface = vibrance_glfw_create_surface;
+    engineInfo.transparentFramebuffer =
+        hostOptions.transparentFramebuffer;
+    engineInfo.enableAudio = hostOptions.enableAudio;
+    if (hostOptions.configureEngine)
+    {
+        hostOptions.configureEngine(engineInfo);
+    }
+
+    try
+    {
+        hostedEngine = std::make_unique<Engine>(engineInfo);
+    }
+    catch (const std::exception& error)
+    {
+        if (Logger* logger = Logger::fetch_logger())
+        {
+            logger->error(
+                std::string("Window host could not create its renderer: ") +
+                error.what());
+        }
+        close();
+        return false;
+    }
+    return true;
+}
+
+void GlfwWindowHost::close()
+{
+    hostedEngine.reset();
+    if (hostedWindow)
+    {
+        destroy_glfw_window(hostedWindow);
+        hostedWindow = nullptr;
+    }
+}
+
+bool GlfwWindowHost::is_open() const
+{
+    return hostedWindow != nullptr && hostedEngine != nullptr;
+}
+
+GLFWwindow* GlfwWindowHost::window() const
+{
+    return hostedWindow;
+}
+
+Engine* GlfwWindowHost::engine() const
+{
+    return hostedEngine.get();
 }
 
 void destroy_glfw_window(GLFWwindow* window)
@@ -200,6 +432,17 @@ std::vector<GlfwMonitorInfo> glfw_connected_monitors()
             &info.position.x,
             &info.position.y);
         info.size = { videoMode->width, videoMode->height };
+        glfwGetMonitorWorkarea(
+            monitor,
+            &info.workPosition.x,
+            &info.workPosition.y,
+            &info.workSize.x,
+            &info.workSize.y);
+        if (info.workSize.x <= 0 || info.workSize.y <= 0)
+        {
+            info.workPosition = info.position;
+            info.workSize = info.size;
+        }
         std::string baseId = glfw_monitor_identifier(monitor);
         if (baseId.empty())
         {
@@ -220,6 +463,151 @@ std::vector<GlfwMonitorInfo> glfw_connected_monitors()
         result.push_back(std::move(info));
     }
     return result;
+}
+
+glm::ivec2 glfw_aligned_window_position(
+    glm::ivec2 areaPosition,
+    glm::ivec2 areaSize,
+    glm::ivec2 windowSize,
+    GlfwWindowAlignment alignment,
+    glm::ivec4 margins,
+    glm::ivec2 offset)
+{
+    areaSize = glm::max(areaSize, glm::ivec2(1));
+    windowSize = glm::max(windowSize, glm::ivec2(1));
+    margins = glm::max(margins, glm::ivec4(0));
+
+    const glm::ivec2 start = areaPosition + glm::ivec2(
+        std::min(margins.x, areaSize.x - 1),
+        std::min(margins.y, areaSize.y - 1));
+    const glm::ivec2 end = areaPosition + areaSize - glm::ivec2(
+        std::min(margins.z, areaSize.x - 1),
+        std::min(margins.w, areaSize.y - 1));
+    const glm::ivec2 available = glm::max(end - start, glm::ivec2(1));
+
+    int horizontal = 1;
+    int vertical = 1;
+    switch (alignment)
+    {
+        case GlfwWindowAlignment::eTopLeft:
+            horizontal = 0;
+            vertical = 0;
+            break;
+        case GlfwWindowAlignment::eTopCenter:
+            vertical = 0;
+            break;
+        case GlfwWindowAlignment::eTopRight:
+            horizontal = 2;
+            vertical = 0;
+            break;
+        case GlfwWindowAlignment::eMiddleLeft:
+            horizontal = 0;
+            break;
+        case GlfwWindowAlignment::eMiddleRight:
+            horizontal = 2;
+            break;
+        case GlfwWindowAlignment::eBottomLeft:
+            horizontal = 0;
+            vertical = 2;
+            break;
+        case GlfwWindowAlignment::eBottomCenter:
+            vertical = 2;
+            break;
+        case GlfwWindowAlignment::eBottomRight:
+            horizontal = 2;
+            vertical = 2;
+            break;
+        case GlfwWindowAlignment::eCenter:
+        default:
+            break;
+    }
+
+    const glm::ivec2 remaining = glm::max(
+        available - windowSize,
+        glm::ivec2(0));
+    glm::ivec2 result = start + glm::ivec2(
+        horizontal == 0 ? 0 : horizontal == 2 ? remaining.x : remaining.x / 2,
+        vertical == 0 ? 0 : vertical == 2 ? remaining.y : remaining.y / 2) +
+        offset;
+    const glm::ivec2 maximum = glm::max(
+        start,
+        end - windowSize);
+    return glm::clamp(result, start, maximum);
+}
+
+std::optional<glm::ivec2> resolve_glfw_window_position(
+    glm::ivec2 windowSize,
+    const GlfwWindowPositionOptions& options)
+{
+    const std::vector<GlfwMonitorInfo> monitors =
+        glfw_connected_monitors();
+    if (monitors.empty())
+    {
+        return std::nullopt;
+    }
+
+    const GlfwMonitorInfo* selected = nullptr;
+    if (!options.monitorId.empty())
+    {
+        const auto match = std::find_if(
+            monitors.begin(),
+            monitors.end(),
+            [&options](const GlfwMonitorInfo& monitor) {
+                return monitor.id == options.monitorId;
+            });
+        if (match != monitors.end())
+        {
+            selected = &*match;
+        }
+    }
+
+    if (!selected && options.referencePoint)
+    {
+        std::int64_t bestDistance =
+            std::numeric_limits<std::int64_t>::max();
+        for (const GlfwMonitorInfo& monitor : monitors)
+        {
+            const glm::ivec2 point = *options.referencePoint;
+            const glm::ivec2 maximum =
+                monitor.position + monitor.size - glm::ivec2(1);
+            const glm::ivec2 nearest = glm::clamp(
+                point,
+                monitor.position,
+                maximum);
+            const std::int64_t deltaX =
+                static_cast<std::int64_t>(point.x) - nearest.x;
+            const std::int64_t deltaY =
+                static_cast<std::int64_t>(point.y) - nearest.y;
+            const std::int64_t distance =
+                deltaX * deltaX + deltaY * deltaY;
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                selected = &monitor;
+            }
+        }
+    }
+
+    if (!selected)
+    {
+        const auto primary = std::find_if(
+            monitors.begin(),
+            monitors.end(),
+            [](const GlfwMonitorInfo& monitor) {
+                return monitor.primary;
+            });
+        selected = primary == monitors.end() ?
+            &monitors.front() :
+            &*primary;
+    }
+
+    return glfw_aligned_window_position(
+        selected->workPosition,
+        selected->workSize,
+        windowSize,
+        options.alignment,
+        options.margins,
+        options.offset);
 }
 
 #if !defined(__APPLE__)
@@ -397,6 +785,16 @@ void poll_glfw_events()
     glfwPollEvents();
 }
 
+void focus_glfw_window(GLFWwindow* window)
+{
+    if (!window)
+    {
+        return;
+    }
+    glfwShowWindow(window);
+    glfwFocusWindow(window);
+}
+
 void set_glfw_window_title(GLFWwindow* window, const char* title)
 {
     if (window && title)
@@ -465,10 +863,95 @@ void set_glfw_window_always_on_top(GLFWwindow* window, bool alwaysOnTop)
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 #endif
 }
+
+#if !defined(__APPLE__)
+void set_glfw_window_application_presence(
+    GLFWwindow* window,
+    bool showInTaskbar,
+    bool showInAltTab)
+{
+    if (!window)
+    {
+        return;
+    }
+#if defined(_WIN32)
+    HWND nativeWindow = glfwGetWin32Window(window);
+    if (!nativeWindow)
+    {
+        return;
+    }
+
+    LONG_PTR extendedStyle = GetWindowLongPtrW(
+        nativeWindow,
+        GWL_EXSTYLE);
+    if (showInAltTab)
+    {
+        extendedStyle &= ~static_cast<LONG_PTR>(WS_EX_TOOLWINDOW);
+    }
+    else
+    {
+        extendedStyle |= WS_EX_TOOLWINDOW;
+    }
+    if (showInTaskbar)
+    {
+        extendedStyle |= WS_EX_APPWINDOW;
+    }
+    else
+    {
+        extendedStyle &= ~static_cast<LONG_PTR>(WS_EX_APPWINDOW);
+    }
+    SetWindowLongPtrW(nativeWindow, GWL_EXSTYLE, extendedStyle);
+    SetWindowPos(
+        nativeWindow,
+        nullptr,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+            SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+    // WS_EX_TOOLWINDOW controls Alt-Tab. ITaskbarList keeps taskbar presence
+    // independently configurable for all four policy combinations.
+    const HRESULT comInitialised = CoInitializeEx(
+        nullptr,
+        COINIT_APARTMENTTHREADED);
+    ITaskbarList* taskbar = nullptr;
+    const HRESULT created = CoCreateInstance(
+        CLSID_TaskbarList,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_ITaskbarList,
+        reinterpret_cast<void**>(&taskbar));
+    if (SUCCEEDED(created) && taskbar)
+    {
+        if (SUCCEEDED(taskbar->HrInit()))
+        {
+            if (showInTaskbar)
+            {
+                taskbar->AddTab(nativeWindow);
+            }
+            else
+            {
+                taskbar->DeleteTab(nativeWindow);
+            }
+        }
+        taskbar->Release();
+    }
+    if (SUCCEEDED(comInitialised))
+    {
+        CoUninitialize();
+    }
+#else
+    (void)showInTaskbar;
+    (void)showInAltTab;
+#endif
+}
+#endif
 
 #if !defined(__APPLE__)
 bool apply_glfw_window_placement(
@@ -893,6 +1376,7 @@ bool glfw_ui_input_has_pointer_capture(const UiInputState& inputState)
         inputState.resizingPanel != entt::null ||
         inputState.activeSlider != entt::null ||
         inputState.activeScrollBar != entt::null ||
+        inputState.activeStretchDynamics != entt::null ||
         inputState.pressedInputEntity != entt::null ||
         inputState.pointerInputCapture != entt::null;
 }
@@ -915,9 +1399,15 @@ void glfw_update_ui_drag_inputs(
     UiInputState& inputState,
     const GlfwUiPointerSample& pointer)
 {
-    // Shared drag path for panels, sliders, and scrollbars
+    // Shared drag path for panels and direct-manipulation controls
     const bool leftPressed = glfw_left_mouse_pressed(window);
     Renderer2DScene& scene = engine.renderer2d_scene();
+    ui_update_stretch_dynamics_drag(
+        scene,
+        inputState,
+        leftPressed,
+        pointer.hasPoint,
+        pointer.point);
     ui_update_panel_resize(
         scene,
         inputState,
@@ -979,6 +1469,10 @@ void glfw_update_ui_timed_controls(
     ui_update_scrollbar_fade(engine.renderer2d_scene(), currentTimeSeconds);
     ui_update_switch_animations(engine.renderer2d_scene(), currentTimeSeconds);
     ui_update_slider_smoothing(engine.renderer2d_scene(), engine.renderer2d_font_atlas(), currentTimeSeconds);
+    ui_update_stretch_dynamics_settling(
+        engine.renderer2d_scene(),
+        inputState,
+        currentTimeSeconds);
 }
 
 UiPointerButtonInput glfw_pointer_button_input(

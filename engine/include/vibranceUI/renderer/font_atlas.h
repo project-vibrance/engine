@@ -22,6 +22,8 @@ struct Renderer2DTextLayout
     std::vector<MSDFGlyph> glyphs;
     glm::vec2 bounds { 0.0f };
     float lineHeight = 0.0f;
+    uint32_t lineCount = 0u;
+    bool rightToLeft = false;
 };
 
 struct Renderer2DCodepointRange
@@ -120,6 +122,16 @@ public:
 
     // Returns glyph positions in local text space for drawing and caret placement
     Renderer2DTextLayout layout_text(std::string_view text, float fontSize) const;
+    Renderer2DTextLayout layout_text(
+        std::string_view text,
+        float fontSize,
+        const TextLayout2DOptions& options) const;
+
+    // Literal and runtime text can arrive after the initial atlas build. These
+    // helpers let the engine discover only the code points that still need to
+    // be baked instead of replacing them with question marks indefinitely.
+    bool covers_text(std::string_view text) const;
+    std::vector<uint32_t> missing_codepoints(std::string_view text) const;
 
     StorageImage* image() const;
     bool loaded() const;
@@ -150,9 +162,9 @@ private:
     glm::uvec2 atlasSize { 1u, 1u };
     std::string fontName = "Renderer2D Font";
     uint32_t atlasId = 1;
-    float bakedPixelHeight = 64.0f;
-    float lineHeight = 64.0f;
-    float baseline = 48.0f;
+    float bakedPixelHeight = 96.0f;
+    float lineHeight = 96.0f;
+    float baseline = 72.0f;
     float sdfPixelRange = 8.0f;
     bool isLoaded = false;
 };

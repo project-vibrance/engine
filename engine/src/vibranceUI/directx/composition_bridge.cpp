@@ -1,3 +1,5 @@
+#if defined(_WIN32)
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -1837,3 +1839,5 @@ vibrance_composition_set_regions(
     }
     return bridge->set_regions(regions, count) ? 1u : 0u;
 }
+
+#endif // defined(_WIN32)

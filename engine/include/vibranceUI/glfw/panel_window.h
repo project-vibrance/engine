@@ -110,6 +110,9 @@ struct GlfwPanelWindowTemplateOptions
     glm::vec4 contentMargin { 24.0f, 72.0f, 24.0f, 24.0f };
     bool resizable = true;
     bool draggable = true;
+    // Overrides the interactive top strip without changing title/content
+    // layout. Null keeps the legacy derived title region; zero disables it.
+    std::optional<float> topDragHeight {};
     bool closeOnEscape = true;
     bool showTitleText = true;
     GlfwPanelWindowTrafficLightOptions trafficLights {};
@@ -252,8 +255,13 @@ struct GlfwPanelWindowHostOptions
     int x = 80;
     int y = 80;
     bool hasInitialPosition = true;
+    std::optional<GlfwWindowPositionOptions> positioning {};
     bool transparentFramebuffer = true;
     bool decorated = false;
+    bool alwaysOnTop = false;
+    bool focusOnShow = true;
+    bool showInTaskbar = true;
+    bool showInAltTab = true;
     bool enableAudio = false;
     uint32_t maxRenderPixels = 0;
     uint32_t msaaSamples = 4;
@@ -261,6 +269,9 @@ struct GlfwPanelWindowHostOptions
     RenderBackend renderBackend = RenderBackend::eVulkan;
     PresentationBackend presentationBackend = PresentationBackend::eNative;
     uint32_t targetFrameRate = 0;
+    // Host-level override applied after makeTemplateOptions. This lets window
+    // owners opt into a top drag strip without modifying reusable content.
+    std::optional<float> topDragHeight {};
     std::string title = "vibranceUI panel window";
     GlfwPanelWindowEngineConfigurator configureEngine;
     GlfwPanelWindowTemplateFactory makeTemplateOptions;
@@ -283,6 +294,9 @@ public:
     bool is_open() const;
     bool should_close() const;
     bool is_hovered() const;
+    // Re-runs the configured template factory and reapplies host overrides.
+    // Prefer this when host policies such as topDragHeight must remain active.
+    bool refresh_template();
 
     GLFWwindow* window() const;
     Engine* engine() const;

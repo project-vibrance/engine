@@ -1,6 +1,7 @@
 #pragma once
 #include "vibranceUI/export.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -24,7 +25,11 @@ enum class Renderer2DPrimitive : uint32_t
     eMedia = 5,
     eSquircle = 6,
     eNotchedSquircle = 7,
-    eCircularProgress = 8
+    eCircularProgress = 8,
+    // Analytic two-source metaball used for seamless liquid connections.
+    eLiquidBridge = 9,
+    // Six rounded audio bars carried by one media projection.
+    eBarVisualiser = 10
 };
 
 enum class Renderer2DFill : uint32_t
@@ -103,7 +108,10 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
     eRenderer2DStyleShadowOutsideOnly = 1u << 23,
     eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24,
-    eRenderer2DStyleTextEdgeFade = 1u << 25
+    eRenderer2DStyleTextEdgeFade = 1u << 25,
+    eRenderer2DStyleMediaSingleBlurSample = 1u << 26,
+    eRenderer2DStyleMediaBlurHorizontal = 1u << 27,
+    eRenderer2DStyleMediaBlurVertical = 1u << 28
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -441,10 +449,35 @@ struct VisualTransform2DComponent
     glm::vec2 pivot { 0.5f };
 };
 
+struct InteractiveVisual2DComponent
+{
+    // A renderer-native, post-layout effect used by direct manipulation.
+    // scaleOrigin is in framebuffer space, allowing an interaction to keep
+    // one edge fixed while the opposite edge follows the pointer. Descendant
+    // inheritance makes a complete control or interface deform as one unit.
+    bool enabled = true;
+    bool affectSelf = true;
+    bool inheritToChildren = true;
+    // Foreground blur normally follows affectSelf. This separate opt-out lets
+    // a surface deform while only its descendants receive inherited blur.
+    bool blurSelf = true;
+    glm::vec2 scale { 1.0f };
+    glm::vec2 scaleOrigin { 0.0f };
+    float blurRadius = 0.0f;
+    float opacity = 1.0f;
+};
+
 struct HitRegion2DComponent
 {
     // Keeps an entity interactive even when its shape is intentionally fully
     // transparent. This separates pointer geometry from visible paint.
+    bool enabled = true;
+};
+
+struct InputTransparent2DComponent
+{
+    // Excludes this visual from pointer picking without affecting its paint or
+    // its descendants. Useful for decorative overlays such as animated borders.
     bool enabled = true;
 };
 
@@ -460,6 +493,86 @@ struct Parent2DComponent
 {
     entt::entity parent = entt::null;
 };
+
+inline glm::vec4 renderer2d_apply_interactive_visual_rect(
+    const entt::registry& registry,
+    entt::entity entity,
+    glm::vec4 rect)
+{
+    std::array<const InteractiveVisual2DComponent*, 64u> effects {};
+    std::size_t effectCount = 0u;
+    entt::entity current = entity;
+    for (uint32_t depth = 0u;
+        depth < effects.size() && current != entt::null && registry.valid(current);
+        ++depth)
+    {
+        if (const InteractiveVisual2DComponent* visual =
+            registry.try_get<InteractiveVisual2DComponent>(current);
+            visual && visual->enabled &&
+            (current == entity ? visual->affectSelf : visual->inheritToChildren))
+        {
+            effects[effectCount++] = visual;
+        }
+
+        const Parent2DComponent* parent =
+            registry.try_get<Parent2DComponent>(current);
+        if (!parent || parent->parent == entt::null ||
+            parent->parent == current)
+        {
+            break;
+        }
+        current = parent->parent;
+    }
+
+    // Parent effects are applied first so nested interactive visuals compose
+    // in the same order as their entity hierarchy.
+    for (std::size_t index = effectCount; index > 0u; --index)
+    {
+        const InteractiveVisual2DComponent& visual = *effects[index - 1u];
+        const glm::vec2 safeScale =
+            glm::max(visual.scale, glm::vec2(0.001f));
+        const glm::vec2 minPosition = visual.scaleOrigin +
+            (glm::vec2(rect.x, rect.y) - visual.scaleOrigin) * safeScale;
+        const glm::vec2 size = glm::vec2(rect.z, rect.w) * safeScale;
+        rect = { minPosition.x, minPosition.y, size.x, size.y };
+    }
+    return rect;
+}
+
+inline glm::vec2 renderer2d_interactive_visual_effects(
+    const entt::registry& registry,
+    entt::entity entity)
+{
+    // x is inherited foreground blur radius; y is inherited opacity.
+    glm::vec2 result { 0.0f, 1.0f };
+    entt::entity current = entity;
+    for (uint32_t depth = 0u;
+        depth < 64u && current != entt::null && registry.valid(current);
+        ++depth)
+    {
+        if (const InteractiveVisual2DComponent* visual =
+            registry.try_get<InteractiveVisual2DComponent>(current);
+            visual && visual->enabled &&
+            (current == entity ? visual->affectSelf : visual->inheritToChildren))
+        {
+            if (current != entity || visual->blurSelf)
+            {
+                result.x = std::max(result.x, visual->blurRadius);
+            }
+            result.y *= std::clamp(visual->opacity, 0.0f, 1.0f);
+        }
+
+        const Parent2DComponent* parent =
+            registry.try_get<Parent2DComponent>(current);
+        if (!parent || parent->parent == entt::null ||
+            parent->parent == current)
+        {
+            break;
+        }
+        current = parent->parent;
+    }
+    return result;
+}
 
 struct LayoutRect2DComponent
 {
@@ -830,10 +943,18 @@ struct Media2DComponent
     // Media owns its clipping geometry. This avoids wrapping artwork in a
     // masked shape merely to obtain rounded or squircle corners.
     Renderer2DPrimitive primitive = Renderer2DPrimitive::eRoundedRectangle;
+    // Optional primitive-specific payload. The common media primitives leave
+    // these at zero; analytic compound masks can use them without extra buffers.
+    glm::vec4 primitiveData0 { 0.0f };
+    glm::vec4 primitiveData1 { 0.0f };
     float opacity = 1.0f;
     float cornerRadius = 0.0f;
     float edgeSoftness = 1.0f;
     float blurRadius = 0.0f;
+    // Strongly blurred media changes negligibly across the four sub-pixel
+    // coverage locations. Opt in to evaluating its expensive source filter
+    // once per pixel while retaining four-sample geometry/mask antialiasing.
+    bool sampleBlurOncePerPixel = false;
     float brightness = 0.0f;
     float contrast = 1.0f;
     float exposure = 0.0f;
@@ -1144,6 +1265,46 @@ struct MSDFGlyphAtlasComponent
     std::string name;
     glm::uvec2 textureSize { 0u };
     float pixelRange = 4.0f;
+};
+
+enum class TextWrapMode2D : uint8_t
+{
+    eNone,
+    eWord,
+    eCharacter
+};
+
+enum class TextHorizontalAlignment2D : uint8_t
+{
+    // Start and End follow the text direction. For left-to-right text Start is
+    // left; for right-to-left text Start is right.
+    eStart,
+    eCenter,
+    eEnd,
+    eJustify
+};
+
+struct TextLayout2DOptions
+{
+    // Renderer-space width. A value <= 0 keeps the legacy unconstrained run.
+    float maximumWidth = 0.0f;
+    TextWrapMode2D wrapMode = TextWrapMode2D::eNone;
+    TextHorizontalAlignment2D horizontalAlignment =
+        TextHorizontalAlignment2D::eStart;
+    // Multiplies the font's natural baseline distance. The pixel spacings are
+    // then added, allowing both compact and editorial layouts.
+    float lineHeightMultiplier = 1.0f;
+    float lineSpacing = 0.0f;
+    float paragraphSpacing = 0.0f;
+    float characterSpacing = 0.0f;
+    float wordSpacing = 0.0f;
+};
+
+struct TextLayout2DComponent
+{
+    TextLayout2DOptions options {};
+    uint32_t lineCount = 0u;
+    float resolvedLineHeight = 0.0f;
 };
 
 struct TextComponent

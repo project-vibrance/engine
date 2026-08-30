@@ -93,6 +93,35 @@ bool apply_glfw_window_placement(
     return true;
 }
 
+void set_glfw_window_application_presence(
+    GLFWwindow* window,
+    bool showInTaskbar,
+    bool showInAltTab)
+{
+    (void)showInTaskbar;
+    if (!window)
+    {
+        return;
+    }
+
+    NSWindow* nativeWindow = glfwGetCocoaWindow(window);
+    if (!nativeWindow)
+    {
+        return;
+    }
+
+    NSWindowCollectionBehavior behavior =
+        [nativeWindow collectionBehavior];
+    behavior &= ~(
+        NSWindowCollectionBehaviorParticipatesInCycle |
+        NSWindowCollectionBehaviorIgnoresCycle);
+    behavior |= showInAltTab ?
+        NSWindowCollectionBehaviorParticipatesInCycle :
+        NSWindowCollectionBehaviorIgnoresCycle;
+    [nativeWindow setCollectionBehavior:behavior];
+    [nativeWindow setExcludedFromWindowsMenu:!showInAltTab];
+}
+
 bool begin_glfw_native_window_drag(GLFWwindow* window)
 {
     if (!window)

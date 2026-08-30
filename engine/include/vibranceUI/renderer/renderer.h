@@ -90,6 +90,8 @@ class VIBRANCE_ENGINE_API Engine
 
     const AudioEngine& audio() const;
 
+    // Replaces the shared 2D font atlas and refreshes existing frame bindings
+    // and text layouts. New text can immediately use renderer2d_font_atlas().
     bool load_renderer2d_font(const std::filesystem::path& path);
 
     bool load_renderer2d_font(

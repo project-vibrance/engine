@@ -51,6 +51,10 @@ ivec2 dispatch_origin() {
     return ivec2(int(pc.data.w & 65535u), int((pc.data.w >> 16u) & 65535u));
 }
 
+ivec2 dispatch_extent() {
+    return ivec2(int(pc.data.x & 65535u), int((pc.data.x >> 16u) & 65535u));
+}
+
 float median(float r, float g, float b) {
     return max(min(r, g), min(max(r, g), b));
 }
@@ -89,17 +93,20 @@ float sample_font_atlas(vec2 atlasUv) {
     vec2 texel = clamp(atlasUv, vec2(0.0), vec2(1.0)) * vec2(atlasSize) - vec2(0.5);
     ivec2 basePixel = ivec2(floor(texel));
     vec2 blend = fract(texel);
-
-    ivec2 p00 = clamp(basePixel, ivec2(0), atlasSize - ivec2(1));
-    ivec2 p10 = clamp(basePixel + ivec2(1, 0), ivec2(0), atlasSize - ivec2(1));
-    ivec2 p01 = clamp(basePixel + ivec2(0, 1), ivec2(0), atlasSize - ivec2(1));
-    ivec2 p11 = clamp(basePixel + ivec2(1, 1), ivec2(0), atlasSize - ivec2(1));
-
-    float a00 = imageLoad(fontAtlas, p00).a;
-    float a10 = imageLoad(fontAtlas, p10).a;
-    float a01 = imageLoad(fontAtlas, p01).a;
-    float a11 = imageLoad(fontAtlas, p11).a;
-    return mix(mix(a00, a10, blend.x), mix(a01, a11, blend.x), blend.y);
+    ivec2 maximumPixel = atlasSize - ivec2(1);
+    ivec2 p00 = clamp(basePixel, ivec2(0), maximumPixel);
+    ivec2 p10 = clamp(basePixel + ivec2(1, 0), ivec2(0), maximumPixel);
+    ivec2 p01 = clamp(basePixel + ivec2(0, 1), ivec2(0), maximumPixel);
+    ivec2 p11 = clamp(basePixel + ivec2(1, 1), ivec2(0), maximumPixel);
+    float top = mix(
+        imageLoad(fontAtlas, p00).a,
+        imageLoad(fontAtlas, p10).a,
+        blend.x);
+    float bottom = mix(
+        imageLoad(fontAtlas, p01).a,
+        imageLoad(fontAtlas, p11).a,
+        blend.x);
+    return mix(top, bottom, blend.y);
 }
 
 float atlas_pixels_per_screen_pixel() {
@@ -204,7 +211,7 @@ float notch_flare_size(vec2 size, float amount, float depth) {
     const float morphThreshold = 0.85;
     float progress = clamp((clamp(amount, 0.0, 1.0) - morphThreshold) / (1.0 - morphThreshold), 0.0, 1.0);
     float depthTarget = depth > 0.5 ? depth : clamp(size.y * 0.62, 0.0, 92.0);
-    float flareTarget = clamp(depthTarget * 0.18, 0.0, min(size.y * 0.5, size.x * 0.18));
+    float flareTarget = clamp(depthTarget * 0.18, 0.0, size.y * 0.5);
     float sizeRatio = clamp((size.y * 0.5) / max(flareTarget, 0.001), 0.0, 1.0);
     float flareT = sizeRatio * progress;
     return flareTarget * flareT * flareT;
@@ -430,19 +437,28 @@ vec4 resolve_text(
     bool renderUnderlay,
     bool renderForeground,
     bool renderGlow) {
-    vec4 s0 = shade_text_sample(pixelCenter + vec2(-0.375, -0.125), atlasText, renderUnderlay, renderForeground, renderGlow);
-    vec4 s1 = shade_text_sample(pixelCenter + vec2( 0.125, -0.375), atlasText, renderUnderlay, renderForeground, renderGlow);
-    vec4 s2 = shade_text_sample(pixelCenter + vec2(-0.125,  0.375), atlasText, renderUnderlay, renderForeground, renderGlow);
-    vec4 s3 = shade_text_sample(pixelCenter + vec2( 0.375,  0.125), atlasText, renderUnderlay, renderForeground, renderGlow);
-
-    vec3 premultiplied =
-        s0.rgb * s0.a +
-        s1.rgb * s1.a +
-        s2.rgb * s2.a +
-        s3.rgb * s3.a;
-    float alpha = s0.a + s1.a + s2.a + s3.a;
-    premultiplied *= 0.25;
-    alpha *= 0.25;
+    // Resolve sixteen evenly distributed coverage samples. This mirrors the
+    // coverage-mask approach used by high-quality 2D text renderers: atlas
+    // filtering reconstructs the distance field, while supersampling
+    // integrates the portion of the output pixel covered by the glyph. The
+    // previous four-sample resolve exposed visible coverage steps on curves.
+    vec3 premultiplied = vec3(0.0);
+    float alpha = 0.0;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            vec2 offset = (vec2(x, y) + vec2(0.5)) * 0.25 - vec2(0.5);
+            vec4 sampleColor = shade_text_sample(
+                pixelCenter + offset,
+                atlasText,
+                renderUnderlay,
+                renderForeground,
+                renderGlow);
+            premultiplied += sampleColor.rgb * sampleColor.a;
+            alpha += sampleColor.a;
+        }
+    }
+    premultiplied *= 1.0 / 16.0;
+    alpha *= 1.0 / 16.0;
 
     vec3 rgb = alpha > 0.0001 ? premultiplied / alpha : vec3(0.0);
     return vec4(rgb, alpha);
@@ -503,7 +519,12 @@ vec4 resolve_blurred_text(
 }
 
 void main() {
-    ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
+    ivec2 localPixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 exactExtent = dispatch_extent();
+    if (localPixel.x >= exactExtent.x || localPixel.y >= exactExtent.y) {
+        return;
+    }
+    ivec2 pixel = dispatch_origin() + localPixel;
     ivec2 screenSize = imageSize(colorBuffer);
     if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
         return;

@@ -8,6 +8,7 @@
 #include <functional>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -42,6 +43,98 @@ struct PointerInputEvent
     PointerButton button = PointerButton::eOther;
     int platformButton = 0;
     InputModifiers modifiers {};
+};
+
+enum StretchDynamicsAxisFlags : uint32_t
+{
+    eStretchDynamicsNone = 0u,
+    eStretchDynamicsHorizontal = 1u << 0u,
+    eStretchDynamicsVertical = 1u << 1u,
+    eStretchDynamicsBoth =
+        eStretchDynamicsHorizontal | eStretchDynamicsVertical
+};
+
+enum class StretchDynamicsAnchor
+{
+    // Automatic fixes the edge opposite the pointer press. Minimum fixes the
+    // left/top edge; Maximum fixes the right/bottom edge.
+    eAutomatic,
+    eMinimum,
+    eMaximum
+};
+
+struct StretchDynamicsEvent
+{
+    entt::entity target = entt::null;
+    glm::vec2 framebufferPosition { 0.0f };
+    glm::vec2 displacement { 0.0f };
+    glm::vec2 scale { 1.0f };
+    float inwardProgress = 0.0f;
+    bool inwardReleaseArmed = false;
+};
+
+struct StretchDynamicsOptions
+{
+    // Pointer distance is converted into visible edge deformation. The edge
+    // nearest the press follows the pointer while the opposite edge remains
+    // fixed, so reversing direction compresses the same grabbed edge inward.
+    bool enabled = true;
+    uint32_t axes = eStretchDynamicsBoth;
+    bool stretchSelf = true;
+    bool stretchDescendants = true;
+    // After an edge has stretched outward, crossing back through the press
+    // point transfers control to the opposite edge without a new press.
+    bool directionAware = true;
+    StretchDynamicsAnchor horizontalAnchor =
+        StretchDynamicsAnchor::eAutomatic;
+    StretchDynamicsAnchor verticalAnchor =
+        StretchDynamicsAnchor::eAutomatic;
+    float dragResistance = 0.18f;
+    float maximumStretch = 0.14f;
+    float maximumCompression = 0.10f;
+    float dragDeadZone = 2.0f;
+    float returnResponse = 0.26f;
+    float returnDampingFraction = 0.82f;
+
+    // A normalized direction plus a positive release distance enables an
+    // inward gesture. Progress can foreground-blur the affected hierarchy;
+    // releasing at progress 1 invokes onInwardRelease.
+    glm::vec2 inwardDirection { 0.0f };
+    float inwardReleaseDistance = 0.0f;
+    float inwardBlurRadius = 0.0f;
+    // Disable this when the stretched entity is a surface whose contents
+    // should blur without blurring the surface itself.
+    bool inwardBlurSelf = true;
+
+    std::function<void(const StretchDynamicsEvent&)> onChanged;
+    std::function<void(const StretchDynamicsEvent&)> onRelease;
+    std::function<void(const StretchDynamicsEvent&)> onInwardRelease;
+};
+
+struct StretchDynamicsComponent
+{
+    StretchDynamicsOptions options {};
+    bool dragging = false;
+    bool settling = false;
+    glm::vec2 pressPoint { 0.0f };
+    glm::vec4 baseRect { 0.0f };
+    glm::vec2 grabSide { 1.0f };
+    uint32_t outwardAxes = eStretchDynamicsNone;
+    glm::vec2 displacement { 0.0f };
+    glm::vec2 scale { 1.0f };
+    glm::vec2 scaleVelocity { 0.0f };
+    glm::vec2 scaleOrigin { 0.0f };
+    float blurRadius = 0.0f;
+    float blurVelocity = 0.0f;
+    float inwardProgress = 0.0f;
+    double lastUpdateSeconds = 0.0;
+};
+
+struct StretchDynamicsBlockerComponent
+{
+    // Place this on a direct-manipulation region to stop a stretch component
+    // on any ancestor from beginning when the region or its children are hit.
+    bool enabled = true;
 };
 
 struct ScrollInputEvent
@@ -239,6 +332,7 @@ struct UiInputState
     entt::entity resizingPanel = entt::null;
     entt::entity activeSlider = entt::null;
     entt::entity activeScrollBar = entt::null;
+    entt::entity activeStretchDynamics = entt::null;
     entt::entity pressedInputEntity = entt::null;
     entt::entity pointerInputCapture = entt::null;
     entt::entity focusedTextInput = entt::null;
@@ -259,6 +353,7 @@ struct UiInputState
     {
         activeSlider = entt::null;
         activeScrollBar = entt::null;
+        activeStretchDynamics = entt::null;
         pressedInputEntity = entt::null;
         pointerInputCapture = entt::null;
         draggedPanel = entt::null;
@@ -364,6 +459,88 @@ inline void ui_mark_direct_manipulation_dirty(
     scene.mark_dirty(entity);
 }
 
+inline StretchDynamicsComponent& ui_enable_stretch_dynamics(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    StretchDynamicsOptions options = {})
+{
+    entt::registry& registry = scene.registry();
+    StretchDynamicsComponent dynamics = {};
+    dynamics.options = std::move(options);
+    StretchDynamicsComponent& result =
+        registry.emplace_or_replace<StretchDynamicsComponent>(
+            entity,
+            std::move(dynamics));
+
+    InteractiveVisual2DComponent visual = {};
+    visual.affectSelf = result.options.stretchSelf;
+    visual.inheritToChildren = result.options.stretchDescendants;
+    visual.blurSelf = result.options.inwardBlurSelf;
+    registry.emplace_or_replace<InteractiveVisual2DComponent>(
+        entity,
+        visual);
+    scene.mark_dirty(entity);
+    return result;
+}
+
+inline void ui_set_stretch_dynamics_blocker(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    bool blocked = true)
+{
+    entt::registry& registry = scene.registry();
+    if (entity == entt::null || !registry.valid(entity))
+    {
+        return;
+    }
+    if (blocked)
+    {
+        registry.emplace_or_replace<StretchDynamicsBlockerComponent>(entity);
+    }
+    else
+    {
+        registry.remove<StretchDynamicsBlockerComponent>(entity);
+    }
+}
+
+inline void ui_disable_stretch_dynamics(
+    Renderer2DScene& scene,
+    entt::entity entity)
+{
+    entt::registry& registry = scene.registry();
+    if (entity == entt::null || !registry.valid(entity))
+    {
+        return;
+    }
+    registry.remove<StretchDynamicsComponent>(entity);
+    registry.remove<InteractiveVisual2DComponent>(entity);
+    scene.mark_dirty(entity);
+}
+
+inline float ui_stretch_scale_for_axis(
+    float displacement,
+    float grabSide,
+    float extent,
+    float dragResistance,
+    float maximumStretch,
+    float maximumCompression,
+    float dragDeadZone)
+{
+    const float safeExtent = std::max(extent, 1.0f);
+    const float direction = displacement < 0.0f ? -1.0f : 1.0f;
+    const float effectiveDisplacement = direction * std::max(
+        std::abs(displacement) - std::max(dragDeadZone, 0.0f),
+        0.0f);
+    const float signedEdgeMovement = effectiveDisplacement *
+        (grabSide < 0.0f ? -1.0f : 1.0f);
+    const float deformation = signedEdgeMovement *
+        std::max(dragResistance, 0.0f) / safeExtent;
+    return 1.0f + std::clamp(
+        deformation,
+        -std::max(maximumCompression, 0.0f),
+        std::max(maximumStretch, 0.0f));
+}
+
 inline bool ui_shortcut_matches(const KeyboardShortcutComponent& shortcut, int key, const InputModifiers& modifiers)
 {
     if (!shortcut.enabled || shortcut.key != key)
@@ -430,6 +607,7 @@ inline bool ui_entity_visible_by_hierarchy(const entt::registry& registry, entt:
 inline bool ui_has_input_component(const entt::registry& registry, entt::entity entity)
 {
     return registry.all_of<ButtonInputComponent>(entity) ||
+        registry.all_of<StretchDynamicsComponent>(entity) ||
         registry.all_of<TextInputComponent>(entity) ||
         registry.all_of<DropTargetComponent>(entity) ||
         registry.all_of<ScrollInputComponent>(entity) ||
@@ -479,7 +657,9 @@ inline glm::vec2 ui_entity_framebuffer_size(const entt::registry& registry, entt
     return glm::max(size * transform->scale, glm::vec2(0.0f));
 }
 
-inline glm::vec4 ui_entity_framebuffer_rect(const entt::registry& registry, entt::entity entity)
+inline glm::vec4 ui_entity_base_framebuffer_rect(
+    const entt::registry& registry,
+    entt::entity entity)
 {
     const Transform2DComponent* transform = registry.try_get<Transform2DComponent>(entity);
     if (!transform)
@@ -490,6 +670,26 @@ inline glm::vec4 ui_entity_framebuffer_rect(const entt::registry& registry, entt
     const glm::vec2 size = ui_entity_framebuffer_size(registry, entity);
     const glm::vec2 minPosition = transform->position - transform->origin * size;
     return { minPosition.x, minPosition.y, size.x, size.y };
+}
+
+inline glm::vec4 ui_entity_framebuffer_rect(
+    const entt::registry& registry,
+    entt::entity entity)
+{
+    // Layout and interaction code must remain based on authored geometry.
+    // Interactive deformation is render-only and must never feed back into a
+    // subsequent layout pass.
+    return ui_entity_base_framebuffer_rect(registry, entity);
+}
+
+inline glm::vec4 ui_entity_visual_framebuffer_rect(
+    const entt::registry& registry,
+    entt::entity entity)
+{
+    return renderer2d_apply_interactive_visual_rect(
+        registry,
+        entity,
+        ui_entity_base_framebuffer_rect(registry, entity));
 }
 
 inline uint32_t ui_panel_resize_edges_for(glm::vec4 rect, glm::vec2 point, const ResizablePanelComponent& resize)

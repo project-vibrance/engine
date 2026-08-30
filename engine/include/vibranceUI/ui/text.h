@@ -11,11 +11,20 @@
 inline void apply_font_layout(const Renderer2DFontAtlas& fontAtlas, entt::registry& registry, entt::entity entity)
 {
     TextComponent& text = registry.get<TextComponent>(entity);
-    Renderer2DTextLayout layout = fontAtlas.layout_text(text.text, text.fontSize);
+    TextLayout2DComponent* textLayout =
+        registry.try_get<TextLayout2DComponent>(entity);
+    Renderer2DTextLayout layout = textLayout ?
+        fontAtlas.layout_text(text.text, text.fontSize, textLayout->options) :
+        fontAtlas.layout_text(text.text, text.fontSize);
     text.atlasId = fontAtlas.atlas_id();
     text.msdfPixelRange = fontAtlas.pixel_range();
     text.bounds = layout.bounds;
     text.glyphs = std::move(layout.glyphs);
+    if (textLayout)
+    {
+        textLayout->lineCount = layout.lineCount;
+        textLayout->resolvedLineHeight = layout.lineHeight;
+    }
 }
 
 inline bool set_text_entity(

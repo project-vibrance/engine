@@ -9,11 +9,15 @@ const uint STYLE_MEDIA_AUTO_BLACK_LIFT = 1u << 14;
 const uint STYLE_SHAPE_MASK = 1u << 15;
 const uint STYLE_MEDIA_TINT_AS_MASK = 1u << 19;
 const uint STYLE_MEDIA_PREMULTIPLIED_ALPHA = 1u << 22;
+const uint STYLE_MEDIA_SINGLE_BLUR_SAMPLE = 1u << 26;
+const uint STYLE_MEDIA_BLUR_HORIZONTAL = 1u << 27;
+const uint STYLE_MEDIA_BLUR_VERTICAL = 1u << 28;
 const uint PRIMITIVE_RECTANGLE = 1u;
 const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
 const uint PRIMITIVE_ELLIPSE = 3u;
 const uint PRIMITIVE_SQUIRCLE = 6u;
 const uint PRIMITIVE_NOTCHED_SQUIRCLE = 7u;
+const uint PRIMITIVE_BAR_VISUALISER = 10u;
 const float AUTO_BLACK_LIFT_FLOOR = 0.038;
 const float AUTO_BLACK_LIFT_RANGE = 0.18;
 const float AUTO_BLACK_LIFT_BLEND = 0.92;
@@ -21,6 +25,7 @@ const float AUTO_BLACK_LIFT_BLEND = 0.92;
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
 layout (set = 1, binding = 0) uniform sampler2D mediaTexture;
+layout (set = 2, binding = 8, rgba16f) uniform image2D mediaBlurBuffer;
 
 layout (push_constant) uniform Renderer2DConstants {
     vec4 rect;
@@ -173,9 +178,41 @@ float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float p
 }
 
 float media_primitive_mask(vec2 p) {
-    uint primitive = pc.data.x;
+    uint primitive = pc.data.x & 15u;
     if (primitive == PRIMITIVE_RECTANGLE) {
         return 1.0;
+    }
+
+    if (primitive == PRIMITIVE_BAR_VISUALISER) {
+        float barWidth = max(pc.color2.z, 0.0);
+        float gap = max(pc.color2.w, 0.0);
+        float stride = barWidth + gap;
+        if (barWidth <= 0.0 || stride <= 0.0) {
+            return 0.0;
+        }
+        float localX = p.x - pc.rect.x;
+        int barIndex = int(floor(localX / stride));
+        if (barIndex < 0 || barIndex >= 6) {
+            return 0.0;
+        }
+        float barLeft = float(barIndex) * stride;
+        if (localX < barLeft || localX > barLeft + barWidth) {
+            return 0.0;
+        }
+        float barHeight = barIndex < 4
+            ? pc.color1[barIndex]
+            : pc.color2[barIndex - 4];
+        vec2 barHalfSize = max(
+            vec2(barWidth, barHeight) * 0.5,
+            vec2(0.5));
+        vec2 barCenter = vec2(
+            pc.rect.x + barLeft + barWidth * 0.5,
+            pc.rect.y + pc.rect.w * 0.5);
+        float sdf = sd_rounded_box(
+            p - barCenter,
+            barHalfSize,
+            min(barHalfSize.x, barHalfSize.y));
+        return 1.0 - smoothstep(-0.75, 0.0, sdf);
     }
 
     vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
@@ -187,7 +224,7 @@ float media_primitive_mask(vec2 p) {
         sdf = (length(q) - 1.0) * min(halfSize.x, halfSize.y);
     } else if (primitive == PRIMITIVE_SQUIRCLE) {
         float radius = clamp(pc.effect0.x, 0.0, min(halfSize.x, halfSize.y));
-        sdf = sd_squircle_box(local, halfSize, radius, 1.0, 4.0);
+        sdf = sd_squircle_box(local, halfSize, radius, 1.0, 5.0);
     } else {
         return rounded_rect_mask(p);
     }
@@ -219,7 +256,7 @@ float notch_flare_size(vec2 size, float amount, float depth) {
     const float morphThreshold = 0.85;
     float progress = clamp((clamp(amount, 0.0, 1.0) - morphThreshold) / (1.0 - morphThreshold), 0.0, 1.0);
     float depthTarget = depth > 0.5 ? depth : clamp(size.y * 0.62, 0.0, 92.0);
-    float flareTarget = clamp(depthTarget * 0.18, 0.0, min(size.y * 0.5, size.x * 0.18));
+    float flareTarget = clamp(depthTarget * 0.18, 0.0, size.y * 0.5);
     float sizeRatio = clamp((size.y * 0.5) / max(flareTarget, 0.001), 0.0, 1.0);
     float flareT = sizeRatio * progress;
     return flareTarget * flareT * flareT;
@@ -342,8 +379,95 @@ bool media_premultiplied_alpha() {
     return (pc.data.y & STYLE_MEDIA_PREMULTIPLIED_ALPHA) != 0u;
 }
 
+float media_texture_lod() {
+    vec2 sourceSize = vec2(textureSize(mediaTexture, 0));
+    vec2 visibleSourceSize =
+        abs(pc.uvRect.zw - pc.uvRect.xy) * sourceSize;
+    vec2 texelsPerScreenPixel =
+        visibleSourceSize / max(pc.rect.zw, vec2(1.0));
+    float footprint = max(
+        texelsPerScreenPixel.x,
+        texelsPerScreenPixel.y);
+    float maximumLod = float(max(textureQueryLevels(mediaTexture) - 1, 0));
+    return clamp(log2(max(footprint, 1.0)), 0.0, maximumLod);
+}
+
+vec4 sample_media_texture_linear(vec2 uv) {
+    // Compute shaders have no implicit screen-space derivatives. Select the
+    // trilinear mip explicitly so thumbnails and raster icons receive the
+    // same minification filtering expected from a coverage-based 2D renderer.
+    return textureLod(mediaTexture, uv, media_texture_lod());
+}
+
+vec4 catmull_rom_weights(float fraction) {
+    float f2 = fraction * fraction;
+    float f3 = f2 * fraction;
+    return vec4(
+        -0.5 * fraction + f2 - 0.5 * f3,
+        1.0 - 2.5 * f2 + 1.5 * f3,
+        0.5 * fraction + 2.0 * f2 - 1.5 * f3,
+        -0.5 * f2 + 0.5 * f3);
+}
+
+vec4 sample_media_texture_cubic_level(vec2 uv, int lodLevel) {
+    vec2 sourceSize = vec2(textureSize(mediaTexture, lodLevel));
+    vec2 inverseSize = 1.0 / max(sourceSize, vec2(1.0));
+    vec2 samplePosition = clamp(uv, vec2(0.0), vec2(1.0)) * sourceSize;
+    vec2 texel1 = floor(samplePosition - vec2(0.5)) + vec2(0.5);
+    vec2 fraction = samplePosition - texel1;
+    vec4 weightsX = catmull_rom_weights(fraction.x);
+    vec4 weightsY = catmull_rom_weights(fraction.y);
+
+    // The two positive centre lobes can be combined into one bilinear lookup.
+    // This is the same 4x4 cubic reconstruction as sixteen point samples, but
+    // uses nine filtered lookups and remains practical for UI artwork.
+    vec2 centreWeights = vec2(
+        max(weightsX.y + weightsX.z, 0.0001),
+        max(weightsY.y + weightsY.z, 0.0001));
+    vec2 centreOffset = vec2(
+        weightsX.z / centreWeights.x,
+        weightsY.z / centreWeights.y);
+    vec3 sampleX = vec3(
+        texel1.x - 1.0,
+        texel1.x + centreOffset.x,
+        texel1.x + 2.0);
+    vec3 sampleY = vec3(
+        texel1.y - 1.0,
+        texel1.y + centreOffset.y,
+        texel1.y + 2.0);
+    vec3 combinedX = vec3(weightsX.x, centreWeights.x, weightsX.w);
+    vec3 combinedY = vec3(weightsY.x, centreWeights.y, weightsY.w);
+    vec2 minimumUv = inverseSize * 0.5;
+    vec2 maximumUv = vec2(1.0) - minimumUv;
+
+    vec4 result = vec4(0.0);
+    for (int y = 0; y < 3; ++y) {
+        for (int x = 0; x < 3; ++x) {
+            vec2 sampleUv = clamp(
+                vec2(sampleX[x], sampleY[y]) * inverseSize,
+                minimumUv,
+                maximumUv);
+            result += textureLod(
+                mediaTexture,
+                sampleUv,
+                float(lodLevel)) * combinedX[x] * combinedY[y];
+        }
+    }
+    return clamp(result, vec4(0.0), vec4(1.0));
+}
+
 vec4 sample_media_texture(vec2 uv) {
-    return texture(mediaTexture, uv);
+    float lod = media_texture_lod();
+    int lowerLod = int(floor(lod));
+    int upperLod = min(
+        lowerLod + 1,
+        max(textureQueryLevels(mediaTexture) - 1, 0));
+    vec4 lower = sample_media_texture_cubic_level(uv, lowerLod);
+    if (upperLod == lowerLod) {
+        return lower;
+    }
+    vec4 upper = sample_media_texture_cubic_level(uv, upperLod);
+    return mix(lower, upper, fract(lod));
 }
 
 vec4 sample_media(vec2 uv) {
@@ -366,12 +490,26 @@ vec4 sample_media(vec2 uv) {
     vec3 weightedRgb = vec3(0.0);
     float weightedAlpha = 0.0;
     float weightSum = 0.0;
-    for (int y = -radius; y <= radius; y += stepSize) {
-        for (int x = -radius; x <= radius; x += stepSize) {
+    // The 2-D Gaussian is separable. Cache its one-dimensional axis weights
+    // once instead of evaluating exp() for every tap in the square kernel.
+    // A radius of 32 with step 1 is the maximum 65-tap axis.
+    float axisWeights[65];
+    int tapCount = 0;
+    for (int offset = -radius; offset <= radius; offset += stepSize) {
+        axisWeights[tapCount] = exp(
+            -(float(offset * offset)) / (2.0 * sigma * sigma));
+        ++tapCount;
+    }
+    for (int yIndex = 0; yIndex < tapCount; ++yIndex) {
+        int y = -radius + yIndex * stepSize;
+        for (int xIndex = 0; xIndex < tapCount; ++xIndex) {
+            int x = -radius + xIndex * stepSize;
             vec2 offset = vec2(float(x), float(y));
-            float weight = exp(-dot(offset, offset) / (2.0 * sigma * sigma));
+            float weight = axisWeights[xIndex] * axisWeights[yIndex];
             vec2 sampleUv = clamp(uv + offset * uvPerScreenPixel, uvMin, uvMax);
-            vec4 sampleColor = sample_media_texture(sampleUv);
+            // Gaussian reconstruction already removes high-frequency edges;
+            // keep its many taps linear rather than nesting the cubic kernel.
+            vec4 sampleColor = sample_media_texture_linear(sampleUv);
             weightedRgb += (premultiplied ? sampleColor.rgb : sampleColor.rgb * sampleColor.a) * weight;
             weightedAlpha += sampleColor.a * weight;
             weightSum += weight;
@@ -382,6 +520,75 @@ vec4 sample_media(vec2 uv) {
     vec3 rgb = premultiplied
         ? weightedRgb / max(weightSum, 0.0001)
         : (weightedAlpha > 0.0001 ? weightedRgb / weightedAlpha : vec3(0.0));
+    return vec4(rgb, alpha);
+}
+
+vec4 sample_media_blur_horizontal(vec2 samplePoint) {
+    int radius = clamp(int(round(pc.effect0.z)), 0, 32);
+    int stepSize = max(1, radius / 6);
+    float sigma = max(float(radius) * 0.5, 1.0);
+    vec2 localUv = clamp(
+        (samplePoint - pc.rect.xy) / max(pc.rect.zw, vec2(1.0)),
+        vec2(0.0),
+        vec2(1.0));
+    vec2 uv = mix(pc.uvRect.xy, pc.uvRect.zw, localUv);
+    vec2 uvPerScreenPixel =
+        abs(pc.uvRect.zw - pc.uvRect.xy) / max(pc.rect.zw, vec2(1.0));
+    vec2 uvMin = min(pc.uvRect.xy, pc.uvRect.zw);
+    vec2 uvMax = max(pc.uvRect.xy, pc.uvRect.zw);
+    bool premultiplied = media_premultiplied_alpha();
+
+    vec3 weightedRgb = vec3(0.0);
+    float weightedAlpha = 0.0;
+    float weightSum = 0.0;
+    for (int x = -radius; x <= radius; x += stepSize) {
+        float weight = exp(
+            -(float(x * x)) / (2.0 * sigma * sigma));
+        vec2 sampleUv = clamp(
+            uv + vec2(float(x), 0.0) * uvPerScreenPixel,
+            uvMin,
+            uvMax);
+        vec4 sampleColor = sample_media_texture_linear(sampleUv);
+        weightedRgb +=
+            (premultiplied ? sampleColor.rgb :
+                sampleColor.rgb * sampleColor.a) * weight;
+        weightedAlpha += sampleColor.a * weight;
+        weightSum += weight;
+    }
+    return vec4(
+        weightedRgb / max(weightSum, 0.0001),
+        weightedAlpha / max(weightSum, 0.0001));
+}
+
+vec4 sample_media_blur_vertical(vec2 samplePoint) {
+    int radius = clamp(int(round(pc.effect0.z)), 0, 32);
+    int stepSize = max(1, radius / 6);
+    float sigma = max(float(radius) * 0.5, 1.0);
+    ivec2 sourceSize = imageSize(mediaBlurBuffer);
+    ivec2 centerPixel = ivec2(floor(samplePoint));
+    bool premultiplied = media_premultiplied_alpha();
+
+    vec3 weightedRgb = vec3(0.0);
+    float weightedAlpha = 0.0;
+    float weightSum = 0.0;
+    for (int y = -radius; y <= radius; y += stepSize) {
+        float weight = exp(
+            -(float(y * y)) / (2.0 * sigma * sigma));
+        ivec2 sourcePixel = clamp(
+            centerPixel + ivec2(0, y),
+            ivec2(0),
+            sourceSize - ivec2(1));
+        vec4 sampleColor = imageLoad(mediaBlurBuffer, sourcePixel);
+        weightedRgb += sampleColor.rgb * weight;
+        weightedAlpha += sampleColor.a * weight;
+        weightSum += weight;
+    }
+
+    float alpha = weightedAlpha / max(weightSum, 0.0001);
+    vec3 rgb = premultiplied
+        ? weightedRgb / max(weightSum, 0.0001)
+        : (weightedAlpha > 0.0001 ?
+            weightedRgb / weightedAlpha : vec3(0.0));
     return vec4(rgb, alpha);
 }
 
@@ -441,15 +648,20 @@ vec3 apply_media_auto_black_lift(vec3 rgb, float alpha, float backgroundFactor) 
     return clamp(mix(rgb, balanced, strength), vec3(0.0), vec3(1.0));
 }
 
-vec4 shade_media_sample(vec2 samplePoint, float backgroundFactor) {
-    SurfacePoint surface = surface_point_for_pixel(samplePoint);
+vec4 shade_media_surface(
+    SurfacePoint surface,
+    vec2 samplePoint,
+    float backgroundFactor) {
     if (!surface.inside) {
         return vec4(0.0);
     }
 
     vec2 localUv = clamp(surface.uv, vec2(0.0), vec2(1.0));
     vec2 uv = mix(pc.uvRect.xy, pc.uvRect.zw, localUv);
-    vec4 src = unpremultiply_media(sample_media(uv));
+    vec4 filtered = (pc.data.y & STYLE_MEDIA_BLUR_VERTICAL) != 0u
+        ? sample_media_blur_vertical(samplePoint)
+        : sample_media(uv);
+    vec4 src = unpremultiply_media(filtered);
     vec3 tintRgb = media_tint_rgb(localUv);
     if ((pc.data.y & STYLE_MEDIA_TINT_AS_MASK) != 0u) {
         src.rgb = tintRgb;
@@ -459,8 +671,26 @@ vec4 shade_media_sample(vec2 samplePoint, float backgroundFactor) {
     src.rgb = apply_media_color_adjustment(src.rgb);
     src.rgb = apply_media_auto_black_lift(src.rgb, src.a, backgroundFactor);
     src.a *= media_alpha_mask(localUv) * pc.effect0.w;
-    src.a *= media_primitive_mask(pc.rect.xy + localUv * pc.rect.zw);
-    src.a *= inherited_shape_mask_alpha(samplePoint);
+    return src.a > 0.001 ? src : vec4(0.0);
+}
+
+float media_geometry_coverage(SurfacePoint surface, vec2 samplePoint) {
+    if (!surface.inside) {
+        return 0.0;
+    }
+    vec2 localUv = clamp(surface.uv, vec2(0.0), vec2(1.0));
+    return media_primitive_mask(pc.rect.xy + localUv * pc.rect.zw) *
+        inherited_shape_mask_alpha(samplePoint);
+}
+
+vec4 shade_media_sample(vec2 samplePoint, float backgroundFactor) {
+    SurfacePoint surface = surface_point_for_pixel(samplePoint);
+    float coverage = media_geometry_coverage(surface, samplePoint);
+    if (coverage <= 0.0) {
+        return vec4(0.0);
+    }
+    vec4 src = shade_media_surface(surface, samplePoint, backgroundFactor);
+    src.a *= coverage;
     return src.a > 0.001 ? src : vec4(0.0);
 }
 
@@ -485,6 +715,35 @@ vec4 resolve_accumulated_media(vec3 premultiplied, float alpha, float weightSum)
 }
 
 vec4 resolve_filtered_media(vec2 pixelCenter, float backgroundFactor) {
+    if ((pc.data.y & STYLE_MEDIA_SINGLE_BLUR_SAMPLE) != 0u &&
+        (pc.data.y & STYLE_BLUR) != 0u) {
+        const vec2 offsets[4] = vec2[](
+            vec2(-0.375, -0.125),
+            vec2( 0.125, -0.375),
+            vec2(-0.125,  0.375),
+            vec2( 0.375,  0.125));
+        float coverage = 0.0;
+        for (int index = 0; index < 4; ++index) {
+            vec2 samplePoint = pixelCenter + offsets[index];
+            SurfacePoint surface = surface_point_for_pixel(samplePoint);
+            coverage += media_geometry_coverage(surface, samplePoint);
+        }
+        if (coverage <= 0.0) {
+            return vec4(0.0);
+        }
+
+        SurfacePoint centerSurface = surface_point_for_pixel(pixelCenter);
+        vec4 src = shade_media_surface(
+            centerSurface,
+            pixelCenter,
+            backgroundFactor);
+        if (src.a <= 0.001) {
+            return vec4(0.0);
+        }
+        src.a *= coverage * 0.25;
+        return src.a > 0.001 ? src : vec4(0.0);
+    }
+
     vec3 premultiplied = vec3(0.0);
     float alpha = 0.0;
     float weightSum = 0.0;
@@ -517,6 +776,14 @@ vec4 resolve_transformed_media(vec2 pixelCenter, float backgroundFactor) {
 }
 
 void main() {
+    uint dispatchWidth = (pc.data.x >> 4u) & 16383u;
+    uint dispatchHeight = (pc.data.x >> 18u) & 16383u;
+    if (dispatchWidth > 0u && dispatchHeight > 0u &&
+        (gl_GlobalInvocationID.x >= dispatchWidth ||
+            gl_GlobalInvocationID.y >= dispatchHeight)) {
+        return;
+    }
+
     ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
     ivec2 screenSize = imageSize(colorBuffer);
     if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {
@@ -524,6 +791,11 @@ void main() {
     }
 
     vec2 p = vec2(pixel) + vec2(0.5);
+    if ((pc.data.y & STYLE_MEDIA_BLUR_HORIZONTAL) != 0u) {
+        imageStore(mediaBlurBuffer, pixel, sample_media_blur_horizontal(p));
+        return;
+    }
+
     bool transformed = (pc.data.y & STYLE_TRANSFORM_2_5D) != 0u;
     float samplePad = 1.0;
     if (!transformed &&

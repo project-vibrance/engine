@@ -2,6 +2,13 @@
 
 #include <cstdint>
 
+#if defined(_WIN32)
+#define VIBRANCE_COMPOSITION_CALL __cdecl
+#else
+// The engine's portable presenter stub includes this POD ABI header too.
+#define VIBRANCE_COMPOSITION_CALL
+#endif
+
 constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 12u;
 constexpr std::uint32_t VIBRANCE_COMPOSITION_MAX_BUFFERS = 3u;
 
@@ -74,19 +81,28 @@ struct VibranceCompositionRegion
 #pragma pack(pop)
 
 using VibranceCompositionHandle = void*;
-using VibranceCompositionAbiVersionFn = std::uint32_t(__cdecl*)();
-using VibranceCompositionLastErrorFn = const char*(__cdecl*)();
-using VibranceCompositionCreateFn = VibranceCompositionHandle(__cdecl*)(
+using VibranceCompositionAbiVersionFn =
+    std::uint32_t(VIBRANCE_COMPOSITION_CALL*)();
+using VibranceCompositionLastErrorFn =
+    const char*(VIBRANCE_COMPOSITION_CALL*)();
+using VibranceCompositionCreateFn =
+    VibranceCompositionHandle(VIBRANCE_COMPOSITION_CALL*)(
     const VibranceCompositionCreateInfo*,
     VibranceCompositionBuffer*,
     std::uint32_t);
-using VibranceCompositionDestroyFn = void(__cdecl*)(VibranceCompositionHandle);
-using VibranceCompositionAcquireFn = std::uint32_t(__cdecl*)(VibranceCompositionHandle, std::uint32_t);
-using VibranceCompositionPresentFn = std::uint32_t(__cdecl*)(
+using VibranceCompositionDestroyFn =
+    void(VIBRANCE_COMPOSITION_CALL*)(VibranceCompositionHandle);
+using VibranceCompositionAcquireFn =
+    std::uint32_t(VIBRANCE_COMPOSITION_CALL*)(
+        VibranceCompositionHandle,
+        std::uint32_t);
+using VibranceCompositionPresentFn =
+    std::uint32_t(VIBRANCE_COMPOSITION_CALL*)(
     VibranceCompositionHandle,
     std::uint32_t,
     const VibranceCompositionPresentInfo*);
-using VibranceCompositionSetRegionsFn = std::uint32_t(__cdecl*)(
+using VibranceCompositionSetRegionsFn =
+    std::uint32_t(VIBRANCE_COMPOSITION_CALL*)(
     VibranceCompositionHandle,
     const VibranceCompositionRegion*,
     std::uint32_t);
@@ -105,3 +121,5 @@ constexpr const char* VIBRANCE_COMPOSITION_PRESENT_SYMBOL =
     "vibrance_composition_present";
 constexpr const char* VIBRANCE_COMPOSITION_SET_REGIONS_SYMBOL =
     "vibrance_composition_set_regions";
+
+#undef VIBRANCE_COMPOSITION_CALL

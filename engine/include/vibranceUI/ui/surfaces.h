@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -598,6 +599,175 @@ inline std::vector<entt::entity> ui_create_panel_background_layers(
         alwaysOnTop);
 }
 
+// Describes a renderer-owned liquid connection between two circular surfaces.
+// Endpoint centres and diameter are framebuffer-space values, which makes the
+// same primitive usable for independently positioned roots, floating panels,
+// and drag-to-dock interactions without introducing a layout-parent coupling.
+struct UiLiquidMergeOptions
+{
+    bool enabled = true;
+    glm::vec2 firstCenter { 0.0f };
+    glm::vec2 secondCenter { 0.0f };
+    float diameter = 38.0f;
+    float amount = 0.0f;
+    float opacity = 1.0f;
+    ShapeStyleComponent style = make_solid_style(
+        "#000000FF",
+        "#00000000",
+        0.0f,
+        1.0f);
+    int32_t layer = 0;
+    uint32_t order = 0u;
+    bool alwaysOnTop = false;
+    bool dynamicCache = true;
+};
+
+inline bool ui_set_liquid_merge_enabled(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    bool enabled)
+{
+    entt::registry& registry = scene.registry();
+    if (entity == entt::null || !registry.valid(entity))
+    {
+        return false;
+    }
+    RenderLayer2DComponent* layer =
+        registry.try_get<RenderLayer2DComponent>(entity);
+    if (!layer || layer->visible == enabled)
+    {
+        return false;
+    }
+    layer->visible = enabled;
+    scene.mark_dirty(entity);
+    return true;
+}
+
+inline bool ui_update_liquid_merge(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    const UiLiquidMergeOptions& options)
+{
+    entt::registry& registry = scene.registry();
+    if (entity == entt::null || !registry.valid(entity))
+    {
+        return false;
+    }
+
+    const float diameter = std::max(options.diameter, 0.0f);
+    const float amount = std::clamp(options.amount, 0.0f, 1.0f);
+    const float opacity = std::clamp(options.opacity, 0.0f, 1.0f);
+    const glm::vec2 delta = options.secondCenter - options.firstCenter;
+    const float centerDistance = glm::length(delta);
+    const bool visible = options.enabled && diameter > 0.001f &&
+        amount > 0.001f && opacity > 0.001f;
+    bool changed = false;
+
+    if (RenderLayer2DComponent* layer =
+        registry.try_get<RenderLayer2DComponent>(entity))
+    {
+        if (layer->visible != visible ||
+            layer->layer != options.layer ||
+            layer->order != options.order ||
+            layer->alwaysOnTop != options.alwaysOnTop)
+        {
+            layer->visible = visible;
+            layer->layer = options.layer;
+            layer->order = options.order;
+            layer->alwaysOnTop = options.alwaysOnTop;
+            changed = true;
+        }
+    }
+    if (ShapeComponent* shape = registry.try_get<ShapeComponent>(entity))
+    {
+        const glm::vec2 size {
+            std::max(centerDistance + diameter, 1.0f),
+            std::max(diameter, 1.0f)
+        };
+        if (shape->primitive != Renderer2DPrimitive::eLiquidBridge ||
+            shape->size != size ||
+            shape->notchAmount != amount)
+        {
+            shape->primitive = Renderer2DPrimitive::eLiquidBridge;
+            shape->size = size;
+            shape->notchAmount = amount;
+            changed = true;
+        }
+    }
+    if (Transform2DComponent* transform =
+        registry.try_get<Transform2DComponent>(entity))
+    {
+        const glm::vec2 position =
+            (options.firstCenter + options.secondCenter) * 0.5f;
+        const glm::vec2 origin { 0.5f, 0.5f };
+        const float rotationRadians = std::atan2(delta.y, delta.x);
+        if (transform->position != position ||
+            transform->origin != origin ||
+            transform->rotationRadians != rotationRadians)
+        {
+            transform->position = position;
+            transform->origin = origin;
+            transform->rotationRadians = rotationRadians;
+            changed = true;
+        }
+    }
+    if (ShapeStyleComponent* style =
+        registry.try_get<ShapeStyleComponent>(entity))
+    {
+        ShapeStyleComponent nextStyle = options.style;
+        nextStyle.opacity = opacity;
+        const bool styleChanged =
+            style->fill != nextStyle.fill ||
+            style->color0 != nextStyle.color0 ||
+            style->color1 != nextStyle.color1 ||
+            style->outlineColor != nextStyle.outlineColor ||
+            style->gradientStart != nextStyle.gradientStart ||
+            style->gradientEnd != nextStyle.gradientEnd ||
+            style->outlineWidth != nextStyle.outlineWidth ||
+            style->edgeSoftness != nextStyle.edgeSoftness ||
+            style->opacity != nextStyle.opacity ||
+            style->backdropBlurRadius != nextStyle.backdropBlurRadius ||
+            style->backdropBlurPasses != nextStyle.backdropBlurPasses ||
+            style->backdropBlurOpacity != nextStyle.backdropBlurOpacity ||
+            style->backdropBlurFollowsFillAlpha !=
+                nextStyle.backdropBlurFollowsFillAlpha ||
+            style->backdropBlurClipToInheritedMask !=
+                nextStyle.backdropBlurClipToInheritedMask;
+        if (styleChanged)
+        {
+            *style = nextStyle;
+            changed = true;
+        }
+    }
+    if (changed)
+    {
+        scene.mark_dirty(entity);
+    }
+    return changed;
+}
+
+inline entt::entity ui_create_liquid_merge(
+    UiBuilder& ui,
+    const UiLiquidMergeOptions& options = {})
+{
+    entt::entity entity = ui.scene().create_shape(
+        { 0.0f, 0.0f },
+        { 1.0f, 1.0f },
+        options.style,
+        Renderer2DPrimitive::eLiquidBridge);
+    ui.set_layer(
+        entity,
+        options.layer,
+        options.order,
+        options.alwaysOnTop);
+    if (options.dynamicCache)
+    {
+        ui.set_dynamic_cache(entity, false);
+    }
+    ui_update_liquid_merge(ui.scene(), entity, options);
+    return entity;
+}
+
 enum class UiScrollFadeEdge
 {
     eTop,
@@ -1007,6 +1177,9 @@ inline UiScrollViewHandle ui_create_scroll_view(
         Renderer2DPrimitive::eRectangle);
     ui.set_layer(handle.viewport, options.viewportLayer, options.viewportOrder);
     ui.attach_fill(handle.viewport, parent, options.viewportMargin);
+    // A transparent viewport must still own pointer hits in the gaps between
+    // its visible children so input cannot leak to an interactive ancestor.
+    registry.emplace_or_replace<HitRegion2DComponent>(handle.viewport);
     if (options.maskViewport)
     {
         scene.enable_mask(handle.viewport, false);
@@ -1122,5 +1295,8 @@ inline UiScrollViewHandle ui_create_scroll_view(
         }
     };
     registry.emplace<ScrollInputComponent>(handle.viewport, std::move(scroll));
+    // Scrolling is direct manipulation and must not accidentally activate a
+    // stretch gesture owned by a surrounding interface.
+    ui_set_stretch_dynamics_blocker(scene, handle.viewport);
     return handle;
 }

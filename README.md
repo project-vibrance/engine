@@ -4,9 +4,10 @@
 > **`vibranceUI`**_, developed by **[59xa](https://github.com/59xa)** and **[Florian Butz](https://github.com/FlorianButz)**, is licenced under the **[CC BY-SA 4.0](LICENCE)** copyleft licence._
 
 **`vibranceUI`** is a standalone C++20 SDK. It owns the renderer, UI,
-windowing adapter, audio, media, engine shaders, and all engine implementation
-code. Applications consume its installed CMake package and never add this
-source tree with `add_subdirectory()`.
+windowing adapter, audio, media, neutral system-notification providers and
+callback-driven cards, engine shaders, and all engine implementation code.
+Applications consume its installed CMake package and never add this source tree
+with `add_subdirectory()`.
 
 ## Build and install
 
@@ -41,15 +42,312 @@ A downstream CMake project needs only:
 ```cmake
 find_package(vibrance_engine 0.1 CONFIG REQUIRED)
 target_link_libraries(my_app PRIVATE vibrance::engine)
+vibrance_engine_copy_runtime_companions(my_app)
 ```
 
 Pass the SDK prefix through `CMAKE_PREFIX_PATH`, or point the app's
 `VIBRANCE_ENGINE_ROOT` cache variable at it.
 
+Reusable object models and retained controls are part of this same target; no
+per-control library or implementation source needs to be added downstream:
+
+```cpp
+#include <vibranceUI/time/countdown_timer.h>
+#include <vibranceUI/audio/loopback_capture.h>
+#include <vibranceUI/audio/spectrum.h>
+#include <vibranceUI/display/display.h>
+#include <vibranceUI/media/media.h>
+#include <vibranceUI/notifications/notifications.h>
+#include <vibranceUI/ui/components.h>
+#include <array>
+
+CountdownTimer timer { 5 * 60 };
+timer.start(0.0); // Supply the application's monotonic time.
+
+AudioSpectrumProcessor spectrum;
+std::array<float, AudioSpectrumProcessor::kFftLength> monoSamples {};
+spectrum.push_samples(monoSamples); // Samples can come from any source.
+spectrum.update(1.0 / 60.0);
+
+// Or let the engine's platform source feed the processor directly.
+AudioLoopbackCapture capture(spectrum);
+capture.start();
+
+// UiContextMenuItem, UiAnimatedCharacterTextView, and the dialog builders are
+// ready to use with any UiBuilder owned by an engine window or panel.
+```
+
+`<vibranceUI/media/media.h>` similarly exposes UTF-8/time/aspect helpers,
+artwork presentation and playback animation, `RevisionedMediaSlot`, and
+`MediaArtworkView`. It also includes the portable `GlobalMediaSession` provider,
+status, commands, and snapshot contract from `<vibranceUI/media/session.h>`.
+The optional installed Win32 companion supplies GSMTC; other platforms fail
+closed until a provider is implemented. Applications provide refresh cadence,
+optimistic UI state, and product routing, while the SDK owns provider and
+renderer-local behavior.
+
+`<vibranceUI/notifications/notifications.h>` exposes
+`SystemNotificationProvider`, access state, revisioned snapshots, neutral
+items, explicit dismissal/source-activation commands, and application-icon
+resolution. The provider never persists, claims, groups, or displays records;
+applications retain those product decisions. On Windows it privately loads the
+installed shared interop companion. Other platforms are safe to compile and
+construct and return an explicit unsupported diagnostic.
+
+`<vibranceUI/notifications/card.h>` builds a complete retained notification card
+from presentation-only strings, media handles, and callbacks. It also owns text
+filtering, message wrapping, height measurement, and compact group-fan setup.
+The options object has useful defaults, so an app does not need to reproduce the
+card's entity graph:
+
+```cpp
+UiNotificationCardOptions card {};
+card.parent = notificationRoot;
+card.content = {
+    .header = "Calendar",
+    .title = "Stand-up",
+    .message = "The meeting starts in ten minutes.",
+    .elapsedText = "now"
+};
+card.callbacks.activate = [] { open_calendar(); };
+card.callbacks.dismiss = [] { dismiss_from_model(); };
+
+UiNotificationCardHandle view = ui_create_notification_card(
+    ui, fontAtlas, localisation, card);
+```
+
+`<vibranceUI/notifications/stack_layout.h>` independently places measured
+cards down a right-edge stack, including compact backing-layer depth. Supply
+only sizes and group counts; no application notification model is required.
+
+```cpp
+SystemNotificationProvider notifications;
+if (notifications.bridge_loaded())
+{
+    // Call request_access() from a user-initiated permission flow when needed.
+    notifications.refresh(); // Read-only: this never claims native records.
+    for (const SystemNotificationItem& item : notifications.snapshot().items)
+    {
+        consume_notification(item);
+        // Persist application state before an optional dismiss(item.providerId).
+    }
+}
+```
+
+`<vibranceUI/display/display.h>` provides stable monitor targeting, independent
+feature trackers, edge geometry, and optional JSON preference storage. Product
+code supplies its preference keys and decides which interface owns each
+tracker.
+
+Use `<vibranceUI/engine.h>` when a small application prefers one SDK umbrella
+include. Narrow headers remain available for larger translation units.
+
 The installed package exposes `vibrance_engine_MANIFEST_FILE` for build tools.
 At runtime, include `<vibranceUI/core/engine_manifest.h>` and call
 `vibrance_engine_manifest()` to query the same engine name, semantic version,
 and ISO last-updated date directly from the loaded DLL.
+
+## Start with one window
+
+`UiWindow` is the default entry point for a normal application window. It owns
+GLFW, the surface-bound `Engine`, custom chrome, input callbacks, resizing, and
+the frame loop:
+
+```cpp
+#include <vibranceUI/engine.h>
+#include <utility>
+
+int main()
+{
+    UiWindowOptions options {};
+    options.title = "Hello Vibrance";
+    options.size = { 720, 480 };
+    options.fontPath = "assets/Inter-Regular.ttf";
+    options.build = [](UiWindowContext& view) {
+        const entt::entity card = view.ui.block("#20242EFF", 20.0f);
+        view.ui.place(card).inside(view.root).fill(24.0f).layer(0);
+
+        const entt::entity title = view.ui.text(
+            "Hello, world",
+            view.fontAtlas,
+            28.0f);
+        view.ui.place(title)
+            .inside(card)
+            .at(UiAlignment::eTopLeft)
+            .offset(24.0f, 24.0f)
+            .layer(1);
+    };
+
+    UiWindow window(std::move(options));
+    return window.run();
+}
+```
+
+Placement values are logical pixels and remain DPI-aware. Use
+`GlfwWindowHost` when an application needs several independently controlled
+windows or monitor-edge placement. The existing `GlfwPanelWindowHost`,
+`Renderer2DScene`, and raw GLFW adapters remain available for specialized
+chrome, retained scene mutation, and custom process loops.
+
+### Add an animated scroll viewport
+
+`UiScrollViewportOptions` is the application-facing scroll control. One call
+creates its positioned surface, rounded mask, wheel input, moving content,
+scrollbar, and a border that fades in while shrinking to the viewport. The
+surface, content, and scrollbar remain stationary throughout that entrance.
+The content callback runs immediately and exposes the correct parent and render
+layer:
+
+```cpp
+UiScrollViewportOptions countries {};
+countries.contentHeight = 24.0f + names.size() * 32.0f;
+countries.buildContent = [&](const UiScrollViewportBuildContext& content) {
+    for (std::size_t index = 0; index < names.size(); ++index)
+    {
+        const entt::entity label = content.ui.text(
+            names[index], view.fontAtlas, 14.0f);
+        content.ui.place(label)
+            .inside(content.content)
+            .at(UiAlignment::eTopLeft)
+            .offset(12.0f, 12.0f + index * 32.0f)
+            .layer(content.layer, content.order + index);
+    }
+};
+
+UiScrollViewportHandle viewport = ui_create_scroll_viewport(
+    view.ui,
+    view.root,
+    UiAlignment::eCenter,
+    { 0.0f, 40.0f },
+    { 456.0f, 248.0f },
+    std::move(countries));
+```
+
+All dimensions are logical pixels. Set `entrance.enabled = false` for an
+already-visible viewport; colors, outline, corner radius, scrollbar behavior,
+edge fades, and scroll callbacks are regular options. The returned handle also
+exposes each retained entity for advanced styling without requiring it.
+
+Window hosts also expose independent initialization policy for focus, taskbar
+presence, and Alt-Tab/window-cycle presence. Disabling one of these policies
+causes the native window to be configured before its first visible frame.
+`GlfwWindowPositionOptions` adds reusable monitor-work-area alignment (including
+centering, stable monitor ids, reference-point targeting, margins, and offsets)
+across `GlfwWindowHost`, `GlfwPanelWindowHost`, and `UiWindow`.
+`GlfwPanelWindowHostOptions::topDragHeight` can independently opt a borderless
+panel into a logical-pixel top drag strip after its template factory runs;
+title and content geometry remain unchanged, and zero disables the strip.
+Use `GlfwPanelWindowHost::refresh_template()` for later rebuilds so this and
+other host-owned policies are reapplied.
+
+### Build reusable page stacks
+
+`<vibranceUI/ui/page_stack.h>` owns the common keep-alive page pattern: each
+page is an entity subtree, exactly one registered root is visible, and page IDs
+connect directly to a history-enabled icon button or navigation cluster. Apps
+do not need one visibility boolean per page.
+
+```cpp
+enum class Page : std::size_t
+{
+    eWelcome,
+    eOptions,
+    eSummary
+};
+
+const entt::entity welcome = ui_create_page_root(view.ui, view.root);
+const entt::entity options = ui_create_page_root(view.ui, view.root);
+const entt::entity summary = ui_create_page_root(view.ui, view.root);
+
+const UiPageStackHandle pages = ui_create_page_stack(
+    view.ui.scene(),
+    {
+        { ui_page_id(Page::eWelcome), welcome },
+        { ui_page_id(Page::eOptions), options },
+        { ui_page_id(Page::eSummary), summary }
+    },
+    { .initialPage = ui_page_id(Page::eWelcome) });
+
+UiIconButtonOptions backOptions {};
+backOptions.useHistory = true;
+backOptions.historyDirection = UiNavigationDirection::eBack;
+backOptions.initialPage = ui_page_id(Page::eWelcome);
+backOptions.onNavigatePage =
+    ui_page_stack_navigation_callback(view.ui.scene(), pages);
+```
+
+Build controls beneath the corresponding root, whether their builders are in
+the same translation unit or another `.cpp`. Forward links call
+`ui_navigation_push_history`; direct, non-history selection can call
+`ui_page_stack_show`. `ui_page_stack_add_page` supports a root registered after
+the stack is created. Duplicate IDs/roots and unknown destinations are rejected
+without hiding the active page.
+
+### Lay out wrapped text blocks
+
+`<vibranceUI/ui/text_block.h>` adds document-style text without requiring apps
+to insert manual newlines. Block placement and line alignment are independent,
+so a centered fixed-width document can still use a shared left edge:
+
+```cpp
+UiTextBlockOptions body {};
+body.width = 520.0f;
+body.fontSize = 14.0f;
+body.wrapMode = TextWrapMode2D::eWord;
+body.textAlignment = TextHorizontalAlignment2D::eStart;
+body.lineHeightMultiplier = 0.96f;
+body.lineSpacing = -0.5f;
+body.paragraphSpacing = 6.0f;
+body.characterSpacing = 0.0f;
+body.wordSpacing = 0.0f;
+body.placement = UiAlignment::eCenter;
+body.style = make_flat_text_style("#55585EFF");
+
+UiTextBlockHandle paragraph = ui_create_text_block(
+    view.ui,
+    view.fontAtlas,
+    pageRoot,
+    "A long paragraph wraps automatically inside the authored width.",
+    body);
+```
+
+Use `eStart`, `eCenter`, `eEnd`, or `eJustify` for each line and `eWord`,
+`eCharacter`, or `eNone` for wrapping. Start/End follow right-to-left text
+direction. Explicit newlines receive `paragraphSpacing`; automatically wrapped
+lines receive the chosen line height and line spacing. `set_text_entity`
+reflows an existing block, including after localization changes, and
+`ui_set_text_block_layout` updates its editorial settings in logical pixels.
+Use a shared-width `layout_group` or `UiStackLayout` when headings and body
+blocks need the same edge and controlled spacing between differently styled
+sections.
+
+## Reuse liquid merge transitions
+
+`UiLiquidMergeOptions` in `<vibranceUI/ui/surfaces.h>` exposes the analytic
+liquid connection used by detachable interfaces. It works between any two
+circular surfaces or equal-height pill end caps and is not tied to an island or
+timer. Endpoint centres and diameter use framebuffer coordinates so the two
+surfaces do not need a common layout parent.
+
+```cpp
+UiLiquidMergeOptions merge {};
+merge.enabled = liquidMergeEnabled;
+merge.firstCenter = mainSurfaceCenter;
+merge.secondCenter = detachedSurfaceCenter;
+merge.diameter = surfaceDiameter;
+merge.amount = mergeProgress; // 0.0 detached, 1.0 merged
+merge.opacity = mergeOpacity;
+merge.layer = -1;
+
+entt::entity bridge = ui_create_liquid_merge(ui, merge);
+
+// Update the same entity while either endpoint moves.
+ui_update_liquid_merge(ui.scene(), bridge, merge);
+```
+
+Set `enabled` to `false`, or call `ui_set_liquid_merge_enabled`, when an
+interface should render without the effect. Paint, ordering, always-on-top
+behaviour, and dynamic-cache participation are also regular options.
 
 ## Renderer and system-backdrop backends
 
@@ -98,9 +396,11 @@ macOS implementation the same call will select `eMacOSNative`; no macOS Liquid
 Glass code is compiled for now.
 
 MinGW builds the reusable engine normally and invokes MSVC only for the small
-C++/WinRT companion `vibrance_win32_composition.dll`. Installing the engine
-places that companion beside the engine DLL, and the exported CMake package
-publishes its path so downstream applications can copy or install it.
+`vibrance_win32_composition.dll` and `vibrance_win32_interop.dll` companions.
+Installing the engine places them beside the engine DLL. The exported CMake
+package publishes their paths and
+`vibrance_engine_copy_runtime_companions(target)` so downstream applications
+need no MSVC discovery or custom build/copy rules.
 
 ## Dependency policy
 

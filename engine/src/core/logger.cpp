@@ -99,14 +99,15 @@ namespace
     }
 }
 
-Logger::Logger() 
+Logger::Logger() :
+    enabled(true),
+    vulkanRendererLoggingEnabled(
+        VIBRANCE_ENABLE_VULKAN_RENDERER_LOGGING != 0),
+    vulkanValidationEnabled(VIBRANCE_ENABLE_VULKAN_VALIDATION != 0),
+    minLevel(LogLevel::eTrace),
+    outputOptions(pending_logger_output_options()),
+    startTime(std::chrono::steady_clock::now())
 {
-    enabled = true;
-    vulkanRendererLoggingEnabled = VIBRANCE_ENABLE_VULKAN_RENDERER_LOGGING != 0;
-    vulkanValidationEnabled = VIBRANCE_ENABLE_VULKAN_VALIDATION != 0;
-    minLevel = LogLevel::eTrace;
-    startTime = std::chrono::steady_clock::now();
-    outputOptions = pending_logger_output_options();
     reopen_file();
 }
 

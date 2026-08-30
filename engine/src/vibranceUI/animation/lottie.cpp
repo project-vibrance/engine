@@ -624,12 +624,22 @@ namespace
         int lineJoin = 1;
     };
 
+    struct TrimPaths
+    {
+        AnimatedValue<1> start;
+        AnimatedValue<1> end;
+        AnimatedValue<1> offset;
+        bool present = false;
+        int mode = 1;
+    };
+
     struct ShapeGroup
     {
         std::vector<Path> paths;
         Transform transform;
         Paint fill;
         Paint stroke;
+        TrimPaths trim;
         bool evenOddFill = false;
         bool hidden = false;
     };
@@ -674,6 +684,35 @@ namespace
         paint.lineCap = static_cast<int>(json_number(item, "lc").value_or(1.0));
         paint.lineJoin = static_cast<int>(json_number(item, "lj").value_or(1.0));
         return paint;
+    }
+
+    TrimPaths parse_trim_paths(
+        Json item,
+        uint32_t& ignoredExpressions,
+        uint32_t& unsupportedFeatures)
+    {
+        TrimPaths trim;
+        trim.present = !json_bool(item, "hd");
+        trim.start.value = { 0.0 };
+        trim.end.value = { 100.0 };
+        trim.offset.value = { 0.0 };
+        trim.mode = static_cast<int>(json_number(item, "m").value_or(1.0));
+
+        const auto parseProperty = [&](std::string_view name, Value<1> fallback) {
+            Json property;
+            return json_field(item, name, property)
+                ? parse_animated_value(
+                    property,
+                    fallback,
+                    ignoredExpressions,
+                    unsupportedFeatures)
+                : AnimatedValue<1> { fallback, {} };
+        };
+
+        trim.start = parseProperty("s", Value<1> { 0.0 });
+        trim.end = parseProperty("e", Value<1> { 100.0 });
+        trim.offset = parseProperty("o", Value<1> { 0.0 });
+        return trim;
     }
 
     ShapeGroup parse_shape_group(
@@ -721,6 +760,13 @@ namespace
                     ignoredExpressions,
                     unsupportedFeatures);
             }
+            else if (type == "tm")
+            {
+                result.trim = parse_trim_paths(
+                    item,
+                    ignoredExpressions,
+                    unsupportedFeatures);
+            }
             else if (type == "tr")
             {
                 result.transform = parse_transform(
@@ -738,6 +784,13 @@ namespace
             {
                 ++unsupportedFeatures;
             }
+        }
+        if (result.trim.present && result.trim.mode == 1 && result.paths.size() > 1u)
+        {
+            // Simultaneous trim treats every path as one continuous contour.
+            // The common one-path form is exact; multi-path groups currently
+            // use the deterministic per-path fallback below.
+            ++unsupportedFeatures;
         }
         return result;
     }
@@ -940,6 +993,308 @@ namespace
         }
     }
 
+    struct EvaluatedTrimPaths
+    {
+        double start = 0.0;
+        double extent = 1.0;
+        bool present = false;
+    };
+
+    EvaluatedTrimPaths evaluate_trim_paths(const TrimPaths& trim, double frame)
+    {
+        if (!trim.present)
+        {
+            return {};
+        }
+
+        const double rawStart = evaluate(trim.start, frame)[0] * 0.01;
+        const double rawEnd = evaluate(trim.end, frame)[0] * 0.01;
+        const double rawExtent = rawEnd - rawStart;
+        if (std::abs(rawExtent) >= 1.0 - 0.000001)
+        {
+            return { 0.0, 1.0, true };
+        }
+
+        const double offset = evaluate(trim.offset, frame)[0] / 360.0;
+        double start = std::fmod(rawStart + offset, 1.0);
+        if (start < 0.0)
+        {
+            start += 1.0;
+        }
+        double extent = std::fmod(rawExtent, 1.0);
+        if (extent < 0.0)
+        {
+            extent += 1.0;
+        }
+        return { start, std::clamp(extent, 0.0, 1.0), true };
+    }
+
+    Value<2> cubic_point(
+        const Value<2>& start,
+        const Value<2>& control1,
+        const Value<2>& control2,
+        const Value<2>& end,
+        double progress)
+    {
+        const double inverse = 1.0 - progress;
+        const double startWeight = inverse * inverse * inverse;
+        const double control1Weight = 3.0 * inverse * inverse * progress;
+        const double control2Weight = 3.0 * inverse * progress * progress;
+        const double endWeight = progress * progress * progress;
+        return {
+            start[0] * startWeight + control1[0] * control1Weight +
+                control2[0] * control2Weight + end[0] * endWeight,
+            start[1] * startWeight + control1[1] * control1Weight +
+                control2[1] * control2Weight + end[1] * endWeight
+        };
+    }
+
+    Value<2> interpolate_point(
+        const Value<2>& start,
+        const Value<2>& end,
+        double progress)
+    {
+        return {
+            start[0] + (end[0] - start[0]) * progress,
+            start[1] + (end[1] - start[1]) * progress
+        };
+    }
+
+    struct CubicCurve
+    {
+        Value<2> start {};
+        Value<2> control1 {};
+        Value<2> control2 {};
+        Value<2> end {};
+    };
+
+    CubicCurve path_cubic(const Path& path, std::size_t segment)
+    {
+        const std::size_t next = (segment + 1u) % path.vertices.size();
+        return {
+            path.vertices[segment],
+            {
+                path.vertices[segment][0] + path.outTangents[segment][0],
+                path.vertices[segment][1] + path.outTangents[segment][1]
+            },
+            {
+                path.vertices[next][0] + path.inTangents[next][0],
+                path.vertices[next][1] + path.inTangents[next][1]
+            },
+            path.vertices[next]
+        };
+    }
+
+    std::array<CubicCurve, 2> split_cubic(
+        const CubicCurve& curve,
+        double progress)
+    {
+        progress = std::clamp(progress, 0.0, 1.0);
+        const Value<2> first = interpolate_point(
+            curve.start,
+            curve.control1,
+            progress);
+        const Value<2> second = interpolate_point(
+            curve.control1,
+            curve.control2,
+            progress);
+        const Value<2> third = interpolate_point(
+            curve.control2,
+            curve.end,
+            progress);
+        const Value<2> fourth = interpolate_point(first, second, progress);
+        const Value<2> fifth = interpolate_point(second, third, progress);
+        const Value<2> split = interpolate_point(fourth, fifth, progress);
+        return {
+            CubicCurve { curve.start, first, fourth, split },
+            CubicCurve { split, fifth, third, curve.end }
+        };
+    }
+
+    CubicCurve cubic_interval(
+        const CubicCurve& curve,
+        double start,
+        double end)
+    {
+        start = std::clamp(start, 0.0, 1.0);
+        end = std::clamp(end, start, 1.0);
+        CubicCurve result = end < 1.0
+            ? split_cubic(curve, end)[0]
+            : curve;
+        if (start > 0.0 && end > 0.0)
+        {
+            result = split_cubic(result, start / end)[1];
+        }
+        return result;
+    }
+
+    constexpr uint32_t kCubicLengthSamples = 48u;
+
+    struct MeasuredCubic
+    {
+        CubicCurve curve;
+        std::array<double, kCubicLengthSamples + 1u> cumulativeLength {};
+        double length = 0.0;
+    };
+
+    MeasuredCubic measure_cubic(const CubicCurve& curve)
+    {
+        MeasuredCubic measured;
+        measured.curve = curve;
+        Value<2> previous = curve.start;
+        for (uint32_t sample = 1u; sample <= kCubicLengthSamples; ++sample)
+        {
+            const double progress = static_cast<double>(sample) /
+                static_cast<double>(kCubicLengthSamples);
+            const Value<2> current = cubic_point(
+                curve.start,
+                curve.control1,
+                curve.control2,
+                curve.end,
+                progress);
+            const double deltaX = current[0] - previous[0];
+            const double deltaY = current[1] - previous[1];
+            measured.length += std::sqrt(deltaX * deltaX + deltaY * deltaY);
+            measured.cumulativeLength[sample] = measured.length;
+            previous = current;
+        }
+        return measured;
+    }
+
+    std::vector<MeasuredCubic> measure_path(const Path& path)
+    {
+        std::vector<MeasuredCubic> measured;
+        if (!path.valid() || (!path.closed && path.vertices.size() < 2u))
+        {
+            return measured;
+        }
+        const std::size_t segmentCount = path.closed
+            ? path.vertices.size()
+            : path.vertices.size() - 1u;
+        measured.reserve(segmentCount);
+        for (std::size_t segment = 0u; segment < segmentCount; ++segment)
+        {
+            measured.push_back(measure_cubic(path_cubic(path, segment)));
+        }
+        return measured;
+    }
+
+    double cubic_parameter_at_length(
+        const MeasuredCubic& curve,
+        double distance)
+    {
+        if (curve.length <= 0.000001)
+        {
+            return 0.0;
+        }
+        distance = std::clamp(distance, 0.0, curve.length);
+        for (uint32_t sample = 1u; sample <= kCubicLengthSamples; ++sample)
+        {
+            if (distance > curve.cumulativeLength[sample])
+            {
+                continue;
+            }
+            const double previousLength = curve.cumulativeLength[sample - 1u];
+            const double sampleLength = std::max(
+                curve.cumulativeLength[sample] - previousLength,
+                0.000001);
+            const double withinSample = std::clamp(
+                (distance - previousLength) / sampleLength,
+                0.0,
+                1.0);
+            return (static_cast<double>(sample - 1u) + withinSample) /
+                static_cast<double>(kCubicLengthSamples);
+        }
+        return 1.0;
+    }
+
+    void append_trimmed_interval(
+        std::ostringstream& svg,
+        const std::vector<MeasuredCubic>& curves,
+        double intervalStart,
+        double intervalEnd)
+    {
+        if (intervalEnd - intervalStart <= 0.000001)
+        {
+            return;
+        }
+
+        double curveStart = 0.0;
+        bool beganSubpath = false;
+        for (const MeasuredCubic& measured : curves)
+        {
+            const double curveEnd = curveStart + measured.length;
+            const double overlapStart = std::max(intervalStart, curveStart);
+            const double overlapEnd = std::min(intervalEnd, curveEnd);
+            if (overlapEnd - overlapStart > 0.000001 &&
+                measured.length > 0.000001)
+            {
+                const double localStart = overlapStart - curveStart;
+                const double localEnd = overlapEnd - curveStart;
+                const CubicCurve visible = cubic_interval(
+                    measured.curve,
+                    cubic_parameter_at_length(measured, localStart),
+                    cubic_parameter_at_length(measured, localEnd));
+                if (!beganSubpath)
+                {
+                    svg << 'M' << visible.start[0] << ' ' << visible.start[1];
+                    beganSubpath = true;
+                }
+                svg << " C"
+                    << visible.control1[0] << ' ' << visible.control1[1] << ' '
+                    << visible.control2[0] << ' ' << visible.control2[1] << ' '
+                    << visible.end[0] << ' ' << visible.end[1];
+            }
+            curveStart = curveEnd;
+            if (curveStart >= intervalEnd)
+            {
+                break;
+            }
+        }
+    }
+
+    void append_trimmed_path_data(
+        std::ostringstream& svg,
+        const Path& path,
+        const EvaluatedTrimPaths& trim)
+    {
+        if (!trim.present || trim.extent >= 1.0 - 0.000001)
+        {
+            append_path_data(svg, path);
+            return;
+        }
+        if (trim.extent <= 0.000001)
+        {
+            return;
+        }
+
+        const std::vector<MeasuredCubic> curves = measure_path(path);
+        double pathLength = 0.0;
+        for (const MeasuredCubic& curve : curves)
+        {
+            pathLength += curve.length;
+        }
+        if (pathLength <= 0.000001)
+        {
+            return;
+        }
+
+        const double start = trim.start * pathLength;
+        const double visibleLength = trim.extent * pathLength;
+        const double firstEnd = std::min(start + visibleLength, pathLength);
+        append_trimmed_interval(svg, curves, start, firstEnd);
+
+        const double wrappedLength = visibleLength - (firstEnd - start);
+        if (wrappedLength > 0.000001)
+        {
+            append_trimmed_interval(
+                svg,
+                curves,
+                0.0,
+                std::min(wrappedLength, pathLength));
+        }
+    }
+
     std::string render_svg_frame(const Document& document, double frame)
     {
         std::ostringstream svg;
@@ -993,11 +1348,15 @@ namespace
                 const Value<4> strokeColor = evaluate(group.stroke.color, frame);
                 const Value<1> strokeOpacity = evaluate(group.stroke.opacity, frame);
                 const Value<1> strokeWidth = evaluate(group.stroke.width, frame);
+                const EvaluatedTrimPaths trim =
+                    evaluate_trim_paths(group.trim, frame);
 
                 for (const Path& path : group.paths)
                 {
+                    const bool trimHidesStroke =
+                        trim.present && trim.extent <= 0.000001;
                     svg << "<path d=\"";
-                    append_path_data(svg, path);
+                    append_trimmed_path_data(svg, path, trim);
                     svg << "\" fill=\"" << (group.fill.present ? svg_color(fillColor) : "none")
                         << "\" fill-opacity=\""
                         << (group.fill.present
@@ -1011,7 +1370,8 @@ namespace
                         << "\" stroke-opacity=\""
                         << (group.stroke.present
                             ? std::clamp(
-                                strokeOpacity[0] * 0.01 * strokeColor[3] * inheritedOpacity,
+                                strokeOpacity[0] * 0.01 * strokeColor[3] *
+                                    inheritedOpacity * (trimHidesStroke ? 0.0 : 1.0),
                                 0.0,
                                 1.0)
                             : 0.0)

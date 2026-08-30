@@ -8,15 +8,18 @@
 #include <vibranceUI/renderer/frame.h>
 #include <vibranceUI/renderer/swapchain.h>
 #include <vibranceUI/factories/mesh_factory.h>
+#include <vibranceUI/ui/text.h>
 #include "../directx/composition_presenter.h"
 #include <sstream>
 #include <string_view>
 #include <deque>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <array>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vma/vk_mem_alloc.h>
@@ -783,6 +786,11 @@ struct Engine::Impl
 	const AudioEngine& audio() const;
 	bool load_renderer2d_font(const std::filesystem::path& path);
 	bool load_renderer2d_font(const std::filesystem::path& path, const Renderer2DFontAtlasLoadOptions& options);
+	bool load_renderer2d_font_internal(
+		const std::filesystem::path& path,
+		const Renderer2DFontAtlasLoadOptions& options,
+		bool explicitRequest);
+	void ensure_renderer2d_scene_glyphs();
 	bool load_localisation_directory(const std::filesystem::path& directory);
 	bool load_localisation_directories(const std::vector<std::filesystem::path>& directories);
 	bool set_locale(const std::string& locale);
@@ -856,6 +864,12 @@ private:
 	vk::SampleCountFlagBits hosted3DSamples = vk::SampleCountFlagBits::e1;
 	Renderer2DScene renderer2DScene;
 	Renderer2DFontAtlas renderer2DFontAtlas;
+	std::filesystem::path renderer2DFontPath {};
+	Renderer2DFontAtlasLoadOptions renderer2DFontOptions {};
+	std::unordered_set<uint32_t> attemptedRenderer2DCodepoints;
+	uint64_t lastRenderer2DGlyphScanGeneration = UINT64_MAX;
+	uint64_t lastRenderer2DTextFingerprint = 0u;
+	bool hasRenderer2DTextFingerprint = false;
 
 	vk::CommandPool commandPool;
 	vk::CommandBuffer mainCommandBuffer;
@@ -878,6 +892,14 @@ private:
 	bool nativeTransparencyPrimed = false;
 	bool hasSubmittedFrame = false;
 	uint64_t lastSubmittedFrameGeneration = 0u;
+	bool renderDiagnosticsEnabled = false;
+	std::chrono::steady_clock::time_point renderDiagnosticsStart {};
+	uint64_t diagnosticDrawCalls = 0u;
+	uint64_t diagnosticSubmissions = 0u;
+	uint64_t diagnosticGenerationChanges = 0u;
+	uint64_t diagnosticContinuousRequests = 0u;
+	uint64_t diagnosticRetainedSyncRequests = 0u;
+	uint64_t diagnosticLastSceneGeneration = 0u;
 
 	std::unordered_map<uint32_t, Model3DAsset> modelAssets;
 	std::unordered_map<std::string, uint32_t> modelIdsByPath;
@@ -1135,6 +1157,10 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	audioEngine(createInfo.enableAudio)
 {
     logger = Logger::fetch_logger();
+	const char* renderDiagnostics = std::getenv(
+		"VIBRANCE_RENDER_DIAGNOSTICS");
+	renderDiagnosticsEnabled = renderDiagnostics &&
+		std::strcmp(renderDiagnostics, "0") != 0;
 #if defined(_WIN32)
 	compositionFrameRate = monitor_refresh_rate(nativeWindowHandle);
 #endif
@@ -1315,23 +1341,31 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		vk::DescriptorType::eStorageImage,
 		vk::DescriptorType::eStorageImage,
 		vk::DescriptorType::eStorageImage,
+		vk::DescriptorType::eStorageImage,
 		vk::DescriptorType::eStorageImage
 	};
 	descriptorPools[DescriptorScope::ePost] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 	descriptorPools[DescriptorScope::eUICachePost] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 
-	if (!createInfo.defaultRenderer2DFontPath.empty() &&
-		!renderer2DFontAtlas.load_from_file(
-			createInfo.defaultRenderer2DFontPath,
-			createInfo.defaultRenderer2DFontOptions,
-			allocator,
-			mainCommandBuffer,
-			graphicsQueue,
-			logicalDevice,
-			vmaDeletionQueue,
-			deviceDeletionQueue))
+	if (!createInfo.defaultRenderer2DFontPath.empty())
 	{
-		logger->vulkan("Renderer2D font atlas is using its fallback texture.");
+		if (renderer2DFontAtlas.load_from_file(
+				createInfo.defaultRenderer2DFontPath,
+				createInfo.defaultRenderer2DFontOptions,
+				allocator,
+				mainCommandBuffer,
+				graphicsQueue,
+				logicalDevice,
+				vmaDeletionQueue,
+				deviceDeletionQueue))
+		{
+			renderer2DFontPath = createInfo.defaultRenderer2DFontPath;
+			renderer2DFontOptions = createInfo.defaultRenderer2DFontOptions;
+		}
+		else
+		{
+			logger->vulkan("Renderer2D font atlas is using its fallback texture.");
+		}
 	}
 
 	descriptorSets.resize(frameCount);
@@ -1399,6 +1433,7 @@ void Engine::Impl::make_descriptor_sets()
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
+	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
 	descriptorSetLayouts[DescriptorScope::ePost] = builder.build(deviceDeletionQueue);
 	descriptorSetLayouts[DescriptorScope::eUICache] = descriptorSetLayouts[DescriptorScope::eFrame];
 	descriptorSetLayouts[DescriptorScope::eUICachePost] = descriptorSetLayouts[DescriptorScope::ePost];
@@ -1431,6 +1466,7 @@ void Engine::Impl::make_pipeline_layouts()
 
 	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
 	builder.add(descriptorSetLayouts[DescriptorScope::eMediaTexture]);
+	builder.add(descriptorSetLayouts[DescriptorScope::ePost]);
 	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(Renderer2DPushConstants));
 	pipelineLayouts[PipelineType::eMedia2D] = builder.build(deviceDeletionQueue);
 
@@ -1568,8 +1604,27 @@ void Engine::Impl::update_system_backdrop_regions()
 		{
 			return;
 		}
-		const glm::vec2 framebufferSize = shape.size * glm::abs(transform.scale);
-		const glm::vec2 topLeft = transform.position - transform.origin * framebufferSize;
+		const glm::vec2 baseFramebufferSize = shape.size * glm::abs(transform.scale);
+		const glm::vec2 baseTopLeft =
+			transform.position - transform.origin * baseFramebufferSize;
+		const glm::vec4 interactiveRect =
+			renderer2d_apply_interactive_visual_rect(
+				registry,
+				entity,
+				{
+					baseTopLeft.x,
+					baseTopLeft.y,
+					baseFramebufferSize.x,
+					baseFramebufferSize.y
+				});
+		const glm::vec2 framebufferSize {
+			interactiveRect.z,
+			interactiveRect.w
+		};
+		const glm::vec2 topLeft {
+			interactiveRect.x,
+			interactiveRect.y
+		};
 		if (framebufferSize.x <= 0.0f || framebufferSize.y <= 0.0f)
 		{
 			return;
@@ -1746,6 +1801,41 @@ void Engine::Impl::publish_completed_composition_frames()
 
 void Engine::Impl::draw()
 {
+	if (renderDiagnosticsEnabled)
+	{
+		const auto diagnosticsNow = std::chrono::steady_clock::now();
+		if (renderDiagnosticsStart.time_since_epoch().count() == 0)
+		{
+			renderDiagnosticsStart = diagnosticsNow;
+		}
+		else if (diagnosticsNow - renderDiagnosticsStart >=
+			std::chrono::seconds(1))
+		{
+			const double seconds = std::chrono::duration<double>(
+				diagnosticsNow - renderDiagnosticsStart).count();
+			logger->info(
+				"Renderer diagnostics " +
+				std::to_string(framebufferWidth) + "x" +
+				std::to_string(framebufferHeight) + ": " +
+				std::to_string(static_cast<uint64_t>(
+					diagnosticSubmissions / std::max(seconds, 0.001))) +
+				" submissions/s, " +
+				std::to_string(diagnosticDrawCalls) + " draw calls, " +
+				std::to_string(diagnosticGenerationChanges) +
+				" scene-generation changes, " +
+				std::to_string(diagnosticContinuousRequests) +
+				" continuous-redraw requests, " +
+				std::to_string(diagnosticRetainedSyncRequests) +
+				" retained-buffer sync requests.");
+			renderDiagnosticsStart = diagnosticsNow;
+			diagnosticDrawCalls = 0u;
+			diagnosticSubmissions = 0u;
+			diagnosticGenerationChanges = 0u;
+			diagnosticContinuousRequests = 0u;
+			diagnosticRetainedSyncRequests = 0u;
+		}
+		++diagnosticDrawCalls;
+	}
 	if (!rendererReady)
 	{
 		return;
@@ -1950,21 +2040,39 @@ void Engine::Impl::draw()
 		nextNativeSubmitDeadline = {};
 	}
 
+	// UI builders are allowed to create arbitrary UTF-8 literals. Discover any
+	// code points that were not present during the initial localisation preload
+	// and expand the atlas once before this scene is submitted.
+	ensure_renderer2d_scene_glyphs();
+
 	const double renderTimeSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
 	const uint64_t sceneFrameGeneration = renderer2DScene.frame_generation();
 	const bool retainedCompositionBuffersNeedSync =
 		compositionAvailable && compositionBufferDamage.has_pending();
+	const bool continuousRedrawRequired =
+		renderer2DScene.requires_continuous_redraw(renderTimeSeconds);
+	if (renderDiagnosticsEnabled)
+	{
+		if (sceneFrameGeneration != diagnosticLastSceneGeneration)
+		{
+			diagnosticLastSceneGeneration = sceneFrameGeneration;
+			++diagnosticGenerationChanges;
+		}
+		diagnosticContinuousRequests += continuousRedrawRequired ? 1u : 0u;
+		diagnosticRetainedSyncRequests +=
+			retainedCompositionBuffersNeedSync ? 1u : 0u;
+	}
 	if (hasSubmittedFrame &&
 		sceneFrameGeneration == lastSubmittedFrameGeneration &&
-		!renderer2DScene.requires_continuous_redraw(renderTimeSeconds) &&
-		!retainedCompositionBuffersNeedSync &&
+		!continuousRedrawRequired &&
 		(!compositionAvailable || nativeTransparencyPrimed))
 	{
-		// DWM and native swapchains retain the last presented image. Stop only
-		// after every imported Composition image has received the newest damage;
-		// otherwise a later frame-slot/cache handoff can expose an older scroll
-		// position even though the scene generation itself has gone idle.
+		// DWM and native swapchains retain the last presented image. Imported
+		// Composition buffers are caught up lazily: pending damage remains attached
+		// to a retained buffer and is unioned into its next real scene update. Do not
+		// submit standalone frames merely to rotate through currently invisible
+		// buffers, because that turns a finite scene change into perpetual GPU work.
 		return;
 	}
 	Frame& frame = frames[frameIndex];
@@ -2107,6 +2215,10 @@ void Engine::Impl::draw()
 	{
 		logger->vulkan("Failed to submit buffer to graphics queue.");
 		return;
+	}
+	if (renderDiagnosticsEnabled)
+	{
+		++diagnosticSubmissions;
 	}
 	hasSubmittedFrame = true;
 	lastSubmittedFrameGeneration = sceneFrameGeneration;
@@ -2545,6 +2657,14 @@ bool Engine::Impl::load_renderer2d_font(const std::filesystem::path& path)
 
 bool Engine::Impl::load_renderer2d_font(const std::filesystem::path& path, const Renderer2DFontAtlasLoadOptions& options)
 {
+	return load_renderer2d_font_internal(path, options, true);
+}
+
+bool Engine::Impl::load_renderer2d_font_internal(
+	const std::filesystem::path& path,
+	const Renderer2DFontAtlasLoadOptions& options,
+	bool explicitRequest)
+{
 	if (!logicalDevice || !allocator || !mainCommandBuffer || !graphicsQueue)
 	{
 		logger->vulkan("Cannot load Renderer2D font before the renderer is ready.");
@@ -2572,17 +2692,116 @@ bool Engine::Impl::load_renderer2d_font(const std::filesystem::path& path, const
 		return false;
 	}
 
+	renderer2DFontPath = path;
+	renderer2DFontOptions = options;
+	if (explicitRequest)
+	{
+		// A new face or fallback chain may cover code points which an earlier
+		// configuration could not. Let the next scene scan try them again.
+		attemptedRenderer2DCodepoints.clear();
+		lastRenderer2DGlyphScanGeneration = UINT64_MAX;
+		hasRenderer2DTextFingerprint = false;
+	}
+
+	// Frames created before a runtime font load initially bind their fallback
+	// image. Point both the live and retained-cache descriptor sets at the newly
+	// uploaded atlas before any text using it can be submitted.
+	StorageImage* fontAtlasImage = renderer2DFontAtlas.image();
+	for (Frame& frame : frames)
+	{
+		frame.set_font_atlas_image(fontAtlasImage);
+	}
+
 	refresh_localised_texts();
 	auto textView = renderer2DScene.registry().view<TextComponent>(entt::exclude<LocalisedTextComponent>);
-	textView.each([this](entt::entity, TextComponent& text) {
-		Renderer2DTextLayout layout = renderer2DFontAtlas.layout_text(text.text, text.fontSize);
-		text.atlasId = renderer2DFontAtlas.atlas_id();
-		text.msdfPixelRange = renderer2DFontAtlas.pixel_range();
-		text.bounds = layout.bounds;
-		text.glyphs = std::move(layout.glyphs);
+	textView.each([this](entt::entity entity, TextComponent&) {
+		apply_font_layout(
+			renderer2DFontAtlas,
+			renderer2DScene.registry(),
+			entity);
 	});
 	renderer2DScene.mark_dirty();
 	return true;
+}
+
+void Engine::Impl::ensure_renderer2d_scene_glyphs()
+{
+	const uint64_t sceneGeneration = renderer2DScene.frame_generation();
+	if (sceneGeneration == lastRenderer2DGlyphScanGeneration ||
+		renderer2DFontPath.empty() ||
+		!renderer2DFontAtlas.loaded())
+	{
+		return;
+	}
+	lastRenderer2DGlyphScanGeneration = sceneGeneration;
+
+	auto textView = renderer2DScene.registry().view<TextComponent>();
+	uint64_t textFingerprint = 1469598103934665603ull;
+	textView.each([&](entt::entity, const TextComponent& text) {
+		textFingerprint ^= static_cast<uint64_t>(text.text.size());
+		textFingerprint *= 1099511628211ull;
+		for (const unsigned char byte : text.text)
+		{
+			textFingerprint ^= static_cast<uint64_t>(byte);
+			textFingerprint *= 1099511628211ull;
+		}
+	});
+	if (hasRenderer2DTextFingerprint &&
+		textFingerprint == lastRenderer2DTextFingerprint)
+	{
+		return;
+	}
+	lastRenderer2DTextFingerprint = textFingerprint;
+	hasRenderer2DTextFingerprint = true;
+
+	std::string literalPreloadText;
+	std::size_t newCodepointCount = 0u;
+	textView.each([&](entt::entity, const TextComponent& text) {
+		bool appendText = false;
+		for (const uint32_t codepoint :
+			renderer2DFontAtlas.missing_codepoints(text.text))
+		{
+			if (attemptedRenderer2DCodepoints.insert(codepoint).second)
+			{
+				appendText = true;
+				++newCodepointCount;
+			}
+		}
+		if (!appendText)
+		{
+			return;
+		}
+		if (!literalPreloadText.empty())
+		{
+			literalPreloadText.push_back('\n');
+		}
+		literalPreloadText += text.text;
+	});
+
+	if (literalPreloadText.empty())
+	{
+		return;
+	}
+
+	Renderer2DFontAtlasLoadOptions expandedOptions = renderer2DFontOptions;
+	if (!expandedOptions.preloadText.empty())
+	{
+		expandedOptions.preloadText.push_back('\n');
+	}
+	expandedOptions.preloadText += literalPreloadText;
+	// Runtime literals should never discard all usable text because one face is
+	// missing a script. The loader reports unavailable glyphs and keeps every
+	// character covered by the configured fallback chain.
+	expandedOptions.requireRequestedGlyphs = false;
+	logger->vulkan(
+		"Expanding Renderer2D font atlas for " +
+		std::to_string(newCodepointCount) +
+		" code points discovered in scene text.");
+	load_renderer2d_font_internal(
+		renderer2DFontPath,
+		expandedOptions,
+		false);
+	lastRenderer2DGlyphScanGeneration = renderer2DScene.frame_generation();
 }
 
 bool Engine::Impl::load_localisation_directory(const std::filesystem::path& directory)
@@ -2665,11 +2884,10 @@ void Engine::Impl::refresh_localised_texts()
 	bool refreshedAny = false;
 	view.each([this, &refreshedAny](entt::entity entity, TextComponent& text, const LocalisedTextComponent& localised) {
 		text.text = localisation_.resolve(localised.value);
-		Renderer2DTextLayout layout = renderer2DFontAtlas.layout_text(text.text, text.fontSize);
-		text.atlasId = renderer2DFontAtlas.atlas_id();
-		text.msdfPixelRange = renderer2DFontAtlas.pixel_range();
-		text.bounds = layout.bounds;
-		text.glyphs = std::move(layout.glyphs);
+		apply_font_layout(
+			renderer2DFontAtlas,
+			renderer2DScene.registry(),
+			entity);
 		renderer2DScene.mark_dirty(entity);
 		refreshedAny = true;
 	});

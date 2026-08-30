@@ -7,6 +7,7 @@
 #include <functional>
 #include <filesystem>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -157,9 +158,13 @@ struct UiButtonOptions
     float cornerRadius = 10.0f;
     float fontSize = 13.0f;
     float iconSize = 14.0f;
+    float leadingIconSize = 0.0f;
+    float trailingIconSize = 0.0f;
     float iconTextGap = 6.0f;
     bool primary = false;
     bool enabled = true;
+    bool tintLeadingIcon = true;
+    bool tintTrailingIcon = true;
     std::string textColor {};
     std::string iconTint {};
     std::string backgroundColor {};
@@ -175,12 +180,94 @@ struct UiButtonOptions
     float pressedOutlineWidth = 1.0f;
     float disabledOutlineWidth = 0.6f;
     UiGlassOptions glass {};
+    // When set, dragging elastically stretches the button without changing
+    // its layout position. Its icon, label, masks, and other descendants
+    // inherit the same deformation.
+    std::optional<StretchDynamicsOptions> stretchDynamics {};
     std::function<void(const PointerInputEvent&)> onClick;
+};
+
+struct UiSubmenuRowOptions
+{
+    // Responsive card row built on the standard text-button interaction model.
+    UiButtonOptions button {};
+    float horizontalInset = 8.0f;
+    float height = 42.0f;
+};
+
+struct UiScrollViewportEntranceOptions
+{
+    // Only the border animates: it starts slightly oversized, fades in, and
+    // settles onto the viewport. Content and scrolling remain fully visible.
+    bool enabled = true;
+    float durationSeconds = 0.44f;
+    float delaySeconds = 0.0f;
+    float startScale = 1.06f;
+    float startOpacity = 0.0f;
+    DisplayTransitionCurve2D curve = DisplayTransitionCurve2D::eEaseOut;
+};
+
+struct UiScrollViewportBuildContext
+{
+    // buildContent is invoked immediately. Add children to content using layer
+    // (or a higher layer) and normal logical-pixel offsets.
+    UiBuilder& ui;
+    entt::entity content = entt::null;
+    int32_t layer = 1;
+    uint32_t order = 0u;
+    glm::vec2 viewportSize { 0.0f };
+};
+
+struct UiScrollViewportOptions
+{
+    // contentHeight is the complete logical height, including vertical padding.
+    float contentHeight = 0.0f;
+    glm::vec4 contentPadding { 10.0f, 8.0f, 18.0f, 8.0f };
+    float scrollStep = 42.0f;
+    bool enabled = true;
+    bool showScrollbar = true;
+    bool scrollbarFadesWhenIdle = true;
+    bool showEdgeFades = false;
+    float cornerRadius = 8.0f;
+    std::string backgroundColor = "rgba(255, 255, 255, 0.96)";
+    std::string backgroundBottomColor {};
+    std::string outlineColor = "#0A84FFFF";
+    float outlineWidth = 1.8f;
+    float opacity = 1.0f;
+    float backdropBlurRadius = 0.0f;
+    uint32_t backdropBlurPasses = 1u;
+    float backdropBlurOpacity = 0.85f;
+    int32_t layer = 1;
+    uint32_t order = 0u;
+    UiScrollBarOptions scrollbar {};
+    UiScrollEdgeFadeOptions edgeFades {};
+    UiScrollViewportEntranceOptions entrance {};
+    std::function<void(const UiScrollViewportBuildContext&)> buildContent;
+    std::function<void(const ScrollInputEvent&)> onScroll;
+};
+
+struct UiScrollViewportHandle
+{
+    // root is the positioned layout container; viewport owns surface paint,
+    // clipping, and scrolling. border owns the entrance transition. Add app
+    // content to content.
+    entt::entity root = entt::null;
+    entt::entity viewport = entt::null;
+    entt::entity border = entt::null;
+    entt::entity content = entt::null;
+    UiScrollBarHandle scrollbar {};
+    UiScrollViewHandle scrollView {};
+};
+
+enum class UiNavigationDirection : uint8_t
+{
+    eBack,
+    eForward
 };
 
 struct UiIconButtonOptions
 {
-    // Circle or squircle icon-only button for toolbar and title-row actions
+    // Circle or squircle icon-only button for toolbar, title-row, and navigation actions
     Media2DHandle icon {};
     bool enabled = true;
     float cornerRadius = 0.0f;
@@ -196,9 +283,15 @@ struct UiIconButtonOptions
     uint32_t backdropBlurPasses = 1u;
     float backdropBlurOpacity = 0.85f;
     UiGlassOptions glass {};
+    std::optional<StretchDynamicsOptions> stretchDynamics {};
     std::string iconTint = "#55585EFF";
     std::string disabledIconTint = "#B1B4BAFF";
     std::function<void(const PointerInputEvent&)> onClick;
+    // History mode owns onClick and enables/disables the button from its cursor.
+    bool useHistory = false;
+    UiNavigationDirection historyDirection = UiNavigationDirection::eBack;
+    std::size_t initialPage = 0u;
+    std::function<void(std::size_t, const PointerInputEvent&)> onNavigatePage;
 };
 
 struct UiSearchFieldOptions
@@ -464,13 +557,19 @@ struct UiCircularProgressOptions
 struct UiRadioControlComponent
 {
     bool checked = false;
+    entt::entity outer = entt::null;
     entt::entity indicator = entt::null;
+    entt::entity label = entt::null;
     std::string groupId;
     bool singleSelect = false;
-    ShapeStyleComponent uncheckedIdle;
-    ShapeStyleComponent uncheckedHovered;
-    ShapeStyleComponent checkedIdle;
-    ShapeStyleComponent checkedHovered;
+    ShapeStyleComponent enabledIdle;
+    ShapeStyleComponent enabledHovered;
+    ShapeStyleComponent enabledPressed;
+    ShapeStyleComponent disabled;
+    ShapeStyleComponent enabledIndicator;
+    ShapeStyleComponent disabledIndicator;
+    TextStyleComponent enabledLabel;
+    TextStyleComponent disabledLabel;
     std::function<void(bool, const PointerInputEvent&)> onChanged;
 };
 
@@ -481,6 +580,21 @@ struct UiRadioOptions
     bool enabled = true;
     bool singleSelect = false;
     std::string groupId;
+    std::string enabledColor = "#0D6FFFFF";
+    std::string hoveredColor = "#2A82FFFF";
+    std::string pressedColor = "#0061D5FF";
+    std::string disabledColor = "#B7BBC2FF";
+    std::string outlineColor = "#00000014";
+    std::string disabledOutlineColor = "#0000000F";
+    std::string indicatorColor = "#FFFFFFFF";
+    std::string disabledIndicatorColor = "#F7F7F7FF";
+    std::string labelColor = "#1D1D1FFF";
+    std::string disabledLabelColor = "#92969DFF";
+    float diameter = 14.0f;
+    float indicatorDiameter = 6.0f;
+    float outlineWidth = 0.8f;
+    float disabledOutlineWidth = 0.6f;
+    float labelFontSize = 13.0f;
     std::function<void(bool, const PointerInputEvent&)> onChanged;
 };
 
@@ -670,9 +784,9 @@ struct UiSettingsShellHandle
 using UiSplitShellOptions = UiSettingsShellOptions;
 using UiSplitShellHandle = UiSettingsShellHandle;
 
-struct UiNavClusterHistoryComponent
+struct UiNavigationHistoryComponent
 {
-    // History is stored on the control so app pages can rebuild without losing navigation
+    // History is stored on either a nav cluster or a history-enabled icon button.
     std::vector<std::size_t> pages;
     std::size_t cursor = 0u;
     entt::entity backButton = entt::null;
@@ -683,6 +797,9 @@ struct UiNavClusterHistoryComponent
     std::string disabledIconTint = "#B1B4BAFF";
     std::function<void(std::size_t, const PointerInputEvent&)> onNavigate;
 };
+
+// Compatibility name retained for applications that inspect nav-cluster state.
+using UiNavClusterHistoryComponent = UiNavigationHistoryComponent;
 
 struct UiSidebarNavItemHandle
 {
@@ -733,6 +850,7 @@ struct UiSidebarNavItemOptions
     float rowCornerRadius = 9.0f;
     float iconSize = 26.0f;
     float iconCornerRadius = 7.0f;
+    UiAlignment labelAlignment = UiAlignment::eMiddleLeft;
     glm::vec2 iconOffset { 8.0f, 0.0f };
     glm::vec2 labelOffset { 44.0f, 0.0f };
     float labelFontSize = 15.0f;
@@ -1576,7 +1694,7 @@ inline UiSidebarNavItemHandle ui_create_sidebar_nav_item(
         ui_truncate_text_with_ellipsis(label, options.maxLabelCharacters),
         fontAtlas,
         handle.row,
-        UiAlignment::eMiddleLeft,
+        options.labelAlignment,
         options.labelFontSize,
         ui_sidebar_nav_label_style(options, options.selected),
         layer + 2,
@@ -1605,10 +1723,10 @@ inline void ui_tint_icon_media(Renderer2DScene& scene, entt::entity entity, std:
     ui_set_media_mask_tint(scene, entity, color);
 }
 
-inline void ui_update_nav_cluster_history_visual(Renderer2DScene& scene, entt::entity entity)
+inline void ui_update_navigation_history_visual(Renderer2DScene& scene, entt::entity entity)
 {
     entt::registry& registry = scene.registry();
-    UiNavClusterHistoryComponent* history = registry.try_get<UiNavClusterHistoryComponent>(entity);
+    UiNavigationHistoryComponent* history = registry.try_get<UiNavigationHistoryComponent>(entity);
     if (!history)
     {
         return;
@@ -1639,20 +1757,20 @@ inline void ui_update_nav_cluster_history_visual(Renderer2DScene& scene, entt::e
     scene.mark_dirty(entity);
 }
 
-inline bool ui_nav_cluster_navigate_to_history(
+inline bool ui_navigation_navigate_to_history(
     Renderer2DScene& scene,
     entt::entity entity,
     std::size_t cursor,
     const PointerInputEvent& event)
 {
-    UiNavClusterHistoryComponent* history = scene.registry().try_get<UiNavClusterHistoryComponent>(entity);
+    UiNavigationHistoryComponent* history = scene.registry().try_get<UiNavigationHistoryComponent>(entity);
     if (!history || cursor >= history->pages.size())
     {
         return false;
     }
 
     history->cursor = cursor;
-    ui_update_nav_cluster_history_visual(scene, entity);
+    ui_update_navigation_history_visual(scene, entity);
     if (history->onNavigate)
     {
         history->onNavigate(history->pages[history->cursor], event);
@@ -1660,33 +1778,33 @@ inline bool ui_nav_cluster_navigate_to_history(
     return true;
 }
 
-inline bool ui_nav_cluster_go_back(Renderer2DScene& scene, entt::entity entity, const PointerInputEvent& event)
+inline bool ui_navigation_go_back(Renderer2DScene& scene, entt::entity entity, const PointerInputEvent& event)
 {
-    const UiNavClusterHistoryComponent* history = scene.registry().try_get<UiNavClusterHistoryComponent>(entity);
+    const UiNavigationHistoryComponent* history = scene.registry().try_get<UiNavigationHistoryComponent>(entity);
     if (!history || history->cursor == 0u)
     {
         return false;
     }
-    return ui_nav_cluster_navigate_to_history(scene, entity, history->cursor - 1u, event);
+    return ui_navigation_navigate_to_history(scene, entity, history->cursor - 1u, event);
 }
 
-inline bool ui_nav_cluster_go_forward(Renderer2DScene& scene, entt::entity entity, const PointerInputEvent& event)
+inline bool ui_navigation_go_forward(Renderer2DScene& scene, entt::entity entity, const PointerInputEvent& event)
 {
-    const UiNavClusterHistoryComponent* history = scene.registry().try_get<UiNavClusterHistoryComponent>(entity);
+    const UiNavigationHistoryComponent* history = scene.registry().try_get<UiNavigationHistoryComponent>(entity);
     if (!history || history->cursor + 1u >= history->pages.size())
     {
         return false;
     }
-    return ui_nav_cluster_navigate_to_history(scene, entity, history->cursor + 1u, event);
+    return ui_navigation_navigate_to_history(scene, entity, history->cursor + 1u, event);
 }
 
-inline bool ui_nav_cluster_push_history(
+inline bool ui_navigation_push_history(
     Renderer2DScene& scene,
     entt::entity entity,
     std::size_t page,
     const PointerInputEvent& event)
 {
-    UiNavClusterHistoryComponent* history = scene.registry().try_get<UiNavClusterHistoryComponent>(entity);
+    UiNavigationHistoryComponent* history = scene.registry().try_get<UiNavigationHistoryComponent>(entity);
     if (!history)
     {
         return false;
@@ -1703,7 +1821,7 @@ inline bool ui_nav_cluster_push_history(
         {
             history->onNavigate(page, event);
         }
-        ui_update_nav_cluster_history_visual(scene, entity);
+        ui_update_navigation_history_visual(scene, entity);
         return true;
     }
     else
@@ -1716,12 +1834,47 @@ inline bool ui_nav_cluster_push_history(
         history->cursor = history->pages.size() - 1u;
     }
 
-    ui_update_nav_cluster_history_visual(scene, entity);
+    ui_update_navigation_history_visual(scene, entity);
     if (history->onNavigate)
     {
         history->onNavigate(page, event);
     }
     return true;
+}
+
+// Nav-cluster names remain source-compatible while the implementation is shared
+// with singular history-enabled icon buttons.
+inline void ui_update_nav_cluster_history_visual(Renderer2DScene& scene, entt::entity entity)
+{
+    ui_update_navigation_history_visual(scene, entity);
+}
+
+inline bool ui_nav_cluster_navigate_to_history(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    std::size_t cursor,
+    const PointerInputEvent& event)
+{
+    return ui_navigation_navigate_to_history(scene, entity, cursor, event);
+}
+
+inline bool ui_nav_cluster_go_back(Renderer2DScene& scene, entt::entity entity, const PointerInputEvent& event)
+{
+    return ui_navigation_go_back(scene, entity, event);
+}
+
+inline bool ui_nav_cluster_go_forward(Renderer2DScene& scene, entt::entity entity, const PointerInputEvent& event)
+{
+    return ui_navigation_go_forward(scene, entity, event);
+}
+
+inline bool ui_nav_cluster_push_history(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    std::size_t page,
+    const PointerInputEvent& event)
+{
+    return ui_navigation_push_history(scene, entity, page, event);
 }
 
 inline float ui_control_ease_out(float t)
@@ -1829,10 +1982,21 @@ inline UiControlHandle ui_create_text_button(
     button.onClick = std::move(options.onClick);
     registry.emplace<ButtonInputComponent>(handle.root, std::move(button));
     registry.emplace<ButtonVisualComponent>(handle.root, visual);
+    if (options.stretchDynamics)
+    {
+        ui_enable_stretch_dynamics(
+            scene,
+            handle.root,
+            std::move(*options.stretchDynamics));
+    }
 
     const std::string textColor = !options.textColor.empty() ? options.textColor : (options.primary ? "#FFFFFFFF" : "#1D1D1FFF");
     const std::string iconTint = !options.iconTint.empty() ? options.iconTint : textColor;
     const float iconGap = std::max(options.iconTextGap, 0.0f);
+    const float leadingIconSize = options.leadingIconSize > 0.0f ?
+        options.leadingIconSize : options.iconSize;
+    const float trailingIconSize = options.trailingIconSize > 0.0f ?
+        options.trailingIconSize : options.iconSize;
     glm::vec2 labelOffset { 0.0f };
     UiAlignment labelAlignment = UiAlignment::eCenter;
     if (options.leadingIcon.valid())
@@ -1841,13 +2005,16 @@ inline UiControlHandle ui_create_text_button(
             options.leadingIcon,
             handle.root,
             UiAlignment::eMiddleLeft,
-            { options.iconSize, options.iconSize },
+            { leadingIconSize, leadingIconSize },
             layer + 1,
             order,
             { options.padding.x, 0.0f });
-        ui_tint_icon_media(scene, handle.leadingIcon, iconTint);
+        if (options.tintLeadingIcon)
+        {
+            ui_tint_icon_media(scene, handle.leadingIcon, iconTint);
+        }
         labelAlignment = UiAlignment::eMiddleLeft;
-        labelOffset.x = options.padding.x + options.iconSize + iconGap;
+        labelOffset.x = options.padding.x + leadingIconSize + iconGap;
     }
     if (options.trailingIcon.valid())
     {
@@ -1855,14 +2022,17 @@ inline UiControlHandle ui_create_text_button(
             options.trailingIcon,
             handle.root,
             UiAlignment::eMiddleRight,
-            { options.iconSize, options.iconSize },
+            { trailingIconSize, trailingIconSize },
             layer + 1,
             order + 1u,
             { -options.padding.z, 0.0f });
-        ui_tint_icon_media(scene, handle.trailingIcon, iconTint);
+        if (options.tintTrailingIcon)
+        {
+            ui_tint_icon_media(scene, handle.trailingIcon, iconTint);
+        }
         if (labelAlignment == UiAlignment::eCenter)
         {
-            labelOffset.x = -((options.iconSize + iconGap) * 0.5f);
+            labelOffset.x = -((trailingIconSize + iconGap) * 0.5f);
         }
     }
 
@@ -1924,6 +2094,13 @@ inline UiControlHandle ui_create_icon_button(
     button.onClick = std::move(options.onClick);
     registry.emplace<ButtonInputComponent>(handle.root, std::move(button));
     registry.emplace<ButtonVisualComponent>(handle.root, visual);
+    if (options.stretchDynamics)
+    {
+        ui_enable_stretch_dynamics(
+            scene,
+            handle.root,
+            std::move(*options.stretchDynamics));
+    }
 
     if (options.icon.valid())
     {
@@ -1938,6 +2115,43 @@ inline UiControlHandle ui_create_icon_button(
             scene,
             handle.leadingIcon,
             options.enabled ? options.iconTint : options.disabledIconTint);
+    }
+
+    if (options.useHistory)
+    {
+        UiNavigationHistoryComponent history = {};
+        history.pages.push_back(options.initialPage);
+        history.cursor = 0u;
+        history.iconTint = options.iconTint;
+        history.disabledIconTint = options.disabledIconTint;
+        history.onNavigate = std::move(options.onNavigatePage);
+        if (options.historyDirection == UiNavigationDirection::eBack)
+        {
+            history.backButton = handle.root;
+            history.backIcon = handle.leadingIcon;
+        }
+        else
+        {
+            history.forwardButton = handle.root;
+            history.forwardIcon = handle.leadingIcon;
+        }
+        registry.emplace<UiNavigationHistoryComponent>(handle.root, std::move(history));
+
+        if (ButtonInputComponent* input = registry.try_get<ButtonInputComponent>(handle.root))
+        {
+            const UiNavigationDirection direction = options.historyDirection;
+            input->onClick = [scenePtr = &scene, root = handle.root, direction](const PointerInputEvent& event) {
+                if (direction == UiNavigationDirection::eBack)
+                {
+                    ui_navigation_go_back(*scenePtr, root, event);
+                }
+                else
+                {
+                    ui_navigation_go_forward(*scenePtr, root, event);
+                }
+            };
+        }
+        ui_update_navigation_history_visual(scene, handle.root);
     }
     ui_update_button_visual(scene, handle.root);
     return handle;
@@ -1964,6 +2178,196 @@ inline UiControlHandle ui_create_aligned_text_button(
         order,
         std::move(options));
     ui.attach_aligned(handle.root, parent, alignment, scaled_offset(offset.x, offset.y, ui.scale()), scaled_size(size.x, size.y, ui.scale()));
+    return handle;
+}
+
+inline UiScrollViewportHandle ui_create_scroll_viewport(
+    UiBuilder& ui,
+    entt::entity parent,
+    UiAlignment alignment,
+    glm::vec2 offset,
+    glm::vec2 size,
+    UiScrollViewportOptions options = {})
+{
+    // This is the application-facing scroll control. The lower-level scroll
+    // view remains available for shells that need to assemble their own chrome.
+    UiScrollViewportHandle handle = {};
+    if (parent == entt::null || !ui.registry().valid(parent))
+    {
+        return handle;
+    }
+
+    Renderer2DScene& scene = ui.scene();
+    entt::registry& registry = ui.registry();
+    const glm::vec2 logicalSize = glm::max(size, glm::vec2(1.0f));
+    const float contentHeight = options.contentHeight > 0.0f ?
+        options.contentHeight : logicalSize.y;
+
+    handle.root = scene.create_shape(
+        { 0.0f, 0.0f },
+        scaled_size(logicalSize.x, logicalSize.y, ui.scale()),
+        ui_clear_surface_style(0.0f),
+        Renderer2DPrimitive::eRectangle);
+    ui.set_layer(handle.root, options.layer, options.order);
+    ui.attach_aligned(
+        handle.root,
+        parent,
+        alignment,
+        scaled_offset(offset.x, offset.y, ui.scale()),
+        scaled_size(logicalSize.x, logicalSize.y, ui.scale()));
+
+    UiScrollViewOptions scroll = {};
+    scroll.viewportHeight = logicalSize.y;
+    scroll.contentHeight = std::max(contentHeight, 1.0f);
+    scroll.contentMargin = options.contentPadding;
+    scroll.scrollStep = std::max(options.scrollStep, 1.0f);
+    scroll.viewportLayer = options.layer;
+    scroll.viewportOrder = options.order + 1u;
+    scroll.contentLayer = options.layer + 1;
+    scroll.contentOrder = options.order;
+    scroll.createScrollbar = options.showScrollbar;
+    scroll.createEdgeFades = options.showEdgeFades;
+    scroll.edgeFadesAttachToViewport = true;
+    scroll.scrollbar = options.scrollbar;
+    scroll.scrollbar.layer = options.layer + 2;
+    scroll.scrollbar.order = options.order;
+    scroll.scrollbar.fadeWhenIdle = options.scrollbarFadesWhenIdle;
+    scroll.edgeFades = options.edgeFades;
+    scroll.edgeFades.layer = options.layer + 2;
+    scroll.edgeFades.order = options.order + 10u;
+    scroll.onScroll = std::move(options.onScroll);
+
+    handle.scrollView = ui_create_scroll_view(ui, handle.root, scroll);
+    handle.viewport = handle.scrollView.viewport;
+    handle.content = handle.scrollView.content;
+    handle.scrollbar = handle.scrollView.scrollbar;
+    if (handle.viewport == entt::null || !registry.valid(handle.viewport))
+    {
+        return handle;
+    }
+
+    const std::string bottomColor = options.backgroundBottomColor.empty() ?
+        options.backgroundColor : options.backgroundBottomColor;
+    ShapeStyleComponent surfaceStyle =
+        options.backdropBlurRadius > 0.0f || !options.backgroundBottomColor.empty() ?
+        ui_macos26_frosted_control_style(
+            ui,
+            options.backgroundColor,
+            bottomColor,
+            "rgba(0, 0, 0, 0)",
+            0.0f,
+            options.opacity,
+            options.backdropBlurRadius,
+            options.backdropBlurPasses,
+            options.backdropBlurOpacity) :
+        ui_macos26_control_style(
+            ui,
+            options.backgroundColor,
+            "rgba(0, 0, 0, 0)",
+            0.0f,
+            options.opacity);
+    surfaceStyle.edgeSoftness = scaled_scalar(0.7f, ui.scale());
+    registry.emplace_or_replace<ShapeStyleComponent>(handle.viewport, surfaceStyle);
+    ui.set_shape(handle.viewport, std::max(options.cornerRadius, 0.0f));
+    if (ShapeComponent* shape = registry.try_get<ShapeComponent>(handle.viewport))
+    {
+        shape->primitive = Renderer2DPrimitive::eRoundedRectangle;
+    }
+
+    ShapeStyleComponent borderStyle = make_solid_style(
+        "rgba(0, 0, 0, 0)",
+        options.outlineColor,
+        scaled_scalar(std::max(options.outlineWidth, 0.0f), ui.scale()),
+        options.opacity);
+    borderStyle.edgeSoftness = scaled_scalar(0.7f, ui.scale());
+    handle.border = scene.create_shape(
+        { 0.0f, 0.0f },
+        scaled_size(logicalSize.x, logicalSize.y, ui.scale()),
+        borderStyle,
+        Renderer2DPrimitive::eRoundedRectangle);
+    ui.set_shape(handle.border, std::max(options.cornerRadius, 0.0f));
+    ui.set_layer(handle.border, options.layer + 3, options.order);
+    ui.attach_fill(handle.border, handle.root);
+    // This is paint-only chrome above the content and scrollbar.
+    registry.emplace<InputTransparent2DComponent>(handle.border);
+
+    if (ScrollInputComponent* input = registry.try_get<ScrollInputComponent>(handle.viewport))
+    {
+        input->enabled = options.enabled;
+    }
+
+    if (options.buildContent && handle.content != entt::null && registry.valid(handle.content))
+    {
+        const UiScrollViewportBuildContext context {
+            ui,
+            handle.content,
+            options.layer + 1,
+            options.order,
+            logicalSize
+        };
+        options.buildContent(context);
+    }
+
+    if (options.entrance.enabled && options.entrance.durationSeconds > 0.0f)
+    {
+        DisplayTransition2DComponent transition = {};
+        transition.inheritToChildren = false;
+        transition.durationSeconds = options.entrance.durationSeconds;
+        transition.fromOpacity = std::clamp(options.entrance.startOpacity, 0.0f, 1.0f);
+        transition.toOpacity = 1.0f;
+        transition.fromScale = glm::vec2(std::max(options.entrance.startScale, 0.0f));
+        transition.toScale = glm::vec2(1.0f);
+        transition.curve = options.entrance.curve;
+        transition.set_delay(options.entrance.delaySeconds);
+        // The renderer establishes the clock epoch on the first frame, so a
+        // control can start an entrance animation during a build callback.
+        scene.play_display_transition(handle.border, transition, 0.0);
+    }
+
+    scene.mark_dirty(handle.viewport);
+    scene.mark_dirty(handle.border);
+    return handle;
+}
+
+inline UiControlHandle ui_create_submenu_row(
+    UiBuilder& ui,
+    const Renderer2DFontAtlas& fontAtlas,
+    entt::entity parent,
+    float y,
+    std::string label,
+    int32_t layer,
+    uint32_t order,
+    UiSubmenuRowOptions options = {})
+{
+    if (parent == entt::null || !ui.registry().valid(parent))
+    {
+        return {};
+    }
+
+    const float height = std::max(options.height, 1.0f);
+    const float horizontalInset = std::max(options.horizontalInset, 0.0f);
+    UiControlHandle handle = ui_create_text_button(
+        ui,
+        fontAtlas,
+        std::move(label),
+        { 1.0f, height },
+        layer,
+        order,
+        std::move(options.button));
+    ui.attach_stretch(
+        handle.root,
+        parent,
+        { 0.0f, 0.0f },
+        { 1.0f, 0.0f },
+        { 0.0f, 0.0f },
+        scaled_edges(
+            horizontalInset,
+            0.0f,
+            horizontalInset,
+            0.0f,
+            ui.scale()),
+        scaled_offset(0.0f, y, ui.scale()),
+        scaled_size(0.0f, height, ui.scale()));
     return handle;
 }
 
@@ -2933,7 +3337,7 @@ inline UiControlHandle ui_create_nav_cluster(
 
     if (options.useHistory)
     {
-        UiNavClusterHistoryComponent history = {};
+        UiNavigationHistoryComponent history = {};
         history.pages.push_back(options.initialPage);
         history.cursor = 0u;
         history.backButton = handle.label;
@@ -2943,21 +3347,21 @@ inline UiControlHandle ui_create_nav_cluster(
         history.iconTint = options.iconTint;
         history.disabledIconTint = options.disabledIconTint;
         history.onNavigate = std::move(options.onNavigatePage);
-        registry.emplace<UiNavClusterHistoryComponent>(handle.root, std::move(history));
+        registry.emplace<UiNavigationHistoryComponent>(handle.root, std::move(history));
 
         if (ButtonInputComponent* back = registry.try_get<ButtonInputComponent>(handle.label))
         {
             back->onClick = [scenePtr = &scene, root = handle.root](const PointerInputEvent& event) {
-                ui_nav_cluster_go_back(*scenePtr, root, event);
+                ui_navigation_go_back(*scenePtr, root, event);
             };
         }
         if (ButtonInputComponent* forward = registry.try_get<ButtonInputComponent>(handle.caret))
         {
             forward->onClick = [scenePtr = &scene, root = handle.root](const PointerInputEvent& event) {
-                ui_nav_cluster_go_forward(*scenePtr, root, event);
+                ui_navigation_go_forward(*scenePtr, root, event);
             };
         }
-        ui_update_nav_cluster_history_visual(scene, handle.root);
+        ui_update_navigation_history_visual(scene, handle.root);
     }
 
     ui_update_button_visual(scene, handle.label);
@@ -3329,10 +3733,16 @@ inline bool ui_set_circular_progress(
         return false;
     }
 
-    indicator->arcProgress = ui_circular_progress_normalized_value(
+    const float normalizedValue = ui_circular_progress_normalized_value(
         control->value,
         control->minValue,
         control->maxValue);
+    if (indicator->arcProgress == normalizedValue)
+    {
+        return false;
+    }
+
+    indicator->arcProgress = normalizedValue;
     scene.mark_dirty(control->indicator);
     return true;
 }
@@ -3595,6 +4005,71 @@ inline UiControlHandle ui_create_switch(
     return handle;
 }
 
+inline void ui_update_radio_visual(
+    Renderer2DScene& scene,
+    entt::entity entity)
+{
+    entt::registry& registry = scene.registry();
+    UiRadioControlComponent* control =
+        registry.try_get<UiRadioControlComponent>(entity);
+    ButtonInputComponent* button =
+        registry.try_get<ButtonInputComponent>(entity);
+    if (!control || !button)
+    {
+        return;
+    }
+
+    const bool enabled = button->enabled;
+    if (control->outer != entt::null && registry.valid(control->outer))
+    {
+        if (ShapeStyleComponent* style =
+                registry.try_get<ShapeStyleComponent>(control->outer))
+        {
+            if (!enabled)
+            {
+                *style = control->disabled;
+            }
+            else if (button->leftPressed || button->rightPressed)
+            {
+                *style = control->enabledPressed;
+            }
+            else if (button->hovered)
+            {
+                *style = control->enabledHovered;
+            }
+            else
+            {
+                *style = control->enabledIdle;
+            }
+        }
+        scene.mark_dirty(control->outer);
+    }
+
+    if (control->indicator != entt::null &&
+        registry.valid(control->indicator))
+    {
+        if (ShapeStyleComponent* style =
+                registry.try_get<ShapeStyleComponent>(control->indicator))
+        {
+            *style = enabled ?
+                control->enabledIndicator :
+                control->disabledIndicator;
+            style->opacity = control->checked ? 1.0f : 0.0f;
+        }
+        scene.mark_dirty(control->indicator);
+    }
+
+    if (control->label != entt::null && registry.valid(control->label))
+    {
+        if (TextStyleComponent* style =
+                registry.try_get<TextStyleComponent>(control->label))
+        {
+            *style = enabled ? control->enabledLabel : control->disabledLabel;
+        }
+        scene.mark_dirty(control->label);
+    }
+}
+
 inline void ui_set_radio_checked(
     Renderer2DScene& scene,
     entt::entity entity,
@@ -3616,6 +4091,31 @@ inline void ui_set_radio_checked(
         }
         scene.mark_dirty(control->indicator);
     }
+    ui_update_radio_visual(scene, entity);
+    scene.mark_dirty(entity);
+}
+
+inline void ui_set_radio_enabled(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    bool enabled)
+{
+    ButtonInputComponent* button =
+        scene.registry().try_get<ButtonInputComponent>(entity);
+    if (!button)
+    {
+        return;
+    }
+
+    button->enabled = enabled;
+    if (!enabled)
+    {
+        button->hovered = false;
+        button->leftPressed = false;
+        button->rightPressed = false;
+    }
+    ui_update_radio_visual(scene, entity);
+    ui_update_button_visual(scene, entity);
 }
 
 inline void ui_set_checkbox_checked(
@@ -3678,47 +4178,128 @@ inline UiControlHandle ui_create_radio(
     ui.set_layer(handle.root, layer, order);
     ui.attach_aligned(handle.root, parent, alignment, scaled_offset(offset.x, offset.y, ui.scale()), scaled_size(size.x, size.y, ui.scale()));
 
+    const float diameter = std::max(options.diameter, 8.0f);
+    const float indicatorDiameter = std::clamp(
+        options.indicatorDiameter,
+        2.0f,
+        diameter - 2.0f);
+    const ShapeStyleComponent enabledIdle = ui_macos26_control_style(
+        ui,
+        options.enabledColor,
+        options.outlineColor,
+        options.outlineWidth,
+        1.0f);
+    const ShapeStyleComponent enabledHovered = ui_macos26_control_style(
+        ui,
+        options.hoveredColor,
+        options.outlineColor,
+        options.outlineWidth,
+        1.0f);
+    const ShapeStyleComponent enabledPressed = ui_macos26_control_style(
+        ui,
+        options.pressedColor,
+        options.outlineColor,
+        options.outlineWidth,
+        1.0f);
+    const ShapeStyleComponent disabled = ui_macos26_control_style(
+        ui,
+        options.disabledColor,
+        options.disabledOutlineColor,
+        options.disabledOutlineWidth,
+        1.0f);
+
     entt::entity outer = scene.create_shape(
         { 0.0f, 0.0f },
-        scaled_size(14.0f, 14.0f, ui.scale()),
-        ui_macos26_control_style(ui, "#FFFFFFFF", "#8D8D92FF", 1.0f, 1.0f),
+        scaled_size(diameter, diameter, ui.scale()),
+        options.enabled ? enabledIdle : disabled,
         Renderer2DPrimitive::eEllipse);
     ui.set_layer(outer, layer + 1, order);
-    ui.attach_aligned(outer, handle.root, UiAlignment::eMiddleLeft, scaled_offset(0.0f, 0.0f, ui.scale()), scaled_size(14.0f, 14.0f, ui.scale()));
+    ui.attach_aligned(
+        outer,
+        handle.root,
+        UiAlignment::eMiddleLeft,
+        scaled_offset(0.0f, 0.0f, ui.scale()),
+        scaled_size(diameter, diameter, ui.scale()));
 
     handle.indicator = scene.create_shape(
         { 0.0f, 0.0f },
-        scaled_size(6.0f, 6.0f, ui.scale()),
-        make_solid_style("#0D6FFFFF", "#00000000", 0.0f, options.checked ? 1.0f : 0.0f),
+        scaled_size(indicatorDiameter, indicatorDiameter, ui.scale()),
+        make_solid_style(
+            options.enabled ?
+                options.indicatorColor :
+                options.disabledIndicatorColor,
+            "#00000000",
+            0.0f,
+            options.checked ? 1.0f : 0.0f),
         Renderer2DPrimitive::eEllipse);
     ui.set_layer(handle.indicator, layer + 2, order);
-    ui.attach_aligned(handle.indicator, outer, UiAlignment::eCenter, glm::vec2(0.0f), scaled_size(6.0f, 6.0f, ui.scale()));
+    ui.attach_aligned(
+        handle.indicator,
+        outer,
+        UiAlignment::eCenter,
+        glm::vec2(0.0f),
+        scaled_size(indicatorDiameter, indicatorDiameter, ui.scale()));
+
+    const TextStyleComponent enabledLabel =
+        ui_macos26_text_style(options.labelColor);
+    const TextStyleComponent disabledLabel =
+        ui_macos26_text_style(options.disabledLabelColor);
 
     handle.label = ui.create_aligned_text(
         std::move(label),
         fontAtlas,
         handle.root,
         UiAlignment::eMiddleLeft,
-        13.0f,
-        ui_macos26_text_style("#1D1D1FFF"),
+        options.labelFontSize,
+        options.enabled ? enabledLabel : disabledLabel,
         layer + 1,
         order + 1u,
-        { 22.0f, 0.0f });
+        { diameter + 8.0f, 0.0f });
 
     UiRadioControlComponent control = {};
     control.checked = options.checked;
+    control.outer = outer;
     control.indicator = handle.indicator;
+    control.label = handle.label;
     control.groupId = options.groupId;
     if (options.singleSelect && control.groupId.empty())
     {
         control.groupId = "parent:" + std::to_string(static_cast<uint32_t>(entt::to_integral(parent)));
     }
     control.singleSelect = options.singleSelect;
+    control.enabledIdle = enabledIdle;
+    control.enabledHovered = enabledHovered;
+    control.enabledPressed = enabledPressed;
+    control.disabled = disabled;
+    control.enabledIndicator = make_solid_style(
+        options.indicatorColor,
+        "#00000000",
+        0.0f,
+        options.checked ? 1.0f : 0.0f);
+    control.disabledIndicator = make_solid_style(
+        options.disabledIndicatorColor,
+        "#00000000",
+        0.0f,
+        options.checked ? 1.0f : 0.0f);
+    control.enabledLabel = enabledLabel;
+    control.disabledLabel = disabledLabel;
     control.onChanged = std::move(options.onChanged);
     registry.emplace<UiRadioControlComponent>(handle.root, std::move(control));
 
     ButtonInputComponent button = {};
     button.enabled = options.enabled;
+    button.onPress = [scenePtr = &scene, entity = handle.root](
+                         const PointerInputEvent&) {
+        ui_update_radio_visual(*scenePtr, entity);
+    };
+    button.onRelease = [scenePtr = &scene, entity = handle.root](
+                           const PointerInputEvent&) {
+        ui_update_radio_visual(*scenePtr, entity);
+    };
+    button.onHoverChanged = [scenePtr = &scene, entity = handle.root](
+                                bool) {
+        ui_update_radio_visual(*scenePtr, entity);
+    };
     button.onClick = [scenePtr = &scene, entity = handle.root](const PointerInputEvent& event) {
         entt::registry& capturedRegistry = scenePtr->registry();
         UiRadioControlComponent* captured = capturedRegistry.try_get<UiRadioControlComponent>(entity);
@@ -3760,6 +4341,7 @@ inline UiControlHandle ui_create_radio(
     };
     registry.emplace<ButtonInputComponent>(handle.root, std::move(button));
     registry.emplace<ButtonVisualComponent>(handle.root, ui_transparent_button_visual());
+    ui_update_radio_visual(scene, handle.root);
     return handle;
 }
 

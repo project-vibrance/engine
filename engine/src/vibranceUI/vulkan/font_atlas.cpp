@@ -2,6 +2,7 @@
 #include <vibranceUI/renderer/image.h>
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
+#include "text_direction.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -19,7 +20,11 @@ namespace
 {
     constexpr uint32_t kAtlasWidth = 4096;
     constexpr uint32_t kAtlasHeight = 4096;
-    constexpr int kSdfPadding = 48;
+    // Bake glyph outlines above their normal UI display size, while keeping
+    // enough signed-distance padding for outlines and glow. The former 64 px
+    // source spent more atlas space on 48 px padding than on the glyph itself,
+    // leaving curved outlines visibly quantised after scaling.
+    constexpr int kSdfPadding = 24;
     constexpr unsigned char kSdfOnEdgeValue = 180;
 
     bool upload_rgba_to_image(
@@ -530,78 +535,6 @@ namespace
         return (static_cast<uint64_t>(left) << 32u) | static_cast<uint64_t>(right);
     }
 
-    bool append_utf8_codepoint(std::vector<uint32_t>& out, std::string_view text, std::size_t& offset)
-    {
-        // Invalid UTF-8 falls back to a visible question mark rather than dropping layout
-        if (offset >= text.size())
-        {
-            return false;
-        }
-
-        const unsigned char first = static_cast<unsigned char>(text[offset++]);
-        if (first < 0x80u)
-        {
-            out.push_back(first);
-            return true;
-        }
-
-        uint32_t codepoint = 0u;
-        int continuationCount = 0;
-        if ((first & 0xE0u) == 0xC0u)
-        {
-            codepoint = first & 0x1Fu;
-            continuationCount = 1;
-        }
-        else if ((first & 0xF0u) == 0xE0u)
-        {
-            codepoint = first & 0x0Fu;
-            continuationCount = 2;
-        }
-        else if ((first & 0xF8u) == 0xF0u)
-        {
-            codepoint = first & 0x07u;
-            continuationCount = 3;
-        }
-        else
-        {
-            out.push_back('?');
-            return false;
-        }
-
-        for (int i = 0; i < continuationCount; ++i)
-        {
-            if (offset >= text.size())
-            {
-                out.push_back('?');
-                return false;
-            }
-
-            const unsigned char next = static_cast<unsigned char>(text[offset++]);
-            if ((next & 0xC0u) != 0x80u)
-            {
-                out.push_back('?');
-                return false;
-            }
-            codepoint = (codepoint << 6u) | (next & 0x3Fu);
-        }
-
-        out.push_back(codepoint);
-        return true;
-    }
-
-    std::vector<uint32_t> decode_utf8(std::string_view text)
-    {
-        // Layout operates on codepoints so glyph lookup and kerning stay simple
-        std::vector<uint32_t> out;
-        out.reserve(text.size());
-        std::size_t offset = 0u;
-        while (offset < text.size())
-        {
-            append_utf8_codepoint(out, text, offset);
-        }
-        return out;
-    }
-
     std::vector<uint32_t> build_codepoint_list(const Renderer2DFontAtlasLoadOptions& options)
     {
         std::vector<uint32_t> codepoints;
@@ -638,7 +571,13 @@ namespace
             }
         }
 
-        for (uint32_t codepoint : decode_utf8(options.preloadText))
+        for (uint32_t codepoint : renderer2d_decode_utf8(options.preloadText))
+        {
+            add_codepoint(codepoint);
+        }
+        // Arabic shaping happens at layout time, so preload the corresponding
+        // presentation forms in the same shared atlas as their logical text.
+        for (uint32_t codepoint : renderer2d_visual_codepoints(options.preloadText))
         {
             add_codepoint(codepoint);
         }
@@ -1163,6 +1102,9 @@ std::vector<std::filesystem::path> renderer2d_common_font_fallbacks(
     addLayeredFont("NotoSansJP-VariableFont_wght.ttf");
     addLayeredFont("NotoSansKR-Regular.ttf");
     addLayeredFont("NotoSansArabic-Variable.ttf");
+    addLayeredFont("NotoSansDevanagari-Variable.ttf");
+    addLayeredFont("NotoSansDevanagari-VariableFont_wght.ttf");
+    addLayeredFont("NotoSansDevanagari-Regular.ttf");
     addLayeredFont("NotoSansThai-Variable.ttf");
 
     // Optional system fonts help with Devanagari and extra Cyrillic coverage when installed
@@ -1484,7 +1426,10 @@ bool Renderer2DFontAtlas::load_from_file(
 
                 FT_Face face = faces[faceIndex].face;
                 const FT_UInt glyphIndex = FT_Get_Char_Index(face, codepoint);
-                if (FT_Load_Glyph(face, glyphIndex, FT_LOAD_DEFAULT) != 0)
+                if (FT_Load_Glyph(
+                        face,
+                        glyphIndex,
+                        FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING) != 0)
                 {
                     ++missingGlyphs;
                     continue;
@@ -1691,6 +1636,9 @@ bool Renderer2DFontAtlas::load_from_file(
 Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, float fontSize) const
 {
     Renderer2DTextLayout layout;
+    layout.rightToLeft = renderer2d_text_is_right_to_left(text);
+    layout.lineCount = 1u + static_cast<uint32_t>(
+        std::count(text.begin(), text.end(), '\n'));
     if (!isLoaded || fontSize <= 0.0f)
     {
         return layout;
@@ -1706,7 +1654,7 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, flo
     glm::vec2 inkMax { std::numeric_limits<float>::lowest() };
     uint32_t previous = 0;
 
-    for (uint32_t codepoint : decode_utf8(text))
+    for (uint32_t codepoint : renderer2d_visual_codepoints(text))
     {
         if (codepoint == '\n')
         {
@@ -1787,6 +1735,427 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, flo
         };
     }
     return layout;
+}
+
+Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
+    std::string_view text,
+    float fontSize,
+    const TextLayout2DOptions& options) const
+{
+    const bool legacyLayout =
+        options.maximumWidth <= 0.0f &&
+        options.wrapMode == TextWrapMode2D::eNone &&
+        options.horizontalAlignment == TextHorizontalAlignment2D::eStart &&
+        std::abs(options.lineHeightMultiplier - 1.0f) <= 0.0001f &&
+        std::abs(options.lineSpacing) <= 0.0001f &&
+        std::abs(options.paragraphSpacing) <= 0.0001f &&
+        std::abs(options.characterSpacing) <= 0.0001f &&
+        std::abs(options.wordSpacing) <= 0.0001f;
+    if (legacyLayout)
+    {
+        return layout_text(text, fontSize);
+    }
+
+    Renderer2DTextLayout layout = {};
+    layout.rightToLeft = renderer2d_text_is_right_to_left(text);
+    if (!isLoaded || fontSize <= 0.0f)
+    {
+        layout.lineCount = 1u + static_cast<uint32_t>(
+            std::count(text.begin(), text.end(), '\n'));
+        layout.bounds.x = std::max(options.maximumWidth, 0.0f);
+        return layout;
+    }
+
+    const float scale = fontSize / std::max(bakedPixelHeight, 1.0f);
+    const float scaledLineHeight = lineHeight * scale;
+    const float scaledBaseline = baseline * scale;
+    const float maximumWidth = std::max(options.maximumWidth, 0.0f);
+    const float characterSpacing = std::max(
+        options.characterSpacing,
+        -fontSize * 0.45f);
+    const float wordSpacing = std::max(
+        options.wordSpacing,
+        -fontSize * 0.75f);
+    const float resolvedLineHeight = std::max(
+        scaledLineHeight * std::max(options.lineHeightMultiplier, 0.2f) +
+            options.lineSpacing,
+        fontSize * 0.2f);
+    const float paragraphSpacing = std::max(
+        options.paragraphSpacing,
+        -resolvedLineHeight * 0.8f);
+
+    const auto is_wrap_space = [](uint32_t codepoint) {
+        return codepoint == ' ' || codepoint == '\t' ||
+            codepoint == 0x00A0u || codepoint == 0x3000u;
+    };
+    const auto glyph_for_layout = [this](
+        uint32_t codepoint,
+        uint32_t& resolvedCodepoint) -> const GlyphRecord* {
+        resolvedCodepoint = codepoint;
+        const GlyphRecord* glyph = glyph_for(codepoint);
+        if (glyph == nullptr || !glyph->valid)
+        {
+            resolvedCodepoint = '?';
+            glyph = glyph_for('?');
+        }
+        return glyph && glyph->valid ? glyph : nullptr;
+    };
+    const auto measure_range = [
+        this,
+        &glyph_for_layout,
+        &is_wrap_space,
+        characterSpacing,
+        wordSpacing,
+        scale](const std::vector<uint32_t>& codepoints,
+               std::size_t begin,
+               std::size_t end) {
+        float width = 0.0f;
+        uint32_t previous = 0u;
+        for (std::size_t index = begin; index < end; ++index)
+        {
+            uint32_t resolved = 0u;
+            const GlyphRecord* glyph =
+                glyph_for_layout(codepoints[index], resolved);
+            if (!glyph)
+            {
+                continue;
+            }
+            if (previous != 0u)
+            {
+                width += kerning(previous, resolved) * scale +
+                    characterSpacing;
+            }
+            width += glyph->advance * scale;
+            if (is_wrap_space(codepoints[index]))
+            {
+                width += wordSpacing;
+            }
+            previous = resolved;
+        }
+        return std::max(width, 0.0f);
+    };
+
+    struct FlowLine
+    {
+        std::vector<uint32_t> codepoints;
+        bool lastInParagraph = true;
+        bool paragraphBreakAfter = false;
+    };
+
+    std::vector<std::vector<uint32_t>> paragraphs(1u);
+    for (uint32_t codepoint : renderer2d_visual_codepoints(text))
+    {
+        if (codepoint == '\n')
+        {
+            paragraphs.emplace_back();
+        }
+        else if (codepoint != '\r')
+        {
+            if (codepoint == '\t')
+            {
+                paragraphs.back().insert(paragraphs.back().end(), 4u, ' ');
+            }
+            else
+            {
+                paragraphs.back().push_back(codepoint);
+            }
+        }
+    }
+
+    std::vector<FlowLine> lines;
+    for (std::size_t paragraphIndex = 0u;
+        paragraphIndex < paragraphs.size(); ++paragraphIndex)
+    {
+        const std::vector<uint32_t>& paragraph = paragraphs[paragraphIndex];
+        const std::size_t firstLine = lines.size();
+        const bool shouldWrap = maximumWidth > 0.0f &&
+            options.wrapMode != TextWrapMode2D::eNone;
+        if (!shouldWrap || paragraph.empty())
+        {
+            lines.push_back({ paragraph, true, false });
+        }
+        else
+        {
+            std::size_t start = 0u;
+            while (start < paragraph.size())
+            {
+                while (start < paragraph.size() &&
+                    is_wrap_space(paragraph[start]))
+                {
+                    ++start;
+                }
+                if (start >= paragraph.size())
+                {
+                    break;
+                }
+
+                std::size_t end = start;
+                std::size_t lastSpace = paragraph.size();
+                bool emitted = false;
+                while (end < paragraph.size())
+                {
+                    if (is_wrap_space(paragraph[end]))
+                    {
+                        lastSpace = end;
+                    }
+                    const float candidateWidth =
+                        measure_range(paragraph, start, end + 1u);
+                    if (candidateWidth > maximumWidth)
+                    {
+                        std::size_t lineEnd = end;
+                        std::size_t nextStart = end;
+                        if (options.wrapMode == TextWrapMode2D::eWord &&
+                            lastSpace != paragraph.size() &&
+                            lastSpace >= start)
+                        {
+                            lineEnd = lastSpace;
+                            nextStart = lastSpace + 1u;
+                        }
+                        else if (end == start)
+                        {
+                            lineEnd = start + 1u;
+                            nextStart = lineEnd;
+                        }
+
+                        while (lineEnd > start &&
+                            is_wrap_space(paragraph[lineEnd - 1u]))
+                        {
+                            --lineEnd;
+                        }
+                        lines.push_back({
+                            std::vector<uint32_t>(
+                                paragraph.begin() + static_cast<std::ptrdiff_t>(start),
+                                paragraph.begin() + static_cast<std::ptrdiff_t>(lineEnd)),
+                            false,
+                            false
+                        });
+                        start = nextStart;
+                        emitted = true;
+                        break;
+                    }
+                    ++end;
+                }
+
+                if (!emitted)
+                {
+                    std::size_t lineEnd = paragraph.size();
+                    while (lineEnd > start &&
+                        is_wrap_space(paragraph[lineEnd - 1u]))
+                    {
+                        --lineEnd;
+                    }
+                    lines.push_back({
+                        std::vector<uint32_t>(
+                            paragraph.begin() + static_cast<std::ptrdiff_t>(start),
+                            paragraph.begin() + static_cast<std::ptrdiff_t>(lineEnd)),
+                        false,
+                        false
+                    });
+                    break;
+                }
+            }
+        }
+
+        if (lines.size() == firstLine)
+        {
+            lines.push_back({ {}, true, false });
+        }
+        lines.back().lastInParagraph = true;
+        lines.back().paragraphBreakAfter =
+            paragraphIndex + 1u < paragraphs.size();
+    }
+
+    layout.lineCount = static_cast<uint32_t>(lines.size());
+    layout.lineHeight = resolvedLineHeight;
+    float penY = 0.0f;
+    float maximumVisibleX = 0.0f;
+    float inkMinY = std::numeric_limits<float>::max();
+    float inkMaxY = std::numeric_limits<float>::lowest();
+    bool hasInk = false;
+
+    for (const FlowLine& line : lines)
+    {
+        const float lineAdvance = measure_range(
+            line.codepoints,
+            0u,
+            line.codepoints.size());
+        const std::size_t spaceCount = static_cast<std::size_t>(
+            std::count_if(
+                line.codepoints.begin(),
+                line.codepoints.end(),
+                is_wrap_space));
+        const bool justify =
+            options.horizontalAlignment ==
+                TextHorizontalAlignment2D::eJustify &&
+            !line.lastInParagraph && maximumWidth > 0.0f &&
+            spaceCount > 0u;
+        const float justifySpacing = justify ?
+            std::max(maximumWidth - lineAdvance, 0.0f) /
+                static_cast<float>(spaceCount) :
+            0.0f;
+
+        struct PendingGlyph
+        {
+            MSDFGlyph glyph;
+            float inkInset = 0.0f;
+        };
+        std::vector<PendingGlyph> pending;
+        float penX = 0.0f;
+        float lineInkMin = std::numeric_limits<float>::max();
+        float lineInkMax = std::numeric_limits<float>::lowest();
+        uint32_t previous = 0u;
+        for (uint32_t codepoint : line.codepoints)
+        {
+            uint32_t resolved = 0u;
+            const GlyphRecord* glyph = glyph_for_layout(codepoint, resolved);
+            if (!glyph)
+            {
+                continue;
+            }
+            if (previous != 0u)
+            {
+                penX += kerning(previous, resolved) * scale +
+                    characterSpacing;
+            }
+            if (glyph->drawable)
+            {
+                PendingGlyph out = {};
+                out.glyph.codepoint = resolved;
+                out.glyph.position = {
+                    penX + glyph->offset.x * scale,
+                    penY + scaledBaseline + glyph->offset.y * scale
+                };
+                out.glyph.size = glyph->size * scale;
+                out.glyph.uvMin = glyph->uvMin;
+                out.glyph.uvMax = glyph->uvMax;
+                out.glyph.advance = glyph->advance * scale;
+                out.inkInset = std::min(
+                    sdfPixelRange * scale,
+                    std::max(
+                        std::min(out.glyph.size.x, out.glyph.size.y) * 0.45f,
+                        0.0f));
+                lineInkMin = std::min(
+                    lineInkMin,
+                    out.glyph.position.x + out.inkInset);
+                lineInkMax = std::max(
+                    lineInkMax,
+                    out.glyph.position.x + out.glyph.size.x - out.inkInset);
+                pending.push_back(out);
+            }
+            penX += glyph->advance * scale;
+            if (is_wrap_space(codepoint))
+            {
+                penX += wordSpacing + justifySpacing;
+            }
+            previous = resolved;
+        }
+
+        const bool lineHasInk = !pending.empty() &&
+            std::isfinite(lineInkMin) && std::isfinite(lineInkMax);
+        const float visibleWidth = lineHasInk ?
+            std::max(lineInkMax - lineInkMin, 0.0f) :
+            std::max(lineAdvance, 0.0f);
+        const float alignmentWidth = maximumWidth > 0.0f ?
+            maximumWidth : visibleWidth;
+        float alignedLeft = 0.0f;
+        switch (options.horizontalAlignment)
+        {
+        case TextHorizontalAlignment2D::eCenter:
+            alignedLeft = (alignmentWidth - visibleWidth) * 0.5f;
+            break;
+        case TextHorizontalAlignment2D::eEnd:
+            alignedLeft = layout.rightToLeft ?
+                0.0f : alignmentWidth - visibleWidth;
+            break;
+        case TextHorizontalAlignment2D::eJustify:
+            alignedLeft = 0.0f;
+            break;
+        case TextHorizontalAlignment2D::eStart:
+        default:
+            alignedLeft = layout.rightToLeft ?
+                alignmentWidth - visibleWidth : 0.0f;
+            break;
+        }
+        alignedLeft = std::max(alignedLeft, 0.0f);
+        const float lineShift = lineHasInk ?
+            alignedLeft - lineInkMin : alignedLeft;
+
+        for (PendingGlyph& pendingGlyph : pending)
+        {
+            pendingGlyph.glyph.position.x += lineShift;
+            const float glyphInkMinY =
+                pendingGlyph.glyph.position.y + pendingGlyph.inkInset;
+            const float glyphInkMaxY =
+                pendingGlyph.glyph.position.y + pendingGlyph.glyph.size.y -
+                    pendingGlyph.inkInset;
+            inkMinY = std::min(inkMinY, glyphInkMinY);
+            inkMaxY = std::max(inkMaxY, glyphInkMaxY);
+            maximumVisibleX = std::max(
+                maximumVisibleX,
+                pendingGlyph.glyph.position.x +
+                    pendingGlyph.glyph.size.x - pendingGlyph.inkInset);
+            layout.glyphs.push_back(std::move(pendingGlyph.glyph));
+            hasInk = true;
+        }
+
+        if (&line != &lines.back())
+        {
+            penY += resolvedLineHeight;
+            if (line.paragraphBreakAfter)
+            {
+                penY += paragraphSpacing;
+            }
+        }
+    }
+
+    const float typographicHeight = lines.empty() ? 0.0f :
+        penY + scaledLineHeight *
+            std::max(options.lineHeightMultiplier, 0.2f);
+    if (hasInk)
+    {
+        for (MSDFGlyph& glyph : layout.glyphs)
+        {
+            glyph.position.y -= inkMinY;
+        }
+        layout.bounds.y = std::max(
+            inkMaxY - inkMinY,
+            typographicHeight);
+    }
+    else
+    {
+        layout.bounds.y = typographicHeight;
+    }
+    layout.bounds.x = maximumWidth > 0.0f ?
+        maximumWidth : maximumVisibleX;
+    layout.bounds = glm::max(layout.bounds, glm::vec2(0.0f));
+    return layout;
+}
+
+bool Renderer2DFontAtlas::covers_text(std::string_view text) const
+{
+    return missing_codepoints(text).empty();
+}
+
+std::vector<uint32_t> Renderer2DFontAtlas::missing_codepoints(
+    std::string_view text) const
+{
+    std::vector<uint32_t> missing;
+    std::unordered_set<uint32_t> seen;
+    for (const uint32_t codepoint : renderer2d_visual_codepoints(text))
+    {
+        // Newlines affect layout but never require an atlas entry.
+        if (codepoint == '\n' || codepoint == 0u || seen.contains(codepoint))
+        {
+            continue;
+        }
+        seen.insert(codepoint);
+        const GlyphRecord* glyph = glyph_for(codepoint);
+        if (glyph == nullptr || !glyph->valid)
+        {
+            missing.push_back(codepoint);
+        }
+    }
+    return missing;
 }
 
 StorageImage* Renderer2DFontAtlas::image() const

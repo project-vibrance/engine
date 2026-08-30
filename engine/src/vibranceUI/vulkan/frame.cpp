@@ -46,6 +46,11 @@ namespace
 			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
 		frame.uiBlurSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
 			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		// Media's separable source blur needs an intermediate with enough colour
+		// and alpha precision to avoid an extra visible 8-bit quantisation between
+		// the horizontal and vertical axes.
+		frame.mediaBlurSurface = new StorageImage(frame.allocator, vk::Format::eR16G16B16A16Sfloat, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
 		frame.uiStaticSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
 			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue,
 			vk::ImageUsageFlagBits::eColorAttachment);
@@ -101,7 +106,7 @@ namespace
 		// Descriptor scopes point shaders at the current frame surfaces and buffers
 		StorageImage* fontAtlasDescriptorImage = frame.fontAtlasImage != nullptr ? frame.fontAtlasImage : frame.uiBlurSurface;
 		std::vector<vk::WriteDescriptorSet> updates;
-		updates.reserve(23);
+		updates.reserve(24);
 
 		auto add_image_write = [&](DescriptorScope scope, uint32_t binding, StorageImage* image) {
 			vk::WriteDescriptorSet writeOp = {};
@@ -126,6 +131,7 @@ namespace
 		add_image_write(DescriptorScope::ePost, 5, frame.uiStaticBlurSurface);
 		add_image_write(DescriptorScope::ePost, 6, frame.externalBackdropSurface);
 		add_image_write(DescriptorScope::ePost, 7, frame.compositionSurface);
+		add_image_write(DescriptorScope::ePost, 8, frame.mediaBlurSurface);
 
 		add_image_write(DescriptorScope::eUICache, 0, frame.depthBuffer);
 		add_image_write(DescriptorScope::eUICache, 1, frame.uiStaticSurface);
@@ -138,6 +144,7 @@ namespace
 		add_image_write(DescriptorScope::eUICachePost, 5, frame.uiStaticBlurSurface);
 		add_image_write(DescriptorScope::eUICachePost, 6, frame.externalBackdropSurface);
 		add_image_write(DescriptorScope::eUICachePost, 7, frame.compositionSurface);
+		add_image_write(DescriptorScope::eUICachePost, 8, frame.mediaBlurSurface);
 
 		frame.logicalDevice.updateDescriptorSets(static_cast<uint32_t>(updates.size()), updates.data(), 0, nullptr);
 	}
@@ -291,11 +298,13 @@ void Frame::record_command_buffer(
 		transition_render_target(compositionSurface, vk::AccessFlagBits::eShaderWrite);
 	}
 	transition_render_target(uiBlurSurface, vk::AccessFlagBits::eMemoryWrite);
+	transition_render_target(mediaBlurSurface, vk::AccessFlagBits::eMemoryWrite);
 	prepare_cache_target(uiStaticSurface);
 	prepare_cache_target(uiStaticBlurSurface);
 	uiCacheImagesReady = true;
 
 	barrier_render_target(uiBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	barrier_render_target(mediaBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
 
 	renderer2D.record(
 		commandBuffer,
@@ -594,6 +603,12 @@ void Frame::resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModel
 	update_frame_descriptor_sets(*this);
 }
 
+void Frame::set_font_atlas_image(StorageImage* image)
+{
+	fontAtlasImage = image;
+	update_frame_descriptor_sets(*this);
+}
+
 void Frame::free_resources()
 {
 	Logger* logger = Logger::fetch_logger();
@@ -623,6 +638,7 @@ void Frame::free_resources()
 	delete_storage_image(tempSurface);
 	delete_storage_image(compositionSurface);
 	delete_storage_image(uiBlurSurface);
+	delete_storage_image(mediaBlurSurface);
 	delete_storage_image(uiStaticSurface);
 	delete_storage_image(uiStaticBlurSurface);
 	delete_storage_image(externalBackdropSurface);
