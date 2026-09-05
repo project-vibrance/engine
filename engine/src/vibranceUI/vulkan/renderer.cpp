@@ -19,6 +19,7 @@
 #include <vector>
 #include <array>
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -128,7 +129,12 @@ namespace
 		const std::uintmax_t safeSize = error ? 0u : size;
 		error.clear();
 		const auto writeTime = std::filesystem::last_write_time(path, error);
-		const auto writeTicks = error ? 0 : writeTime.time_since_epoch().count();
+		// libc++ may expose the filesystem clock count as a 128-bit integer,
+		// which has no std::to_string overload. The cache stamp only needs a
+		// stable, process-independent scalar representation.
+		const std::int64_t writeTicks = error
+			? 0
+			: static_cast<std::int64_t>(writeTime.time_since_epoch().count());
 		return std::to_string(safeSize) + "@" + std::to_string(writeTicks);
 	}
 

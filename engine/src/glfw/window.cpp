@@ -795,6 +795,22 @@ void focus_glfw_window(GLFWwindow* window)
     glfwFocusWindow(window);
 }
 
+void set_glfw_window_visible(GLFWwindow* window, bool visible)
+{
+    if (!window)
+    {
+        return;
+    }
+    if (visible)
+    {
+        glfwShowWindow(window);
+    }
+    else
+    {
+        glfwHideWindow(window);
+    }
+}
+
 void set_glfw_window_title(GLFWwindow* window, const char* title)
 {
     if (window && title)

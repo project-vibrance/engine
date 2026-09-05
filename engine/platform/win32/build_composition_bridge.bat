@@ -15,7 +15,10 @@ set "OBJECT_DIR=%~6"
 set "SDK_VERSION=%~7"
 set "SDK_INCLUDE_ROOT=%~8"
 set "SDK_UM_LIBRARY_DIR=%~9"
-set "SDK_UCRT_LIBRARY_DIR=%~10"
+REM cmd.exe exposes only %%0 through %%9 directly. One shift moves the original
+REM argument 10 into %%9; all earlier values were captured above.
+shift
+set "SDK_UCRT_LIBRARY_DIR=%~9"
 
 if not exist "%VCVARSALL%" exit /b 3
 if not exist "%OBJECT_DIR%" mkdir "%OBJECT_DIR%"

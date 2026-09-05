@@ -406,14 +406,18 @@ void GlfwPanelWindow::handle_mouse_button(int button, int action, int mods)
         const UiPointerButtonInput input = glfw_pointer_button_input(window, button, action, mods, renderWidth, renderHeight);
         if (input.hasPoint)
         {
-            const TrafficLightKind light = traffic_light_at(input.point);
+            const bool sceneBlocksWindowAction =
+                scene_blocks_window_action(input.point);
+            const TrafficLightKind light = !sceneBlocksWindowAction ?
+                traffic_light_at(input.point) : TrafficLightKind::eNone;
             if (light != TrafficLightKind::eNone)
             {
                 perform_traffic_light_action(light);
                 return;
             }
 
-            if (handle_window_action_press(input))
+            if (!sceneBlocksWindowAction &&
+                handle_window_action_press(input))
             {
                 return;
             }
@@ -1076,7 +1080,9 @@ void GlfwPanelWindow::update_hover_cursor()
         return;
     }
 
-    const TrafficLightKind light = traffic_light_at(point);
+    const bool blocksWindowAction = scene_blocks_window_action(point);
+    const TrafficLightKind light = !blocksWindowAction ?
+        traffic_light_at(point) : TrafficLightKind::eNone;
     if (light != TrafficLightKind::eNone)
     {
         ui_update_input_hover(
@@ -1094,7 +1100,6 @@ void GlfwPanelWindow::update_hover_cursor()
     }
     set_hovered_traffic_light(TrafficLightKind::eNone);
 
-    const bool blocksWindowAction = scene_blocks_window_action(point);
     const uint32_t edges = resize_edges_at(point);
     if (!blocksWindowAction && edges != eResizeNone)
     {
@@ -1131,11 +1136,11 @@ void GlfwPanelWindow::update_hover_cursor()
         return;
     }
 
-    if (edges != eResizeNone)
+    if (!blocksWindowAction && edges != eResizeNone)
     {
         set_glfw_cursor_for_kind(window, cursors, cursor_for_resize_edges(edges));
     }
-    else if (title_hit_test(point))
+    else if (!blocksWindowAction && title_hit_test(point))
     {
         set_glfw_cursor_for_kind(window, cursors, UiCursorKind::ePointer);
     }

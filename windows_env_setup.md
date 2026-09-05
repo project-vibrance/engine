@@ -3,10 +3,18 @@
 > Because of that, I have created this document to ensure that setup process is properly working.
 
 ### Setting up MinGW
-- [Get this version of MinGW-w64 specifically
-](https://github.com/brechtsanders/winlibs_mingw/releases/download/15.2.0posix-13.0.0-ucrt-r6/winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-13.0.0-r6.7z)
-- Keep this directory somewhere, for example: `C:\dev\winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-13.0.0-r6\mingw64`.
-- Add this to `PATH`: `C:\dev\winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-13.0.0-r6\mingw64\bin`
+Download the UCRT Windows-host
+archive from the official
+[LLVM-MinGW releases](https://github.com/mstorsjo/llvm-mingw/releases), unpack
+it to `C:\llvm-mingw`, and add `C:\llvm-mingw\bin` to `PATH`. The Windows-host
+distribution is a UCRT cross-toolchain that produces both x64 and ARM64
+binaries from an x64 development machine. Set both `MINGW_PATH` and
+`LLVM_MINGW_PATH` to the unpacked root. The build scripts use the included GNU
+Make and select the correct target compilers automatically.
+
+Install Visual Studio Build Tools with both the normal C++ workload and the
+**MSVC ARM64 build tools** component. Those tools compile the optional private
+Composition and WinRT companion DLLs; the main engine remains LLVM-MinGW.
 
 ### Getting GLFW binaries working
 - Ensure you build the binaries from the GitHub repository, and not use the pre-built ones
@@ -50,7 +58,8 @@ C:\VulkanSDK\1.4.341.1\Include
 - [stb](https://github.com/nothings/stb/archive/refs/heads/master.zip)
 - [entt v3.16.0](https://github.com/skypjack/entt/releases/tag/v3.16.0)
 - [freetype-VER-2-14-3](https://gitlab.freedesktop.org/freetype/freetype/-/archive/VER-2-14-3/freetype-VER-2-14-3.zip?ref_type=tags)
-- [ffmpeg](https://github.com/BtbN/FFmpeg-Builds/releases/tag/latest)
+- [FFmpeg 8.1.2 source](https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz),
+  built using [the LGPL Windows instructions](docs/building-lgpl-ffmpeg.md)
 - [soloud_20200207](https://solhsa.com/soloud/soloud_20200207.zip)
 
 > [!NOTE]
@@ -60,7 +69,7 @@ C:\VulkanSDK\1.4.341.1\Include
 - Ensure your `.env.cmake` for Windows builds look similar to this:
 
 ```cmake
-set(MINGW_PATH "C:/dev/winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64ucrt-13.0.0-r6/mingw64")
+set(MINGW_PATH "C:/llvm-mingw")
 set(GLFW_PATH "C:/dev/glfw-3.4")
 set(GLM_PATH "C:/dev/glm")
 set(VMA_PATH "C:/dev/VulkanMemoryAllocator-3.3.0")
@@ -69,8 +78,18 @@ set(SIMDJSON_PATH "C:/dev/simdjson (or C:/dev/singleheader)")
 set(ENTT_PATH "C:/dev/entt")
 set(FREETYPE_PATH "C:/dev/freetype-VER-2-14-3")
 set(STB_PATH "C:/dev/stb")
+
+# Required for arm64. Prefer source checkouts for GLFW and FreeType.
+set(LLVM_MINGW_PATH "C:/llvm-mingw")
+set(GLFW_ARM64_PATH "C:/dev/glfw-3.4")
+set(FREETYPE_ARM64_PATH "C:/dev/freetype-VER-2-14-3")
+
+set(FFMPEG_PATH "C:/dev/ffmpeg-8.1.2-lgpl-static-windows-x64")
+set(FFMPEG_ARM64_PATH "C:/dev/ffmpeg-8.1.2-lgpl-static-windows-arm64")
 ```
 
 ### Clean-up
-- Verify everything works by running `.\mingwBuild.bat` (`CTRL+Shift+B` if building from VS Code)
+- Build x64 with `.\mingwBuild.bat Release x64`, ARM64 with
+  `.\mingwBuild.bat Release arm64`, or both with
+  `.\mingwBuild.bat Release all`.
 - If it does not compile, make sure you kill your terminal first or restart VS Code

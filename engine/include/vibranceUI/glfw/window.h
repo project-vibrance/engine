@@ -207,6 +207,9 @@ VIBRANCE_GLFW_API double glfw_time_seconds();
 VIBRANCE_GLFW_API bool glfw_window_should_close(GLFWwindow* window);
 VIBRANCE_GLFW_API void poll_glfw_events();
 VIBRANCE_GLFW_API void focus_glfw_window(GLFWwindow* window);
+VIBRANCE_GLFW_API void set_glfw_window_visible(
+    GLFWwindow* window,
+    bool visible);
 VIBRANCE_GLFW_API void set_glfw_window_title(GLFWwindow* window, const char* title);
 VIBRANCE_GLFW_API void set_glfw_window_decorated(
     GLFWwindow* window,

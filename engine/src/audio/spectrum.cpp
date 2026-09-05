@@ -13,6 +13,45 @@ namespace
 {
     constexpr float kPi = 3.14159265358979323846f;
 
+    constexpr std::size_t kHopLengthDivisor = 4u;
+
+    constexpr float kRmsContribution = 0.82f;
+    constexpr float kPeakContribution = 0.18f;
+
+    constexpr float kNeighbourContribution = 0.12f;
+    constexpr float kGlobalContribution = 0.08f;
+
+    constexpr float kTransientSensitivity = 2.35f;
+    constexpr float kTransientMaximum = 0.30f;
+    constexpr float kTransientDecayRate = 18.0f;
+
+    constexpr float kResponseGamma = 0.78f;
+
+    constexpr float kAttackStepMultiplier = 2.6f;
+
+    constexpr float kSecondBarCurve = 1.55f;
+    constexpr float kSecondBarNeighbourContribution = 0.045f;
+    constexpr float kSecondBarGlobalContributionScale = 0.30f;
+    constexpr float kSecondBarTransientContributionScale = 0.32f;
+    constexpr float kSecondBarFullResponseStart = 0.88f;
+    constexpr float kSecondBarFullResponseEnd = 0.995f;
+    constexpr float kSecondBarDominanceStart = 1.25f;
+    constexpr float kSecondBarDominanceEnd = 1.65f;
+
+    float smoothstep(float edge0, float edge1, float value)
+    {
+        if (edge1 <= edge0)
+        {
+            return value >= edge1 ? 1.0f : 0.0f;
+        }
+
+        const float x = std::clamp(
+            (value - edge0) / (edge1 - edge0),
+            0.0f,
+            1.0f);
+        return x * x * (3.0f - 2.0f * x);
+    }
+
     std::uint32_t bit_reverse(std::uint32_t value, std::uint32_t bits)
     {
         std::uint32_t reversed = 0u;
@@ -46,8 +85,6 @@ namespace
         options.lowBandCompression = std::max(options.lowBandCompression, 0.01f);
         options.highBandCompression = std::max(options.highBandCompression, 0.01f);
 
-        // A custom band count gets neutral weights unless one weight is
-        // supplied for every band. This makes configuration mistakes benign.
         if (options.bandWeights.size() != options.bandCount)
         {
             options.bandWeights.assign(options.bandCount, 1.0f);
@@ -63,13 +100,19 @@ namespace
 struct AudioSpectrumProcessor::Impl
 {
     static constexpr std::size_t kMagnitudeCount = kFftLength / 2u;
+    static constexpr std::size_t kHopLength =
+        std::max<std::size_t>(kFftLength / kHopLengthDivisor, 1u);
 
     explicit Impl(AudioSpectrumOptions requestedOptions, float requestedSampleRate) :
         options(normalise_options(std::move(requestedOptions))),
         bandBins(options.bandCount),
         bandBinCounts(options.bandCount, 1u),
         pendingBandSumSquares(options.bandCount, 0.0f),
+        pendingBandPeaks(options.bandCount, 0.0f),
         bandSumSquares(options.bandCount, 0.0f),
+        bandPeaks(options.bandCount, 0.0f),
+        rawLevels(options.bandCount, 0.0f),
+        shapedLevels(options.bandCount, 0.0f),
         targetLevels(options.bandCount, 0.0f),
         displayedLevels(options.bandCount, 0.0f)
     {
@@ -127,21 +170,38 @@ struct AudioSpectrumProcessor::Impl
 
     void push_sample_unlocked(float sample)
     {
-        sampleBlock[sampleCursor++] = std::clamp(sample, -1.0f, 1.0f);
-        if (sampleCursor < kFftLength)
+
+        sampleBlock[sampleCursor] = std::clamp(sample, -1.0f, 1.0f);
+        sampleCursor = (sampleCursor + 1u) % kFftLength;
+
+        if (samplesCollected < kFftLength)
+        {
+            ++samplesCollected;
+            if (samplesCollected == kFftLength)
+            {
+                samplesSinceFft = 0u;
+                process_block_unlocked();
+            }
+            return;
+        }
+
+        ++samplesSinceFft;
+        if (samplesSinceFft < kHopLength)
         {
             return;
         }
 
-        sampleCursor = 0u;
+        samplesSinceFft = 0u;
         process_block_unlocked();
     }
 
     void process_block_unlocked()
     {
+
         for (std::size_t i = 0; i < kFftLength; ++i)
         {
-            fftBuffer[i] = { sampleBlock[i] * window[i], 0.0f };
+            const std::size_t sourceIndex = (sampleCursor + i) % kFftLength;
+            fftBuffer[i] = { sampleBlock[sourceIndex] * window[i], 0.0f };
         }
 
         fft_unlocked();
@@ -149,11 +209,8 @@ struct AudioSpectrumProcessor::Impl
         const float magnitudeScale = 2.0f / static_cast<float>(kFftLength);
         for (std::size_t i = 0; i < magnitudes.size(); ++i)
         {
-            const float real = std::abs(fftBuffer[i].real());
-            const float imaginary = std::abs(fftBuffer[i].imag());
-            const float magnitude =
-                (std::max(real, imaginary) + 0.4f * std::min(real, imaginary)) *
-                magnitudeScale;
+
+            const float magnitude = std::abs(fftBuffer[i]) * magnitudeScale;
             magnitudes[i] = magnitude < 1.0e-12f ? 0.0f : magnitude;
         }
 
@@ -161,17 +218,26 @@ struct AudioSpectrumProcessor::Impl
             pendingBandSumSquares.begin(),
             pendingBandSumSquares.end(),
             0.0f);
+        std::fill(
+            pendingBandPeaks.begin(),
+            pendingBandPeaks.end(),
+            0.0f);
+
         for (std::size_t band = 0; band < options.bandCount; ++band)
         {
+            float peak = 0.0f;
             for (const std::uint32_t bin : bandBins[band])
             {
                 const float value = magnitudes[bin];
                 pendingBandSumSquares[band] += value * value;
+                peak = std::max(peak, value);
             }
+            pendingBandPeaks[band] = peak;
         }
 
         std::lock_guard outputLock(outputMutex);
         bandSumSquares = pendingBandSumSquares;
+        bandPeaks = pendingBandPeaks;
     }
 
     void fft_unlocked()
@@ -211,8 +277,13 @@ struct AudioSpectrumProcessor::Impl
     void clear_levels_unlocked()
     {
         std::fill(bandSumSquares.begin(), bandSumSquares.end(), 0.0f);
+        std::fill(bandPeaks.begin(), bandPeaks.end(), 0.0f);
+        std::fill(rawLevels.begin(), rawLevels.end(), 0.0f);
+        std::fill(shapedLevels.begin(), shapedLevels.end(), 0.0f);
         std::fill(targetLevels.begin(), targetLevels.end(), 0.0f);
         std::fill(displayedLevels.begin(), displayedLevels.end(), 0.0f);
+        previousGlobalEnergy = 0.0f;
+        transientEnvelope = 0.0f;
     }
 
     AudioSpectrumOptions options;
@@ -224,10 +295,18 @@ struct AudioSpectrumProcessor::Impl
     std::vector<std::vector<std::uint32_t>> bandBins;
     std::vector<std::size_t> bandBinCounts;
     std::vector<float> pendingBandSumSquares;
+    std::vector<float> pendingBandPeaks;
     std::vector<float> bandSumSquares;
+    std::vector<float> bandPeaks;
+    std::vector<float> rawLevels;
+    std::vector<float> shapedLevels;
     std::vector<float> targetLevels;
     std::vector<float> displayedLevels;
     std::size_t sampleCursor = 0u;
+    std::size_t samplesCollected = 0u;
+    std::size_t samplesSinceFft = 0u;
+    float previousGlobalEnergy = 0.0f;
+    float transientEnvelope = 0.0f;
     float sampleRateHz = 44100.0f;
     mutable std::mutex inputMutex;
     mutable std::mutex outputMutex;
@@ -250,11 +329,17 @@ void AudioSpectrumProcessor::set_sample_rate(float sampleRateHz)
     std::lock_guard outputLock(impl->outputMutex);
     impl->initialise_fft_unlocked(sampleRateHz);
     impl->sampleCursor = 0u;
+    impl->samplesCollected = 0u;
+    impl->samplesSinceFft = 0u;
     impl->sampleBlock.fill(0.0f);
     impl->magnitudes.fill(0.0f);
     std::fill(
         impl->pendingBandSumSquares.begin(),
         impl->pendingBandSumSquares.end(),
+        0.0f);
+    std::fill(
+        impl->pendingBandPeaks.begin(),
+        impl->pendingBandPeaks.end(),
         0.0f);
     impl->clear_levels_unlocked();
 }
@@ -293,47 +378,157 @@ void AudioSpectrumProcessor::update(double deltaSeconds)
         1.0 / 30.0));
     std::lock_guard lock(impl->outputMutex);
 
+    std::vector<float>& raw = impl->rawLevels;
+    std::vector<float>& shaped = impl->shapedLevels;
     std::vector<float>& targets = impl->targetLevels;
-    std::fill(targets.begin(), targets.end(), 0.0f);
+
     for (std::size_t band = 0; band < impl->options.bandCount; ++band)
     {
         const float binCount = static_cast<float>(impl->bandBinCounts[band]);
         const float rms = std::sqrt(impl->bandSumSquares[band] / binCount);
-        const float decibels = 20.0f * std::log10(std::max(rms, 1.0e-7f));
+        const float peak = impl->bandPeaks[band];
+        const float visualMagnitude =
+            rms * kRmsContribution + peak * kPeakContribution;
+
+        const float decibels = 20.0f *
+            std::log10(std::max(visualMagnitude, 1.0e-7f));
+
         float normalised = std::clamp(
             (decibels - impl->options.decibelFloor) /
                 impl->options.decibelRange,
             0.0f,
             1.0f);
+
         normalised *= impl->options.bandWeights[band];
         normalised *= impl->options.outputGain;
         normalised = std::pow(
-            normalised,
+            std::clamp(normalised, 0.0f, 1.0f),
             band < impl->options.lowBandCount
                 ? impl->options.lowBandCompression
                 : impl->options.highBandCompression);
-        targets[band] = std::clamp(normalised, 0.0f, 1.0f);
+
+        raw[band] = std::clamp(normalised, 0.0f, 1.0f);
     }
 
-    const float average = std::accumulate(
-        targets.begin(),
-        targets.end(),
-        0.0f) / static_cast<float>(impl->options.bandCount);
-    if (average < impl->options.quietThreshold)
+    for (std::size_t band = 0; band < impl->options.bandCount; ++band)
     {
-        std::fill(targets.begin(), targets.end(), 0.0f);
+        const float centre = raw[band];
+        const float left = band > 0u ? raw[band - 1u] : centre;
+        const float right = band + 1u < impl->options.bandCount
+            ? raw[band + 1u]
+            : centre;
+
+        const float neighbourContribution = band == 1u
+            ? kSecondBarNeighbourContribution
+            : kNeighbourContribution;
+
+        shaped[band] =
+            centre * (1.0f - 2.0f * neighbourContribution) +
+            left * neighbourContribution +
+            right * neighbourContribution;
+    }
+
+    float energySquared = 0.0f;
+    for (const float value : shaped)
+    {
+        energySquared += value * value;
+    }
+    const float globalEnergy = std::sqrt(
+        energySquared / static_cast<float>(impl->options.bandCount));
+
+    const float positiveEnergyChange = std::max(
+        globalEnergy - impl->previousGlobalEnergy,
+        0.0f);
+    impl->previousGlobalEnergy = globalEnergy;
+
+    const float transientImpulse = std::min(
+        positiveEnergyChange * kTransientSensitivity,
+        kTransientMaximum);
+    impl->transientEnvelope = std::max(
+        transientImpulse,
+        impl->transientEnvelope * std::exp(-kTransientDecayRate * delta));
+
+    float gate = 1.0f;
+    if (impl->options.quietThreshold > 0.0f)
+    {
+        gate = smoothstep(
+            impl->options.quietThreshold * 0.55f,
+            impl->options.quietThreshold * 1.35f,
+            globalEnergy);
+    }
+
+    for (std::size_t band = 0; band < impl->options.bandCount; ++band)
+    {
+        const float bandPosition = impl->options.bandCount > 1u
+            ? static_cast<float>(band) /
+                static_cast<float>(impl->options.bandCount - 1u)
+            : 0.0f;
+        const float transientWeight = 0.72f - 0.24f * bandPosition;
+        const bool isSecondBar = band == 1u;
+        const float globalContribution = isSecondBar
+            ? kGlobalContribution * kSecondBarGlobalContributionScale
+            : kGlobalContribution;
+        const float transientContribution = isSecondBar
+            ? kSecondBarTransientContributionScale
+            : 1.0f;
+
+        float target =
+            shaped[band] * (1.0f - globalContribution) +
+            globalEnergy * globalContribution;
+        target += impl->transientEnvelope * transientWeight * transientContribution;
+        target *= gate;
+        target = std::pow(std::clamp(target, 0.0f, 1.0f), kResponseGamma);
+
+        if (isSecondBar)
+        {
+            const float fullResponse = smoothstep(
+                kSecondBarFullResponseStart,
+                kSecondBarFullResponseEnd,
+                raw[1]);
+
+            float dominance = 0.0f;
+            if (impl->options.bandCount > 2u)
+            {
+                const float neighbourEnergy =
+                    0.5f * (raw[0] + raw[2]);
+                dominance = smoothstep(
+                    kSecondBarDominanceStart,
+                    kSecondBarDominanceEnd,
+                    raw[1] / std::max(neighbourEnergy, 0.001f));
+            }
+            else if (impl->options.bandCount > 1u)
+            {
+                dominance = smoothstep(
+                    kSecondBarDominanceStart,
+                    kSecondBarDominanceEnd,
+                    raw[1] / std::max(raw[0], 0.001f));
+            }
+
+            const float release = std::max(fullResponse, dominance);
+            const float curve =
+                kSecondBarCurve + (1.0f - kSecondBarCurve) * release;
+            target = std::pow(std::clamp(target, 0.0f, 1.0f), curve);
+        }
+
+        targets[band] = std::clamp(target, 0.0f, 1.0f);
     }
 
     for (std::size_t band = 0; band < impl->options.bandCount; ++band)
     {
         const float current = impl->displayedLevels[band];
         const float target = targets[band];
-        const float rate = target > current
+        const bool rising = target > current;
+        const float rate = rising
             ? impl->options.attackRate
             : impl->options.releaseRate;
         const float alpha = 1.0f - std::exp(-rate * delta);
         const float next = current + (target - current) * alpha;
-        const float maximumStep = impl->options.maximumChangePerSecond * delta;
+
+        const float stepMultiplier = rising ? kAttackStepMultiplier : 1.0f;
+
+        const float maximumStep =
+            impl->options.maximumChangePerSecond * stepMultiplier * delta;
+
         impl->displayedLevels[band] = current + std::clamp(
             next - current,
             -maximumStep,
@@ -369,11 +564,17 @@ void AudioSpectrumProcessor::reset()
     std::lock_guard inputLock(impl->inputMutex);
     std::lock_guard outputLock(impl->outputMutex);
     impl->sampleCursor = 0u;
+    impl->samplesCollected = 0u;
+    impl->samplesSinceFft = 0u;
     impl->sampleBlock.fill(0.0f);
     impl->magnitudes.fill(0.0f);
     std::fill(
         impl->pendingBandSumSquares.begin(),
         impl->pendingBandSumSquares.end(),
+        0.0f);
+    std::fill(
+        impl->pendingBandPeaks.begin(),
+        impl->pendingBandPeaks.end(),
         0.0f);
     impl->clear_levels_unlocked();
 }

@@ -128,6 +128,13 @@ list(APPEND ENGINE_SOURCES "${EMBEDDED_SHADER_CPP}")
 add_library(vibrance_engine SHARED ${ENGINE_SOURCES})
 add_library(vibrance::engine ALIAS vibrance_engine)
 
+set(_vibrance_msvc_requirements
+    Microsoft.VisualStudio.Component.VC.Tools.x86.x64)
+if(WIN32 AND VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64")
+    list(APPEND _vibrance_msvc_requirements
+        Microsoft.VisualStudio.Component.VC.Tools.ARM64)
+endif()
+
 set(VIBRANCE_WIN32_COMPOSITION_AVAILABLE OFF)
 if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
     find_program(
@@ -143,7 +150,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_VSWHERE_EXECUTABLE}"
                 -latest
                 -products *
-                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+                -requires ${_vibrance_msvc_requirements}
                 -property installationPath
             OUTPUT_VARIABLE VIBRANCE_VISUAL_STUDIO_ROOT
             OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -151,14 +158,15 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
     endif()
     set(VIBRANCE_VCVARSALL
         "${VIBRANCE_VISUAL_STUDIO_ROOT}/VC/Auxiliary/Build/vcvarsall.bat")
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
-            set(VIBRANCE_COMPOSITION_ARCH amd64_arm64)
-        else()
-            set(VIBRANCE_COMPOSITION_ARCH x64)
-        endif()
+    if(VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64")
+        set(VIBRANCE_COMPOSITION_VCVARS_ARCH amd64_arm64)
+        set(VIBRANCE_COMPOSITION_SDK_ARCH arm64)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(VIBRANCE_COMPOSITION_VCVARS_ARCH x64)
+        set(VIBRANCE_COMPOSITION_SDK_ARCH x64)
     else()
-        set(VIBRANCE_COMPOSITION_ARCH x86)
+        set(VIBRANCE_COMPOSITION_VCVARS_ARCH x86)
+        set(VIBRANCE_COMPOSITION_SDK_ARCH x86)
     endif()
 
     # The private interop ABI was verified against the 19041 SDK generation.
@@ -182,7 +190,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
         file(GLOB _vibrance_sdk_nuget_roots LIST_DIRECTORIES TRUE
             "${CMAKE_SOURCE_DIR}/build/sdk-19041/packages/microsoft.windows.sdk.cpp/*/c")
         file(GLOB _vibrance_sdk_nuget_arch_roots LIST_DIRECTORIES TRUE
-            "${CMAKE_SOURCE_DIR}/build/sdk-19041/packages/microsoft.windows.sdk.cpp.${VIBRANCE_COMPOSITION_ARCH}/*/c")
+            "${CMAKE_SOURCE_DIR}/build/sdk-19041/packages/microsoft.windows.sdk.cpp.${VIBRANCE_COMPOSITION_SDK_ARCH}/*/c")
         if(_vibrance_sdk_nuget_roots AND _vibrance_sdk_nuget_arch_roots)
             list(SORT _vibrance_sdk_nuget_roots COMPARE NATURAL ORDER DESCENDING)
             list(SORT _vibrance_sdk_nuget_arch_roots COMPARE NATURAL ORDER DESCENDING)
@@ -197,11 +205,11 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
     if(EXISTS "${_vibrance_sdk_root}/Include/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}")
         set(VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT
             "${_vibrance_sdk_root}/Include/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}")
-        if(EXISTS "${_vibrance_sdk_arch_root}/um/${VIBRANCE_COMPOSITION_ARCH}")
+        if(EXISTS "${_vibrance_sdk_arch_root}/um/${VIBRANCE_COMPOSITION_SDK_ARCH}")
             set(VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR
-                "${_vibrance_sdk_arch_root}/um/${VIBRANCE_COMPOSITION_ARCH}")
+                "${_vibrance_sdk_arch_root}/um/${VIBRANCE_COMPOSITION_SDK_ARCH}")
             set(VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR
-                "${_vibrance_sdk_arch_root}/ucrt/${VIBRANCE_COMPOSITION_ARCH}")
+                "${_vibrance_sdk_arch_root}/ucrt/${VIBRANCE_COMPOSITION_SDK_ARCH}")
         endif()
     endif()
 
@@ -225,7 +233,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             COMMAND
                 "${VIBRANCE_COMPOSITION_BUILD_SCRIPT}"
                 "${VIBRANCE_VCVARSALL}"
-                "${VIBRANCE_COMPOSITION_ARCH}"
+                "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
                 "${VIBRANCE_COMPOSITION_SOURCE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx"
                 "${VIBRANCE_COMPOSITION_DLL}"
@@ -252,7 +260,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
            VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR AND
            VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR)
             message(STATUS
-                "Windows Composition presenter: enabled (${VIBRANCE_COMPOSITION_ARCH}, MSVC, D3D11, SDK ${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION})")
+                "Windows Composition presenter: enabled (${VIBRANCE_COMPOSITION_SDK_ARCH}, MSVC, D3D11, SDK ${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION})")
         else()
             message(WARNING
                 "Windows SDK ${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION} was not found. "
@@ -284,7 +292,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
                 "${VIBRANCE_VSWHERE_EXECUTABLE}"
                 -latest
                 -products *
-                -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+                -requires ${_vibrance_msvc_requirements}
                 -property installationPath
             OUTPUT_VARIABLE VIBRANCE_VISUAL_STUDIO_ROOT
             OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -293,12 +301,10 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
 
     set(VIBRANCE_VCVARSALL
         "${VIBRANCE_VISUAL_STUDIO_ROOT}/VC/Auxiliary/Build/vcvarsall.bat")
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
-            set(VIBRANCE_WIN32_INTEROP_ARCH amd64_arm64)
-        else()
-            set(VIBRANCE_WIN32_INTEROP_ARCH x64)
-        endif()
+    if(VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64")
+        set(VIBRANCE_WIN32_INTEROP_ARCH amd64_arm64)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(VIBRANCE_WIN32_INTEROP_ARCH x64)
     else()
         set(VIBRANCE_WIN32_INTEROP_ARCH x86)
     endif()
@@ -366,7 +372,7 @@ option(
     OFF)
 
 target_compile_features(vibrance_engine PUBLIC cxx_std_20)
-if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+if (CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     # Debug retains symbols/assertions, but renderer hot paths must not run at
     # GCC's default -O0. -O2 is required here because this target contains the
     # per-pixel batching and frame-submission code used by live UI profiling.
@@ -473,11 +479,15 @@ else()
     target_link_libraries(vibrance_engine PRIVATE pthread dl m)
 endif()
 
-if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND VIBRANCE_STATIC_MINGW_RUNTIME)
-    target_link_options(vibrance_engine PRIVATE
-        -static
-        -static-libgcc
-        -static-libstdc++)
+if(WIN32 AND MINGW AND VIBRANCE_STATIC_MINGW_RUNTIME)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_options(vibrance_engine PRIVATE
+            -static
+            -static-libgcc
+            -static-libstdc++)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_link_options(vibrance_engine PRIVATE -static)
+    endif()
 endif()
 
 include(CMakePackageConfigHelpers)

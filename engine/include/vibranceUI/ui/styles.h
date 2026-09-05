@@ -435,7 +435,10 @@ inline std::vector<UiOptionChoice> ui_theme_choices_from_directories(
         }
     };
 
-    addCode("theme");
+    // "theme" was the original built-in light-theme identifier. Keep
+    // accepting it as a saved preference below, but expose only the canonical
+    // file-backed name so light.json is not listed as a second Light option.
+    addCode("light");
     addCode("dark");
 
     for (const std::filesystem::path& directory : directories)
@@ -465,13 +468,15 @@ inline std::vector<UiOptionChoice> ui_theme_choices_from_directories(
         *selectedIndex = 0;
     }
 
+    const std::string_view canonicalSelectedTheme =
+        selectedTheme == "theme" ? std::string_view("light") : selectedTheme;
     for (std::size_t i = 0; i < themeCodes.size(); ++i)
     {
         choices.push_back({
             themeCodes[i],
             localisation.resolve(ui_theme_label_text(themeCodes[i]))
         });
-        if (selectedIndex && themeCodes[i] == selectedTheme)
+        if (selectedIndex && themeCodes[i] == canonicalSelectedTheme)
         {
             *selectedIndex = static_cast<int>(i);
         }

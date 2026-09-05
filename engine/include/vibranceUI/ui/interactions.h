@@ -1387,32 +1387,38 @@ inline UiHoverResult ui_update_input_hover(
         textOwner = entt::null;
     };
 
-    if (hovered_owner_contains_point(state.hoveredButton))
+    // Preserve the previous owner only across a temporarily empty hit (for
+    // example, an animated edge). A real front-most child must take ownership;
+    // otherwise a hovered dropdown menu keeps swallowing all of its rows.
+    if (!resolvedInputOwner)
     {
-        buttonOwner = state.hoveredButton;
-        clear_other_hover_owners(true, false, false, false);
-    }
-    else if (hovered_owner_contains_point(state.hoveredSlider))
-    {
-        sliderOwner = state.hoveredSlider;
-        clear_other_hover_owners(false, true, false, false);
-    }
-    else if (hovered_owner_contains_point(state.hoveredScrollBar))
-    {
-        scrollBarOwner = state.hoveredScrollBar;
-        clear_other_hover_owners(false, false, true, false);
-    }
-    else if (hovered_owner_contains_point(state.hoveredDropTarget))
-    {
-        dropOwner = state.hoveredDropTarget;
-        clear_other_hover_owners(false, false, false, true);
-    }
-    else if (!resolvedInputOwner)
-    {
-        buttonOwner = entt::null;
-        sliderOwner = entt::null;
-        scrollBarOwner = entt::null;
-        dropOwner = entt::null;
+        if (hovered_owner_contains_point(state.hoveredButton))
+        {
+            buttonOwner = state.hoveredButton;
+            clear_other_hover_owners(true, false, false, false);
+        }
+        else if (hovered_owner_contains_point(state.hoveredSlider))
+        {
+            sliderOwner = state.hoveredSlider;
+            clear_other_hover_owners(false, true, false, false);
+        }
+        else if (hovered_owner_contains_point(state.hoveredScrollBar))
+        {
+            scrollBarOwner = state.hoveredScrollBar;
+            clear_other_hover_owners(false, false, true, false);
+        }
+        else if (hovered_owner_contains_point(state.hoveredDropTarget))
+        {
+            dropOwner = state.hoveredDropTarget;
+            clear_other_hover_owners(false, false, false, true);
+        }
+        else
+        {
+            buttonOwner = entt::null;
+            sliderOwner = entt::null;
+            scrollBarOwner = entt::null;
+            dropOwner = entt::null;
+        }
     }
 
     uint32_t resizeEdges = state.activeResizeEdges;

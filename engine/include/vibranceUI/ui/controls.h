@@ -1982,6 +1982,10 @@ inline UiControlHandle ui_create_text_button(
     button.onClick = std::move(options.onClick);
     registry.emplace<ButtonInputComponent>(handle.root, std::move(button));
     registry.emplace<ButtonVisualComponent>(handle.root, visual);
+    // Transparent buttons still own their complete authored rectangle. Without
+    // an explicit hit region, picking falls through anywhere that is not
+    // covered by a label or icon.
+    registry.emplace<HitRegion2DComponent>(handle.root);
     if (options.stretchDynamics)
     {
         ui_enable_stretch_dynamics(
@@ -3667,6 +3671,11 @@ inline UiControlHandle ui_create_slider(
         { 0.5f, 0.5f },
         scaled_offset(size.x * initialNormalized, 0.0f, ui.scale()),
         scaled_size(thumbSize.x, thumbSize.y, ui.scale()));
+    ui.add_shadow(
+        handle.knob,
+        { 0, 0 },
+        4.0f,
+        0.24f);
 
     SliderInputComponent slider = {};
     slider.maskEntity = fillMask;
@@ -4916,6 +4925,9 @@ inline UiControlHandle ui_create_dropdown(
                 }
             };
             registry.emplace<ButtonInputComponent>(row, std::move(rowButton));
+            // The idle row is intentionally transparent, but its whitespace is
+            // part of the option and must react exactly like its text.
+            registry.emplace<HitRegion2DComponent>(row);
             ButtonVisualComponent rowVisual = {};
             rowVisual.idle = ui_macos26_control_style(ui, "#FFFFFF00", "#00000000", 0.0f, 1.0f);
             rowVisual.hovered = ui_macos26_control_style(ui, options.rowHoveredColor, "#00000000", 0.0f, 1.0f);

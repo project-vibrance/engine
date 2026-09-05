@@ -24,6 +24,9 @@ vibrance_add_engine_test(
     vibrance_simple_ui_builder_tests
     simple_ui_builder_tests.cpp)
 vibrance_add_engine_test(
+    vibrance_control_interaction_tests
+    control_interaction_tests.cpp)
+vibrance_add_engine_test(
     vibrance_scroll_viewport_tests
     scroll_viewport_tests.cpp)
 vibrance_add_engine_test(

@@ -17,8 +17,31 @@ Configure dependency locations in a local `.env.cmake` using
 On Windows with MinGW:
 
 ```bat
-mingwBuild.bat Release C:\dev\vibranceUI
+mingwBuild.bat Release C:\dev\vibranceUI x64
 ```
+
+Windows builds accept `x64`, `arm64`, or `all` as the third argument:
+
+```bat
+mingwBuild.bat Release x64
+mingwBuild.bat Release arm64
+mingwBuild.bat Release all
+```
+
+`all` runs both architecture builds from one command. The normal no-prefix
+layout preserves the existing x64 SDK at `install` and places ARM64 at
+`install/windows-arm64`; their build trees are `build/Release` and
+`build/windows-arm64/Release`. With an explicit base prefix, `all` installs to
+`<prefix>/windows-x64` and `<prefix>/windows-arm64`. A single-architecture
+command installs directly to the prefix it is given.
+
+x64 continues to use GCC MinGW. Windows ARM64 uses the UCRT LLVM-MinGW
+cross-toolchain and Ninja. Set `LLVM_MINGW_PATH` to its unpacked root in the
+environment or `.env.cmake`. Install the Visual Studio C++ ARM64 build tools as
+well if the Composition and WinRT companion DLLs should be included. GLFW and
+FreeType must be source trees or ARM64 installs; x64 libraries are deliberately
+not reused. Static FFmpeg video support is disabled for ARM64 unless
+`FFMPEG_ARM64_PATH` identifies an ARM64 SDK.
 
 On Unix-like systems:
 
@@ -35,6 +58,7 @@ The selected prefix is a relocatable SDK:
   lib/... import/static metadata
   lib/cmake/vibrance_engine/vibrance_engineConfig.cmake
   share/vibrance_engine/vibrance_engine_manifest.json
+  share/vibrance_engine/toolchains/windows-arm64-llvm-mingw.cmake
 ```
 
 A downstream CMake project needs only:
@@ -145,7 +169,13 @@ include. Narrow headers remain available for larger translation units.
 The installed package exposes `vibrance_engine_MANIFEST_FILE` for build tools.
 At runtime, include `<vibranceUI/core/engine_manifest.h>` and call
 `vibrance_engine_manifest()` to query the same engine name, semantic version,
-and ISO last-updated date directly from the loaded DLL.
+full display build, and ISO last-updated date directly from the loaded DLL.
+The full display build uses
+`<version>-<UTC date>.<sequence>-<stage>` (for example,
+`0.6.0-20260903.0-a`). Configure `VIBRANCE_ENGINE_RELEASE_STAGE` as `alpha`,
+`beta`, `release-candidate`, or `release`; the manifest abbreviates these as
+`a`, `b`, `rc`, and `r`. Increment `VIBRANCE_ENGINE_BUILD_SEQUENCE` when
+creating another engine build on the same UTC day.
 
 ## Start with one window
 
