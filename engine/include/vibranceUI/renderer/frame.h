@@ -4,6 +4,7 @@
 #include <deque>
 #include <functional>
 #include <unordered_map>
+#include <vector>
 #include <vibranceUI/renderer/image.h>
 #include <vibranceUI/renderer/swapchain.h>
 #include <vibranceUI/renderer/buffer.h>
@@ -45,6 +46,7 @@ class Frame
         bool presentNativeSurface,
         bool clearNativeSurface,
         vk::Image compositionImage = {},
+        vk::Buffer compositionReadbackBuffer = {},
         bool compositionImageFirstUse = true,
         glm::uvec4 pendingCompositionDamageRect = glm::uvec4(0u),
         uint32_t graphicsQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
@@ -82,6 +84,9 @@ class Frame
     glm::uvec4 compositionContentRect { 0u };
     glm::uvec4 compositionDamageRect { 0u };
     glm::uvec4 compositionSceneDamageRect { 0u };
+    // Native backdrop state captured from the same scene/timestamp as this
+    // command buffer. It must be applied only when this Vulkan frame presents.
+    std::vector<SystemBackdropRegion> compositionBackdropRegions;
 
     std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets;
     std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts;

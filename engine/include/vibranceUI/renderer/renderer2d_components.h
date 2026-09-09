@@ -1434,6 +1434,14 @@ struct Renderer2DBatch
     uint32_t frameIndex = 0;
 };
 
+struct Renderer2DShapeVisualState
+{
+    // The exact post-layout, inherited-transition and interactive rectangle
+    // used when the renderer emits a shape batch.
+    glm::vec4 rect { 0.0f };
+    float opacity = 1.0f;
+};
+
 struct Renderer3DModelBatch
 {
     entt::entity entity = entt::null;
@@ -1595,6 +1603,9 @@ public:
 
     Renderer2DRenderPlan build_render_plan(double currentTimeSeconds, uint64_t rendererCacheGeneration);
     void build_render_plan(Renderer2DRenderPlan& plan, double currentTimeSeconds, uint64_t rendererCacheGeneration);
+    std::optional<Renderer2DShapeVisualState> resolved_shape_visual_state(
+        entt::entity entity,
+        double currentTimeSeconds) const;
 
 private:
     friend class Renderer2D;

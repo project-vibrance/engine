@@ -10,6 +10,7 @@
 #include <vibranceUI/factories/mesh_factory.h>
 #include <vibranceUI/ui/text.h>
 #include "../directx/composition_presenter.h"
+#include "../directx/composition_bridge_abi.h"
 #include <sstream>
 #include <string_view>
 #include <deque>
@@ -34,6 +35,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#ifndef WS_EX_NOREDIRECTIONBITMAP
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
@@ -48,6 +52,44 @@
 
 namespace
 {
+
+#if defined(_WIN32)
+	void restore_native_window_redirection(
+		void* nativeWindowHandle,
+		bool transparentFramebuffer)
+	{
+		if (!nativeWindowHandle || !transparentFramebuffer)
+		{
+			return;
+		}
+		HWND window = static_cast<HWND>(nativeWindowHandle);
+		SetLastError(ERROR_SUCCESS);
+		const LONG_PTR extendedStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+		if (extendedStyle == 0 && GetLastError() != ERROR_SUCCESS)
+		{
+			return;
+		}
+		if ((extendedStyle & WS_EX_NOREDIRECTIONBITMAP) == 0)
+		{
+			return;
+		}
+		(void)SetWindowLongPtrW(
+			window,
+			GWL_EXSTYLE,
+			extendedStyle &
+				~static_cast<LONG_PTR>(WS_EX_NOREDIRECTIONBITMAP));
+		(void)SetWindowPos(
+			window,
+			nullptr,
+			0,
+			0,
+			0,
+			0,
+			SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+				SWP_NOACTIVATE | SWP_FRAMECHANGED);
+	}
+#endif
+
 	constexpr uint32_t kMaxModel3DMaterialSets = 2048;
 	constexpr uint32_t kMaxMedia2DTextures = 2048;
 
@@ -183,6 +225,7 @@ namespace
 			close(left.notchAmount, right.notchAmount) &&
 			close(left.notchDepth, right.notchDepth) &&
 			close(left.verticalStart, right.verticalStart) &&
+			std::abs(left.opacity - right.opacity) <= 0.002f &&
 			close(left.blurRadius, right.blurRadius) &&
 			close(left.saturation, right.saturation) &&
 			close(left.tint.red, right.tint.red) &&
@@ -805,6 +848,8 @@ struct Engine::Impl
 	RenderBackend render_backend() const;
 	PresentationBackend presentation_backend() const;
 	bool system_backdrop_available() const;
+	bool ready() const;
+	std::string vulkan_api_version() const;
 	void refresh_localised_texts();
 	Localisation& localisation();
 	const Localisation& localisation() const;
@@ -825,7 +870,13 @@ private:
 	void make_pipeline_layouts();
 	void make_pipelines();
 	bool rebuild_composition_presenter();
-	void update_system_backdrop_regions();
+	bool ensure_composition_readback(vk::Extent2D extent);
+	void destroy_composition_readback();
+	bool upload_software_composition(std::uint32_t bufferIndex);
+	std::vector<SystemBackdropRegion> collect_system_backdrop_regions(
+		double renderTimeSeconds);
+	void apply_system_backdrop_regions(
+		const std::vector<SystemBackdropRegion>& regions);
 	void publish_completed_composition_frames();
 
 	uint32_t framebufferWidth = 0;
@@ -858,6 +909,11 @@ private:
 	bool rendererReady = false;
 	bool transparentFramebuffer = false;
 	WindowsCompositionPresenter compositionPresenter;
+	bool compositionGpuInterop = false;
+	vk::Buffer compositionReadbackBuffer {};
+	VmaAllocation compositionReadbackAllocation = nullptr;
+	void* compositionReadbackMapped = nullptr;
+	vk::Extent2D compositionReadbackExtent {};
 	std::vector<SystemBackdropRegion> appliedBackdropRegions;
 
 	std::unordered_map<DescriptorScope, vk::DescriptorSetLayout> descriptorSetLayouts;
@@ -1089,6 +1145,16 @@ bool Engine::system_backdrop_available() const
 	return impl->system_backdrop_available();
 }
 
+bool Engine::ready() const
+{
+	return impl->ready();
+}
+
+std::string Engine::vulkan_api_version() const
+{
+	return impl->vulkan_api_version();
+}
+
 void Engine::refresh_localised_texts()
 {
 	impl->refresh_localised_texts();
@@ -1223,12 +1289,30 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 			"Windows Composition presentation requires a native HWND; using native Vulkan presentation.");
 		compositionRequested = false;
 	}
-	physicalDevice = choose_physical_device(instance, compositionRequested);
-	if (!physicalDevice && compositionRequested)
+	const char* forceCompositionHostUpload = std::getenv(
+		"VIBRANCE_FORCE_COMPOSITION_HOST_UPLOAD");
+	const bool forceHostUpload = compositionRequested &&
+		forceCompositionHostUpload &&
+		std::strcmp(forceCompositionHostUpload, "0") != 0;
+	if (forceHostUpload)
+	{
+		logger->info(
+			"Windows Composition host-upload fallback was forced for diagnostics.");
+	}
+	// Prefer zero-copy Vulkan/D3D interop when the native ICD exposes the full
+	// external-memory contract. Native ARM64 drivers may omit that optional
+	// contract; those devices keep DirectComposition via the host-upload path.
+	const bool attemptCompositionGpuInterop =
+		compositionRequested && !forceHostUpload;
+	physicalDevice = choose_physical_device(
+		instance,
+		attemptCompositionGpuInterop);
+	compositionGpuInterop = attemptCompositionGpuInterop &&
+		static_cast<bool>(physicalDevice);
+	if (!physicalDevice && attemptCompositionGpuInterop)
 	{
 		logger->warning(
-			"No Vulkan GPU supports D3D11 external-memory interop; using native Vulkan presentation.");
-		compositionRequested = false;
+			"No Vulkan GPU supports D3D11 external-memory and keyed-mutex interop; using the host-upload Windows Composition fallback.");
 		physicalDevice = choose_physical_device(instance, false);
 	}
 	if (!physicalDevice)
@@ -1243,7 +1327,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		physicalDevice,
 		surface,
 		deviceDeletionQueue,
-		compositionRequested);
+		compositionGpuInterop);
 	if (!logicalDevice)
 	{
 		logger->vulkan("Failed to create a logical device.");
@@ -1269,20 +1353,45 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	if (compositionRequested && compositionPresenter.initialise(
 			nativeWindowHandle,
 			physicalDevice,
-			logicalDevice,
-			swapchain.extent.width,
-			swapchain.extent.height,
-			static_cast<uint32_t>(swapchain.images.size()),
-			graphicsQueueFamilyIndex))
+		logicalDevice,
+		swapchain.extent.width,
+		swapchain.extent.height,
+		static_cast<uint32_t>(swapchain.images.size()),
+		graphicsQueueFamilyIndex,
+		transparentFramebuffer,
+		compositionGpuInterop))
 	{
 		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
+		// Transparent Composition windows opt out of the HWND redirection
+		// surface. DirectComposition is the only visible content, whether its
+		// source arrives through shared GPU memory or the host-upload fallback.
+		nativeTransparencyPrimed = transparentFramebuffer;
 	}
 	else
 	{
 		activePresentationBackend = PresentationBackend::eNative;
+#if defined(_WIN32)
+		restore_native_window_redirection(
+			nativeWindowHandle,
+			transparentFramebuffer);
+#endif
 	}
 	renderExtent = choose_render_extent(swapchain.extent.width, swapchain.extent.height, maxRenderPixels);
 	modelRenderExtent = renderExtent;
+	if (compositionPresenter.available() &&
+		!compositionPresenter.gpu_interop() &&
+		!ensure_composition_readback(renderExtent))
+	{
+		logger->warning(
+			"Windows Composition host-upload staging could not be allocated; using native Vulkan presentation.");
+		compositionPresenter.shutdown(logicalDevice);
+		activePresentationBackend = PresentationBackend::eNative;
+#if defined(_WIN32)
+		restore_native_window_redirection(
+			nativeWindowHandle,
+			transparentFramebuffer);
+#endif
+	}
 
 	make_descriptor_sets();
 
@@ -1558,27 +1667,155 @@ bool Engine::Impl::rebuild_composition_presenter()
 	if (compositionPresenter.initialise(
 			nativeWindowHandle,
 			physicalDevice,
-			logicalDevice,
-			swapchain.extent.width,
-			swapchain.extent.height,
-			static_cast<uint32_t>(swapchain.images.size()),
-			graphicsQueueFamilyIndex))
+		logicalDevice,
+		swapchain.extent.width,
+		swapchain.extent.height,
+		static_cast<uint32_t>(swapchain.images.size()),
+		graphicsQueueFamilyIndex,
+		transparentFramebuffer,
+		compositionGpuInterop))
 	{
 		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
+		nativeTransparencyPrimed = transparentFramebuffer;
+		if (!compositionPresenter.gpu_interop() &&
+			!ensure_composition_readback(renderExtent))
+		{
+			logger->warning(
+				"Windows Composition host-upload staging could not be rebuilt.");
+			compositionPresenter.shutdown(logicalDevice);
+			activePresentationBackend = PresentationBackend::eNative;
+			return false;
+		}
+		if (compositionPresenter.gpu_interop())
+		{
+			destroy_composition_readback();
+		}
 		compositionBufferDamage.reset(
 			compositionPresenter.buffer_count(),
 			glm::uvec4(0u));
 		return true;
 	}
 #endif
+#if defined(_WIN32)
+	restore_native_window_redirection(
+		nativeWindowHandle,
+		transparentFramebuffer);
+#endif
 	return false;
 }
 
-void Engine::Impl::update_system_backdrop_regions()
+bool Engine::Impl::ensure_composition_readback(vk::Extent2D extent)
+{
+	if (extent.width == 0u || extent.height == 0u || !allocator)
+	{
+		return false;
+	}
+	if (compositionReadbackBuffer && compositionReadbackMapped &&
+		compositionReadbackExtent.width == extent.width &&
+		compositionReadbackExtent.height == extent.height)
+	{
+		return true;
+	}
+
+	const vk::DeviceSize byteCount =
+		static_cast<vk::DeviceSize>(extent.width) *
+		static_cast<vk::DeviceSize>(extent.height) * 4u;
+	vk::BufferCreateInfo bufferInfo = {};
+	bufferInfo.size = byteCount;
+	bufferInfo.usage = vk::BufferUsageFlagBits::eTransferDst;
+	bufferInfo.sharingMode = vk::SharingMode::eExclusive;
+	const VkBufferCreateInfo rawBufferInfo = bufferInfo;
+
+	VmaAllocationCreateInfo allocationInfo = {};
+	allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+		VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+	VkBuffer newBuffer = VK_NULL_HANDLE;
+	VmaAllocation newAllocation = nullptr;
+	VmaAllocationInfo mappedInfo = {};
+	const VkResult createResult = vmaCreateBuffer(
+		allocator,
+		&rawBufferInfo,
+		&allocationInfo,
+		&newBuffer,
+		&newAllocation,
+		&mappedInfo);
+	if (createResult != VK_SUCCESS || !newBuffer || !newAllocation ||
+		!mappedInfo.pMappedData)
+	{
+		if (newBuffer && newAllocation)
+		{
+			vmaDestroyBuffer(allocator, newBuffer, newAllocation);
+		}
+		return false;
+	}
+
+	if (logicalDevice)
+	{
+		(void)logicalDevice.waitIdle();
+	}
+	destroy_composition_readback();
+	compositionReadbackBuffer = newBuffer;
+	compositionReadbackAllocation = newAllocation;
+	compositionReadbackMapped = mappedInfo.pMappedData;
+	compositionReadbackExtent = extent;
+	vmaSetAllocationName(
+		allocator,
+		compositionReadbackAllocation,
+		"Windows Composition host readback");
+	return true;
+}
+
+void Engine::Impl::destroy_composition_readback()
+{
+	if (allocator && compositionReadbackBuffer &&
+		compositionReadbackAllocation)
+	{
+		vmaDestroyBuffer(
+			allocator,
+			static_cast<VkBuffer>(compositionReadbackBuffer),
+			compositionReadbackAllocation);
+	}
+	compositionReadbackBuffer = nullptr;
+	compositionReadbackAllocation = nullptr;
+	compositionReadbackMapped = nullptr;
+	compositionReadbackExtent = vk::Extent2D{};
+}
+
+bool Engine::Impl::upload_software_composition(std::uint32_t bufferIndex)
+{
+	if (!compositionPresenter.available() ||
+		compositionPresenter.gpu_interop() ||
+		!compositionReadbackAllocation || !compositionReadbackMapped ||
+		compositionReadbackExtent.width == 0u ||
+		compositionReadbackExtent.height == 0u)
+	{
+		return false;
+	}
+	if (vmaInvalidateAllocation(
+			allocator,
+			compositionReadbackAllocation,
+			0u,
+			VK_WHOLE_SIZE) != VK_SUCCESS)
+	{
+		logger->warning(
+			"Vulkan could not invalidate the Windows Composition host readback buffer.");
+		return false;
+	}
+	return compositionPresenter.upload(
+		bufferIndex,
+		compositionReadbackMapped,
+		compositionReadbackExtent.width,
+		compositionReadbackExtent.height,
+		compositionReadbackExtent.width * 4u);
+}
+
+std::vector<SystemBackdropRegion>
+Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 {
 	if (!compositionPresenter.available())
 	{
-		return;
+		return {};
 	}
 
 	struct OrderedBackdropRegion
@@ -1610,26 +1847,21 @@ void Engine::Impl::update_system_backdrop_regions()
 		{
 			return;
 		}
-		const glm::vec2 baseFramebufferSize = shape.size * glm::abs(transform.scale);
-		const glm::vec2 baseTopLeft =
-			transform.position - transform.origin * baseFramebufferSize;
-		const glm::vec4 interactiveRect =
-			renderer2d_apply_interactive_visual_rect(
-				registry,
+		const std::optional<Renderer2DShapeVisualState> visual =
+			renderer2DScene.resolved_shape_visual_state(
 				entity,
-				{
-					baseTopLeft.x,
-					baseTopLeft.y,
-					baseFramebufferSize.x,
-					baseFramebufferSize.y
-				});
+				renderTimeSeconds);
+		if (!visual)
+		{
+			return;
+		}
 		const glm::vec2 framebufferSize {
-			interactiveRect.z,
-			interactiveRect.w
+			visual->rect.z,
+			visual->rect.w
 		};
 		const glm::vec2 topLeft {
-			interactiveRect.x,
-			interactiveRect.y
+			visual->rect.x,
+			visual->rect.y
 		};
 		if (framebufferSize.x <= 0.0f || framebufferSize.y <= 0.0f)
 		{
@@ -1637,6 +1869,10 @@ void Engine::Impl::update_system_backdrop_regions()
 		}
 
 		SystemBackdropRegion region = backdrop.region;
+		region.opacity = std::clamp(
+			region.opacity * visual->opacity,
+			0.0f,
+			1.0f);
 		region.x = topLeft.x * outputScaleX;
 		region.y = topLeft.y * outputScaleY;
 		region.width = framebufferSize.x * outputScaleX;
@@ -1717,7 +1953,16 @@ void Engine::Impl::update_system_backdrop_regions()
 	{
 		regions.push_back(entry.region);
 	}
+	return regions;
+}
 
+void Engine::Impl::apply_system_backdrop_regions(
+	const std::vector<SystemBackdropRegion>& regions)
+{
+	if (!compositionPresenter.available())
+	{
+		return;
+	}
 	bool unchanged = regions.size() == appliedBackdropRegions.size();
 	if (unchanged)
 	{
@@ -1749,7 +1994,7 @@ void Engine::Impl::update_system_backdrop_regions()
 				"Windows Composition backdrop regions applied: " +
 				std::to_string(regions.size()) + ".");
 		}
-		appliedBackdropRegions = std::move(regions);
+		appliedBackdropRegions = regions;
 	}
 	else if (!unchanged)
 	{
@@ -1786,7 +2031,8 @@ void Engine::Impl::publish_completed_composition_frames()
 			continue;
 		}
 
-		update_system_backdrop_regions();
+		apply_system_backdrop_regions(
+			frames[pending].compositionBackdropRegions);
 		const auto presentResult = compositionPresenter.present(
 			compositionFrameBufferIndices[pending],
 			false,
@@ -1917,6 +2163,8 @@ void Engine::Impl::draw()
 	}
 
 	const bool compositionAvailable = compositionPresenter.available();
+	const bool compositionGpuPath =
+		compositionAvailable && compositionPresenter.gpu_interop();
 	const double schedulingTimeSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
 	const uint32_t activeUiFrameRateLimit =
@@ -2130,6 +2378,7 @@ void Engine::Impl::draw()
 		swapchain.compositeAlpha == vk::CompositeAlphaFlagBitsKHR::eOpaque;
 	uint32_t compositionBufferIndex = 0u;
 	vk::Image compositionImage {};
+	bool compositionBufferAcquired = false;
 	bool compositionImageFirstUse = true;
 	glm::uvec4 pendingCompositionDamageRect { 0u };
 	if (compositionPresenter.available() && compositionPresenter.buffer_count() > 0u)
@@ -2167,7 +2416,11 @@ void Engine::Impl::draw()
 				}
 
 				compositionBufferIndex = candidate;
-				compositionImage = compositionPresenter.image(candidate);
+				compositionBufferAcquired = true;
+				if (compositionGpuPath)
+				{
+					compositionImage = compositionPresenter.image(candidate);
+				}
 				compositionImageFirstUse = compositionPresenter.first_use(candidate);
 				pendingCompositionDamageRect =
 					compositionBufferDamage.pending_for(candidate);
@@ -2179,7 +2432,9 @@ void Engine::Impl::draw()
 	// If all interop buffers are still in use, there is nowhere for this frame
 	// to become visible. Do not record and submit a full offscreen Vulkan pass;
 	// retry with the freshest scene state at the next Composition opportunity.
-	if (compositionAvailable && submitCompositionFrame && !compositionImage)
+	if (compositionAvailable && submitCompositionFrame &&
+		(!compositionBufferAcquired ||
+			(compositionGpuPath && !compositionImage)))
 	{
 		return;
 	}
@@ -2198,9 +2453,23 @@ void Engine::Impl::draw()
 		presentNativeSurface,
 		clearNativeSurface,
 		compositionImage,
+		compositionBufferAcquired && !compositionGpuPath ?
+			compositionReadbackBuffer : vk::Buffer {},
 		compositionImageFirstUse,
 		pendingCompositionDamageRect,
 		graphicsQueueFamilyIndex);
+	if (compositionBufferAcquired)
+	{
+		// Renderer2D has now advanced transitions and resolved layout for this
+		// timestamp. Retain that exact native-material state until the matching
+		// Vulkan frame reaches the presentation boundary.
+		frame.compositionBackdropRegions =
+			collect_system_backdrop_regions(renderTimeSeconds);
+	}
+	else
+	{
+		frame.compositionBackdropRegions.clear();
+	}
 	vk::SubmitInfo submitInfo = {};
 	submitInfo.commandBufferCount = 1;
 	submitInfo.pCommandBuffers = &frame.commandBuffer;
@@ -2216,6 +2485,38 @@ void Engine::Impl::draw()
 	vk::PipelineStageFlags waitStage = vk::PipelineStageFlagBits::eTransfer;
 	submitInfo.pWaitDstStageMask = &waitStage;
 
+#if defined(_WIN32)
+	// The NT shared texture is a keyed-mutex resource. Hand ownership from
+	// D3D11 to Vulkan at key 0 and return it at key 1 after every render. The
+	// Composition bridge performs the inverse transition around its copy.
+	vk::DeviceMemory compositionMemory {};
+	const std::uint64_t compositionAcquireKey =
+		VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_KEY;
+	const std::uint64_t compositionReleaseKey =
+		VIBRANCE_COMPOSITION_VULKAN_RELEASE_KEY;
+	const std::uint32_t compositionAcquireTimeout =
+		VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_TIMEOUT_MS;
+	vk::Win32KeyedMutexAcquireReleaseInfoKHR keyedMutexInfo = {};
+	if (compositionImage)
+	{
+		compositionMemory = compositionPresenter.memory(compositionBufferIndex);
+		if (!compositionMemory)
+		{
+			logger->warning(
+				"Windows Composition buffer has no imported Vulkan memory.");
+			return;
+		}
+		keyedMutexInfo.acquireCount = 1u;
+		keyedMutexInfo.pAcquireSyncs = &compositionMemory;
+		keyedMutexInfo.pAcquireKeys = &compositionAcquireKey;
+		keyedMutexInfo.pAcquireTimeouts = &compositionAcquireTimeout;
+		keyedMutexInfo.releaseCount = 1u;
+		keyedMutexInfo.pReleaseSyncs = &compositionMemory;
+		keyedMutexInfo.pReleaseKeys = &compositionReleaseKey;
+		submitInfo.pNext = &keyedMutexInfo;
+	}
+#endif
+
 	result = graphicsQueue.submit(submitInfo, frame.renderFinishedFence);
 	if (result != vk::Result::eSuccess)
 	{
@@ -2228,16 +2529,17 @@ void Engine::Impl::draw()
 	}
 	hasSubmittedFrame = true;
 	lastSubmittedFrameGeneration = sceneFrameGeneration;
-	if (compositionImage)
+	if (compositionBufferAcquired)
 	{
 		compositionBufferDamage.commit(
 			compositionBufferIndex,
 			frame.compositionSceneDamageRect);
 	}
-	if (compositionImage)
+	if (compositionBufferAcquired)
 	{
 		compositionPresenter.mark_used(compositionBufferIndex);
-		if (frameIndex < compositionFramePending.size())
+		if (compositionGpuPath &&
+			frameIndex < compositionFramePending.size())
 		{
 			compositionFramePending[frameIndex] = true;
 			compositionFrameBufferIndices[frameIndex] = compositionBufferIndex;
@@ -2284,9 +2586,10 @@ void Engine::Impl::draw()
 	// the monitor cadence publish in the same frame so Vulkan content and the
 	// D3D Composition regions cannot drift apart by multiple frame slots.
 	const bool pipelineComposition =
-		targetFrameRate == 0u ||
-		targetFrameRate > effectiveCompositionFrameRate + 2u;
-	if (compositionImage && !pipelineComposition)
+		compositionGpuPath &&
+		(targetFrameRate == 0u ||
+			targetFrameRate > effectiveCompositionFrameRate + 2u);
+	if (compositionBufferAcquired && !pipelineComposition)
 	{
 		const vk::Result compositionFenceResult = logicalDevice.waitForFences(
 			frame.renderFinishedFence,
@@ -2294,16 +2597,24 @@ void Engine::Impl::draw()
 			UINT64_MAX);
 		if (compositionFenceResult == vk::Result::eSuccess)
 		{
-			update_system_backdrop_regions();
-			const auto presentResult = compositionPresenter.present(
-				compositionBufferIndex,
-				true,
-				frame.compositionContentRect,
-				frame.compositionDamageRect);
+			const bool uploaded = compositionGpuPath ||
+				upload_software_composition(compositionBufferIndex);
+			WindowsCompositionPresenter::PresentResult presentResult =
+				WindowsCompositionPresenter::PresentResult::eFailed;
+			if (uploaded)
+			{
+				apply_system_backdrop_regions(
+					frame.compositionBackdropRegions);
+				presentResult = compositionPresenter.present(
+					compositionBufferIndex,
+					true,
+					frame.compositionContentRect,
+					frame.compositionDamageRect);
+			}
 			if (presentResult ==
 				WindowsCompositionPresenter::PresentResult::eFailed)
 			{
-				logger->warning("Windows Composition could not present the shared Vulkan frame.");
+				logger->warning("Windows Composition could not present the Vulkan frame.");
 			}
 			if (frameIndex < compositionFramePending.size() &&
 				presentResult !=
@@ -2874,6 +3185,23 @@ bool Engine::Impl::system_backdrop_available() const
 	return compositionPresenter.available();
 }
 
+bool Engine::Impl::ready() const
+{
+	return rendererReady;
+}
+
+std::string Engine::Impl::vulkan_api_version() const
+{
+	if (!physicalDevice)
+	{
+		return {};
+	}
+	const std::uint32_t version = physicalDevice.getProperties().apiVersion;
+	return std::to_string(vk::apiVersionMajor(version)) + "." +
+		std::to_string(vk::apiVersionMinor(version)) + "." +
+		std::to_string(vk::apiVersionPatch(version));
+}
+
 Localisation& Engine::Impl::localisation()
 {
 	return localisation_;
@@ -2944,6 +3272,7 @@ Engine::Impl::~Impl()
 		}
 	}
 	compositionPresenter.shutdown(logicalDevice);
+	destroy_composition_readback();
 
     logger->vulkan("Exiting application.");
 

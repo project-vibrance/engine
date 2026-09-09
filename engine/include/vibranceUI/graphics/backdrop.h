@@ -82,6 +82,11 @@ struct SystemBackdropRegion
     // outer shape clip still covers the complete entity.
     float verticalStart = 0.0f;
 
+    // Effective visual opacity resolved from the same inherited renderer
+    // transitions as the Vulkan entity. Platform composition backends use it
+    // to keep native material and Vulkan content on one animation timeline.
+    float opacity = 1.0f;
+
     // System-glass controls. Windows Acrylic/Mica may ignore these values.
     float blurRadius = 24.0f;
     float saturation = 1.0f;

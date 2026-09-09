@@ -606,16 +606,32 @@ inline UiResourceDirectories ui_discover_resource_directories(
 
     std::vector<std::filesystem::path> assetCandidates;
     std::vector<std::filesystem::path> configCandidates;
-    const std::vector<std::filesystem::path> sourceRoots {
-        workingDirectory,
-        workingDirectory.parent_path(),
-        workingDirectory.parent_path().parent_path(),
-        workingDirectory.parent_path().parent_path().parent_path()
-    };
+    // Build trees are allowed to add platform/configuration directories (for
+    // example build/windows-x64/Release/app). Walk the ancestry instead of
+    // assuming a fixed depth so a development executable can still reach the
+    // source-tree app/assets and app/config fallbacks.
+    std::vector<std::filesystem::path> sourceRoots;
+    std::filesystem::path sourceRoot = workingDirectory;
+    for (std::size_t depth = 0u; depth < 8u && !sourceRoot.empty(); ++depth)
+    {
+        ui_append_unique_path(sourceRoots, sourceRoot);
+        const std::filesystem::path parent = sourceRoot.parent_path();
+        if (parent.empty() || parent == sourceRoot)
+        {
+            break;
+        }
+        sourceRoot = parent;
+    }
 
-    // Installed resources adjacent to the executable are the authoritative
-    // packaged layer. Source-tree resources are a development fallback for
-    // build directories that intentionally do not copy runtime data.
+    // Installed applications may keep implementation-only resources under a
+    // private .vibrance directory. Prefer that layout over legacy public
+    // assets/config siblings; source-tree resources remain a development
+    // fallback for build directories that intentionally do not copy data.
+    for (const std::filesystem::path& root : sourceRoots)
+    {
+        assetCandidates.push_back(root / ".vibrance" / "assets");
+        configCandidates.push_back(root / ".vibrance" / "config");
+    }
     for (const std::filesystem::path& root : sourceRoots)
     {
         assetCandidates.push_back(root / "assets");

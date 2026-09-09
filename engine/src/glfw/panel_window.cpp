@@ -1660,11 +1660,36 @@ bool GlfwPanelWindowHost::open()
 
     close();
 
+    GlfwWindowPositionOptions positioning =
+        hostOptions.positioning.value_or(GlfwWindowPositionOptions {});
+    if (hostOptions.fitToWorkArea)
+    {
+        positioning.margins = glm::max(
+            positioning.margins,
+            hostOptions.workAreaMargins);
+    }
+    glm::ivec2 requestedSize {
+        std::max(hostOptions.width, 1),
+        std::max(hostOptions.height, 1)
+    };
+    if (hostOptions.fitToWorkArea)
+    {
+        if (const std::optional<glm::ivec2> fitted =
+                resolve_glfw_window_size(requestedSize, positioning))
+        {
+            requestedSize = *fitted;
+        }
+    }
+
     GlfwWindowCreateInfo windowCreateInfo = {};
-    windowCreateInfo.width = hostOptions.width;
-    windowCreateInfo.height = hostOptions.height;
+    windowCreateInfo.width = requestedSize.x;
+    windowCreateInfo.height = requestedSize.y;
     windowCreateInfo.name = hostOptions.title.c_str();
     windowCreateInfo.transparentFramebuffer = hostOptions.transparentFramebuffer;
+    windowCreateInfo.windowsCompositionSurface =
+        hostOptions.transparentFramebuffer &&
+        hostOptions.presentationBackend ==
+            PresentationBackend::eWindowsCompositionD3D11;
     windowCreateInfo.decorated = hostOptions.decorated;
     windowCreateInfo.alwaysOnTop = hostOptions.alwaysOnTop;
     windowCreateInfo.focusOnShow = hostOptions.focusOnShow;
@@ -1673,8 +1698,8 @@ bool GlfwPanelWindowHost::open()
     if (hostOptions.positioning)
     {
         windowCreateInfo.position = resolve_glfw_window_position(
-            { hostOptions.width, hostOptions.height },
-            *hostOptions.positioning);
+            requestedSize,
+            positioning);
     }
     if (!windowCreateInfo.position && hostOptions.hasInitialPosition)
     {

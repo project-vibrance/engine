@@ -48,15 +48,37 @@ if(NOT COMMAND vibrance_engine_copy_runtime_companions)
             message(FATAL_ERROR
                 "vibrance_engine_copy_runtime_companions: unknown target '${target_name}'")
         endif()
-        foreach(_vibrance_engine_companion IN LISTS vibrance_engine_RUNTIME_COMPANIONS)
+        set(_vibrance_engine_copy_target
+            "${target_name}_vibrance_runtime_companions")
+        if(NOT TARGET "${_vibrance_engine_copy_target}")
+            add_custom_target(
+                "${_vibrance_engine_copy_target}"
+                ALL)
+            # A consumer executable does not necessarily relink when only an
+            # imported runtime DLL changes. Refresh the engine itself from this
+            # always-built target without adding a generator expression to the
+            # concrete-path runtime companion metadata used by packagers.
             add_custom_command(
-                TARGET "${target_name}"
+                TARGET "${_vibrance_engine_copy_target}"
                 POST_BUILD
                 COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                    "${_vibrance_engine_companion}"
+                    "$<TARGET_FILE:vibrance::engine>"
                     "$<TARGET_FILE_DIR:${target_name}>"
                 VERBATIM)
-        endforeach()
+            foreach(_vibrance_engine_companion IN LISTS vibrance_engine_RUNTIME_COMPANIONS)
+                add_custom_command(
+                    TARGET "${_vibrance_engine_copy_target}"
+                    POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${_vibrance_engine_companion}"
+                        "$<TARGET_FILE_DIR:${target_name}>"
+                    VERBATIM)
+            endforeach()
+            add_dependencies(
+                "${target_name}"
+                "${_vibrance_engine_copy_target}")
+        endif()
+        unset(_vibrance_engine_copy_target)
     endfunction()
 endif()
 

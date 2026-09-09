@@ -59,14 +59,17 @@ struct WindowsCompositionPresenter::Impl
     VibranceCompositionDestroyFn destroy = nullptr;
     VibranceCompositionAcquireFn acquire = nullptr;
     VibranceCompositionPresentFn present = nullptr;
+    VibranceCompositionUploadFn upload = nullptr;
     VibranceCompositionSetRegionsFn setRegions = nullptr;
     VibranceCompositionLastErrorFn lastError = nullptr;
 #endif
     std::string lastRegionError;
+    std::string lastPresentError;
     std::vector<SharedImage> images;
     std::uint32_t width = 0u;
     std::uint32_t height = 0u;
     std::uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
+    bool gpuInterop = false;
     bool ready = false;
 
 #if defined(_WIN32)
@@ -167,9 +170,37 @@ struct WindowsCompositionPresenter::Impl
 
         const vk::MemoryRequirements requirements =
             logicalDevice.getImageMemoryRequirements(destination.image);
+        const auto getHandleProperties = reinterpret_cast<
+            PFN_vkGetMemoryWin32HandlePropertiesKHR>(
+                vkGetDeviceProcAddr(
+                    static_cast<VkDevice>(logicalDevice),
+                    "vkGetMemoryWin32HandlePropertiesKHR"));
+        VkMemoryWin32HandlePropertiesKHR handleProperties {
+            VK_STRUCTURE_TYPE_MEMORY_WIN32_HANDLE_PROPERTIES_KHR,
+            nullptr,
+            0u
+        };
+        if (!getHandleProperties ||
+            getHandleProperties(
+                static_cast<VkDevice>(logicalDevice),
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
+                sharedHandle,
+                &handleProperties) != VK_SUCCESS)
+        {
+            logicalDevice.destroyImage(destination.image);
+            destination.image = nullptr;
+            return false;
+        }
+        // A handle created outside Vulkan may expose fewer compatible heaps
+        // than a freshly created Vulkan image. Intersect both requirements;
+        // choosing from the image alone works on permissive desktop ICDs but
+        // can bind the imported allocation to the wrong heap on Windows ARM64.
+        const std::uint32_t compatibleMemoryTypes =
+            requirements.memoryTypeBits &
+            handleProperties.memoryTypeBits;
         const std::uint32_t typeIndex = memory_type_index(
             physicalDevice,
-            requirements.memoryTypeBits,
+            compatibleMemoryTypes,
             vk::MemoryPropertyFlagBits::eDeviceLocal);
         if (typeIndex == UINT32_MAX)
         {
@@ -230,7 +261,9 @@ bool WindowsCompositionPresenter::initialise(
     std::uint32_t width,
     std::uint32_t height,
     std::uint32_t bufferCount,
-    std::uint32_t graphicsQueueFamilyIndex)
+    std::uint32_t graphicsQueueFamilyIndex,
+    bool transparentFramebuffer,
+    bool enableVulkanInterop)
 {
 #if !defined(_WIN32)
     (void)nativeWindow;
@@ -240,6 +273,8 @@ bool WindowsCompositionPresenter::initialise(
     (void)height;
     (void)bufferCount;
     (void)graphicsQueueFamilyIndex;
+    (void)transparentFramebuffer;
+    (void)enableVulkanInterop;
     return false;
 #else
     if (!nativeWindow || !physicalDevice || !logicalDevice ||
@@ -276,11 +311,14 @@ bool WindowsCompositionPresenter::initialise(
     impl->present = Impl::load_function<VibranceCompositionPresentFn>(
         impl->module,
         VIBRANCE_COMPOSITION_PRESENT_SYMBOL);
+    impl->upload = Impl::load_function<VibranceCompositionUploadFn>(
+        impl->module,
+        VIBRANCE_COMPOSITION_UPLOAD_SYMBOL);
     impl->setRegions = Impl::load_function<VibranceCompositionSetRegionsFn>(
         impl->module,
         VIBRANCE_COMPOSITION_SET_REGIONS_SYMBOL);
     if (!abiVersion || !create || !impl->destroy || !impl->acquire ||
-        !impl->present || !impl->setRegions ||
+        !impl->present || !impl->upload || !impl->setRegions ||
         abiVersion() != VIBRANCE_COMPOSITION_ABI_VERSION)
     {
         Logger::fetch_logger()->warning(
@@ -293,7 +331,7 @@ bool WindowsCompositionPresenter::initialise(
     vk::PhysicalDeviceProperties2 properties = {};
     properties.pNext = &idProperties;
     physicalDevice.getProperties2(&properties);
-    if (!idProperties.deviceLUIDValid)
+    if (!idProperties.deviceLUIDValid && enableVulkanInterop)
     {
         Logger::fetch_logger()->warning(
             "Windows Composition presenter could not match the Vulkan GPU to DXGI.");
@@ -302,7 +340,10 @@ bool WindowsCompositionPresenter::initialise(
     }
 
     LUID adapterLuid {};
-    std::memcpy(&adapterLuid, idProperties.deviceLUID, VK_LUID_SIZE);
+    if (idProperties.deviceLUIDValid)
+    {
+        std::memcpy(&adapterLuid, idProperties.deviceLUID, VK_LUID_SIZE);
+    }
     const std::uint32_t safeBufferCount = std::clamp(
         bufferCount,
         2u,
@@ -313,6 +354,15 @@ bool WindowsCompositionPresenter::initialise(
     createInfo.bufferCount = safeBufferCount;
     createInfo.adapterLuidLow = adapterLuid.LowPart;
     createInfo.adapterLuidHigh = adapterLuid.HighPart;
+    if (transparentFramebuffer)
+    {
+        createInfo.flags |=
+            VIBRANCE_COMPOSITION_CREATE_TRANSPARENT_FRAMEBUFFER;
+    }
+    if (!enableVulkanInterop)
+    {
+        createInfo.flags |= VIBRANCE_COMPOSITION_CREATE_CPU_UPLOAD;
+    }
     createInfo.window = nativeWindow;
 
     std::vector<VibranceCompositionBuffer> buffers(safeBufferCount);
@@ -341,26 +391,31 @@ bool WindowsCompositionPresenter::initialise(
     impl->width = width;
     impl->height = height;
     impl->graphicsQueueFamilyIndex = graphicsQueueFamilyIndex;
+    impl->gpuInterop = enableVulkanInterop;
     impl->images.resize(safeBufferCount);
-    for (std::uint32_t index = 0u; index < safeBufferCount; ++index)
+    if (enableVulkanInterop)
     {
-        if (!buffers[index].sharedHandle ||
-            !impl->import_image(
-                physicalDevice,
-                logicalDevice,
-                static_cast<HANDLE>(buffers[index].sharedHandle),
-                impl->images[index]))
+        for (std::uint32_t index = 0u; index < safeBufferCount; ++index)
         {
-            Logger::fetch_logger()->warning(
-                "Vulkan could not import a D3D11 Composition buffer; using native presentation.");
-            shutdown(logicalDevice);
-            return false;
+            if (!buffers[index].sharedHandle ||
+                !impl->import_image(
+                    physicalDevice,
+                    logicalDevice,
+                    static_cast<HANDLE>(buffers[index].sharedHandle),
+                    impl->images[index]))
+            {
+                Logger::fetch_logger()->warning(
+                    "Vulkan could not import a D3D11 Composition buffer; using native presentation.");
+                shutdown(logicalDevice);
+                return false;
+            }
         }
     }
 
     impl->ready = true;
-    Logger::fetch_logger()->info(
-        "Windows Composition presenter enabled: Vulkan renderer -> D3D11 bridge -> OS compositor.");
+    Logger::fetch_logger()->info(enableVulkanInterop ?
+        "Windows Composition presenter enabled: Vulkan renderer -> D3D11 shared-texture bridge -> OS compositor." :
+        "Windows Composition presenter enabled: Vulkan renderer -> host upload -> D3D11 -> OS compositor.");
     return true;
 #endif
 }
@@ -386,9 +441,11 @@ void WindowsCompositionPresenter::shutdown(vk::Device logicalDevice)
     impl->destroy = nullptr;
     impl->acquire = nullptr;
     impl->present = nullptr;
+    impl->upload = nullptr;
     impl->setRegions = nullptr;
     impl->lastError = nullptr;
     impl->lastRegionError.clear();
+    impl->gpuInterop = false;
     if (impl->module)
     {
         FreeLibrary(impl->module);
@@ -400,6 +457,11 @@ void WindowsCompositionPresenter::shutdown(vk::Device logicalDevice)
 bool WindowsCompositionPresenter::available() const
 {
     return impl && impl->ready;
+}
+
+bool WindowsCompositionPresenter::gpu_interop() const
+{
+    return available() && impl->gpuInterop;
 }
 
 std::uint32_t WindowsCompositionPresenter::buffer_count() const
@@ -414,6 +476,16 @@ vk::Image WindowsCompositionPresenter::image(std::uint32_t index) const
         return {};
     }
     return impl->images[index].image;
+}
+
+vk::DeviceMemory WindowsCompositionPresenter::memory(
+    std::uint32_t index) const
+{
+    if (!available() || index >= impl->images.size())
+    {
+        return {};
+    }
+    return impl->images[index].memory;
 }
 
 bool WindowsCompositionPresenter::first_use(std::uint32_t index) const
@@ -466,11 +538,24 @@ WindowsCompositionPresenter::PresentResult WindowsCompositionPresenter::present(
     switch (impl->present(impl->bridge, index, &presentInfo))
     {
         case VIBRANCE_COMPOSITION_PRESENTED:
+            impl->lastPresentError.clear();
             return PresentResult::ePresented;
         case VIBRANCE_COMPOSITION_PRESENT_DEFERRED:
             return PresentResult::eDeferred;
         default:
+        {
+            const char* detail = impl->lastError ? impl->lastError() : nullptr;
+            const std::string message = detail && detail[0] != '\0' ?
+                detail : "unknown Windows Composition presentation error";
+            if (message != impl->lastPresentError)
+            {
+                Logger::fetch_logger()->warning(
+                    std::string("Windows Composition present detail: ") +
+                    message);
+                impl->lastPresentError = message;
+            }
             return PresentResult::eFailed;
+        }
     }
 #else
     (void)index;
@@ -478,6 +563,45 @@ WindowsCompositionPresenter::PresentResult WindowsCompositionPresenter::present(
     (void)contentRect;
     (void)damageRect;
     return PresentResult::eFailed;
+#endif
+}
+
+bool WindowsCompositionPresenter::upload(
+    std::uint32_t index,
+    const void* rgba,
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t rowPitch)
+{
+#if defined(_WIN32)
+    if (!available() || impl->gpuInterop || index >= impl->images.size() ||
+        !impl->upload)
+    {
+        return false;
+    }
+    VibranceCompositionUploadInfo uploadInfo = {};
+    uploadInfo.pixels = rgba;
+    uploadInfo.width = width;
+    uploadInfo.height = height;
+    uploadInfo.rowPitch = rowPitch;
+    if (impl->upload(impl->bridge, index, &uploadInfo) != 0u)
+    {
+        return true;
+    }
+    const char* detail = impl->lastError ? impl->lastError() : nullptr;
+    if (detail && detail[0] != '\0')
+    {
+        Logger::fetch_logger()->warning(
+            std::string("Windows Composition upload detail: ") + detail);
+    }
+    return false;
+#else
+    (void)index;
+    (void)rgba;
+    (void)width;
+    (void)height;
+    (void)rowPitch;
+    return false;
 #endif
 }
 
@@ -521,6 +645,7 @@ bool WindowsCompositionPresenter::set_regions(
         native.notchAmount = region.notchAmount;
         native.notchDepth = region.notchDepth;
         native.verticalStart = region.verticalStart;
+        native.opacity = region.opacity;
         native.blurRadius = region.blurRadius;
         native.saturation = region.saturation;
         native.tintRed = region.tint.red;

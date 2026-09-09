@@ -36,12 +36,16 @@ public:
         std::uint32_t width,
         std::uint32_t height,
         std::uint32_t bufferCount,
-        std::uint32_t graphicsQueueFamilyIndex);
+        std::uint32_t graphicsQueueFamilyIndex,
+        bool transparentFramebuffer,
+        bool enableVulkanInterop);
     void shutdown(vk::Device logicalDevice);
 
     bool available() const;
+    bool gpu_interop() const;
     std::uint32_t buffer_count() const;
     vk::Image image(std::uint32_t index) const;
+    vk::DeviceMemory memory(std::uint32_t index) const;
     bool first_use(std::uint32_t index) const;
     void mark_used(std::uint32_t index);
     bool acquire(std::uint32_t index);
@@ -50,6 +54,12 @@ public:
         bool synchronize = false,
         glm::uvec4 contentRect = glm::uvec4(0u),
         glm::uvec4 damageRect = glm::uvec4(0u));
+    bool upload(
+        std::uint32_t index,
+        const void* rgba,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t rowPitch);
     bool set_regions(const std::vector<SystemBackdropRegion>& regions);
 
 private:

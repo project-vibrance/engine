@@ -21,6 +21,11 @@ struct GlfwWindowCreateInfo
     int height = 720;
     const char* name = "vibranceUI";
     bool transparentFramebuffer = false;
+    // DirectComposition top-level windows must opt out of the DWM
+    // redirection bitmap while the HWND is being created. This is kept
+    // separate from transparentFramebuffer so native Vulkan windows retain
+    // GLFW's normal per-pixel transparency path.
+    bool windowsCompositionSurface = false;
     bool decorated = true;
     bool alwaysOnTop = false;
     // Initial desktop-shell behavior is applied before the window is first
@@ -184,6 +189,16 @@ VIBRANCE_GLFW_API glm::ivec2 glfw_aligned_window_position(
     GlfwWindowAlignment alignment = GlfwWindowAlignment::eCenter,
     glm::ivec4 margins = glm::ivec4(0),
     glm::ivec2 offset = glm::ivec2(0));
+// Fits a requested logical window size into an inset monitor work area.
+VIBRANCE_GLFW_API glm::ivec2 glfw_fitted_window_size(
+    glm::ivec2 areaSize,
+    glm::ivec2 requestedSize,
+    glm::ivec4 margins = glm::ivec4(0));
+// Resolves the target monitor using the same policy as window positioning.
+VIBRANCE_GLFW_API std::optional<glm::ivec2>
+resolve_glfw_window_size(
+    glm::ivec2 requestedSize,
+    const GlfwWindowPositionOptions& options = {});
 // Resolves a reusable policy against connected monitor work areas.
 VIBRANCE_GLFW_API std::optional<glm::ivec2>
 resolve_glfw_window_position(

@@ -3825,6 +3825,48 @@ Renderer2DRenderPlan Renderer2DScene::build_render_plan(double currentTimeSecond
     return plan;
 }
 
+std::optional<Renderer2DShapeVisualState>
+Renderer2DScene::resolved_shape_visual_state(
+    entt::entity entity,
+    double currentTimeSeconds) const
+{
+    if (entity == entt::null || !registry_.valid(entity) ||
+        !is_visible(registry_, entity))
+    {
+        return std::nullopt;
+    }
+
+    const Transform2DComponent* transform =
+        registry_.try_get<Transform2DComponent>(entity);
+    const ShapeComponent* shape = registry_.try_get<ShapeComponent>(entity);
+    if (!transform || !shape)
+    {
+        return std::nullopt;
+    }
+
+    const DisplayTransitionEffect2D displayTransition =
+        inherited_visual_effect(registry_, entity, currentTimeSeconds);
+    const glm::vec2 interactiveEffects =
+        renderer2d_interactive_visual_effects(registry_, entity);
+    const ShapeStyleComponent* style =
+        registry_.try_get<ShapeStyleComponent>(entity);
+    const float styleOpacity = style ?
+        std::clamp(style->opacity, 0.0f, 1.0f) : 1.0f;
+
+    Renderer2DShapeVisualState state = {};
+    state.rect = apply_display_transition_scale(
+        renderer2d_apply_interactive_visual_rect(
+            registry_,
+            entity,
+            make_bounds(*transform, shape->size)),
+        displayTransition);
+    state.opacity = std::clamp(
+        styleOpacity * displayTransition.opacity * interactiveEffects.y,
+        0.0f,
+        1.0f);
+    return state;
+}
+
 void Renderer2DScene::build_render_plan(
     Renderer2DRenderPlan& plan,
     double currentTimeSeconds,
@@ -5780,12 +5822,17 @@ void Renderer2D::record(
     };
 
     include_plan(visibleBounds, renderPlanCache);
-    include_blurs(visibleBounds, renderPlanCache.cachedPanelBlurs);
-    include_batches(visibleBounds, renderPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
-    include_blurs(visibleBounds, renderPlanCache.cachedBlurs);
-    include_batches(visibleBounds, renderPlanCache.cachedShapes, DispatchBoundsMode::eShape);
-    include_batches(visibleBounds, renderPlanCache.cachedMedia, DispatchBoundsMode::eExact);
-    include_batches(visibleBounds, renderPlanCache.cachedTexts, DispatchBoundsMode::eText);
+    // renderPlanCache only carries static batches on a cache rebuild. The
+    // retained plan is the authoritative visible static layer on later frames
+    // and must remain part of the content bounds. Otherwise a newly acquired
+    // Composition buffer can be cleared and populated with only the dynamic
+    // right-hand page, leaving fixed navigation/search chrome transparent.
+    include_blurs(visibleBounds, cachedLayerPlanCache.cachedPanelBlurs);
+    include_batches(visibleBounds, cachedLayerPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
+    include_blurs(visibleBounds, cachedLayerPlanCache.cachedBlurs);
+    include_batches(visibleBounds, cachedLayerPlanCache.cachedShapes, DispatchBoundsMode::eShape);
+    include_batches(visibleBounds, cachedLayerPlanCache.cachedMedia, DispatchBoundsMode::eExact);
+    include_batches(visibleBounds, cachedLayerPlanCache.cachedTexts, DispatchBoundsMode::eText);
     contentBounds = {
         visibleBounds.x,
         visibleBounds.y,
@@ -5855,12 +5902,12 @@ void Renderer2D::record(
         }
     };
     record_plan_bounds(renderPlanCache);
-    record_blur_bounds(renderPlanCache.cachedPanelBlurs);
-    record_batch_bounds(renderPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
-    record_blur_bounds(renderPlanCache.cachedBlurs);
-    record_batch_bounds(renderPlanCache.cachedShapes, DispatchBoundsMode::eShape);
-    record_batch_bounds(renderPlanCache.cachedMedia, DispatchBoundsMode::eExact);
-    record_batch_bounds(renderPlanCache.cachedTexts, DispatchBoundsMode::eText);
+    record_blur_bounds(cachedLayerPlanCache.cachedPanelBlurs);
+    record_batch_bounds(cachedLayerPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
+    record_blur_bounds(cachedLayerPlanCache.cachedBlurs);
+    record_batch_bounds(cachedLayerPlanCache.cachedShapes, DispatchBoundsMode::eShape);
+    record_batch_bounds(cachedLayerPlanCache.cachedMedia, DispatchBoundsMode::eExact);
+    record_batch_bounds(cachedLayerPlanCache.cachedTexts, DispatchBoundsMode::eText);
 
     DispatchBounds trackedDamage = {};
     if (rebuildCachedLayer || scene.fullDamagePending_)

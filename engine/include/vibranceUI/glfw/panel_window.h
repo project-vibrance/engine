@@ -256,6 +256,10 @@ struct GlfwPanelWindowHostOptions
     int y = 80;
     bool hasInitialPosition = true;
     std::optional<GlfwWindowPositionOptions> positioning {};
+    // Clamp the initial logical size to the selected monitor work area. This
+    // protects fixed-size panels from small displays and mixed-DPI layouts.
+    bool fitToWorkArea = false;
+    glm::ivec4 workAreaMargins { 0 };
     bool transparentFramebuffer = true;
     bool decorated = false;
     bool alwaysOnTop = false;

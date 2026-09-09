@@ -42,6 +42,9 @@ public:
     bool can_run() const noexcept;
     bool owns_instance() const noexcept;
     SingleInstanceStatus status() const noexcept;
+    // Relinquishes the operating-system lock before this guard is destroyed.
+    // Use immediately before launching a replacement process during restart.
+    void release() noexcept;
 
 private:
     struct Impl;

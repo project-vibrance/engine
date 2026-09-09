@@ -4,6 +4,7 @@
 #include <vibranceUI/renderer/font_atlas.h>
 #include <vibranceUI/ui/builder.h>
 #include <vibranceUI/ui/controls.h>
+#include <vibranceUI/ui/glass.h>
 #include <vibranceUI/ui/styles.h>
 #include <vibranceUI/ui/surfaces.h>
 #include <vibranceUI/ui/visuals.h>
@@ -549,9 +550,9 @@ UiNotificationCardHandle ui_create_notification_card(
 
     UiSurfaceBlockOptions cardOptions = {};
     cardOptions.style = make_frosted_panel_style(
-        "rgba(229, 243, 246, 0.88)",
-        "rgba(204, 229, 235, 0.80)",
-        "rgba(255, 255, 255, 0.76)",
+        "rgba(229, 243, 246, 0.76)",
+        "rgba(204, 229, 235, 0.68)",
+        "rgba(255, 255, 255, 0.62)",
         1.0f,
         1.0f,
         26.0f,
@@ -568,6 +569,18 @@ UiNotificationCardHandle ui_create_notification_card(
         { 0.0f, 0.0f },
         options.metrics.size,
         cardOptions);
+    // The Vulkan surface remains responsible for the card contents. On
+    // Windows, this region asks the D3D11 Composition bridge for the desktop
+    // blur underneath the translucent pixels; elsewhere the renderer-owned
+    // frosted style above remains the visual fallback.
+    ui_apply_glass_material(
+        ui,
+        handle.surface,
+        ui_system_glass_options(
+            24.0f,
+            1.12f,
+            { 0.80f, 0.91f, 0.94f, 0.20f },
+            SystemBackdropProvider::eEngine));
 
     ShadowComponent shadow = {};
     shadow.set_color("#07131E52");

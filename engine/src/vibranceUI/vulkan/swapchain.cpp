@@ -93,14 +93,14 @@ namespace
         // Transparent windows need compositor-friendly alpha when the surface supports it
         if (transparent)
         {
-            if (supportedAlpha & vk::CompositeAlphaFlagBitsKHR::ePostMultiplied)
-            {
-                return vk::CompositeAlphaFlagBitsKHR::ePostMultiplied;
-            }
-
             if (supportedAlpha & vk::CompositeAlphaFlagBitsKHR::ePreMultiplied)
             {
                 return vk::CompositeAlphaFlagBitsKHR::ePreMultiplied;
+            }
+
+            if (supportedAlpha & vk::CompositeAlphaFlagBitsKHR::ePostMultiplied)
+            {
+                return vk::CompositeAlphaFlagBitsKHR::ePostMultiplied;
             }
 
             if (supportedAlpha & vk::CompositeAlphaFlagBitsKHR::eInherit)
@@ -201,11 +201,11 @@ void Swapchain::build(
     );
 
     createInfo.preTransform = support.capabilities.currentTransform;
-    createInfo.compositeAlpha = choose_composite_alpha(
+    const vk::CompositeAlphaFlagBitsKHR preferredCompositeAlpha =
+        choose_composite_alpha(
         support.capabilities.supportedCompositeAlpha,
         transparent
     );
-    compositeAlpha = createInfo.compositeAlpha;
     supportedPresentModes.clear();
     supportedPresentModes.reserve(support.presentModes.size());
     for (vk::PresentModeKHR mode : support.presentModes)
@@ -213,9 +213,8 @@ void Swapchain::build(
         supportedPresentModes.push_back(renderer_present_mode_from_vk(mode));
     }
 
-    vk::PresentModeKHR presentMode = choose_present_mode(support.presentModes);
-    activePresentMode = renderer_present_mode_from_vk(presentMode);
-    createInfo.presentMode = presentMode;
+    const vk::PresentModeKHR preferredPresentMode =
+        choose_present_mode(support.presentModes);
     createInfo.clipped = VK_TRUE;
     logger->vulkan(
         std::string("Swapchain supported composite alpha: ") +
@@ -224,19 +223,89 @@ void Swapchain::build(
     );
     logger->vulkan(
         std::string("Swapchain composite alpha: ") +
-        composite_alpha_name(createInfo.compositeAlpha) +
+        composite_alpha_name(preferredCompositeAlpha) +
         (transparent ? " (transparent requested)." : " (opaque requested).")
     );
-    logger->vulkan("Swapchain present mode: " + vk::to_string(presentMode) + ".");
+    logger->vulkan(
+        "Swapchain preferred present mode: " +
+        vk::to_string(preferredPresentMode) + ".");
 
     createInfo.oldSwapchain = vk::SwapchainKHR(nullptr);
 
     VkSwapchainKHR rawSwapchain = VK_NULL_HANDLE;
-    const VkSwapchainCreateInfoKHR rawCreateInfo = createInfo;
-    const VkResult createResult = vkCreateSwapchainKHR(logicalDevice, &rawCreateInfo, nullptr, &rawSwapchain);
+    VkResult createResult = VK_ERROR_INITIALIZATION_FAILED;
+    std::vector<vk::PresentModeKHR> presentModeCandidates {
+        preferredPresentMode
+    };
+    if (preferredPresentMode != vk::PresentModeKHR::eFifo &&
+        contains_present_mode(support.presentModes, vk::PresentModeKHR::eFifo))
+    {
+        presentModeCandidates.push_back(vk::PresentModeKHR::eFifo);
+    }
+
+    std::vector<vk::CompositeAlphaFlagBitsKHR> alphaCandidates;
+    const auto append_alpha_candidate = [&](vk::CompositeAlphaFlagBitsKHR alpha) {
+        if ((support.capabilities.supportedCompositeAlpha & alpha) &&
+            std::find(alphaCandidates.begin(), alphaCandidates.end(), alpha) ==
+                alphaCandidates.end())
+        {
+            alphaCandidates.push_back(alpha);
+        }
+    };
+    append_alpha_candidate(preferredCompositeAlpha);
+    if (transparent)
+    {
+        append_alpha_candidate(vk::CompositeAlphaFlagBitsKHR::ePreMultiplied);
+        append_alpha_candidate(vk::CompositeAlphaFlagBitsKHR::ePostMultiplied);
+        append_alpha_candidate(vk::CompositeAlphaFlagBitsKHR::eInherit);
+    }
+    append_alpha_candidate(vk::CompositeAlphaFlagBitsKHR::eOpaque);
+
+    vk::PresentModeKHR selectedPresentMode = preferredPresentMode;
+    vk::CompositeAlphaFlagBitsKHR selectedCompositeAlpha =
+        preferredCompositeAlpha;
+    std::size_t attempt = 0u;
+    for (const vk::PresentModeKHR presentMode : presentModeCandidates)
+    {
+        for (const vk::CompositeAlphaFlagBitsKHR alpha : alphaCandidates)
+        {
+            ++attempt;
+            createInfo.presentMode = presentMode;
+            createInfo.compositeAlpha = alpha;
+            const VkSwapchainCreateInfoKHR rawCreateInfo = createInfo;
+            createResult = vkCreateSwapchainKHR(
+                logicalDevice,
+                &rawCreateInfo,
+                nullptr,
+                &rawSwapchain);
+            if (createResult == VK_SUCCESS)
+            {
+                selectedPresentMode = presentMode;
+                selectedCompositeAlpha = alpha;
+                break;
+            }
+            logger->vulkan(
+                "Swapchain attempt " + std::to_string(attempt) +
+                " was rejected (present mode " + vk::to_string(presentMode) +
+                ", composite alpha " + composite_alpha_name(alpha) +
+                ", VkResult " +
+                std::to_string(static_cast<int>(createResult)) + ").");
+        }
+        if (createResult == VK_SUCCESS)
+        {
+            break;
+        }
+    }
     if (createResult == VK_SUCCESS) 
     {
         chain = rawSwapchain;
+        activePresentMode = renderer_present_mode_from_vk(selectedPresentMode);
+        compositeAlpha = selectedCompositeAlpha;
+        logger->vulkan(
+            "Swapchain created with present mode " +
+            vk::to_string(selectedPresentMode) +
+            " and composite alpha " +
+            composite_alpha_name(selectedCompositeAlpha) + ".");
 
         deletionQueue.push_back([this, logger](vk::Device device){
             logger->vulkan("Destroyed swapchain.");

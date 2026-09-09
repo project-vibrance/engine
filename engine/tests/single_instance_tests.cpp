@@ -62,6 +62,16 @@ int main(int argc, char* argv[])
         passed &= expect(
             std::system(command.c_str()) == 0,
             "a separate process with the same identifier should be rejected");
+
+        primary.release();
+        passed &= expect(
+            !primary.owns_instance() &&
+                primary.status() == SingleInstanceStatus::eDisabled,
+            "an explicit release should relinquish the process instance");
+        SingleInstanceGuard replacement(options);
+        passed &= expect(
+            replacement.can_run() && replacement.owns_instance(),
+            "a replacement process guard should acquire after explicit release");
     }
 
     SingleInstanceGuard reacquired(options);

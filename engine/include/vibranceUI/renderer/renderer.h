@@ -124,6 +124,15 @@ class VIBRANCE_ENGINE_API Engine
 
     bool system_backdrop_available() const;
 
+    // True only after the Vulkan device, swapchain, pipelines, and frame
+    // resources are ready. Window hosts use this to fail visibly instead of
+    // leaving a transparent but non-rendering native window on screen.
+    bool ready() const;
+
+    // Vulkan API level exposed by the selected native physical device, such
+    // as "1.4.303". Empty means no physical device was selected.
+    std::string vulkan_api_version() const;
+
     // Re-resolves every LocalisedTextComponent in the active 2D scene
     void refresh_localised_texts();
 

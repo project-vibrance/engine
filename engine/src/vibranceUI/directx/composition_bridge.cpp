@@ -74,6 +74,16 @@ inline constexpr winrt::guid winrt::impl::guid_v<
 
 namespace
 {
+    constexpr UINT kSharedTextureMiscFlags =
+        D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+        D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+    static_assert(
+        (kSharedTextureMiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) != 0u);
+    static_assert(
+        (kSharedTextureMiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) != 0u);
+    static_assert(
+        (kSharedTextureMiscFlags & D3D11_RESOURCE_MISC_SHARED) == 0u);
+
 thread_local std::string lastCompositionError;
 
 constexpr HRESULT windowAlreadyComposed =
@@ -555,6 +565,11 @@ public:
         width_(info.width),
         height_(info.height),
         bufferCount_(info.bufferCount),
+        transparentFramebuffer_(
+            (info.flags &
+                VIBRANCE_COMPOSITION_CREATE_TRANSPARENT_FRAMEBUFFER) != 0u),
+        cpuUpload_(
+            (info.flags & VIBRANCE_COMPOSITION_CREATE_CPU_UPLOAD) != 0u),
         windowClaimed_(claim_composition_window(window_))
     {
         adapterLuid_.LowPart = info.adapterLuidLow;
@@ -584,6 +599,7 @@ public:
         }
 
         queries_.clear();
+        sharedMutexes_.clear();
         sharedTextures_.clear();
         backBuffers_.clear();
         backBufferInitialised_.clear();
@@ -663,6 +679,10 @@ public:
             }
             return false;
         }
+        if (!validate_window_redirection_for_transparency())
+        {
+            return false;
+        }
         try
         {
             if (!initialise_composition())
@@ -722,14 +742,77 @@ public:
         return false;
     }
 
+    bool upload(
+        std::uint32_t index,
+        const VibranceCompositionUploadInfo* uploadInfo)
+    {
+        lastCompositionError.clear();
+        if (!cpuUpload_ || index >= sharedTextures_.size() || !context_ ||
+            !uploadInfo ||
+            uploadInfo->structSize < sizeof(VibranceCompositionUploadInfo) ||
+            !uploadInfo->pixels || uploadInfo->width == 0u ||
+            uploadInfo->height == 0u ||
+            uploadInfo->rowPitch < uploadInfo->width * 4u)
+        {
+            lastCompositionError = "invalid CPU Composition upload parameters";
+            return false;
+        }
+
+        const std::size_t destinationRowPitch =
+            static_cast<std::size_t>(width_) * 4u;
+        cpuUploadPixels_.resize(
+            destinationRowPitch * static_cast<std::size_t>(height_));
+        const auto* source = static_cast<const std::uint8_t*>(
+            uploadInfo->pixels);
+
+        // Vulkan's portable composition target is RGBA8. The DXGI Composition
+        // swapchain is BGRA8, so swizzle while copying. Nearest scaling is used
+        // only when maxRenderPixels reduced the Vulkan working extent.
+        for (std::uint32_t y = 0u; y < height_; ++y)
+        {
+            const std::uint32_t sourceY = static_cast<std::uint32_t>(
+                (static_cast<std::uint64_t>(y) * uploadInfo->height) /
+                height_);
+            const std::uint8_t* sourceRow =
+                source + static_cast<std::size_t>(sourceY) *
+                    uploadInfo->rowPitch;
+            std::uint8_t* destinationRow =
+                cpuUploadPixels_.data() +
+                static_cast<std::size_t>(y) * destinationRowPitch;
+            for (std::uint32_t x = 0u; x < width_; ++x)
+            {
+                const std::uint32_t sourceX = static_cast<std::uint32_t>(
+                    (static_cast<std::uint64_t>(x) * uploadInfo->width) /
+                    width_);
+                const std::uint8_t* sourcePixel = sourceRow + sourceX * 4u;
+                std::uint8_t* destinationPixel = destinationRow + x * 4u;
+                destinationPixel[0] = sourcePixel[2];
+                destinationPixel[1] = sourcePixel[1];
+                destinationPixel[2] = sourcePixel[0];
+                destinationPixel[3] = sourcePixel[3];
+            }
+        }
+
+        context_->UpdateSubresource(
+            sharedTextures_[index].get(),
+            0u,
+            nullptr,
+            cpuUploadPixels_.data(),
+            static_cast<UINT>(destinationRowPitch),
+            0u);
+        return true;
+    }
+
     std::uint32_t present(
         std::uint32_t index,
         const VibranceCompositionPresentInfo* presentInfo)
     {
+        lastCompositionError.clear();
         if (index >= sharedTextures_.size() || !swapchain_ || !swapchain3_ ||
             !context_ || backBuffers_.empty() || !presentInfo ||
             presentInfo->structSize < sizeof(VibranceCompositionPresentInfo))
         {
+            lastCompositionError = "invalid Composition present parameters";
             return VIBRANCE_COMPOSITION_PRESENT_FAILED;
         }
 
@@ -749,6 +832,8 @@ public:
             }
             if (waitResult == WAIT_FAILED)
             {
+                lastCompositionError =
+                    "Composition frame-latency wait failed";
                 return VIBRANCE_COMPOSITION_PRESENT_FAILED;
             }
         }
@@ -759,6 +844,8 @@ public:
             backBufferIndex >= backBufferContentRects_.size() ||
             backBufferIndex >= backBufferPendingDamageRects_.size())
         {
+            lastCompositionError =
+                "Composition swapchain returned an invalid back-buffer index";
             return VIBRANCE_COMPOSITION_PRESENT_FAILED;
         }
 
@@ -827,6 +914,32 @@ public:
             pendingDamage = union_rect(pendingDamage, damageRect);
         }
         RECT copyRect = backBufferPendingDamageRects_[backBufferIndex];
+
+        if (!cpuUpload_ &&
+            (index >= sharedMutexes_.size() || !sharedMutexes_[index]))
+        {
+            lastCompositionError =
+                "Composition buffer has no D3D11 keyed mutex";
+            return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+        }
+        if (!cpuUpload_)
+        {
+            const HRESULT acquireResult = sharedMutexes_[index]->AcquireSync(
+                VIBRANCE_COMPOSITION_VULKAN_RELEASE_KEY,
+                synchronize ? 100u : 0u);
+            if (acquireResult == WAIT_TIMEOUT)
+            {
+                return VIBRANCE_COMPOSITION_PRESENT_DEFERRED;
+            }
+            if (acquireResult != S_OK)
+            {
+                lastCompositionError =
+                    "D3D11 keyed-mutex acquire failed (HRESULT " +
+                    std::to_string(static_cast<std::int32_t>(acquireResult)) + ")";
+                return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+            }
+        }
+
         if (!backBufferInitialised_[backBufferIndex])
         {
             copyRect = {
@@ -862,6 +975,18 @@ public:
         backBufferContentRects_[backBufferIndex] = contentRect;
         context_->End(queries_[index].get());
         queryPending_[index] = true;
+        if (!cpuUpload_)
+        {
+            const HRESULT releaseResult = sharedMutexes_[index]->ReleaseSync(
+                VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_KEY);
+            if (FAILED(releaseResult))
+            {
+                lastCompositionError =
+                    "D3D11 keyed-mutex release failed (HRESULT " +
+                    std::to_string(static_cast<std::int32_t>(releaseResult)) + ")";
+                return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+            }
+        }
         DXGI_PRESENT_PARAMETERS parameters {};
         parameters.DirtyRectsCount = has_area(copyRect) ? 1u : 0u;
         parameters.pDirtyRects = has_area(copyRect) ? &copyRect : nullptr;
@@ -881,6 +1006,13 @@ public:
         if (SUCCEEDED(presentResult))
         {
             backBufferPendingDamageRects_[backBufferIndex] = RECT {};
+        }
+        else
+        {
+            lastCompositionError =
+                "IDXGISwapChain1::Present1 failed (HRESULT " +
+                std::to_string(
+                    static_cast<std::int32_t>(presentResult)) + ")";
         }
         return SUCCEEDED(presentResult) ?
             VIBRANCE_COMPOSITION_PRESENTED :
@@ -970,6 +1102,36 @@ public:
     }
 
 private:
+    bool validate_window_redirection_for_transparency()
+    {
+        if (!transparentFramebuffer_)
+        {
+            return true;
+        }
+
+        SetLastError(ERROR_SUCCESS);
+        const LONG_PTR extendedStyle = GetWindowLongPtrW(window_, GWL_EXSTYLE);
+        const DWORD styleReadError = GetLastError();
+        if (extendedStyle == 0 && styleReadError != ERROR_SUCCESS)
+        {
+            lastCompositionError =
+                "could not read the HWND extended style before enabling transparent Composition";
+            return false;
+        }
+
+        if ((extendedStyle & WS_EX_NOREDIRECTIONBITMAP) != 0)
+        {
+            return true;
+        }
+        // DWM decides whether to allocate the opaque redirection bitmap while
+        // CreateWindowEx is running. Retrofitting this style after GLFW has
+        // created the HWND is unreliable and leaves a black client surface on
+        // some Windows/ARM64 drivers.
+        lastCompositionError =
+            "transparent Composition HWND was not created with WS_EX_NOREDIRECTIONBITMAP";
+        return false;
+    }
+
     bool commit_composition_changes()
     {
         // The private Win32 interop compositor uses IDComposition and does not
@@ -1025,6 +1187,8 @@ private:
         right.squirclePower = 0.0f;
         right.notchAmount = 0.0f;
         right.notchDepth = 0.0f;
+        left.opacity = 0.0f;
+        right.opacity = 0.0f;
         return std::memcmp(&left, &right, sizeof(left)) == 0;
     }
 
@@ -1039,6 +1203,7 @@ private:
         const bool sizeChanged =
             previous.width != region.width ||
             previous.height != region.height;
+        const bool opacityChanged = previous.opacity != region.opacity;
         const bool materialGeometryChanged =
             sizeChanged ||
             previous.verticalStart != region.verticalStart;
@@ -1064,6 +1229,10 @@ private:
             if (sizeChanged)
             {
                 state.container.Size({ region.width, region.height });
+            }
+            if (opacityChanged)
+            {
+                state.container.Opacity(std::clamp(region.opacity, 0.0f, 1.0f));
             }
             if (clipChanged)
             {
@@ -1155,8 +1324,17 @@ private:
         }
         if (!adapter)
         {
-            lastCompositionError = "DXGI adapter matching the Vulkan device LUID was not found";
-            return false;
+            // CPU uploads do not share allocations with Vulkan, so an exact
+            // adapter match is unnecessary. Prefer DXGI's first hardware
+            // adapter when a native Vulkan ICD did not publish a usable LUID.
+            if (!cpuUpload_ ||
+                factory->EnumAdapters1(0u, adapter.put()) ==
+                    DXGI_ERROR_NOT_FOUND ||
+                !adapter)
+            {
+                lastCompositionError = "DXGI adapter matching the Vulkan device LUID was not found";
+                return false;
+            }
         }
 
         UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
@@ -1266,6 +1444,7 @@ private:
         }
 
         sharedTextures_.resize(bufferCount_);
+        sharedMutexes_.resize(bufferCount_);
         sharedHandles_.resize(bufferCount_, nullptr);
         queries_.resize(bufferCount_);
         queryPending_.resize(bufferCount_, false);
@@ -1281,8 +1460,13 @@ private:
             textureDescription.Usage = D3D11_USAGE_DEFAULT;
             textureDescription.BindFlags = D3D11_BIND_SHADER_RESOURCE |
                 D3D11_BIND_RENDER_TARGET;
-            textureDescription.MiscFlags = D3D11_RESOURCE_MISC_SHARED |
-                D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+            // IDXGIResource1::CreateSharedHandle requires the documented
+            // NT-handle + keyed-mutex pair. SHARED_NTHANDLE by itself is
+            // rejected with E_INVALIDARG by conforming D3D11 drivers, while
+            // the legacy SHARED flag belongs to IDXGIResource::GetSharedHandle
+            // and must not be mixed into this path.
+            textureDescription.MiscFlags = cpuUpload_ ?
+                0u : kSharedTextureMiscFlags;
             const HRESULT textureResult = device_->CreateTexture2D(
                 &textureDescription,
                 nullptr,
@@ -1295,16 +1479,69 @@ private:
                 return false;
             }
 
-            winrt::com_ptr<IDXGIResource1> resource;
-            if (FAILED(sharedTextures_[index]->QueryInterface(resource.put())) ||
-                FAILED(resource->CreateSharedHandle(
-                    nullptr,
-                    DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
-                    nullptr,
-                    &sharedHandles_[index])))
+            if (!cpuUpload_ &&
+                FAILED(sharedTextures_[index]->QueryInterface(
+                    sharedMutexes_[index].put())))
             {
-                lastCompositionError = "D3D11 NT shared-handle creation failed";
+                lastCompositionError =
+                    "D3D11 shared texture does not expose IDXGIKeyedMutex";
                 return false;
+            }
+
+            // D3D11 resources created without initial data contain undefined
+            // pixels. Initialise the complete allocation on its owning API.
+            // The shared path first claims key 0; CPU-upload textures require
+            // no cross-API ownership transition.
+            HRESULT initialiseAcquire = S_OK;
+            if (!cpuUpload_)
+            {
+                initialiseAcquire = sharedMutexes_[index]->AcquireSync(
+                    VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_KEY,
+                    VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_TIMEOUT_MS);
+                if (initialiseAcquire != S_OK)
+                {
+                    lastCompositionError =
+                        "D3D11 shared texture initial acquire failed (HRESULT " +
+                        std::to_string(
+                            static_cast<std::int32_t>(initialiseAcquire)) + ")";
+                    return false;
+                }
+            }
+            winrt::com_ptr<ID3D11RenderTargetView> initialTarget;
+            const HRESULT targetResult = device_->CreateRenderTargetView(
+                sharedTextures_[index].get(),
+                nullptr,
+                initialTarget.put());
+            if (SUCCEEDED(targetResult))
+            {
+                constexpr float transparent[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                context_->ClearRenderTargetView(initialTarget.get(), transparent);
+                context_->Flush();
+            }
+            const HRESULT initialiseRelease = cpuUpload_ ? S_OK :
+                sharedMutexes_[index]->ReleaseSync(
+                    VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_KEY);
+            if (FAILED(targetResult) || FAILED(initialiseRelease))
+            {
+                lastCompositionError = FAILED(targetResult) ?
+                    "D3D11 shared texture transparent initialisation failed" :
+                    "D3D11 shared texture initial release failed";
+                return false;
+            }
+
+            if (!cpuUpload_)
+            {
+                winrt::com_ptr<IDXGIResource1> resource;
+                if (FAILED(sharedTextures_[index]->QueryInterface(resource.put())) ||
+                    FAILED(resource->CreateSharedHandle(
+                        nullptr,
+                        DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+                        nullptr,
+                        &sharedHandles_[index])))
+                {
+                    lastCompositionError = "D3D11 NT shared-handle creation failed";
+                    return false;
+                }
             }
 
             D3D11_QUERY_DESC queryDescription { D3D11_QUERY_EVENT, 0u };
@@ -1672,6 +1909,7 @@ private:
         auto container = compositor_.CreateContainerVisual();
         container.Offset({ region.x, region.y, 0.0f });
         container.Size({ region.width, region.height });
+        container.Opacity(std::clamp(region.opacity, 0.0f, 1.0f));
         if (auto clip = make_clip(region))
         {
             container.Clip(clip);
@@ -1728,6 +1966,8 @@ private:
     LUID adapterLuid_ {};
     bool apartmentOwned_ = false;
     bool hostBackdropEnabled_ = false;
+    bool transparentFramebuffer_ = false;
+    bool cpuUpload_ = false;
     bool windowClaimed_ = false;
 
     winrt::Windows::System::DispatcherQueueController dispatcherController_ { nullptr };
@@ -1741,6 +1981,7 @@ private:
     std::vector<RECT> backBufferPendingDamageRects_;
     HANDLE frameLatencyWaitableObject_ = nullptr;
     std::vector<winrt::com_ptr<ID3D11Texture2D>> sharedTextures_;
+    std::vector<winrt::com_ptr<IDXGIKeyedMutex>> sharedMutexes_;
     std::vector<HANDLE> sharedHandles_;
     std::vector<winrt::com_ptr<ID3D11Query>> queries_;
     std::vector<bool> queryPending_;
@@ -1758,6 +1999,7 @@ private:
     composition::ContainerVisual regions_ { nullptr };
     composition::SpriteVisual content_ { nullptr };
     std::vector<RegionVisualState> regionVisuals_;
+    std::vector<std::uint8_t> cpuUploadPixels_;
 };
 }
 
@@ -1824,6 +2066,16 @@ vibrance_composition_present(
     return bridge ?
         bridge->present(index, presentInfo) :
         VIBRANCE_COMPOSITION_PRESENT_FAILED;
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_composition_upload(
+    VibranceCompositionHandle handle,
+    std::uint32_t index,
+    const VibranceCompositionUploadInfo* uploadInfo)
+{
+    auto* bridge = static_cast<CompositionBridge*>(handle);
+    return bridge && bridge->upload(index, uploadInfo) ? 1u : 0u;
 }
 
 extern "C" __declspec(dllexport) std::uint32_t __cdecl

@@ -194,6 +194,7 @@ void Frame::record_command_buffer(
 	bool presentNativeSurface,
 	bool clearNativeSurface,
 	vk::Image compositionImage,
+	vk::Buffer compositionReadbackBuffer,
 	bool compositionImageFirstUse,
 	glm::uvec4 pendingCompositionDamageRect,
 	uint32_t graphicsQueueFamilyIndex)
@@ -293,7 +294,10 @@ void Frame::record_command_buffer(
 	{
 		transition_render_target(tempSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
 	}
-	if (compositionImage)
+	const bool writeCompositionSurface =
+		static_cast<bool>(compositionImage) ||
+		static_cast<bool>(compositionReadbackBuffer);
+	if (writeCompositionSurface)
 	{
 		transition_render_target(compositionSurface, vk::AccessFlagBits::eShaderWrite);
 	}
@@ -354,13 +358,22 @@ void Frame::record_command_buffer(
 	glm::uvec4 compositionUpdateRect = union_rect(
 		damageRect,
 		pendingCompositionDamageRect);
+	if (compositionReadbackBuffer)
+	{
+		// The portable Composition fallback reads a complete packed image back to
+		// the host. Rebuild every pixel so transparent space is deterministic even
+		// though compositionSurface itself is transient for this command buffer.
+		compositionUpdateRect = {
+			0u, 0u, renderExtent.width, renderExtent.height };
+	}
 	if (compositionImageFirstUse)
 	{
 		compositionUpdateRect = union_rect(contentRect, compositionUpdateRect);
 	}
 	compositionContentRect = { 0u, 0u, 0u, 0u };
 	compositionDamageRect = { 0u, 0u, 0u, 0u };
-	if (compositionImage && renderExtent.width > 0u && renderExtent.height > 0u)
+	if (writeCompositionSurface &&
+		renderExtent.width > 0u && renderExtent.height > 0u)
 	{
 		auto scale_floor = [](uint32_t value, uint32_t destination, uint32_t source) {
 			return static_cast<uint32_t>(
@@ -417,7 +430,7 @@ void Frame::record_command_buffer(
 		barrier_render_target(tempSurface, vk::AccessFlagBits::eShaderWrite);
 	}
 
-	if (writeNativeContent || compositionImage)
+	if (writeNativeContent || writeCompositionSurface)
 	{
 		renderer2D.record_composite(
 			commandBuffer,
@@ -427,8 +440,8 @@ void Frame::record_command_buffer(
 			pipelineLayouts,
 			useExternalBackdropUnderlay,
 			writeNativeContent,
-			static_cast<bool>(compositionImage),
-			compositionImage ? compositionUpdateRect : contentRect);
+			writeCompositionSurface,
+			writeCompositionSurface ? compositionUpdateRect : contentRect);
 	}
 
 	if (presentNativeSurface)
@@ -475,7 +488,46 @@ void Frame::record_command_buffer(
 		);
 	}
 
-	if (compositionImage)
+	if (compositionReadbackBuffer)
+	{
+		transition_image_layout(commandBuffer, compositionSurface->image,
+			vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
+			vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eTransferRead,
+			vk::PipelineStageFlagBits::eComputeShader,
+			vk::PipelineStageFlagBits::eTransfer);
+
+		vk::BufferImageCopy copyRegion = {};
+		copyRegion.bufferOffset = 0u;
+		copyRegion.bufferRowLength = 0u;
+		copyRegion.bufferImageHeight = 0u;
+		copyRegion.imageSubresource.aspectMask =
+			vk::ImageAspectFlagBits::eColor;
+		copyRegion.imageSubresource.layerCount = 1u;
+		copyRegion.imageExtent = vk::Extent3D{
+			renderExtent.width, renderExtent.height, 1u };
+		commandBuffer.copyImageToBuffer(
+			compositionSurface->image,
+			vk::ImageLayout::eTransferSrcOptimal,
+			compositionReadbackBuffer,
+			copyRegion);
+
+		vk::BufferMemoryBarrier hostReadBarrier = {};
+		hostReadBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		hostReadBarrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
+		hostReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		hostReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		hostReadBarrier.buffer = compositionReadbackBuffer;
+		hostReadBarrier.offset = 0u;
+		hostReadBarrier.size = VK_WHOLE_SIZE;
+		commandBuffer.pipelineBarrier(
+			vk::PipelineStageFlagBits::eTransfer,
+			vk::PipelineStageFlagBits::eHost,
+			{},
+			nullptr,
+			hostReadBarrier,
+			nullptr);
+	}
+	else if (compositionImage)
 	{
 		transition_image_layout(commandBuffer, compositionSurface->image,
 			vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
@@ -484,15 +536,17 @@ void Frame::record_command_buffer(
 		);
 
 		vk::ImageMemoryBarrier acquireBarrier = {};
-		acquireBarrier.oldLayout = compositionImageFirstUse ?
-			vk::ImageLayout::eUndefined : vk::ImageLayout::eGeneral;
+		// These images are created by D3D11 and imported into Vulkan. Their
+		// externally-owned layout is GENERAL even before Vulkan's first use;
+		// treating first use as UNDEFINED permits an implementation to discard
+		// the D3D allocation and its alpha plane. Qualcomm's ARM64 ICD exercises
+		// that permission, producing opaque black in untouched pixels.
+		acquireBarrier.oldLayout = vk::ImageLayout::eGeneral;
 		acquireBarrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
 		acquireBarrier.srcAccessMask = {};
 		acquireBarrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
-		acquireBarrier.srcQueueFamilyIndex = compositionImageFirstUse ?
-			VK_QUEUE_FAMILY_IGNORED : VK_QUEUE_FAMILY_EXTERNAL_KHR;
-		acquireBarrier.dstQueueFamilyIndex = compositionImageFirstUse ?
-			VK_QUEUE_FAMILY_IGNORED : graphicsQueueFamilyIndex;
+		acquireBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR;
+		acquireBarrier.dstQueueFamilyIndex = graphicsQueueFamilyIndex;
 		acquireBarrier.image = compositionImage;
 		acquireBarrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
 		acquireBarrier.subresourceRange.levelCount = 1u;
@@ -523,22 +577,22 @@ void Frame::record_command_buffer(
 		{
 			if (compositionImageFirstUse)
 			{
-			vk::ImageMemoryBarrier clearBarrier = {};
-			clearBarrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
-			clearBarrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
-			clearBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-			clearBarrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
-			clearBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			clearBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			clearBarrier.image = compositionImage;
-			clearBarrier.subresourceRange = compositionRange;
-			commandBuffer.pipelineBarrier(
-				vk::PipelineStageFlagBits::eTransfer,
-				vk::PipelineStageFlagBits::eTransfer,
-				{},
-				nullptr,
-				nullptr,
-				clearBarrier);
+				vk::ImageMemoryBarrier clearBarrier = {};
+				clearBarrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+				clearBarrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+				clearBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+				clearBarrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+				clearBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				clearBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				clearBarrier.image = compositionImage;
+				clearBarrier.subresourceRange = compositionRange;
+				commandBuffer.pipelineBarrier(
+					vk::PipelineStageFlagBits::eTransfer,
+					vk::PipelineStageFlagBits::eTransfer,
+					{},
+					nullptr,
+					nullptr,
+					clearBarrier);
 			}
 
 			copy_image_region_to_image(

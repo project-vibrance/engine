@@ -13,10 +13,77 @@
 #include <GLFW/glfw3native.h>
 #include <objbase.h>
 #include <shobjidl.h>
+#ifndef WS_EX_NOREDIRECTIONBITMAP
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
 #endif
 
 namespace
 {
+#if defined(_WIN32) && defined(__MINGW32__)
+    thread_local bool createCompositionWindow = false;
+
+    class CompositionWindowCreationScope
+    {
+    public:
+        explicit CompositionWindowCreationScope(bool enabled)
+        {
+            createCompositionWindow = enabled;
+        }
+
+        ~CompositionWindowCreationScope()
+        {
+            createCompositionWindow = false;
+        }
+    };
+#endif
+
+#if defined(_WIN32)
+    void apply_embedded_application_icon(GLFWwindow* window)
+    {
+        if (!window)
+        {
+            return;
+        }
+        HWND nativeWindow = glfwGetWin32Window(window);
+        HINSTANCE instance = GetModuleHandleW(nullptr);
+        if (!nativeWindow || !instance)
+        {
+            return;
+        }
+
+        const auto load = [instance](int width, int height) {
+            return static_cast<HICON>(LoadImageW(
+                instance,
+                MAKEINTRESOURCEW(1),
+                IMAGE_ICON,
+                width,
+                height,
+                LR_SHARED));
+        };
+        if (HICON large = load(
+                GetSystemMetrics(SM_CXICON),
+                GetSystemMetrics(SM_CYICON)))
+        {
+            SendMessageW(
+                nativeWindow,
+                WM_SETICON,
+                ICON_BIG,
+                reinterpret_cast<LPARAM>(large));
+        }
+        if (HICON small = load(
+                GetSystemMetrics(SM_CXSMICON),
+                GetSystemMetrics(SM_CYSMICON)))
+        {
+            SendMessageW(
+                nativeWindow,
+                WM_SETICON,
+                ICON_SMALL,
+                reinterpret_cast<LPARAM>(small));
+        }
+    }
+#endif
+
     GLFWmonitor* monitor_for_window(GLFWwindow* window)
     {
         if (!window)
@@ -88,6 +155,68 @@ namespace
     }
 }
 
+#if defined(_WIN32) && defined(__MINGW32__)
+namespace
+{
+    using CreateWindowExWFunction = HWND (WINAPI*)(
+        DWORD,
+        LPCWSTR,
+        LPCWSTR,
+        DWORD,
+        int,
+        int,
+        int,
+        int,
+        HWND,
+        HMENU,
+        HINSTANCE,
+        LPVOID);
+}
+
+// MinGW declares Win32 functions through __imp_* pointers. The engine link
+// wraps this one import so its statically linked GLFW can supply the
+// DirectComposition style in the actual CreateWindowExW call without carrying
+// a private GLFW fork. The flag is scoped to one GLFW creation on this thread.
+extern "C" CreateWindowExWFunction __real___imp_CreateWindowExW;
+
+extern "C" HWND WINAPI vibrance_CreateWindowExW(
+    DWORD extendedStyle,
+    LPCWSTR className,
+    LPCWSTR windowName,
+    DWORD style,
+    int x,
+    int y,
+    int width,
+    int height,
+    HWND parent,
+    HMENU menu,
+    HINSTANCE instance,
+    LPVOID parameter)
+{
+    if (createCompositionWindow && parent == nullptr)
+    {
+        extendedStyle |= WS_EX_NOREDIRECTIONBITMAP;
+        createCompositionWindow = false;
+    }
+    return __real___imp_CreateWindowExW(
+        extendedStyle,
+        className,
+        windowName,
+        style,
+        x,
+        y,
+        width,
+        height,
+        parent,
+        menu,
+        instance,
+        parameter);
+}
+
+extern "C" CreateWindowExWFunction __wrap___imp_CreateWindowExW =
+    vibrance_CreateWindowExW;
+#endif
+
 GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
 {
     Logger* logger = Logger::fetch_logger();
@@ -122,7 +251,10 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     }
 #ifdef GLFW_SCALE_TO_MONITOR
-    glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE);
+    // GLFW sizes Win32 windows in screen coordinates already. Asking it to
+    // scale the native window as well double-applies monitor DPI while the
+    // framebuffer and UI layout remain 1:1 on Windows.
+    glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_FALSE);
 #endif
 #ifdef GLFW_SCALE_FRAMEBUFFER
     glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_TRUE);
@@ -145,9 +277,19 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
 #endif
     }
 
+#if defined(_WIN32) && defined(__MINGW32__)
+    CompositionWindowCreationScope compositionCreation(
+        createInfo.windowsCompositionSurface);
+#endif
     GLFWwindow* window = glfwCreateWindow(createInfo.width, createInfo.height, createInfo.name, nullptr, nullptr);
     if (window)
     {
+#if defined(_WIN32)
+        // GLFW creates secondary native windows with its generic icon. Reuse
+        // the executable's resource so Settings and other Alt-Tab entries use
+        // the same branded icon as the application executable.
+        apply_embedded_application_icon(window);
+#endif
         if (createInfo.position)
         {
             glfwSetWindowPos(
@@ -250,11 +392,26 @@ bool GlfwWindowHost::open()
 {
     close();
 
+    const PresentationBackend requestedPresentationBackend =
+        hostOptions.presentationBackend.value_or(
+#if defined(_WIN32)
+            hostOptions.transparentFramebuffer ?
+                PresentationBackend::eWindowsCompositionD3D11 :
+                PresentationBackend::eNative
+#else
+            PresentationBackend::eNative
+#endif
+        );
+
     GlfwWindowCreateInfo windowInfo = {};
     windowInfo.width = std::max(hostOptions.size.x, 1);
     windowInfo.height = std::max(hostOptions.size.y, 1);
     windowInfo.name = hostOptions.title.c_str();
     windowInfo.transparentFramebuffer = hostOptions.transparentFramebuffer;
+    windowInfo.windowsCompositionSurface =
+        hostOptions.transparentFramebuffer &&
+        requestedPresentationBackend ==
+            PresentationBackend::eWindowsCompositionD3D11;
     windowInfo.decorated = hostOptions.decorated;
     windowInfo.alwaysOnTop = hostOptions.alwaysOnTop;
     windowInfo.focusOnShow = hostOptions.focusOnShow;
@@ -318,16 +475,7 @@ bool GlfwWindowHost::open()
     engineInfo.msaaSamples = hostOptions.msaaSamples;
     engineInfo.presentMode = hostOptions.presentMode;
     engineInfo.renderBackend = hostOptions.renderBackend;
-    engineInfo.presentationBackend =
-        hostOptions.presentationBackend.value_or(
-#if defined(_WIN32)
-            hostOptions.transparentFramebuffer ?
-                PresentationBackend::eWindowsCompositionD3D11 :
-                PresentationBackend::eNative
-#else
-            PresentationBackend::eNative
-#endif
-        );
+    engineInfo.presentationBackend = requestedPresentationBackend;
     engineInfo.targetFrameRate = hostOptions.targetFrameRate;
     engineInfo.instanceExtensionCount = extensionCount;
     engineInfo.instanceExtensions = extensions;
@@ -354,6 +502,16 @@ bool GlfwWindowHost::open()
             logger->error(
                 std::string("Window host could not create its renderer: ") +
                 error.what());
+        }
+        close();
+        return false;
+    }
+    if (!hostedEngine->ready())
+    {
+        if (Logger* logger = Logger::fetch_logger())
+        {
+            logger->error(
+                "Window host renderer initialisation did not complete.");
         }
         close();
         return false;
@@ -533,6 +691,94 @@ glm::ivec2 glfw_aligned_window_position(
         start,
         end - windowSize);
     return glm::clamp(result, start, maximum);
+}
+
+glm::ivec2 glfw_fitted_window_size(
+    glm::ivec2 areaSize,
+    glm::ivec2 requestedSize,
+    glm::ivec4 margins)
+{
+    areaSize = glm::max(areaSize, glm::ivec2(1));
+    requestedSize = glm::max(requestedSize, glm::ivec2(1));
+    margins = glm::max(margins, glm::ivec4(0));
+    const glm::ivec2 available = glm::max(
+        areaSize - glm::ivec2(
+            std::min(margins.x, areaSize.x - 1) +
+                std::min(margins.z, areaSize.x - 1),
+            std::min(margins.y, areaSize.y - 1) +
+                std::min(margins.w, areaSize.y - 1)),
+        glm::ivec2(1));
+    return glm::min(requestedSize, available);
+}
+
+std::optional<glm::ivec2> resolve_glfw_window_size(
+    glm::ivec2 requestedSize,
+    const GlfwWindowPositionOptions& options)
+{
+    const std::vector<GlfwMonitorInfo> monitors =
+        glfw_connected_monitors();
+    if (monitors.empty())
+    {
+        return std::nullopt;
+    }
+
+    const GlfwMonitorInfo* selected = nullptr;
+    if (!options.monitorId.empty())
+    {
+        const auto match = std::find_if(
+            monitors.begin(),
+            monitors.end(),
+            [&options](const GlfwMonitorInfo& monitor) {
+                return monitor.id == options.monitorId;
+            });
+        if (match != monitors.end())
+        {
+            selected = &*match;
+        }
+    }
+    if (!selected && options.referencePoint)
+    {
+        std::int64_t bestDistance =
+            std::numeric_limits<std::int64_t>::max();
+        for (const GlfwMonitorInfo& monitor : monitors)
+        {
+            const glm::ivec2 maximum =
+                monitor.position + monitor.size - glm::ivec2(1);
+            const glm::ivec2 nearest = glm::clamp(
+                *options.referencePoint,
+                monitor.position,
+                maximum);
+            const std::int64_t deltaX =
+                static_cast<std::int64_t>(options.referencePoint->x) -
+                nearest.x;
+            const std::int64_t deltaY =
+                static_cast<std::int64_t>(options.referencePoint->y) -
+                nearest.y;
+            const std::int64_t distance =
+                deltaX * deltaX + deltaY * deltaY;
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                selected = &monitor;
+            }
+        }
+    }
+    if (!selected)
+    {
+        const auto primary = std::find_if(
+            monitors.begin(),
+            monitors.end(),
+            [](const GlfwMonitorInfo& monitor) {
+                return monitor.primary;
+            });
+        selected = primary == monitors.end() ?
+            &monitors.front() :
+            &*primary;
+    }
+    return glfw_fitted_window_size(
+        selected->workSize,
+        requestedSize,
+        options.margins);
 }
 
 std::optional<glm::ivec2> resolve_glfw_window_position(

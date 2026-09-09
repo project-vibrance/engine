@@ -9,6 +9,13 @@ bool supports(const vk::PhysicalDevice& device, const char** ppRequestedExtensio
 
 bool is_suitable(const vk::PhysicalDevice& device, bool requireWindowsCompositionInterop = false);
 
+// Reports whether the selected Vulkan device can import and synchronize the
+// keyed D3D11 textures used by the optional Windows Composition presenter.
+// This is deliberately separate from basic renderer suitability: Vulkan
+// rendering must not move to a layered translation device merely to obtain
+// the presentation bridge.
+bool supports_windows_composition_interop(const vk::PhysicalDevice& device);
+
 vk::PhysicalDevice choose_physical_device(
     const vk::Instance instance,
     bool requireWindowsCompositionInterop = false);

@@ -84,6 +84,11 @@ int main()
         card.root != entt::null && registry.valid(card.root) &&
             card.surface != entt::null && registry.valid(card.surface),
         "card creation should return valid retained entities");
+    passed &= expect(
+        registry.all_of<SystemBackdropComponent>(card.surface) &&
+            registry.get<SystemBackdropComponent>(card.surface)
+                .region.material == GlassMaterial::eSystemGlass,
+        "the main card should retain its Windows Composition blur request");
     const Layout2DComponent& layout =
         registry.get<Layout2DComponent>(card.root);
     passed &= expect(
@@ -115,6 +120,41 @@ int main()
         visual.offset == glm::vec2(0.0f, -20.0f) &&
             std::abs(card.fanStartSeconds - 10.1) <= 0.001,
         "fan preparation should retain transition state on the generic card");
+
+    // Native backdrop geometry consumes this same resolved state after the
+    // Vulkan render plan is built. Verify a transition on the card root is
+    // inherited by its system-glass surface for both scale and fade.
+    scene.build_render_plan(19.0, 0u);
+    const auto restingSurface =
+        scene.resolved_shape_visual_state(card.surface, 19.0);
+    DisplayTransition2DComponent entrance = {};
+    entrance.durationSeconds = 1.0f;
+    entrance.fromOpacity = 0.0f;
+    entrance.toOpacity = 1.0f;
+    entrance.fromScale = { 0.94f, 0.94f };
+    entrance.toScale = { 1.0f, 1.0f };
+    entrance.removeWhenComplete = false;
+    scene.play_display_transition(card.root, entrance, 20.0);
+    scene.build_render_plan(20.0, 0u);
+    const auto enteringSurface =
+        scene.resolved_shape_visual_state(card.surface, 20.0);
+    scene.build_render_plan(20.5, 0u);
+    const auto halfwaySurface =
+        scene.resolved_shape_visual_state(card.surface, 20.5);
+    passed &= expect(
+        restingSurface && enteringSurface && halfwaySurface &&
+            close(enteringSurface->opacity, 0.0f) &&
+            halfwaySurface->opacity > 0.0f &&
+            halfwaySurface->opacity < 1.0f &&
+            close(
+                enteringSurface->rect.z,
+                restingSurface->rect.z * 0.94f) &&
+            close(
+                enteringSurface->rect.w,
+                restingSurface->rect.w * 0.94f) &&
+            halfwaySurface->rect.z > enteringSurface->rect.z &&
+            halfwaySurface->rect.z < restingSurface->rect.z,
+        "the system-glass surface should inherit the card entrance scale and opacity");
 
     return passed ? 0 : 1;
 }

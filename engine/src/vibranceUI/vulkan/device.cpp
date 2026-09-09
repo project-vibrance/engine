@@ -1,6 +1,70 @@
 #include <vibranceUI/renderer/device.h>
 #include <vibranceUI/core/logger.h>
 
+#include <algorithm>
+#include <limits>
+#include <string_view>
+
+namespace
+{
+    bool supports_extension(
+        const std::vector<vk::ExtensionProperties>& extensions,
+        std::string_view requested)
+    {
+        return std::any_of(
+            extensions.begin(),
+            extensions.end(),
+            [requested](const vk::ExtensionProperties& extension) {
+                return std::string_view(extension.extensionName.data()) ==
+                    requested;
+            });
+    }
+
+    bool is_layered_driver(const vk::PhysicalDevice& device)
+    {
+        const std::vector<vk::ExtensionProperties> extensions =
+            device.enumerateDeviceExtensionProperties().value;
+        // Dozen/DZN advertises this extension because it is a Vulkan-over-D3D
+        // mapping driver. It is a useful compatibility fallback, but the
+        // native Qualcomm/AMD/Intel/NVIDIA ICD must win when one is usable.
+        return supports_extension(extensions, "VK_MSFT_layered_driver");
+    }
+
+    int device_score(const vk::PhysicalDevice& device)
+    {
+        const vk::PhysicalDeviceProperties properties = device.getProperties();
+        int score = 0;
+        switch (properties.deviceType)
+        {
+        case vk::PhysicalDeviceType::eDiscreteGpu:
+            score = 5000;
+            break;
+        case vk::PhysicalDeviceType::eIntegratedGpu:
+            score = 4000;
+            break;
+        case vk::PhysicalDeviceType::eVirtualGpu:
+            score = 2000;
+            break;
+        case vk::PhysicalDeviceType::eCpu:
+            score = 100;
+            break;
+        default:
+            score = 500;
+            break;
+        }
+        // A native hardware ICD must outrank any layered implementation even
+        // when the layer reports a more favourable GPU type. Keep a layered
+        // hardware adapter ahead of a native CPU/software Vulkan device so it
+        // remains a useful last-resort renderer.
+        if (!is_layered_driver(device) &&
+            properties.deviceType != vk::PhysicalDeviceType::eCpu)
+        {
+            score += 10000;
+        }
+        return score;
+    }
+}
+
 bool supports(const vk::PhysicalDevice& device, const char** ppRequestedExtensions, const uint32_t requestedExtensionCount)
 {
     // Device extensions are checked explicitly so failures are logged before selection
@@ -54,6 +118,7 @@ bool is_suitable(const vk::PhysicalDevice& device, bool requireWindowsCompositio
     if (requireWindowsCompositionInterop)
     {
         requestedExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+        requestedExtensions.push_back(VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME);
     }
 #else
     (void)requireWindowsCompositionInterop;
@@ -75,34 +140,59 @@ bool is_suitable(const vk::PhysicalDevice& device, bool requireWindowsCompositio
     return true;
 }
 
+bool supports_windows_composition_interop(
+    const vk::PhysicalDevice& device)
+{
+#if defined(_WIN32)
+    const char* requested[] = {
+        VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+        VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME
+    };
+    return supports(device, requested, 2u);
+#else
+    (void)device;
+    return false;
+#endif
+}
+
 vk::PhysicalDevice choose_physical_device(
     const vk::Instance instance,
     bool requireWindowsCompositionInterop)
 {
-    // Prefer a discrete GPU, while falling back to the first suitable integrated device
+    // Prefer a native GPU ICD among devices that satisfy the requested
+    // feature set. A Vulkan-over-D3D implementation remains the architecture-
+    // neutral Composition fallback when an ARM64 native ICD cannot share a
+    // D3D11 keyed texture.
     Logger* logger = Logger::fetch_logger();
     logger->vulkan("Choosing a physical device...");
 
     std::vector<vk::PhysicalDevice> availableDevices = instance.enumeratePhysicalDevices().value;
 
     vk::PhysicalDevice bestDevice = nullptr;
-	bool foundDiscrete = false;
+    int bestScore = std::numeric_limits<int>::min();
 
     for (vk::PhysicalDevice device : availableDevices)
     {
         logger->log(device);
         
-        vk::PhysicalDeviceProperties properties = device.getProperties();
-
-		if (is_suitable(device, requireWindowsCompositionInterop)) 
+        if (is_suitable(device, requireWindowsCompositionInterop))
         {
-			bool discrete = properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
-			if (!bestDevice || (discrete && !foundDiscrete))
+            const int score = device_score(device);
+            if (!bestDevice || score > bestScore)
             {
-				bestDevice = device;
-				foundDiscrete = discrete;
-			}
-		}
+                bestDevice = device;
+                bestScore = score;
+            }
+        }
+    }
+
+    if (bestDevice)
+    {
+        logger->info(
+            std::string("Selected Vulkan physical device: ") +
+            bestDevice.getProperties().deviceName.data() +
+            (is_layered_driver(bestDevice) ? " (layered driver)." :
+                " (native driver)."));
     }
 
     return bestDevice;
@@ -190,6 +280,7 @@ vk::Device create_logical_device(
     if (enableWindowsCompositionInterop)
     {
         enabledExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+        enabledExtensions.push_back(VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME);
     }
 #else
     (void)enableWindowsCompositionInterop;

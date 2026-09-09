@@ -468,6 +468,13 @@ endif()
 
 if(WIN32)
     target_compile_definitions(vibrance_engine PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+    if(MINGW)
+        # GLFW is linked statically and calls through MinGW's imported function
+        # pointer. Wrapping that one import lets the engine opt selected HWNDs
+        # into DirectComposition at CreateWindowExW time on x64 and ARM64.
+        target_link_options(vibrance_engine PRIVATE
+            "-Wl,--wrap=__imp_CreateWindowExW")
+    endif()
     target_link_libraries(vibrance_engine PRIVATE
         advapi32 dwmapi mmdevapi ole32 uuid winmm user32 gdi32 shell32)
 elseif(APPLE)

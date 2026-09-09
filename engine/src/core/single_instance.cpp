@@ -333,6 +333,11 @@ SingleInstanceGuard::SingleInstanceGuard(SingleInstanceOptions options)
 
 SingleInstanceGuard::~SingleInstanceGuard()
 {
+    release();
+}
+
+void SingleInstanceGuard::release() noexcept
+{
     if (!impl)
     {
         return;
@@ -357,6 +362,7 @@ SingleInstanceGuard::~SingleInstanceGuard()
         release_in_process_identifier(impl->identifier);
         impl->registeredInProcess = false;
     }
+    impl->status = SingleInstanceStatus::eDisabled;
 }
 
 bool SingleInstanceGuard::can_run() const noexcept

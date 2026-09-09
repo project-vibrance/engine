@@ -74,6 +74,22 @@ int main()
         same_point(clampedBottomRight, 3440, 380),
         "aligned windows should remain inside the inset work area");
 
+    const glm::ivec2 fittedSettings = glfw_fitted_window_size(
+        { 1366, 728 },
+        { 1000, 850 },
+        { 24, 24, 24, 24 });
+    passed &= expect(
+        same_point(fittedSettings, 1000, 680),
+        "fixed panels should fit inside a small monitor work area");
+
+    const glm::ivec2 unchangedSettings = glfw_fitted_window_size(
+        { 2560, 1400 },
+        { 1000, 850 },
+        { 24, 24, 24, 24 });
+    passed &= expect(
+        same_point(unchangedSettings, 1000, 850),
+        "fitting should retain the requested size when it already fits");
+
     const std::vector<DisplayMonitorTarget> primaryTargets =
         resolve_display_targets(
             { DisplayTargetMode::ePrimary, {} },
