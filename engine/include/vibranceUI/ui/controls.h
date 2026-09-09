@@ -518,6 +518,7 @@ struct UiSliderOptions
     float visualSmoothingRate = 24.0f;
     std::function<void(const SliderInputEvent&)> onChanged;
     std::function<void(const SliderInputEvent&)> onCommitted;
+    bool renderThumbShadow = true;
 };
 
 struct UiCircularProgressComponent
@@ -3671,11 +3672,15 @@ inline UiControlHandle ui_create_slider(
         { 0.5f, 0.5f },
         scaled_offset(size.x * initialNormalized, 0.0f, ui.scale()),
         scaled_size(thumbSize.x, thumbSize.y, ui.scale()));
-    ui.add_shadow(
-        handle.knob,
-        { 0, 0 },
-        4.0f,
-        0.24f);
+        
+    if (options.renderThumbShadow)
+    {
+        ui.add_shadow(
+            handle.knob,
+            { 0, 0 },
+            4.0f,
+            0.24f);
+    }
 
     SliderInputComponent slider = {};
     slider.maskEntity = fillMask;
