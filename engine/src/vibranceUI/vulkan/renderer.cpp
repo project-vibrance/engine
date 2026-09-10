@@ -1353,6 +1353,9 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	allocatorInfo.instance = instance;
 	allocatorInfo.physicalDevice = physicalDevice;
 	allocatorInfo.vulkanApiVersion = vk::ApiVersion13;
+	// Each UI window owns an allocator. Small blocks avoid reserving a large
+	// mostly empty heap for every window; larger resources still fit normally.
+	allocatorInfo.preferredLargeHeapBlockSize = 4ull * 1024ull * 1024ull;
 	vmaCreateAllocator(&allocatorInfo, &allocator);
 
 	swapchain.presentModePreference = createInfo.presentMode;

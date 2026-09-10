@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <span>
 #include <unordered_set>
 #include <vector>
 
@@ -16,6 +18,13 @@
 #include FT_FREETYPE_H
 #include FT_MULTIPLE_MASTERS_H
 #include FT_TRUETYPE_TABLES_H
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace
 {
@@ -658,7 +667,7 @@ namespace
 
     FT_Long choose_weighted_face_index(
         FT_Library library,
-        const std::vector<unsigned char>& fontData,
+        std::span<const unsigned char> fontData,
         int requestedWeight)
     {
         requestedWeight = clamped_font_weight(requestedWeight);
@@ -960,6 +969,7 @@ namespace
     {
         std::filesystem::path path;
         std::vector<unsigned char> data;
+        std::shared_ptr<const unsigned char> mappedData;
         FT_Face face = nullptr;
     };
 
@@ -997,8 +1007,48 @@ namespace
     {
         Logger* logger = Logger::fetch_logger();
         out.path = path;
-        out.data = read_binary_file(path);
-        if (out.data.empty())
+        std::span<const unsigned char> fontData;
+#if defined(_WIN32)
+        // FreeType only touches the tables needed by the requested glyphs.
+        // Mapping avoids copying entire multilingual font collections into
+        // each window's heap and lets Windows share their file-backed pages.
+        const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            LARGE_INTEGER size {};
+            if (GetFileSizeEx(file, &size) && size.QuadPart > 0 &&
+                static_cast<uint64_t>(size.QuadPart) <=
+                    static_cast<uint64_t>(std::numeric_limits<FT_Long>::max()))
+            {
+                const HANDLE mapping = CreateFileMappingW(
+                    file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+                if (mapping)
+                {
+                    const auto* bytes = static_cast<const unsigned char*>(
+                        MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
+                    if (bytes)
+                    {
+                        out.mappedData = std::shared_ptr<const unsigned char>(
+                            bytes, [](const unsigned char* view) {
+                                UnmapViewOfFile(view);
+                            });
+                        fontData = { bytes, static_cast<std::size_t>(size.QuadPart) };
+                    }
+                    CloseHandle(mapping);
+                }
+            }
+            CloseHandle(file);
+        }
+#endif
+        if (fontData.empty())
+        {
+            out.data = read_binary_file(path);
+            fontData = out.data;
+        }
+        if (fontData.empty() || fontData.size() >
+            static_cast<std::size_t>(std::numeric_limits<FT_Long>::max()))
         {
             logger->vulkan("Failed to read Renderer2D font: " + path.string());
             return false;
@@ -1006,9 +1056,9 @@ namespace
 
         if (FT_New_Memory_Face(
             library,
-            out.data.data(),
-            static_cast<FT_Long>(out.data.size()),
-            choose_weighted_face_index(library, out.data, requestedFontWeight),
+            fontData.data(),
+            static_cast<FT_Long>(fontData.size()),
+            choose_weighted_face_index(library, fontData, requestedFontWeight),
             &out.face) != 0)
         {
             logger->vulkan("Failed to initialise Renderer2D font face: " + path.string());
