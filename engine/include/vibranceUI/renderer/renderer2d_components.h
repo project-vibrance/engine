@@ -722,6 +722,9 @@ struct ShapeStyleComponent
     float backdropBlurOpacity = 0.85f;
     bool backdropBlurFollowsFillAlpha = false;
     bool backdropBlurClipToInheritedMask = false;
+    // Post-process the composed surface instead of layering blurred pixels
+    // over their sharp originals (which leaves translucent content sharp).
+    bool backdropBlurReplaceSource = false;
 
     void set_color(glm::vec4 color)
     {

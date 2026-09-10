@@ -1,6 +1,7 @@
 #include <vibranceUI/display/placement.h>
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace
@@ -145,7 +146,10 @@ bool display_monitor_target_matches(
         left.position.x == right.position.x &&
         left.position.y == right.position.y &&
         left.size.x == right.size.x &&
-        left.size.y == right.size.y;
+        left.size.y == right.size.y &&
+        left.workPosition == right.workPosition &&
+        left.workSize == right.workSize &&
+        left.contentScale == right.contentScale;
 }
 
 bool display_monitor_topology_matches(
@@ -268,8 +272,18 @@ std::optional<GlfwWindowPlacement> make_display_window_placement(
         span - startInset - 1);
     const int edgeInset = clamped_inset(options.edgeInset, depth - 1);
     const int availableSpan = std::max(1, span - startInset - endInset);
+    float thicknessScale = 1.0f;
+#if defined(_WIN32)
+    // Match make_fixed_layout_scale. macOS window bounds are points and its
+    // framebuffer already supplies the backing scale, so do not scale twice.
+    if (options.scaleThicknessWithDpi)
+    {
+        thicknessScale = std::max(
+            std::min(target.contentScale.x, target.contentScale.y), 0.25f);
+    }
+#endif
     const int thickness = std::clamp(
-        options.thickness,
+        static_cast<int>(std::ceil(options.thickness * thicknessScale)),
         1,
         std::max(1, depth - edgeInset));
 

@@ -52,6 +52,16 @@
 
 namespace
 {
+	constexpr uint32_t kCompositionBufferCount = 2u;
+
+	vk::Extent2D hosted_3d_extent(
+		vk::Extent2D renderExtent,
+		Renderer2DScene& scene)
+	{
+		return scene.registry().view<Model3DComponent>().empty() ?
+			vk::Extent2D { 1u, 1u } : renderExtent;
+	}
+
 
 #if defined(_WIN32)
 	void restore_native_window_redirection(
@@ -1223,7 +1233,9 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	requestedPresentationBackend(createInfo.presentationBackend),
 	nativeWindowHandle(createInfo.nativeWindowHandle),
 	renderExtent(choose_render_extent(createInfo.framebufferWidth, createInfo.framebufferHeight, createInfo.maxRenderPixels)),
-	modelRenderExtent(choose_render_extent(createInfo.framebufferWidth, createInfo.framebufferHeight, createInfo.maxRenderPixels)),
+	// Hosted 3D attachments grow to the render extent on demand.  Most UI-only
+	// windows never submit a model, so full-size colour/depth targets are waste.
+	modelRenderExtent(1u, 1u),
 	transparentFramebuffer(createInfo.transparentFramebuffer),
 	targetFrameRate(std::min(createInfo.targetFrameRate, 1000u)),
 	audioEngine(createInfo.enableAudio)
@@ -1356,7 +1368,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		logicalDevice,
 		swapchain.extent.width,
 		swapchain.extent.height,
-		static_cast<uint32_t>(swapchain.images.size()),
+		kCompositionBufferCount,
 		graphicsQueueFamilyIndex,
 		transparentFramebuffer,
 		compositionGpuInterop))
@@ -1377,7 +1389,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 #endif
 	}
 	renderExtent = choose_render_extent(swapchain.extent.width, swapchain.extent.height, maxRenderPixels);
-	modelRenderExtent = renderExtent;
+	modelRenderExtent = hosted_3d_extent(renderExtent, renderer2DScene);
 	if (compositionPresenter.available() &&
 		!compositionPresenter.gpu_interop() &&
 		!ensure_composition_readback(renderExtent))
@@ -1431,7 +1443,12 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 
 	mainCommandBuffer = allocate_command_buffer(logicalDevice, commandPool);
 
-	uint32_t frameCount = static_cast<uint32_t>(swapchain.images.size());
+	// DirectComposition deliberately keeps one Vulkan submission in flight (see
+	// draw()).  Mirroring every native swapchain image here only duplicates the
+	// sizeable offscreen render graph without adding any parallelism.  Native
+	// presentation remains fully pipelined against all of its swapchain images.
+	const uint32_t frameCount = compositionPresenter.available() ?
+		1u : static_cast<uint32_t>(swapchain.images.size());
 	std::vector<vk::DescriptorType> descriptorTypes = { vk::DescriptorType::eStorageImage, vk::DescriptorType::eStorageImage };
 	descriptorPools[DescriptorScope::eFrame] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 	descriptorPools[DescriptorScope::eModelFrame] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
@@ -1670,7 +1687,7 @@ bool Engine::Impl::rebuild_composition_presenter()
 		logicalDevice,
 		swapchain.extent.width,
 		swapchain.extent.height,
-		static_cast<uint32_t>(swapchain.images.size()),
+		kCompositionBufferCount,
 		graphicsQueueFamilyIndex,
 		transparentFramebuffer,
 		compositionGpuInterop))
@@ -2140,7 +2157,7 @@ void Engine::Impl::draw()
 			}
 		}
 		renderExtent = choose_render_extent(swapchain.extent.width, swapchain.extent.height, maxRenderPixels);
-		modelRenderExtent = renderExtent;
+		modelRenderExtent = hosted_3d_extent(renderExtent, renderer2DScene);
 		if (requestedPresentationBackend == PresentationBackend::eWindowsCompositionD3D11)
 		{
 			rebuild_composition_presenter();
@@ -2298,6 +2315,26 @@ void Engine::Impl::draw()
 	// code points that were not present during the initial localisation preload
 	// and expand the atlas once before this scene is submitted.
 	ensure_renderer2d_scene_glyphs();
+
+	// Model attachments are an optional part of the frame graph.  Keep their
+	// valid descriptor/framebuffer placeholders at 1x1 until a Model3D entity is
+	// present, then restore the full render resolution before recording it.
+	const vk::Extent2D desiredModelRenderExtent =
+		hosted_3d_extent(renderExtent, renderer2DScene);
+	if (desiredModelRenderExtent.width != modelRenderExtent.width ||
+		desiredModelRenderExtent.height != modelRenderExtent.height)
+	{
+		modelRenderExtent = desiredModelRenderExtent;
+		for (Frame& frame : frames)
+		{
+			frame.resize_resources(renderExtent, modelRenderExtent);
+		}
+		externalBackdropAvailable = false;
+		renderer2DScene.mark_dirty();
+		frameIndex = 0u;
+		hasSubmittedFrame = false;
+		lastSubmittedFrameGeneration = 0u;
+	}
 
 	const double renderTimeSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2757,7 +2794,6 @@ void Engine::Impl::resize(uint32_t width, uint32_t height)
 	framebufferWidth = width;
 	framebufferHeight = height;
 	renderExtent = choose_render_extent(width, height, maxRenderPixels);
-	modelRenderExtent = renderExtent;
 	swapchain.outdated = true;
 }
 

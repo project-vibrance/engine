@@ -1,4 +1,5 @@
 #include <vibranceUI/engine.h>
+#include <vibranceUI/renderer/dispatch_bounds.h>
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +35,36 @@ int main()
     UiBuilder ui(scene, scale);
 
     bool passed = true;
+    // A scrollbar clipped to 9 pixels at x=5 dispatches 16 invocations and
+    // writes through x=20. Rounding the nominal right edge (14) to 16 misses
+    // those trailing pixels and leaves a vertical trail as the thumb moves.
+    passed &= expect(renderer2d_dispatch_axis_coverage(5u, 9u, 100u) == 16u,
+        "unaligned scrollbar dispatches must retain their trailing workgroup pixels");
+    for (uint32_t origin = 0u; origin < 32u; ++origin)
+    {
+        for (uint32_t length = 1u; length <= 65u; ++length)
+        {
+            for (uint32_t surfaceLength : { 37u, 100u })
+            {
+                const uint32_t coverage = renderer2d_dispatch_axis_coverage(
+                    origin, length, surfaceLength);
+                const uint32_t invocationCount = ((length + 7u) / 8u) * 8u;
+                for (uint32_t invocation = 0u; invocation < invocationCount; ++invocation)
+                {
+                    if (origin + invocation < surfaceLength)
+                    {
+                        passed &= expect(invocation < coverage,
+                            "clear/damage bounds must cover every on-screen GPU invocation");
+                    }
+                }
+                passed &= expect(origin + coverage <= surfaceLength,
+                    "dispatch coverage must remain within the render surface");
+            }
+        }
+    }
+    passed &= expect(renderer2d_dispatch_axis_coverage(5u, 0u, 100u) == 0u &&
+        renderer2d_dispatch_axis_coverage(100u, 8u, 100u) == 0u,
+        "empty and offscreen dispatches must not add damage");
     const entt::entity root = ui.root(-2, 4u);
     passed &= expect(
         root != entt::null && scene.registry().valid(root),

@@ -88,8 +88,18 @@ float msdf_alpha(vec2 uv, float offset) {
     return clamp(signedDistance * pxRange + 0.5, 0.0, 1.0);
 }
 
+ivec2 font_atlas_size() {
+    ivec2 packedSize = imageSize(fontAtlas);
+    return ivec2(packedSize.x * 4, packedSize.y);
+}
+
+float load_font_atlas(ivec2 pixel) {
+    vec4 packed = imageLoad(fontAtlas, ivec2(pixel.x / 4, pixel.y));
+    return packed[pixel.x & 3];
+}
+
 float sample_font_atlas(vec2 atlasUv) {
-    ivec2 atlasSize = imageSize(fontAtlas);
+    ivec2 atlasSize = font_atlas_size();
     vec2 texel = clamp(atlasUv, vec2(0.0), vec2(1.0)) * vec2(atlasSize) - vec2(0.5);
     ivec2 basePixel = ivec2(floor(texel));
     vec2 blend = fract(texel);
@@ -99,18 +109,18 @@ float sample_font_atlas(vec2 atlasUv) {
     ivec2 p01 = clamp(basePixel + ivec2(0, 1), ivec2(0), maximumPixel);
     ivec2 p11 = clamp(basePixel + ivec2(1, 1), ivec2(0), maximumPixel);
     float top = mix(
-        imageLoad(fontAtlas, p00).a,
-        imageLoad(fontAtlas, p10).a,
+        load_font_atlas(p00),
+        load_font_atlas(p10),
         blend.x);
     float bottom = mix(
-        imageLoad(fontAtlas, p01).a,
-        imageLoad(fontAtlas, p11).a,
+        load_font_atlas(p01),
+        load_font_atlas(p11),
         blend.x);
     return mix(top, bottom, blend.y);
 }
 
 float atlas_pixels_per_screen_pixel() {
-    ivec2 atlasSize = imageSize(fontAtlas);
+    ivec2 atlasSize = font_atlas_size();
     vec2 glyphAtlasSize = max((pc.uvRect.zw - pc.uvRect.xy) * vec2(atlasSize), vec2(1.0));
     vec2 atlasPerScreen = glyphAtlasSize / max(pc.rect.zw, vec2(1.0));
     return max(min(atlasPerScreen.x, atlasPerScreen.y), 0.001);

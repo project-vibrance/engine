@@ -107,6 +107,9 @@ struct DisplayWindowPlacementOptions
     DisplayWindowEdge edge = DisplayWindowEdge::eTop;
     // Height for top/bottom edges and width for left/right edges.
     int thickness = 1;
+    // Fixed-DPI UI dimensions are logical units; Windows window bounds use
+    // physical pixels. Opt in to converting thickness with the monitor DPI.
+    bool scaleThicknessWithDpi = false;
     // Gap inward from the selected monitor edge.
     int edgeInset = 0;
     // Insets along the spanning axis. Both zero means full width or height.

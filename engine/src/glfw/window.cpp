@@ -590,6 +590,8 @@ std::vector<GlfwMonitorInfo> glfw_connected_monitors()
             &info.position.x,
             &info.position.y);
         info.size = { videoMode->width, videoMode->height };
+        glfwGetMonitorContentScale(monitor,
+            &info.contentScale.x, &info.contentScale.y);
         glfwGetMonitorWorkarea(
             monitor,
             &info.workPosition.x,

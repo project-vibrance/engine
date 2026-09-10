@@ -1,5 +1,6 @@
 #include <vibranceUI/renderer/renderer2d.h>
 #include <vibranceUI/renderer/renderer3d.h>
+#include <vibranceUI/renderer/dispatch_bounds.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -610,8 +611,14 @@ namespace
         return {
             static_cast<uint32_t>(minX),
             static_cast<uint32_t>(minY),
-            static_cast<uint32_t>(maxX - minX),
-            static_cast<uint32_t>(maxY - minY)
+            renderer2d_dispatch_axis_coverage(
+                static_cast<uint32_t>(minX),
+                static_cast<uint32_t>(maxX - minX),
+                static_cast<uint32_t>(screenWidth)),
+            renderer2d_dispatch_axis_coverage(
+                static_cast<uint32_t>(minY),
+                static_cast<uint32_t>(maxY - minY),
+                static_cast<uint32_t>(screenHeight))
         };
     }
 
@@ -4107,7 +4114,7 @@ void Renderer2DScene::build_render_plan(
             blurBatch.effect0 = {
                 blurRadius,
                 static_cast<float>(std::max(blurPasses, 1u)),
-                0.0f,
+                style.backdropBlurReplaceSource ? 1.0f : 0.0f,
                 blurOpacity
             };
             blurBatch.effect1 = {

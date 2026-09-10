@@ -1,6 +1,7 @@
 #include <vibranceUI/display/display.h>
 
 #include <filesystem>
+#include <cmath>
 #include <iostream>
 #include <string_view>
 #include <vector>
@@ -42,6 +43,50 @@ int main()
         secondary
     };
     bool passed = true;
+
+    // Fixed-size overlay contents scale with DPI, but monitor positions and
+    // bounds stay in screen coordinates, including negative monitor origins.
+    for (const glm::ivec2 resolution : {
+            glm::ivec2(2560, 1080), glm::ivec2(1920, 1080),
+            glm::ivec2(1366, 768), glm::ivec2(3840, 2160) })
+    {
+        for (const float dpi : { 1.0f, 1.25f, 1.5f, 2.0f })
+        {
+            DisplayMonitorTarget target = secondary;
+            target.position = { -resolution.x, -120 };
+            target.size = resolution;
+            target.contentScale = glm::vec2(dpi);
+            auto stripOptions = display_top_strip_placement(300);
+            stripOptions.scaleThicknessWithDpi = true;
+            auto sidebarOptions = display_right_sidebar_placement(428);
+            sidebarOptions.scaleThicknessWithDpi = true;
+            const auto strip = make_display_window_placement(target, stripOptions);
+            const auto sidebar = make_display_window_placement(target, sidebarOptions);
+#if defined(_WIN32)
+            const float windowScale = dpi;
+#else
+            const float windowScale = 1.0f;
+#endif
+            passed &= expect(strip &&
+                strip->size.y == static_cast<int>(std::ceil(300 * windowScale)) &&
+                strip->size.x == resolution.x && strip->position == target.position,
+                "island backing height must fit DPI-scaled content without scaling monitor coordinates");
+            passed &= expect(sidebar &&
+                sidebar->size.x == static_cast<int>(std::ceil(428 * windowScale)) &&
+                sidebar->position.x + sidebar->size.x == 0 &&
+                sidebar->size.y == resolution.y,
+                "notification backing width must fit scaled cards and retain the right screen edge");
+        }
+    }
+    DisplayTargetTracker dpiTracker;
+    dpiTracker.update({ primary });
+    auto scaledPrimary = primary;
+    scaledPrimary.contentScale = glm::vec2(1.25f);
+    const auto dpiRefresh = dpiTracker.update({ scaledPrimary });
+    passed &= expect(dpiRefresh.topologyChanged && dpiRefresh.targetsChanged,
+        "a DPI-only change must re-place existing overlay windows");
+    passed &= expect(!dpiTracker.update({ scaledPrimary }).targetsChanged,
+        "unchanged DPI must not repeatedly re-place overlay windows");
 
     const glm::ivec2 centeredWindow = glfw_aligned_window_position(
         { 1920, -120 },

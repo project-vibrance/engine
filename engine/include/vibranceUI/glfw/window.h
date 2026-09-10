@@ -48,6 +48,7 @@ struct GlfwMonitorInfo
     glm::ivec2 size { 0 };
     glm::ivec2 workPosition { 0 };
     glm::ivec2 workSize { 0 };
+    glm::vec2 contentScale { 1.0f };
     bool primary = false;
 };
 

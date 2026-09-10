@@ -396,6 +396,22 @@ void main() {
 
     if ((pc.data.y & STYLE_BLUR_COMPOSITE) != 0u) {
         vec4 src = imageLoad(uiBlurSurface, pixel);
+        if (pc.effect0.z > 0.5) {
+            // Coverage is independent of the blurred image's alpha. Using
+            // source-over here retains the sharp original under sparse icons.
+            vec2 p = vec2(pixel) + vec2(0.5);
+            float coverage = clamp(shape_mask(p) * inherited_shape_mask(p) *
+                pc.effect0.w * blur_gradient_alpha_factor(p), 0.0, 1.0);
+            if (coverage <= 0.001) {
+                return;
+            }
+            vec4 dst = imageLoad(sceneColorBuffer, pixel);
+            float alpha = mix(dst.a, src.a, coverage);
+            vec3 premultiplied = mix(dst.rgb * dst.a, src.rgb * src.a, coverage);
+            imageStore(sceneColorBuffer, pixel,
+                vec4(alpha > 0.0001 ? premultiplied / alpha : vec3(0.0), alpha));
+            return;
+        }
         if (src.a <= 0.001) {
             return;
         }
@@ -439,6 +455,11 @@ void main() {
         radius,
         true);
     float gradientAlpha = blur_gradient_alpha_factor(p);
+    if (pc.effect0.z > 0.5) {
+        // Store the unmasked result; apply coverage once during replacement.
+        imageStore(uiBlurSurface, pixel, source);
+        return;
+    }
     vec4 blurred = vec4(source.rgb, clamp(source.a * pc.effect0.w * mask * gradientAlpha, 0.0, 1.0));
     if (blurred.a <= 0.001) {
         return;

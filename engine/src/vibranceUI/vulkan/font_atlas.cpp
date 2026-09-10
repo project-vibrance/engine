@@ -4,6 +4,7 @@
 #include <vibranceUI/core/logger.h>
 #include "text_direction.h"
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -18,8 +19,12 @@
 
 namespace
 {
-    constexpr uint32_t kAtlasWidth = 4096;
-    constexpr uint32_t kAtlasHeight = 4096;
+    constexpr std::array<uint32_t, 4> kAtlasSides {
+        512u,
+        1024u,
+        2048u,
+        4096u
+    };
     // Bake glyph outlines above their normal UI display size, while keeping
     // enough signed-distance padding for outlines and glow. The former 64 px
     // source spent more atlas space on 48 px padding than on the glyph itself,
@@ -27,16 +32,16 @@ namespace
     constexpr int kSdfPadding = 24;
     constexpr unsigned char kSdfOnEdgeValue = 180;
 
-    bool upload_rgba_to_image(
+    bool upload_atlas_to_image(
         VmaAllocator& allocator,
         vk::CommandBuffer commandBuffer,
         vk::Queue queue,
         StorageImage& image,
-        const std::vector<unsigned char>& rgba)
+        const std::vector<unsigned char>& packedSdf)
     {
         // Font atlas upload uses a short-lived staging buffer and keeps the image shader-readable
         Logger* logger = Logger::fetch_logger();
-        const vk::DeviceSize uploadSize = static_cast<vk::DeviceSize>(rgba.size());
+        const vk::DeviceSize uploadSize = static_cast<vk::DeviceSize>(packedSdf.size());
         if (uploadSize == 0)
         {
             return false;
@@ -63,7 +68,7 @@ namespace
             return false;
         }
 
-        std::memcpy(stagingInfo.pMappedData, rgba.data(), rgba.size());
+        std::memcpy(stagingInfo.pMappedData, packedSdf.data(), packedSdf.size());
 
         vk::Result result = commandBuffer.reset();
         if (result != vk::Result::eSuccess)
@@ -1367,10 +1372,25 @@ bool Renderer2DFontAtlas::load_from_file(
         fontName += "@wght";
         fontName += std::to_string(requestedFontWeight);
     }
-    atlasSize = { kAtlasWidth, kAtlasHeight };
     const std::vector<uint32_t> requestedCodepoints = build_codepoint_list(options);
-
-    std::vector<unsigned char> rgba(kAtlasWidth * kAtlasHeight * 4, 0);
+    struct PendingAtlasGlyph
+    {
+        uint32_t codepoint = 0u;
+        uint32_t width = 0u;
+        uint32_t height = 0u;
+        int bitmapLeft = 0;
+        int bitmapTop = 0;
+        std::vector<unsigned char> sdf {};
+    };
+    struct AtlasPlacement
+    {
+        uint32_t x = 0u;
+        uint32_t y = 0u;
+        bool packed = false;
+    };
+    std::vector<PendingAtlasGlyph> pendingGlyphs;
+    pendingGlyphs.reserve(requestedCodepoints.size());
+    std::vector<unsigned char> packedSdf;
     FT_Library library = nullptr;
     if (FT_Init_FreeType(&library) != 0)
     {
@@ -1407,12 +1427,8 @@ bool Renderer2DFontAtlas::load_from_file(
             }
             sdfPixelRange = static_cast<float>(kSdfPadding);
 
-            uint32_t cursorX = 1;
-            uint32_t cursorY = 1;
-            uint32_t rowHeight = 0;
             uint32_t renderedGlyphs = 0;
             uint32_t missingGlyphs = 0;
-            bool packedAllGlyphs = true;
 
             for (uint32_t codepoint : requestedCodepoints)
             {
@@ -1458,58 +1474,133 @@ bool Renderer2DFontAtlas::load_from_file(
                 const uint32_t glyphWidth = bitmap.width + static_cast<uint32_t>(kSdfPadding * 2);
                 const uint32_t glyphHeight = bitmap.rows + static_cast<uint32_t>(kSdfPadding * 2);
                 const std::vector<unsigned char> alpha = padded_glyph_alpha(bitmap, glyphWidth, glyphHeight);
-                const std::vector<unsigned char> sdf = make_sdf_from_alpha(alpha, glyphWidth, glyphHeight);
+                std::vector<unsigned char> sdf = make_sdf_from_alpha(alpha, glyphWidth, glyphHeight);
                 if (sdf.empty())
                 {
                     continue;
                 }
 
-                if (cursorX + glyphWidth + 1u >= kAtlasWidth)
-                {
-                    cursorX = 1u;
-                    cursorY += rowHeight + 1u;
-                    rowHeight = 0u;
-                }
+                pendingGlyphs.push_back(PendingAtlasGlyph {
+                    codepoint,
+                    glyphWidth,
+                    glyphHeight,
+                    face->glyph->bitmap_left,
+                    face->glyph->bitmap_top,
+                    std::move(sdf)
+                });
+            }
 
-                if (cursorY + glyphHeight + 1u >= kAtlasHeight)
+            // Most UI windows need only Latin and a handful of punctuation.
+            // Size the atlas from the glyphs that actually packed instead of
+            // committing a 4096x4096 (64 MiB) image for every Engine instance.
+            // Never shrink an existing image, avoiding needless replacement
+            // during locale reloads. Dynamic text may still grow it on demand.
+            const uint32_t existingSide = atlasImage == nullptr ? 0u :
+                std::max(atlasImage->extent.width, atlasImage->extent.height);
+            std::vector<AtlasPlacement> placements;
+            const auto pack_atlas = [
+                &pendingGlyphs,
+                &placements](uint32_t side) {
+                placements.assign(pendingGlyphs.size(), AtlasPlacement {});
+                uint32_t cursorX = 1u;
+                uint32_t cursorY = 1u;
+                uint32_t rowHeight = 0u;
+                bool packedAll = true;
+                for (std::size_t index = 0u;
+                    index < pendingGlyphs.size(); ++index)
                 {
-                    packedAllGlyphs = false;
+                    const PendingAtlasGlyph& glyph = pendingGlyphs[index];
+                    if (glyph.width + 2u >= side || glyph.height + 2u >= side)
+                    {
+                        packedAll = false;
+                        continue;
+                    }
+                    if (cursorX + glyph.width + 1u >= side)
+                    {
+                        cursorX = 1u;
+                        cursorY += rowHeight + 1u;
+                        rowHeight = 0u;
+                    }
+                    if (cursorY + glyph.height + 1u >= side)
+                    {
+                        packedAll = false;
+                        continue;
+                    }
+                    placements[index] = { cursorX, cursorY, true };
+                    cursorX += glyph.width + 1u;
+                    rowHeight = std::max(rowHeight, glyph.height);
+                }
+                return packedAll;
+            };
+
+            uint32_t atlasSide = kAtlasSides.back();
+            bool packedAllGlyphs = false;
+            for (uint32_t candidate : kAtlasSides)
+            {
+                if (candidate < existingSide)
+                {
+                    continue;
+                }
+                atlasSide = candidate;
+                packedAllGlyphs = pack_atlas(candidate);
+                if (packedAllGlyphs)
+                {
+                    break;
+                }
+            }
+            atlasSize = { atlasSide, atlasSide };
+            // Store four adjacent scalar SDF texels in one RGBA8 texel. The
+            // text shader unpacks the addressed channel before its existing
+            // manual bilinear interpolation, preserving the same resolution
+            // and fetch count at one quarter of the image memory.
+            packedSdf.assign(
+                static_cast<std::size_t>(atlasSide) * atlasSide,
+                0u);
+
+            for (std::size_t index = 0u;
+                index < pendingGlyphs.size(); ++index)
+            {
+                PendingAtlasGlyph& glyph = pendingGlyphs[index];
+                const AtlasPlacement placement = placements[index];
+                GlyphRecord& record = glyphs[glyph.codepoint];
+                if (!placement.packed)
+                {
                     record = {};
                     continue;
                 }
-
-                for (uint32_t y = 0u; y < glyphHeight; ++y)
+                for (uint32_t y = 0u; y < glyph.height; ++y)
                 {
-                    for (uint32_t x = 0u; x < glyphWidth; ++x)
+                    for (uint32_t x = 0u; x < glyph.width; ++x)
                     {
-                        const uint32_t atlasX = cursorX + x;
-                        const uint32_t atlasY = cursorY + y;
-                        const size_t dst = (static_cast<size_t>(atlasY) * kAtlasWidth + atlasX) * 4u;
-                        const unsigned char value = sdf[static_cast<size_t>(y) * glyphWidth + x];
-                        rgba[dst + 0u] = value;
-                        rgba[dst + 1u] = value;
-                        rgba[dst + 2u] = value;
-                        rgba[dst + 3u] = value;
+                        const std::size_t destination =
+                            (static_cast<std::size_t>(placement.y + y) *
+                                atlasSide + placement.x + x);
+                        const unsigned char value = glyph.sdf[
+                            static_cast<std::size_t>(y) * glyph.width + x];
+                        packedSdf[destination] = value;
                     }
                 }
-
                 record.offset = {
-                    static_cast<float>(face->glyph->bitmap_left - kSdfPadding),
-                    static_cast<float>(-face->glyph->bitmap_top - kSdfPadding)
+                    static_cast<float>(glyph.bitmapLeft - kSdfPadding),
+                    static_cast<float>(-glyph.bitmapTop - kSdfPadding)
                 };
-                record.size = { static_cast<float>(glyphWidth), static_cast<float>(glyphHeight) };
+                record.size = {
+                    static_cast<float>(glyph.width),
+                    static_cast<float>(glyph.height)
+                };
                 record.uvMin = {
-                    static_cast<float>(cursorX) / static_cast<float>(kAtlasWidth),
-                    static_cast<float>(cursorY) / static_cast<float>(kAtlasHeight)
+                    static_cast<float>(placement.x) /
+                        static_cast<float>(atlasSide),
+                    static_cast<float>(placement.y) /
+                        static_cast<float>(atlasSide)
                 };
                 record.uvMax = {
-                    static_cast<float>(cursorX + glyphWidth) / static_cast<float>(kAtlasWidth),
-                    static_cast<float>(cursorY + glyphHeight) / static_cast<float>(kAtlasHeight)
+                    static_cast<float>(placement.x + glyph.width) /
+                        static_cast<float>(atlasSide),
+                    static_cast<float>(placement.y + glyph.height) /
+                        static_cast<float>(atlasSide)
                 };
                 record.drawable = true;
-
-                cursorX += glyphWidth + 1u;
-                rowHeight = std::max(rowHeight, glyphHeight);
                 ++renderedGlyphs;
             }
 
@@ -1595,15 +1686,31 @@ bool Renderer2DFontAtlas::load_from_file(
         FT_Done_FreeType(library);
     }
 
+    if (packedSdf.empty())
+    {
+        atlasSize = { kAtlasSides.front(), kAtlasSides.front() };
+        packedSdf.assign(
+            static_cast<std::size_t>(atlasSize.x) * atlasSize.y,
+            0u);
+    }
+    const vk::Extent2D packedAtlasExtent {
+        std::max(atlasSize.x / 4u, 1u),
+        std::max(atlasSize.y, 1u)
+    };
     if (atlasImage == nullptr ||
-        atlasImage->extent.width != kAtlasWidth ||
-        atlasImage->extent.height != kAtlasHeight)
+        atlasImage->extent.width != packedAtlasExtent.width ||
+        atlasImage->extent.height != packedAtlasExtent.height)
     {
         atlasImage = new StorageImage(allocator, vk::Format::eR8G8B8A8Unorm,
-            vk::Extent2D { kAtlasWidth, kAtlasHeight }, commandBuffer, queue,
+            packedAtlasExtent, commandBuffer, queue,
             logicalDevice, vmaDeletionQueue, deviceDeletionQueue);
     }
-    if (!upload_rgba_to_image(allocator, commandBuffer, queue, *atlasImage, rgba))
+    if (!upload_atlas_to_image(
+            allocator,
+            commandBuffer,
+            queue,
+            *atlasImage,
+            packedSdf))
     {
         logger->vulkan("Failed to upload Renderer2D font atlas.");
         isLoaded = false;

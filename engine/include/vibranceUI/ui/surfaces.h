@@ -732,7 +732,9 @@ inline bool ui_update_liquid_merge(
             style->backdropBlurFollowsFillAlpha !=
                 nextStyle.backdropBlurFollowsFillAlpha ||
             style->backdropBlurClipToInheritedMask !=
-                nextStyle.backdropBlurClipToInheritedMask;
+                nextStyle.backdropBlurClipToInheritedMask ||
+            style->backdropBlurReplaceSource !=
+                nextStyle.backdropBlurReplaceSource;
         if (styleChanged)
         {
             *style = nextStyle;
