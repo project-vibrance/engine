@@ -222,5 +222,41 @@ int main()
             std::find(missing.begin(), missing.end(), 0x0939u) != missing.end(),
         "font coverage should report missing literal UTF-8 code points without losing them to question marks");
 
+    // A modal/nav subtree must remain together after its entrance and child
+    // interaction timers expire, even while an unrelated control is active.
+    {
+        Renderer2DScene liveScene;
+        UiBuilder liveUi(liveScene, LayoutScale {});
+        const auto liveRoot = liveScene.create_shape(
+            { 0.0f, 0.0f }, { 360.0f, 210.0f }, make_solid_style("#FFFFFFFF"));
+        liveUi.set_dynamic_cache(liveRoot);
+        const auto button = liveScene.create_shape(
+            { 30.0f, 150.0f }, { 126.0f, 38.0f }, make_solid_style("#007AFFFF"));
+        liveScene.registry().emplace<Parent2DComponent>(button, Parent2DComponent { liveRoot });
+        liveScene.activate_dynamic(button, 0.35f);
+        const auto unrelated = liveScene.create_shape(
+            { 400.0f, 0.0f }, { 200.0f, 40.0f }, make_solid_style("#EEEEEEFF"));
+        DisplayTransition2DComponent entrance {};
+        entrance.inheritToChildren = true;
+        entrance.durationSeconds = 0.24f;
+        entrance.fromOpacity = 0.0f;
+        entrance.toOpacity = 1.0f;
+        liveScene.play_display_transition(liveRoot, entrance, 1.0);
+        liveScene.build_render_plan(1.0, 0u);
+        for (const double time : { 1.25, 3.0, 10.0 })
+        {
+            liveScene.activate_dynamic(unrelated, 0.35f);
+            const auto plan = liveScene.build_render_plan(time, 0u);
+            for (const auto entity : { liveRoot, button })
+            {
+                const auto contains = [entity](const auto& batches) {
+                    return std::any_of(batches.begin(), batches.end(),
+                        [entity](const auto& batch) { return batch.entity == entity; });
+                };
+                passed &= expect(contains(plan.shapes) && !contains(plan.cachedShapes),
+                    "dialog/nav children must remain live after animations and unrelated focus changes");
+            }
+        }
+    }
     return passed ? 0 : 1;
 }
