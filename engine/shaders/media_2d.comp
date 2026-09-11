@@ -143,9 +143,6 @@ SurfacePoint surface_point_for_pixel(vec2 pixel) {
 float rounded_rect_mask(vec2 p) {
     float radius = clamp(pc.effect0.x, 0.0, min(pc.rect.z, pc.rect.w) * 0.5);
     float softness = max(pc.effect0.y, 0.0);
-    if (radius <= 0.001 && softness <= 0.001) {
-        return 1.0;
-    }
 
     vec2 halfSize = pc.rect.zw * 0.5;
     vec2 local = p - (pc.rect.xy + halfSize);
@@ -154,7 +151,7 @@ float rounded_rect_mask(vec2 p) {
     if (softness <= 0.001) {
         return distanceToEdge <= 0.0 ? 1.0 : 0.0;
     }
-    return 1.0 - smoothstep(0.0, softness, distanceToEdge);
+    return 1.0 - smoothstep(-softness, softness, distanceToEdge);
 }
 
 float sd_rounded_box(vec2 p, vec2 halfSize, float radius) {
@@ -180,7 +177,8 @@ float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float p
 float media_primitive_mask(vec2 p) {
     uint primitive = pc.data.x & 15u;
     if (primitive == PRIMITIVE_RECTANGLE) {
-        return 1.0;
+        return step(pc.rect.x, p.x) * step(pc.rect.y, p.y) *
+            step(p.x, pc.rect.x + pc.rect.z) * step(p.y, pc.rect.y + pc.rect.w);
     }
 
     if (primitive == PRIMITIVE_BAR_VISUALISER) {
@@ -678,8 +676,8 @@ float media_geometry_coverage(SurfacePoint surface, vec2 samplePoint) {
     if (!surface.inside) {
         return 0.0;
     }
-    vec2 localUv = clamp(surface.uv, vec2(0.0), vec2(1.0));
-    return media_primitive_mask(pc.rect.xy + localUv * pc.rect.zw) *
+    // Texture UVs clamp, geometry must not: outside samples need zero coverage.
+    return media_primitive_mask(pc.rect.xy + surface.uv * pc.rect.zw) *
         inherited_shape_mask_alpha(samplePoint);
 }
 

@@ -260,21 +260,13 @@ namespace media_ui
             0.0f,
             1.0f);
         constexpr float halfPi = 1.57079632679f;
-        constexpr float turnPoint = 0.30f;
-        constexpr float incomingOpenEnd = 0.42f;
-        constexpr float overshootRiseEnd = 0.66f;
-        constexpr float overshootHoldEnd = 0.82f;
-        constexpr float overshootScale = 1.055f;
-        constexpr float revealSharpPoint = 0.98f;
-
+        constexpr float turnPoint = 0.40f;
         glm::vec2 artworkSize = state.outgoingSize;
-        float artworkBaseWidth = state.outgoingSize.x;
-        float faceScale = 1.0f;
+        float yaw = 0.0f;
         float blurRadius = 0.0f;
         if (progress < turnPoint)
         {
-            const float phase = smooth_step(progress / turnPoint);
-            faceScale = std::cos(phase * halfPi);
+            yaw = halfPi * smooth_step(progress / turnPoint);
         }
         else
         {
@@ -283,62 +275,23 @@ namespace media_ui
                 media->set_media(state.pendingMedia);
                 state.swapped = true;
             }
-            const float phase = std::clamp(
-                (progress - turnPoint) / (1.0f - turnPoint),
-                0.0f,
-                1.0f);
             artworkSize = state.incomingSize;
-            artworkBaseWidth = state.incomingSize.x;
-            if (phase < incomingOpenEnd)
-            {
-                const float openProgress = smooth_step(
-                    phase / incomingOpenEnd);
-                faceScale = std::sin(openProgress * halfPi);
-            }
-            else if (phase < overshootRiseEnd)
-            {
-                const float overshootProgress = smooth_step(
-                    (phase - incomingOpenEnd) /
-                    (overshootRiseEnd - incomingOpenEnd));
-                faceScale = glm::mix(
-                    1.0f,
-                    overshootScale,
-                    overshootProgress);
-            }
-            else if (phase < overshootHoldEnd)
-            {
-                faceScale = overshootScale;
-            }
-            else
-            {
-                const float settleProgress = smooth_step(
-                    (phase - overshootHoldEnd) /
-                    (1.0f - overshootHoldEnd));
-                faceScale = glm::mix(
-                    overshootScale,
-                    1.0f,
-                    settleProgress);
-            }
-            const float sharpProgress = smooth_step(std::clamp(
-                phase / revealSharpPoint,
-                0.0f,
-                1.0f));
-            blurRadius = state.scaledRevealBlurRadius *
-                (1.0f - sharpProgress);
+            const float phase = std::clamp(
+                (progress - turnPoint) / (1.0f - turnPoint), 0.0f, 1.0f);
+            const float remaining = 1.0f - phase;
+            // Rigid yaw with a small angular settle; never stretch the face.
+            yaw = -halfPi * remaining * remaining * remaining +
+                0.08f * std::sin(3.14159265359f * smooth_step(phase));
+            blurRadius = state.scaledRevealBlurRadius * remaining * remaining;
         }
-
-        artworkSize.x = std::max(artworkBaseWidth * faceScale, 1.0f);
         artworkSize = glm::max(artworkSize, glm::vec2(1.0f));
-        if (Layout2DComponent* layout =
-            registry.try_get<Layout2DComponent>(entity))
+        if (Layout2DComponent* layout = registry.try_get<Layout2DComponent>(entity))
         {
             layout->size = artworkSize;
-            layout->offset.x = (artworkBaseWidth - artworkSize.x) * 0.5f;
+            layout->offset.x = 0.0f;
         }
         media->size = artworkSize;
-        media->uvRect = artwork_cover_uv(
-            *media,
-            { artworkBaseWidth, artworkSize.y });
+        media->uvRect = artwork_cover_uv(*media, artworkSize);
         media->fit = Media2DFit::eStretch;
         media->blurRadius = blurRadius;
         if (presentation.synchroniseParentGridColumn)
@@ -352,7 +305,8 @@ namespace media_ui
         if (Transform2DComponent* transform =
             registry.try_get<Transform2DComponent>(entity))
         {
-            transform->rotation3DRadians = glm::vec2(0.0f);
+            transform->rotation3DRadians = { 0.0f, yaw };
+            // Orthographic projection preserves height and avoids near-edge magnification.
             transform->perspective = 0.0f;
         }
         scene.mark_dirty(entity);
@@ -379,6 +333,11 @@ namespace media_ui
                 registry,
                 entity,
                 state.incomingSize.x);
+        }
+        if (auto* transform = registry.try_get<Transform2DComponent>(entity))
+        {
+            transform->rotation3DRadians = glm::vec2(0.0f);
+            transform->perspective = 0.0f;
         }
         state.reset();
         scene.mark_dirty(entity);

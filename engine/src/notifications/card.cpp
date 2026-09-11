@@ -585,7 +585,7 @@ UiNotificationCardHandle ui_create_notification_card(
     ShadowComponent shadow = {};
     shadow.set_color("#07131E52");
     shadow.offset = scaled_offset(0.0f, 8.0f, ui.scale());
-    shadow.blurRadius = scaled_scalar(22.0f, ui.scale());
+    shadow.blurRadius = scaled_scalar(16.0f, ui.scale());
     shadow.spread = scaled_scalar(1.0f, ui.scale());
     shadow.outsideOnly = true;
     ui.registry().emplace_or_replace<ShadowComponent>(handle.surface, shadow);
