@@ -1174,7 +1174,7 @@ inline UiThemePreviewHandle ui_create_theme_preview(
     UiThemePreviewHandle handle = {};
     ShapeStyleComponent frameStyle = make_solid_style(
         options.dark ? "#0E1324FF" : "#F8FBFFFF",
-        options.selected ? "#007AFFFF" : "rgba(0, 0, 0, 0.12)",
+        options.selected ? options.theme.accent : "rgba(0, 0, 0, 0.12)",
         scaled_scalar(options.selected ? options.selectedOutlineWidth : options.outlineWidth, ui.scale()),
         1.0f);
     handle.root = ui_create_fixed_block(
