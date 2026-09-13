@@ -14,44 +14,10 @@ namespace media_ui
             return t * t * (3.0f - 2.0f * t);
         }
 
-        glm::vec4 artwork_cover_uv(
-            const Media2DComponent& media,
-            glm::vec2 targetSize)
+        struct ArtworkRevealTint
         {
-            if (media.sourcePixelSize.x == 0u ||
-                media.sourcePixelSize.y == 0u ||
-                targetSize.x <= 0.0f || targetSize.y <= 0.0f)
-            {
-                return { 0.0f, 0.0f, 1.0f, 1.0f };
-            }
-
-            const float sourceAspect =
-                static_cast<float>(media.sourcePixelSize.x) /
-                static_cast<float>(media.sourcePixelSize.y);
-            const float targetAspect = targetSize.x / targetSize.y;
-            glm::vec4 uv { 0.0f, 0.0f, 1.0f, 1.0f };
-            if (targetAspect > sourceAspect)
-            {
-                const float visibleHeight = std::clamp(
-                    sourceAspect / targetAspect,
-                    0.0f,
-                    1.0f);
-                const float inset = (1.0f - visibleHeight) * 0.5f;
-                uv.y = inset;
-                uv.w = 1.0f - inset;
-            }
-            else if (targetAspect < sourceAspect)
-            {
-                const float visibleWidth = std::clamp(
-                    targetAspect / sourceAspect,
-                    0.0f,
-                    1.0f);
-                const float inset = (1.0f - visibleWidth) * 0.5f;
-                uv.x = inset;
-                uv.z = 1.0f - inset;
-            }
-            return uv;
-        }
+            float strength = 0.0f;
+        };
 
         glm::vec2 artwork_entity_size(
             entt::registry& registry,
@@ -167,7 +133,9 @@ namespace media_ui
         media.blurRadius = 0.0f;
         media.set_auto_black_lift(
             presentation.autoLiftBlackBackground);
-        media.fit = Media2DFit::eCover;
+        // Keep the complete image within the thumbnail frame in both idle
+        // and animated states; cover fitting crops non-square source artwork.
+        media.fit = Media2DFit::eContain;
         media.uvRect = { 0.0f, 0.0f, 1.0f, 1.0f };
     }
 
@@ -219,7 +187,7 @@ namespace media_ui
         media->blurRadius = 0.0f;
         scene.activate_dynamic(
             entity,
-            static_cast<double>(presentation.transitionDuration) + 0.08);
+            static_cast<double>(presentation.transitionDuration) * 1.12 + 0.08);
         scene.mark_dirty(entity);
         return true;
     }
@@ -252,7 +220,7 @@ namespace media_ui
 
         const float duration = std::max(
             presentation.transitionDuration,
-            0.001f);
+            0.001f) * 1.12f;
         const float progress = std::clamp(
             static_cast<float>(
                 (currentTimeSeconds - state.startSeconds) /
@@ -260,7 +228,8 @@ namespace media_ui
             0.0f,
             1.0f);
         constexpr float halfPi = 1.57079632679f;
-        constexpr float turnPoint = 0.40f;
+        // Preserve the outgoing turn; give the incoming overflip/settle 20% more time.
+        constexpr float turnPoint = 0.40f / 1.12f;
         glm::vec2 artworkSize = state.outgoingSize;
         float yaw = 0.0f;
         float blurRadius = 0.0f;
@@ -279,9 +248,11 @@ namespace media_ui
             const float phase = std::clamp(
                 (progress - turnPoint) / (1.0f - turnPoint), 0.0f, 1.0f);
             const float remaining = 1.0f - phase;
-            // Rigid yaw with a small angular settle; never stretch the face.
-            yaw = -halfPi * remaining * remaining * remaining +
-                0.08f * std::sin(3.14159265359f * smooth_step(phase));
+            // A single continuous ease-out crosses the resting angle once,
+            // then gently settles without a separate bounce/acceleration phase.
+            constexpr float overflip = 2.8f;
+            yaw = -halfPi * (remaining * remaining * remaining * (overflip + 1.0f)
+                - overflip * remaining * remaining);
             blurRadius = state.scaledRevealBlurRadius * remaining * remaining;
         }
         artworkSize = glm::max(artworkSize, glm::vec2(1.0f));
@@ -291,9 +262,15 @@ namespace media_ui
             layout->offset.x = 0.0f;
         }
         media->size = artworkSize;
-        media->uvRect = artwork_cover_uv(*media, artworkSize);
-        media->fit = Media2DFit::eStretch;
+        media->uvRect = { 0.0f, 0.0f, 1.0f, 1.0f };
+        media->fit = Media2DFit::eContain;
         media->blurRadius = blurRadius;
+        const float whiteTint = state.scaledRevealBlurRadius > 0.001f ?
+            0.40f * blurRadius / state.scaledRevealBlurRadius : 0.0f;
+        registry.emplace_or_replace<ArtworkRevealTint>(entity, whiteTint);
+        // This contrast/brightness pair is exactly mix(image, white, strength).
+        media->contrast = 1.0f - whiteTint;
+        media->brightness = 0.5f * whiteTint;
         if (presentation.synchroniseParentGridColumn)
         {
             synchronise_grid_column(
@@ -324,7 +301,7 @@ namespace media_ui
         }
         media->size = state.incomingSize;
         media->uvRect = { 0.0f, 0.0f, 1.0f, 1.0f };
-        media->fit = Media2DFit::eCover;
+        media->fit = Media2DFit::eContain;
         media->blurRadius = 0.0f;
         if (presentation.synchroniseParentGridColumn)
         {
@@ -339,6 +316,9 @@ namespace media_ui
             transform->rotation3DRadians = glm::vec2(0.0f);
             transform->perspective = 0.0f;
         }
+        registry.remove<ArtworkRevealTint>(entity);
+        media->contrast = 1.0f;
+        media->brightness = 0.0f;
         state.reset();
         scene.mark_dirty(entity);
     }
@@ -470,9 +450,13 @@ namespace media_ui
         if (Media2DComponent* media =
             registry.try_get<Media2DComponent>(entity))
         {
-            if (std::abs(media->brightness - state.brightness) > 0.001f)
+            const auto* reveal = registry.try_get<ArtworkRevealTint>(entity);
+            const float whiteTint = reveal ? reveal->strength : 0.0f;
+            const float brightness = state.brightness * (1.0f - whiteTint) +
+                0.5f * whiteTint;
+            if (std::abs(media->brightness - brightness) > 0.001f)
             {
-                media->brightness = state.brightness;
+                media->brightness = brightness;
                 changed = true;
             }
             if (std::abs(media->opacity - state.opacity) > 0.001f)

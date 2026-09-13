@@ -232,6 +232,7 @@ struct UiTheme
     std::string outlineStrong = "rgba(0, 0, 0, 0.22)";
     std::string text = "rgba(29, 29, 31, 1)";
     std::string textMuted = "rgba(112, 112, 117, 0.91)";
+    std::string trafficLightIcon = "rgba(17, 17, 17, 1)";
     std::string icon = "rgba(29, 29, 31, 0.85)";
     std::string accent = "rgba(0, 122, 255, 1)";
     std::string accentHover = "rgba(19, 135, 255, 1)";

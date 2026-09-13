@@ -289,6 +289,16 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
         // the executable's resource so Settings and other Alt-Tab entries use
         // the same branded icon as the application executable.
         apply_embedded_application_icon(window);
+        if (!createInfo.focusOnShow &&
+            !createInfo.showInTaskbar && !createInfo.showInAltTab)
+        {
+            // Passive overlays must also be excluded from Windows' automatic
+            // activation fallback when a fullscreen application changes modes.
+            // GLFW_FOCUS_ON_SHOW alone only controls explicit show operations.
+            HWND nativeWindow = glfwGetWin32Window(window);
+            const LONG_PTR style = GetWindowLongPtrW(nativeWindow, GWL_EXSTYLE);
+            SetWindowLongPtrW(nativeWindow, GWL_EXSTYLE, style | WS_EX_NOACTIVATE);
+        }
 #endif
         if (createInfo.position)
         {
@@ -1112,10 +1122,11 @@ void set_glfw_window_always_on_top(GLFWwindow* window, bool alwaysOnTop)
     {
         return;
     }
-    glfwSetWindowAttrib(
-        window,
-        GLFW_FLOATING,
-        alwaysOnTop ? GLFW_TRUE : GLFW_FALSE);
+    const int desiredFloating = alwaysOnTop ? GLFW_TRUE : GLFW_FALSE;
+    if (glfwGetWindowAttrib(window, GLFW_FLOATING) != desiredFloating)
+    {
+        glfwSetWindowAttrib(window, GLFW_FLOATING, desiredFloating);
+    }
 #if defined(_WIN32)
     HWND nativeWindow = glfwGetWin32Window(window);
     if (nativeWindow)
@@ -1231,15 +1242,22 @@ bool apply_glfw_window_placement(
     // Win32 applies bounds, z-order, and the frame change atomically. This is
     // important for transparent composition windows: separate move/resize
     // mutations can expose an old retained surface between DWM transactions.
-    glfwSetWindowAttrib(
-        window,
-        GLFW_FLOATING,
-        placement.alwaysOnTop ? GLFW_TRUE : GLFW_FALSE);
+    const int desiredFloating = placement.alwaysOnTop ? GLFW_TRUE : GLFW_FALSE;
+    if (glfwGetWindowAttrib(window, GLFW_FLOATING) != desiredFloating)
+    {
+        glfwSetWindowAttrib(window, GLFW_FLOATING, desiredFloating);
+    }
     HWND nativeWindow = glfwGetWin32Window(window);
     if (!nativeWindow)
     {
         return false;
     }
+    // Repositioning an already-topmost overlay must not raise it above a
+    // fullscreen application. Only change z-order when the policy changes.
+    const bool currentlyTopmost =
+        (GetWindowLongPtrW(nativeWindow, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    const UINT zOrderFlags = currentlyTopmost == placement.alwaysOnTop ?
+        SWP_NOZORDER : 0u;
     return SetWindowPos(
         nativeWindow,
         placement.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
@@ -1247,7 +1265,8 @@ bool apply_glfw_window_placement(
         placement.position.y,
         placement.size.x,
         placement.size.y,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED) != FALSE;
+        // Placement must preserve visibility, including fullscreen suppression.
+        SWP_NOACTIVATE | SWP_FRAMECHANGED | zOrderFlags) != FALSE;
 #else
     // GLFW maps these operations to the active Unix window system (X11 or
     // Wayland), including the compositor's supported always-above hint.

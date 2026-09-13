@@ -657,7 +657,7 @@ vec4 shade_media_surface(
     vec2 localUv = clamp(surface.uv, vec2(0.0), vec2(1.0));
     vec2 uv = mix(pc.uvRect.xy, pc.uvRect.zw, localUv);
     vec4 filtered = (pc.data.y & STYLE_MEDIA_BLUR_VERTICAL) != 0u
-        ? sample_media_blur_vertical(samplePoint)
+        ? sample_media_blur_vertical(pc.rect.xy + localUv * pc.rect.zw)
         : sample_media(uv);
     vec4 src = unpremultiply_media(filtered);
     vec3 tintRgb = media_tint_rgb(localUv);

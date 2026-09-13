@@ -390,6 +390,9 @@ namespace
         assign_theme_colour(entries, theme.icon, {
             "colors.icon", "colours.icon", "theme.colors.icon", "theme.colours.icon", "icon", "trafficLights.icon", "panelWindow.trafficLights.icon"
         });
+        assign_theme_colour(entries, theme.trafficLightIcon, {
+            "trafficLights.icon", "panelWindow.trafficLights.icon", "colors.icon", "colours.icon", "icon"
+        });
         assign_theme_colour(entries, theme.accent, {
             "colors.accent", "colours.accent", "theme.colors.accent", "theme.colours.accent", "accent", "primary"
         });
