@@ -27,6 +27,8 @@ struct AudioLoopbackCaptureCallbacks
     // for the duration of the call and always contains downmixed mono floats.
     std::function<void(std::span<const float>, float sampleRateHz)> onSamples;
     std::function<void()> onReset;
+    // Known session attenuation, or 1 when it cannot be determined.
+    std::function<void(float)> onSourceVolume;
 };
 
 // Platform loopback source with no renderer or product dependencies. The

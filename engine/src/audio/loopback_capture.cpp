@@ -19,6 +19,8 @@
 #include <windows.h>
 #include <initguid.h>
 #include <audioclient.h>
+#include <audiopolicy.h>
+#include <cmath>
 #include <mmdeviceapi.h>
 #include <mmreg.h>
 #include <propidl.h>
@@ -35,6 +37,72 @@ namespace
             value->Release();
             value = nullptr;
         }
+    }
+
+    float source_session_volume(DWORD processId)
+    {
+        if (!processId) return 1.0f;
+        IMMDeviceEnumerator* enumerator = nullptr;
+        IMMDeviceCollection* devices = nullptr;
+        float volume = 1.0f;
+        bool found = false;
+        bool ambiguous = false;
+        if (SUCCEEDED(CoCreateInstance(CLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL,
+                IID_IMMDeviceEnumerator, reinterpret_cast<void**>(&enumerator))) &&
+            SUCCEEDED(enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &devices)))
+        {
+            UINT count = 0;
+            devices->GetCount(&count);
+            for (UINT i = 0; i < count; ++i)
+            {
+                IMMDevice* device = nullptr;
+                IAudioSessionManager2* manager = nullptr;
+                IAudioSessionEnumerator* sessions = nullptr;
+                if (SUCCEEDED(devices->Item(i, &device)) &&
+                    SUCCEEDED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL,
+                        nullptr, reinterpret_cast<void**>(&manager))) &&
+                    SUCCEEDED(manager->GetSessionEnumerator(&sessions)))
+                {
+                    int sessionCount = 0;
+                    sessions->GetCount(&sessionCount);
+                    for (int j = 0; j < sessionCount; ++j)
+                    {
+                        IAudioSessionControl* control = nullptr;
+                        IAudioSessionControl2* identity = nullptr;
+                        ISimpleAudioVolume* gain = nullptr;
+                        DWORD pid = 0;
+                        AudioSessionState state = AudioSessionStateInactive;
+                        if (SUCCEEDED(sessions->GetSession(j, &control)) &&
+                            SUCCEEDED(control->QueryInterface(__uuidof(IAudioSessionControl2),
+                                reinterpret_cast<void**>(&identity))) &&
+                            SUCCEEDED(identity->GetProcessId(&pid)) && pid == processId &&
+                            SUCCEEDED(control->GetState(&state)) && state == AudioSessionStateActive &&
+                            SUCCEEDED(control->QueryInterface(__uuidof(ISimpleAudioVolume),
+                                reinterpret_cast<void**>(&gain))))
+                        {
+                            float value = 1.0f;
+                            BOOL muted = FALSE;
+                            if (SUCCEEDED(gain->GetMasterVolume(&value)) && SUCCEEDED(gain->GetMute(&muted)))
+                            {
+                                if (muted) value = 0.0f;
+                                if (found && std::abs(volume - value) > 0.0001f) ambiguous = true;
+                                volume = value;
+                                found = true;
+                            }
+                        }
+                        release_com(gain);
+                        release_com(identity);
+                        release_com(control);
+                    }
+                }
+                release_com(sessions);
+                release_com(manager);
+                release_com(device);
+            }
+        }
+        release_com(devices);
+        release_com(enumerator);
+        return found && !ambiguous ? volume : 1.0f;
     }
 
     enum AudioClientActivationType : std::uint32_t
@@ -430,6 +498,8 @@ struct AudioLoopbackCapture::Impl
             WAVEFORMATEX* mixFormat = nullptr;
             HANDLE audioReadyEvent = nullptr;
             bool started = false;
+            auto lastVolumeQuery = std::chrono::steady_clock::time_point {};
+            if (callbacks.onSourceVolume) callbacks.onSourceVolume(1.0f);
 
             if (processOnly)
             {
@@ -541,6 +611,13 @@ struct AudioLoopbackCapture::Impl
                 {
                     captureValid = false;
                     break;
+                }
+
+                const auto now = std::chrono::steady_clock::now();
+                if (callbacks.onSourceVolume && now - lastVolumeQuery >= std::chrono::milliseconds(200))
+                {
+                    callbacks.onSourceVolume(source_session_volume(capturedProcessId));
+                    lastVolumeQuery = now;
                 }
 
                 UINT32 packetFrames = 0u;
@@ -700,6 +777,9 @@ AudioLoopbackCapture::AudioLoopbackCapture(
             },
             [&processor]() {
                 processor.reset();
+            },
+            [&processor](float volume) {
+                processor.set_source_volume(volume);
             }
         },
         options)

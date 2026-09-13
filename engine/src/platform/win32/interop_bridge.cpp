@@ -1137,6 +1137,8 @@ private:
         publish_notifications(next, std::move(items));
     }
 
+    std::chrono::steady_clock::time_point lastProcessResolution {};
+
     void poll(
         const GlobalSystemMediaTransportControlsSessionManager& manager)
     {
@@ -1155,9 +1157,11 @@ private:
         next.sessionAvailable = 1u;
         const winrt::hstring sourceApp = session.SourceAppUserModelId();
         copy_utf8(next.sourceApp, sourceApp);
+        const auto processNow = std::chrono::steady_clock::now();
         {
             std::lock_guard lock(mutex);
             if (std::strcmp(snapshot.sourceApp, next.sourceApp) == 0 &&
+                processNow - lastProcessResolution < std::chrono::seconds(1) &&
                 process_alive(snapshot.sourceProcessId))
             {
                 next.sourceProcessId = snapshot.sourceProcessId;
@@ -1166,6 +1170,7 @@ private:
         if (next.sourceProcessId == 0u)
         {
             next.sourceProcessId = resolve_media_process_id(sourceApp.c_str());
+            lastProcessResolution = processNow;
         }
 
         const auto mediaProperties =
@@ -1410,6 +1415,7 @@ private:
     struct ProcessEntry
     {
         DWORD processId = 0u;
+        DWORD parentProcessId = 0u;
     };
 
     static std::vector<ProcessEntry> process_snapshot()
@@ -1428,7 +1434,7 @@ private:
         {
             do
             {
-                entries.push_back({ entry.th32ProcessID });
+                entries.push_back({ entry.th32ProcessID, entry.th32ParentProcessID });
             }
             while (Process32NextW(snapshotHandle, &entry));
         }
@@ -1444,6 +1450,24 @@ private:
         }
 
         const std::vector<ProcessEntry> processes = process_snapshot();
+        const std::wstring registeredPath = registered_application_executable_path(sourceApp);
+        const auto matchesSource = [&](DWORD processId) {
+            // Browser audio may live in a sandboxed helper whose AUMID is empty.
+            // Match its executable or ancestor identity, but capture the actual
+            // audio-session PID rather than all desktop output.
+            for (unsigned depth = 0; processId != 0u && depth < 32u; ++depth)
+            {
+                if (source_matches_process(sourceApp, processId) ||
+                    (!registeredPath.empty() && equal_aumid(
+                        process_executable_path(processId), registeredPath)))
+                    return true;
+                const auto entry = std::find_if(processes.begin(), processes.end(),
+                    [processId](const ProcessEntry& value) { return value.processId == processId; });
+                if (entry == processes.end() || entry->parentProcessId == processId) break;
+                processId = entry->parentProcessId;
+            }
+            return false;
+        };
         DWORD activeProcessId = 0u;
         DWORD inactiveProcessId = 0u;
         IMMDeviceEnumerator* deviceEnumerator = nullptr;
@@ -1496,9 +1520,7 @@ private:
                                 AudioSessionStateInactive;
                             sessionControl2->GetProcessId(&processId);
                             sessionControl2->GetState(&state);
-                            if (source_matches_process(
-                                    sourceApp,
-                                    processId))
+                            if (matchesSource(processId))
                             {
                                 if (state == AudioSessionStateActive)
                                 {

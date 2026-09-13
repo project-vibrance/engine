@@ -514,6 +514,20 @@ UiNotificationCardHandle ui_create_notification_card(
         const float inset = static_cast<float>(layerIndex) * 7.0f;
         const float verticalOffset =
             static_cast<float>(layerIndex) * layerOffset;
+        // Render only the exposed bottom strip of each backing card. Full
+        // translucent cards underneath tint the main card and one another.
+        const float stripTop = options.metrics.size.y +
+            static_cast<float>(layerIndex - 1u) * layerOffset;
+        UiSurfaceBlockOptions stripOptions = {};
+        stripOptions.style = ui_clear_surface_style();
+        stripOptions.primitive = Renderer2DPrimitive::eRectangle;
+        stripOptions.cornerRadius = 0.0f;
+        stripOptions.clipChildren = true;
+        stripOptions.layer = 1;
+        const entt::entity strip = ui_create_surface_block(
+            ui, handle.root, UiAlignment::eTopLeft,
+            { 0.0f, stripTop }, { options.metrics.size.x, layerOffset },
+            stripOptions);
         UiSurfaceBlockOptions layerOptions = {};
         layerOptions.style = make_frosted_panel_style(
             layerIndex == 1u ?
@@ -538,9 +552,9 @@ UiNotificationCardHandle ui_create_notification_card(
             options.maximumLayers - layerIndex);
         ui_create_surface_block(
             ui,
-            handle.root,
+            strip,
             UiAlignment::eTopLeft,
-            { inset, verticalOffset },
+            { inset, verticalOffset - stripTop },
             {
                 options.metrics.size.x - inset * 2.0f,
                 options.metrics.size.y

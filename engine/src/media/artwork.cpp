@@ -187,7 +187,7 @@ namespace media_ui
         media->blurRadius = 0.0f;
         scene.activate_dynamic(
             entity,
-            static_cast<double>(presentation.transitionDuration) * 1.12 + 0.08);
+            static_cast<double>(presentation.transitionDuration) * 1.40 + 0.08);
         scene.mark_dirty(entity);
         return true;
     }
@@ -221,15 +221,19 @@ namespace media_ui
         const float duration = std::max(
             presentation.transitionDuration,
             0.001f) * 1.12f;
+        constexpr float faceCrossing = (0.30f + 0.82f / 3.8f) / 1.12f;
+        const float elapsed = std::max(static_cast<float>(
+            currentTimeSeconds - state.startSeconds), 0.0f);
+        const float crossingTime = duration * faceCrossing;
+        const float animationTime = elapsed <= crossingTime ? elapsed :
+            crossingTime + (elapsed - crossingTime) / 1.40f;
         const float progress = std::clamp(
-            static_cast<float>(
-                (currentTimeSeconds - state.startSeconds) /
-                static_cast<double>(duration)),
+            animationTime / duration,
             0.0f,
             1.0f);
         constexpr float halfPi = 1.57079632679f;
         // Preserve the outgoing turn; give the incoming overflip/settle 20% more time.
-        constexpr float turnPoint = 0.40f / 1.12f;
+        constexpr float turnPoint = 0.30f / 1.12f;
         glm::vec2 artworkSize = state.outgoingSize;
         float yaw = 0.0f;
         float blurRadius = 0.0f;

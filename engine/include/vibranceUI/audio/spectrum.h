@@ -53,6 +53,9 @@ public:
     AudioSpectrumProcessor(AudioSpectrumProcessor&&) noexcept;
     AudioSpectrumProcessor& operator=(AudioSpectrumProcessor&&) noexcept;
 
+    // Compensate known source-volume attenuation without altering musical dynamics.
+    void set_normalisation_enabled(bool enabled);
+    void set_source_volume(float volume);
     void set_sample_rate(float sampleRateHz);
     float sample_rate() const;
     std::size_t band_count() const;

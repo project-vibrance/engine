@@ -197,11 +197,16 @@ struct AudioSpectrumProcessor::Impl
 
     void process_block_unlocked()
     {
+        // Compensate only a known volume control. Never infer volume from
+        // instantaneous signal peaks: that destroys the track's dynamics.
+        const float volume = normalisationEnabled ? sourceVolume : 1.0f;
 
         for (std::size_t i = 0; i < kFftLength; ++i)
         {
             const std::size_t sourceIndex = (sampleCursor + i) % kFftLength;
-            fftBuffer[i] = { sampleBlock[sourceIndex] * window[i], 0.0f };
+            const float sample = volume > 0.0f ?
+                sampleBlock[sourceIndex] / volume : 0.0f;
+            fftBuffer[i] = { sample * window[i], 0.0f };
         }
 
         fft_unlocked();
@@ -286,6 +291,8 @@ struct AudioSpectrumProcessor::Impl
         transientEnvelope = 0.0f;
     }
 
+    bool normalisationEnabled = false;
+    float sourceVolume = 1.0f;
     AudioSpectrumOptions options;
     std::array<std::complex<float>, kFftLength> fftBuffer {};
     std::array<float, kFftLength> window {};
@@ -322,6 +329,18 @@ AudioSpectrumProcessor::AudioSpectrumProcessor(
 AudioSpectrumProcessor::~AudioSpectrumProcessor() = default;
 AudioSpectrumProcessor::AudioSpectrumProcessor(AudioSpectrumProcessor&&) noexcept = default;
 AudioSpectrumProcessor& AudioSpectrumProcessor::operator=(AudioSpectrumProcessor&&) noexcept = default;
+
+void AudioSpectrumProcessor::set_normalisation_enabled(bool enabled)
+{
+    std::lock_guard lock(impl->inputMutex);
+    impl->normalisationEnabled = enabled;
+}
+
+void AudioSpectrumProcessor::set_source_volume(float volume)
+{
+    std::lock_guard lock(impl->inputMutex);
+    impl->sourceVolume = std::isfinite(volume) ? std::clamp(volume, 0.0f, 1.0f) : 1.0f;
+}
 
 void AudioSpectrumProcessor::set_sample_rate(float sampleRateHz)
 {
