@@ -157,6 +157,19 @@ namespace
     constexpr float kUpperBandLocalOnsetStart = 0.010f;
     constexpr float kUpperBandLocalOnsetEnd = 0.095f;
 
+    constexpr float kThirdBarOccupancyCurve = 2.55f;
+    constexpr float kThirdBarOccupancyReleaseStart = 0.93f;
+    constexpr float kThirdBarOccupancyReleaseEnd = 0.985f;
+    constexpr float kFourthBarOccupancyCurve = 2.80f;
+    constexpr float kFourthBarOccupancyReleaseStart = 0.84f;
+    constexpr float kFourthBarOccupancyReleaseEnd = 0.91f;
+    constexpr float kFifthBarOccupancyCurve = 2.70f;
+    constexpr float kFifthBarOccupancyReleaseStart = 0.965f;
+    constexpr float kFifthBarOccupancyReleaseEnd = 0.995f;
+    constexpr float kSixthBarOccupancyCurve = 1.78f;
+    constexpr float kSixthBarOccupancyReleaseStart = 0.80f;
+    constexpr float kSixthBarOccupancyReleaseEnd = 0.89f;
+
     float smoothstep(float edge0, float edge1, float value)
     {
         if (edge1 <= edge0)
@@ -1338,6 +1351,51 @@ void AudioSpectrumProcessor::update(double deltaSeconds)
                 (1.0f - target) *
                 kSixthBarPresenceBoost *
                 smoothstep(0.12f, 0.78f, target);
+        }
+
+        if (band >= 2u && band <= 5u)
+        {
+            float occupancyCurve = 1.0f;
+            float releaseStart = 1.0f;
+            float releaseEnd = 1.0f;
+
+            if (band == 2u)
+            {
+                occupancyCurve = kThirdBarOccupancyCurve;
+                releaseStart = kThirdBarOccupancyReleaseStart;
+                releaseEnd = kThirdBarOccupancyReleaseEnd;
+            }
+            else if (band == 3u)
+            {
+                occupancyCurve = kFourthBarOccupancyCurve;
+                releaseStart = kFourthBarOccupancyReleaseStart;
+                releaseEnd = kFourthBarOccupancyReleaseEnd;
+            }
+            else if (band == 4u)
+            {
+                occupancyCurve = kFifthBarOccupancyCurve;
+                releaseStart = kFifthBarOccupancyReleaseStart;
+                releaseEnd = kFifthBarOccupancyReleaseEnd;
+            }
+            else
+            {
+                occupancyCurve = kSixthBarOccupancyCurve;
+                releaseStart = kSixthBarOccupancyReleaseStart;
+                releaseEnd = kSixthBarOccupancyReleaseEnd;
+            }
+
+            const float occupancyRelease = smoothstep(
+                releaseStart,
+                releaseEnd,
+                target);
+
+            const float effectiveCurve =
+                occupancyCurve +
+                (1.0f - occupancyCurve) * occupancyRelease;
+
+            target = std::pow(
+                std::clamp(target, 0.0f, 1.0f),
+                effectiveCurve);
         }
 
         targets[band] = std::clamp(target, 0.0f, 1.0f);
