@@ -426,32 +426,11 @@ namespace
 	void wait_for_frame_deadline(std::chrono::steady_clock::time_point deadline)
 	{
 		ensure_frame_timer_resolution();
-		using Clock = std::chrono::steady_clock;
-		constexpr auto spinWindow = std::chrono::microseconds(250);
-
-		for (;;)
+		// Sleep through the deadline. A 250 us spin on every frame consumes
+		// CPU even when the retained scene has nothing to submit.
+		if (!wait_with_high_resolution_timer(deadline))
 		{
-			const auto now = Clock::now();
-			if (now >= deadline)
-			{
-				return;
-			}
-
-			const auto remaining = deadline - now;
-			if (remaining > spinWindow &&
-				wait_with_high_resolution_timer(deadline - spinWindow))
-			{
-				continue;
-			}
-			while (Clock::now() < deadline)
-			{
-#if defined(_WIN32)
-				YieldProcessor();
-#else
-				std::this_thread::yield();
-#endif
-			}
-			return;
+			std::this_thread::sleep_until(deadline);
 		}
 	}
 
@@ -2195,9 +2174,11 @@ void Engine::Impl::draw()
 			compositionFrameRate;
 	if (targetFrameRate == 0u)
 	{
-		// Keep uncapped timing observably above 2000 Hz without continuously
-		// pumping Win32/GLFW work or spinning an entire CPU core.
-		constexpr uint32_t maxUncappedPollRate = 2100u;
+		// Composition can only display at the monitor cadence. Poll twice per
+		// visible frame so completed GPU work is published between submissions,
+		// without running the entire application loop at 2100 Hz.
+		const uint32_t maxUncappedPollRate = compositionAvailable ?
+			std::clamp(effectiveCompositionFrameRate * 2u, 120u, 480u) : 2100u;
 		const auto pollInterval =
 			std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 				std::chrono::duration<double>(

@@ -203,6 +203,8 @@ namespace
         options.lowBandCount = std::min(options.lowBandCount, options.bandCount);
         options.lowBandCompression = std::max(options.lowBandCompression, 0.01f);
         options.highBandCompression = std::max(options.highBandCompression, 0.01f);
+        options.normalisationPeakTarget = std::isfinite(options.normalisationPeakTarget) ?
+            std::clamp(options.normalisationPeakTarget, 0.0f, 1.0f) : 0.0f;
 
         if (options.bandWeights.size() != options.bandCount)
         {
@@ -297,7 +299,12 @@ struct AudioSpectrumProcessor::Impl
     void push_sample_unlocked(float sample)
     {
 
-        sampleBlock[sampleCursor] = std::clamp(sample, -1.0f, 1.0f);
+        const float rawSample = std::clamp(sample, -1.0f, 1.0f);
+        sampleBlock[sampleCursor] = rawSample;
+        // Apply the gain belonging to this packet, not the most recent gain
+        // to an entire overlapping FFT window. Keep both forms for live toggles.
+        normalisedSampleBlock[sampleCursor] = sourceVolume > 0.0f ?
+            rawSample / sourceVolume : 0.0f;
         sampleCursor = (sampleCursor + 1u) % kFftLength;
 
         if (samplesCollected < kFftLength)
@@ -323,19 +330,33 @@ struct AudioSpectrumProcessor::Impl
 
     void process_block_unlocked()
     {
-        const float volume = normalisationEnabled ? sourceVolume : 1.0f;
-
+        float signalPeak = 0.0f;
         for (std::size_t i = 0; i < kFftLength; ++i)
         {
             const std::size_t sourceIndex = (sampleCursor + i) % kFftLength;
-            const float sample = volume > 0.0f ?
-                sampleBlock[sourceIndex] / volume : 0.0f;
+            const float sample = normalisationEnabled ?
+                normalisedSampleBlock[sourceIndex] : sampleBlock[sourceIndex];
             fftBuffer[i] = { sample * window[i], 0.0f };
+            if (options.normalisationPeakTarget > 0.0f)
+                signalPeak = std::max(signalPeak, std::abs(normalisedSampleBlock[sourceIndex]));
+        }
+
+        float signalGain = 1.0f;
+        if (options.normalisationPeakTarget > 0.0f)
+        {
+            // Keep one gain reference across beats and quiet passages instead
+            // of independently boosting each band/frame and flattening attacks.
+            const float release = std::exp(-static_cast<float>(kHopLength) /
+                (sampleRateHz * 5.0f));
+            normalisationPeak = std::max(signalPeak, normalisationPeak * release);
+            if (normalisationEnabled && signalPeak >= 1.0e-5f)
+                signalGain = std::clamp(options.normalisationPeakTarget /
+                    std::max(normalisationPeak, 1.0e-5f), 1.0f, 1000.0f);
         }
 
         fft_unlocked();
 
-        const float magnitudeScale = 2.0f / static_cast<float>(kFftLength);
+        const float magnitudeScale = signalGain * 2.0f / static_cast<float>(kFftLength);
         for (std::size_t i = 0; i < magnitudes.size(); ++i)
         {
 
@@ -464,12 +485,14 @@ struct AudioSpectrumProcessor::Impl
 
     bool normalisationEnabled = false;
     float sourceVolume = 1.0f;
+    float normalisationPeak = 0.0f;
     AudioSpectrumOptions options;
     std::array<std::complex<float>, kFftLength> fftBuffer {};
     std::array<float, kFftLength> window {};
     std::array<float, kMagnitudeCount> magnitudes {};
     std::array<float, kMagnitudeCount> previousMagnitudes {};
     std::array<float, kFftLength> sampleBlock {};
+    std::array<float, kFftLength> normalisedSampleBlock {};
     std::array<std::uint32_t, kFftLength> bitReversal {};
     std::vector<std::vector<std::uint32_t>> bandBins;
     std::vector<std::size_t> bandBinCounts;
@@ -524,7 +547,13 @@ AudioSpectrumProcessor& AudioSpectrumProcessor::operator=(AudioSpectrumProcessor
 void AudioSpectrumProcessor::set_normalisation_enabled(bool enabled)
 {
     std::lock_guard lock(impl->inputMutex);
+    if (impl->normalisationEnabled == enabled) return;
     impl->normalisationEnabled = enabled;
+    if (enabled) impl->normalisationPeak = 0.0f;
+    if (impl->samplesCollected == kFftLength)
+    {
+        impl->process_block_unlocked();
+    }
 }
 
 void AudioSpectrumProcessor::set_source_volume(float volume)
@@ -542,6 +571,8 @@ void AudioSpectrumProcessor::set_sample_rate(float sampleRateHz)
     impl->samplesCollected = 0u;
     impl->samplesSinceFft = 0u;
     impl->sampleBlock.fill(0.0f);
+    impl->normalisedSampleBlock.fill(0.0f);
+    impl->normalisationPeak = 0.0f;
     impl->magnitudes.fill(0.0f);
     impl->previousMagnitudes.fill(0.0f);
     impl->hasPreviousMagnitudeSpectrum = false;
@@ -1244,9 +1275,10 @@ void AudioSpectrumProcessor::update(double deltaSeconds)
                 kSecondBarDotBlendEnd,
                 impl->secondBarDrive);
 
+            const float dotFloor = kSecondBarDotFloor * gate;
             const float lowLevelFloor =
-                kSecondBarDotFloor +
-                (activityFloor - kSecondBarDotFloor) *
+                dotFloor +
+                (activityFloor - dotFloor) *
                     dotBlend;
 
             target = std::max(target, lowLevelFloor);
@@ -1507,6 +1539,8 @@ void AudioSpectrumProcessor::reset()
     impl->samplesCollected = 0u;
     impl->samplesSinceFft = 0u;
     impl->sampleBlock.fill(0.0f);
+    impl->normalisedSampleBlock.fill(0.0f);
+    impl->normalisationPeak = 0.0f;
     impl->magnitudes.fill(0.0f);
     impl->previousMagnitudes.fill(0.0f);
     impl->hasPreviousMagnitudeSpectrum = false;

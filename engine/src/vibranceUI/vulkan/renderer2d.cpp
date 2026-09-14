@@ -589,7 +589,8 @@ namespace
         };
     }
 
-    DispatchBounds make_dispatch_bounds(const Swapchain& swapchain, glm::vec4 rect, float padding)
+    DispatchBounds make_dispatch_bounds(const Swapchain& swapchain, glm::vec4 rect, float padding,
+        bool coverWorkgroups = true)
     {
         const int32_t screenWidth = static_cast<int32_t>(swapchain.extent.width);
         const int32_t screenHeight = static_cast<int32_t>(swapchain.extent.height);
@@ -608,14 +609,16 @@ namespace
             return {};
         }
 
+        const auto axisExtent = coverWorkgroups ?
+            renderer2d_dispatch_axis_coverage : renderer2d_dispatch_axis_extent;
         return {
             static_cast<uint32_t>(minX),
             static_cast<uint32_t>(minY),
-            renderer2d_dispatch_axis_coverage(
+            axisExtent(
                 static_cast<uint32_t>(minX),
                 static_cast<uint32_t>(maxX - minX),
                 static_cast<uint32_t>(screenWidth)),
-            renderer2d_dispatch_axis_coverage(
+            axisExtent(
                 static_cast<uint32_t>(minY),
                 static_cast<uint32_t>(maxY - minY),
                 static_cast<uint32_t>(screenHeight))
@@ -625,12 +628,13 @@ namespace
     DispatchBounds make_dispatch_bounds(
         const Swapchain& swapchain,
         const Renderer2DBatch& batch,
-        DispatchBoundsMode mode)
+        DispatchBoundsMode mode,
+        bool coverWorkgroups = true)
     {
         return make_dispatch_bounds(
             swapchain,
             expand_and_clip_rect(batch.rect, dispatch_padding(batch, mode), batch.clipRect),
-            0.0f);
+            0.0f, coverWorkgroups);
     }
 
     DispatchBounds make_full_screen_bounds(const Swapchain& swapchain)
@@ -4965,7 +4969,7 @@ void TextPipeline::record_batch(
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, postScope);
 
     auto record_text_draw = [&](const Renderer2DBatch& drawBatch, uint32_t drawPass, DispatchBoundsMode boundsMode) {
-        const DispatchBounds bounds = make_dispatch_bounds(swapchain, drawBatch, boundsMode);
+        const DispatchBounds bounds = make_dispatch_bounds(swapchain, drawBatch, boundsMode, false);
         if (bounds.empty())
         {
             return;

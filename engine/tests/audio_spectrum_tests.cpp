@@ -51,6 +51,19 @@ int main()
         }),
         "a new processor should publish silence");
 
+    // Repeated presentation ticks must not manufacture motion without input.
+    // In particular, the second bar's decorative floor must respect the gate.
+    for (int tick = 0; tick < 120; ++tick)
+    {
+        spectrum.update(1.0 / 120.0);
+    }
+    const auto idleLevels = spectrum.levels();
+    passed &= expect(
+        std::all_of(idleLevels.begin(), idleLevels.end(), [](float value) {
+            return value == 0.0f;
+        }),
+        "presentation updates without samples must remain silent");
+
     const auto bass = sine_wave(
         100.0f,
         spectrum.sample_rate(),

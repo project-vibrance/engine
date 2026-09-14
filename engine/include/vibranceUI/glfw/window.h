@@ -222,6 +222,8 @@ VIBRANCE_GLFW_API glm::vec2 glfw_content_scale(GLFWwindow* window);
 VIBRANCE_GLFW_API double glfw_time_seconds();
 VIBRANCE_GLFW_API bool glfw_window_should_close(GLFWwindow* window);
 VIBRANCE_GLFW_API void poll_glfw_events();
+// Dispatch events, sleeping until input arrives or the timeout expires.
+VIBRANCE_GLFW_API void wait_glfw_events(double timeoutSeconds);
 VIBRANCE_GLFW_API void focus_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void set_glfw_window_visible(
     GLFWwindow* window,

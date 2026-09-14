@@ -2,6 +2,7 @@
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/ui/controls.h>
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <limits>
 #include <sstream>
@@ -1041,6 +1042,18 @@ bool glfw_window_should_close(GLFWwindow* window)
 void poll_glfw_events()
 {
     glfwPollEvents();
+}
+
+void wait_glfw_events(double timeoutSeconds)
+{
+    if (timeoutSeconds > 0.0 && std::isfinite(timeoutSeconds))
+    {
+        glfwWaitEventsTimeout(timeoutSeconds);
+    }
+    else
+    {
+        glfwPollEvents();
+    }
 }
 
 void focus_glfw_window(GLFWwindow* window)

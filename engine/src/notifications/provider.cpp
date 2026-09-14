@@ -28,6 +28,10 @@ struct SystemNotificationProvider::Impl
     VibranceWin32InteropDismissNotificationFn dismissNotification = nullptr;
     VibranceWin32InteropActivateNotificationSourceFn activateSource = nullptr;
     VibranceWin32InteropResolveApplicationIconFn resolveIcon = nullptr;
+    bool hasNotificationSnapshot = false;
+    // Keep the item storage off the refresh stack: even a metadata-only return
+    // would otherwise probe a large Win32 stack frame on every call.
+    std::array<VibranceWin32NotificationItem, 64u> bridgeItems {};
 
     static std::wstring bridge_path()
     {
@@ -146,8 +150,25 @@ struct SystemNotificationProvider::Impl
             return false;
         }
 
-        std::array<VibranceWin32NotificationItem, 64u> bridgeItems {};
         VibranceWin32NotificationSnapshot bridgeSnapshot {};
+        // The ABI supports a metadata-only read. Avoid clearing/copying the
+        // 150 KB item buffer and rebuilding strings on unchanged UI ticks.
+        if (getNotifications(
+                handle,
+                &bridgeSnapshot,
+                sizeof(bridgeSnapshot),
+                nullptr,
+                sizeof(VibranceWin32NotificationItem),
+                0u) == 0u ||
+            bridgeSnapshot.structSize != sizeof(bridgeSnapshot))
+        {
+            return false;
+        }
+        if (hasNotificationSnapshot && bridgeSnapshot.revision == current.revision)
+        {
+            return false;
+        }
+
         if (getNotifications(
                 handle,
                 &bridgeSnapshot,
@@ -182,6 +203,7 @@ struct SystemNotificationProvider::Impl
                 break;
         }
         current.bridgeLoaded = true;
+        hasNotificationSnapshot = true;
         current.revision = bridgeSnapshot.revision;
         current.diagnostic = bridgeSnapshot.diagnostic;
 

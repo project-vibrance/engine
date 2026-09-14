@@ -3,6 +3,13 @@
 #include <algorithm>
 #include <cstdint>
 
+// Shader-visible extent excludes spare invocations in the last workgroup.
+inline uint32_t renderer2d_dispatch_axis_extent(
+    uint32_t origin, uint32_t length, uint32_t surfaceLength)
+{
+    return origin < surfaceLength ? std::min(length, surfaceLength - origin) : 0u;
+}
+
 // Compute workgroups are relative to the dispatch origin, which is not
 // necessarily aligned to the screen's 8-pixel grid. Retained clears and damage
 // tracking must include trailing invocations, even when they extend past the

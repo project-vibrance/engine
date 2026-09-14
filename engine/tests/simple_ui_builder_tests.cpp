@@ -35,6 +35,11 @@ int main()
     UiBuilder ui(scene, scale);
 
     bool passed = true;
+    passed &= expect(renderer2d_dispatch_axis_extent(5u, 9u, 100u) == 9u,
+        "text shader extent must stop at the clipping edge, not the workgroup edge");
+    passed &= expect(renderer2d_dispatch_axis_extent(95u, 9u, 100u) == 5u &&
+        renderer2d_dispatch_axis_extent(100u, 9u, 100u) == 0u,
+        "text shader extent must respect the render surface");
     // A scrollbar clipped to 9 pixels at x=5 dispatches 16 invocations and
     // writes through x=20. Rounding the nominal right edge (14) to 16 misses
     // those trailing pixels and leaves a vertical trail as the thumb moves.
@@ -49,8 +54,12 @@ int main()
                 const uint32_t coverage = renderer2d_dispatch_axis_coverage(
                     origin, length, surfaceLength);
                 const uint32_t invocationCount = ((length + 7u) / 8u) * 8u;
+                const uint32_t exact = renderer2d_dispatch_axis_extent(origin, length, surfaceLength);
                 for (uint32_t invocation = 0u; invocation < invocationCount; ++invocation)
                 {
+                    passed &= expect((invocation < exact) ==
+                        (invocation < length && origin + invocation < surfaceLength),
+                        "text must reject every invocation outside its exact clip");
                     if (origin + invocation < surfaceLength)
                     {
                         passed &= expect(invocation < coverage,

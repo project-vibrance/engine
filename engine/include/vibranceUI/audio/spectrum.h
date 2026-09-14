@@ -33,6 +33,10 @@ struct AudioSpectrumOptions
     std::size_t lowBandCount = 2u;
     float lowBandCompression = 2.2f;
     float highBandCompression = 1.4f;
+    // Optional signal-level compensation for player-internal volume controls.
+    // Zero keeps exact Windows session-gain compensation only. A positive
+    // target uses a fast-attack, slow-release peak reference while normalising.
+    float normalisationPeakTarget = 0.0f;
 };
 
 // Source-independent spectrum analysis. Feed mono samples from a microphone,
