@@ -7,6 +7,7 @@ const uint STYLE_BLUR = 1u << 5;
 const uint STYLE_RADIAL_GRADIENT = 1u << 11;
 const uint STYLE_TRANSFORM_2_5D = 1u << 12;
 const uint STYLE_SHAPE_MASK = 1u << 15;
+const uint STYLE_SHAPE_CUTOUT = 1u << 29;
 const uint STYLE_CORNER_RADII = 1u << 16;
 
 const uint PRIMITIVE_RECTANGLE = 1u;
@@ -420,6 +421,9 @@ float shape_mask_alpha(vec2 pixel, float softness) {
     vec4 maskParams = vec4(squircleAmount, squirclePower, notchAmount, notchDepth);
     float sdf = primitive_sdf(pixel, pc.effect1, primitive, radius, vec4(radius), false, maskParams);
     float inwardSoftness = max(softness, 0.75);
+    if ((pc.data.y & STYLE_SHAPE_CUTOUT) != 0u) {
+        return smoothstep(0.0, inwardSoftness, sdf);
+    }
     return 1.0 - smoothstep(-inwardSoftness, 0.0, sdf);
 }
 

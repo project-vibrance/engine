@@ -111,7 +111,8 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleTextEdgeFade = 1u << 25,
     eRenderer2DStyleMediaSingleBlurSample = 1u << 26,
     eRenderer2DStyleMediaBlurHorizontal = 1u << 27,
-    eRenderer2DStyleMediaBlurVertical = 1u << 28
+    eRenderer2DStyleMediaBlurVertical = 1u << 28,
+    eRenderer2DStyleShapeCutout = 1u << 29
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -579,6 +580,13 @@ struct LayoutRect2DComponent
     glm::vec4 padding { 0.0f };
     bool resizeChildren = true;
     glm::vec2 childLayoutSize { 0.0f };
+};
+
+// Excludes another shape's silhouette from this shape and its frosted blur.
+// The source must share its layout/animation lifetime with the cutout shape.
+struct ShapeCutout2DComponent
+{
+    entt::entity source = entt::null;
 };
 
 struct Mask2DComponent

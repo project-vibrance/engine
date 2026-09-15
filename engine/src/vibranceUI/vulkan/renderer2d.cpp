@@ -1445,6 +1445,7 @@ namespace
         float squirclePower = 4.0f;
         float notchAmount = 0.0f;
         float notchDepth = 0.0f;
+        bool cutout = false;
     };
 
     glm::vec4 shape_mask_payload(const ShapeMaskClip& mask)
@@ -1643,6 +1644,25 @@ namespace
         effect.opacity *= edgeFade.opacity;
         effect.blurRadius = std::max(effect.blurRadius, edgeFade.blurRadius);
         return effect;
+    }
+
+    ShapeMaskClip shape_mask_for_surface(const entt::registry& registry, entt::entity entity, double now)
+    {
+        if (const auto* cutout = registry.try_get<ShapeCutout2DComponent>(entity);
+            cutout && registry.valid(cutout->source))
+        {
+            if (const auto* shape = registry.try_get<ShapeComponent>(cutout->source))
+            {
+                return { true, shape->primitive,
+                    apply_display_transition_scale(
+                        renderer2d_apply_interactive_visual_rect(registry, cutout->source,
+                            rect_from_layout(entity_layout_bounds(registry, cutout->source))),
+                        inherited_visual_effect(registry, cutout->source, now)),
+                    shape->cornerRadius, shape->squircleAmount, shape->squirclePower,
+                    shape->notchAmount, shape->notchDepth, true };
+            }
+        }
+        return inherited_shape_mask_clip(registry, entity);
     }
 
     glm::vec2 fallback_model_size(const entt::registry& registry, entt::entity entity, const Model3DComponent& model)
@@ -4034,11 +4054,12 @@ void Renderer2DScene::build_render_plan(
         }
         if (transformFlags == 0u)
         {
-            const ShapeMaskClip mask = inherited_shape_mask_clip(registry_, entity);
+            const ShapeMaskClip mask = shape_mask_for_surface(registry_, entity, currentTimeSeconds);
             if (mask.enabled && !rect_empty(mask.rect))
             {
                 batch.effect1 = mask.rect;
                 batch.flags |= eRenderer2DStyleShapeMask;
+                if (mask.cutout) batch.flags |= eRenderer2DStyleShapeCutout;
                 batch.flags &= ~eRenderer2DStyleCornerRadii;
                 batch.packedData = pack_shape_mask_data(
                     mask.primitive,
@@ -4134,7 +4155,7 @@ void Renderer2DScene::build_render_plan(
             }
             if (style.backdropBlurClipToInheritedMask)
             {
-                const ShapeMaskClip mask = inherited_shape_mask_clip(registry_, entity);
+                const ShapeMaskClip mask = shape_mask_for_surface(registry_, entity, currentTimeSeconds);
                 if (mask.enabled && !rect_empty(mask.rect))
                 {
                     blurBatch.uvRect = {
@@ -4146,6 +4167,7 @@ void Renderer2DScene::build_render_plan(
                     blurBatch.effect1 = mask.rect;
                     blurBatch.color2 = shape_mask_payload(mask);
                     blurBatch.flags |= eRenderer2DStyleBlurInheritedShapeMask;
+                    if (mask.cutout) blurBatch.flags |= eRenderer2DStyleShapeCutout;
                 }
             }
             blurBatch.flags &= ~(

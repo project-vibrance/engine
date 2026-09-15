@@ -156,5 +156,55 @@ int main()
             halfwaySurface->rect.z < restingSurface->rect.z,
         "the system-glass surface should inherit the card entrance scale and opacity");
 
+    for (float dpi : { 1.0f, 1.5f, 1.75f, 3.0f, 5.0f })
+    {
+        Renderer2DScene layeredScene;
+        LayoutScale layeredScale {};
+        layeredScale.factor = glm::vec2(dpi);
+        layeredScale.logicalSize = { 428.0f, 400.0f };
+        UiBuilder layeredUi(layeredScene, layeredScale);
+        auto layeredOptions = options;
+        layeredOptions.parent = layeredUi.root();
+        const auto layeredCard = ui_create_notification_card(layeredUi, fontAtlas,
+            localisation, layeredOptions);
+        auto& layeredRegistry = layeredScene.registry();
+        const auto cutouts = layeredRegistry.view<ShapeCutout2DComponent>();
+        passed &= expect(cutouts.size() == 2u,
+            "each backing card must have a silhouette cutout instead of a rectangular strip");
+        for (auto entity : cutouts)
+        {
+            const auto parent = layeredRegistry.get<Parent2DComponent>(entity).parent;
+            passed &= expect(parent == layeredCard.root &&
+                !layeredRegistry.all_of<Mask2DComponent>(parent),
+                "backing cards must not be cropped to a straight horizontal strip");
+        }
+        DisplayTransition2DComponent scaleTransition {};
+        scaleTransition.durationSeconds = 1.0f;
+        scaleTransition.fromOpacity = 1.0f;
+        scaleTransition.toOpacity = 1.0f;
+        scaleTransition.fromScale = glm::vec2(0.8f);
+        scaleTransition.toScale = glm::vec2(1.0f);
+        scaleTransition.removeWhenComplete = false;
+        layeredScene.play_display_transition(layeredCard.root, scaleTransition, 1.0);
+        for (double now : { 1.0, 1.5, 2.0 })
+        {
+            const auto plan = layeredScene.build_render_plan(now, 0u);
+            std::size_t shapeCutouts = 0u, blurCutouts = 0u;
+            for (const auto& batch : plan.shapes)
+            {
+                if ((batch.flags & eRenderer2DStyleShapeCutout) == 0u) continue;
+                ++shapeCutouts;
+                const auto source = layeredRegistry.get<ShapeCutout2DComponent>(batch.entity).source;
+                const auto sourceState = layeredScene.resolved_shape_visual_state(source, now);
+                passed &= expect(sourceState && glm::length(batch.effect1 - sourceState->rect) < 0.01f,
+                    "the curved cutout must follow the preceding card during scaled animation");
+            }
+            for (const auto& batch : plan.blurs)
+                if ((batch.flags & eRenderer2DStyleShapeCutout) != 0u) ++blurCutouts;
+            passed &= expect(shapeCutouts == 2u && blurCutouts == 2u,
+                "both translucent fill and blur must exclude the preceding card");
+        }
+    }
+
     return passed ? 0 : 1;
 }

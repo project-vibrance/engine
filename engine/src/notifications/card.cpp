@@ -508,26 +508,14 @@ UiNotificationCardHandle ui_create_notification_card(
     ui.registry().emplace<HitRegion2DComponent>(handle.root);
     ui.set_dynamic_cache(handle.root);
 
+    std::vector<entt::entity> backingLayers(visibleLayers + 1u, entt::entity(entt::null));
     for (std::size_t layerIndex = visibleLayers;
         layerIndex > 0u; --layerIndex)
     {
         const float inset = static_cast<float>(layerIndex) * 7.0f;
         const float verticalOffset =
             static_cast<float>(layerIndex) * layerOffset;
-        // Render only the exposed bottom strip of each backing card. Full
-        // translucent cards underneath tint the main card and one another.
-        const float stripTop = options.metrics.size.y +
-            static_cast<float>(layerIndex - 1u) * layerOffset;
-        UiSurfaceBlockOptions stripOptions = {};
-        stripOptions.style = ui_clear_surface_style();
-        stripOptions.primitive = Renderer2DPrimitive::eRectangle;
-        stripOptions.cornerRadius = 0.0f;
-        stripOptions.clipChildren = true;
-        stripOptions.layer = 1;
-        const entt::entity strip = ui_create_surface_block(
-            ui, handle.root, UiAlignment::eTopLeft,
-            { 0.0f, stripTop }, { options.metrics.size.x, layerOffset },
-            stripOptions);
+        // Subtract the card in front instead of chopping off the curved edges.
         UiSurfaceBlockOptions layerOptions = {};
         layerOptions.style = make_frosted_panel_style(
             layerIndex == 1u ?
@@ -543,6 +531,9 @@ UiNotificationCardHandle ui_create_notification_card(
             1u,
             0.82f);
         layerOptions.primitive = Renderer2DPrimitive::eSquircle;
+        // Masked surfaces use the shader's canonical squircle parameters.
+        layerOptions.squircleAmount = 1.0f;
+        layerOptions.squirclePower = 4.0f;
         layerOptions.cornerRadius = std::max(
             options.metrics.cornerRadius -
                 static_cast<float>(layerIndex),
@@ -550,11 +541,11 @@ UiNotificationCardHandle ui_create_notification_card(
         layerOptions.layer = 1;
         layerOptions.order = options.order + static_cast<std::uint32_t>(
             options.maximumLayers - layerIndex);
-        ui_create_surface_block(
+        backingLayers[layerIndex] = ui_create_surface_block(
             ui,
-            strip,
+            handle.root,
             UiAlignment::eTopLeft,
-            { inset, verticalOffset - stripTop },
+            { inset, verticalOffset },
             {
                 options.metrics.size.x - inset * 2.0f,
                 options.metrics.size.y
@@ -583,6 +574,13 @@ UiNotificationCardHandle ui_create_notification_card(
         { 0.0f, 0.0f },
         options.metrics.size,
         cardOptions);
+    backingLayers[0] = handle.surface;
+    for (std::size_t layerIndex = 1u; layerIndex <= visibleLayers; ++layerIndex)
+    {
+        ui.registry().emplace<ShapeCutout2DComponent>(backingLayers[layerIndex],
+            ShapeCutout2DComponent { backingLayers[layerIndex - 1u] });
+    }
+
     // The Vulkan surface remains responsible for the card contents. On
     // Windows, this region asks the D3D11 Composition bridge for the desktop
     // blur underneath the translucent pixels; elsewhere the renderer-owned

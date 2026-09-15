@@ -5,8 +5,12 @@ if(NOT DEFINED OUTPUT)
     message(FATAL_ERROR "EmbedShaders.cmake requires -DOUTPUT=<generated cpp>")
 endif()
 
+# Publish only a complete translation unit. An interrupted generation must not
+# leave a newer, partial output that an incremental build can compile.
+set(TEMP_OUTPUT "${OUTPUT}.tmp")
+
 file(STRINGS "${MANIFEST}" SHADER_ENTRIES)
-file(WRITE "${OUTPUT}"
+file(WRITE "${TEMP_OUTPUT}"
     "#include \"embedded_shaders.h\"\n\n"
     "#include <cstddef>\n"
     "#include <span>\n"
@@ -30,7 +34,7 @@ foreach(SHADER_ENTRY IN LISTS SHADER_ENTRIES)
 
     file(READ "${SHADER_PATH}" SHADER_HEX HEX)
     string(REGEX REPLACE "(..)" "0x\\1," SHADER_BYTES "${SHADER_HEX}")
-    file(APPEND "${OUTPUT}"
+    file(APPEND "${TEMP_OUTPUT}"
         "    alignas(4) constexpr unsigned char shader_${SHADER_INDEX}[] = {${SHADER_BYTES}};\n")
     string(APPEND SHADER_CASES
         "    if (fileName == \"${SHADER_NAME}\")\n"
@@ -40,10 +44,12 @@ foreach(SHADER_ENTRY IN LISTS SHADER_ENTRIES)
     math(EXPR SHADER_INDEX "${SHADER_INDEX} + 1")
 endforeach()
 
-file(APPEND "${OUTPUT}"
+file(APPEND "${TEMP_OUTPUT}"
     "}\n\n"
     "std::span<const std::byte> vibrance_embedded_shader_spirv(std::string_view fileName)\n"
     "{\n"
     "${SHADER_CASES}"
     "    return {};\n"
     "}\n")
+
+file(RENAME "${TEMP_OUTPUT}" "${OUTPUT}")

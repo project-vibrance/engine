@@ -5,6 +5,7 @@ const uint STYLE_CLEAR = 1u << 7;
 const uint STYLE_BLUR_COMPOSITE = 1u << 9;
 const uint STYLE_RADIAL_GRADIENT = 1u << 11;
 const uint STYLE_SHAPE_MASK = 1u << 15;
+const uint STYLE_SHAPE_CUTOUT = 1u << 29;
 const uint STYLE_BLUR_HORIZONTAL = 1u << 17;
 const uint STYLE_BLUR_VERTICAL = 1u << 18;
 const uint STYLE_BLUR_FOLLOWS_FILL_ALPHA = 1u << 20;
@@ -178,6 +179,9 @@ float inherited_shape_mask(vec2 pixel) {
         sdf = sd_rounded_box(p, halfSize, radius);
     }
 
+    if ((pc.data.y & STYLE_SHAPE_CUTOUT) != 0u) {
+        return smoothstep(0.0, 1.0, sdf);
+    }
     return smoothstep(1.0, -1.0, sdf);
 }
 

@@ -949,6 +949,19 @@ inline float ui_slider_visual_normalized_value(const SliderInputComponent& slide
         (value - slider.minValue) / (slider.maxValue - slider.minValue) : 0.0f;
 }
 
+// Reserve the largest thumb footprint so hovering never moves an endpoint
+// outside the track, and pointer input uses the same travel as the visual.
+inline float ui_slider_thumb_inset(float trackWidth, float thumbWidth)
+{
+    return std::clamp(thumbWidth * 0.5f, 0.0f, std::max(trackWidth, 0.0f) * 0.5f);
+}
+
+inline float ui_slider_thumb_position(float trackWidth, float thumbWidth, float value)
+{
+    const float inset = ui_slider_thumb_inset(trackWidth, thumbWidth);
+    return inset + std::max(trackWidth - 2.0f * inset, 0.0f) * std::clamp(value, 0.0f, 1.0f);
+}
+
 inline bool ui_set_slider_value_from_point(Renderer2DScene& scene, entt::entity entity, glm::vec2 point)
 {
     if (entity == entt::null)
@@ -969,7 +982,13 @@ inline bool ui_set_slider_value_from_point(Renderer2DScene& scene, entt::entity 
         return false;
     }
 
-    float normalized = (point.x - rect.x) / rect.z;
+    const float inset = ui_slider_thumb_inset(rect.z,
+        std::max(slider->thumbSize.x, slider->hoveredThumbSize.x));
+    const float left = rect.x + inset;
+    const float right = rect.x + rect.z - inset;
+    const float travel = right - left;
+    float normalized = point.x <= left ? 0.0f : point.x >= right ? 1.0f :
+        (travel > 0.0f ? (point.x - left) / travel : 0.0f);
     normalized = glm::clamp(normalized, 0.0f, 1.0f);
 
     if (slider->normalisedStep > 0.0f)

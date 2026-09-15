@@ -155,5 +155,52 @@ int main()
             registry.all_of<HitRegion2DComponent>(dropdownControl.itemRows[1]),
         "every transparent dropdown option should own its complete row");
 
+    for (float dpi : { 1.0f, 1.5f, 1.75f, 3.0f, 5.0f })
+    {
+        Renderer2DScene sliderScene;
+        LayoutScale sliderScale {};
+        sliderScale.factor = glm::vec2(dpi);
+        sliderScale.logicalSize = { 600.0f, 200.0f };
+        UiBuilder sliderUi(sliderScene, sliderScale);
+        UiSliderOptions sliderOptions {};
+        sliderOptions.minValue = 0.0f;
+        sliderOptions.maxValue = 100.0f;
+        sliderOptions.thumbSize = { 24.0f, 18.0f };
+        sliderOptions.hoveredThumbScale = 1.3f;
+        sliderOptions.smoothScrubbing = false;
+        const auto sliderHandle = ui_create_slider(sliderUi, sliderUi.root(),
+            UiAlignment::eTopLeft, { 20.0f, 50.0f }, { 500.0f, 7.0f }, 2, 0u, sliderOptions);
+        auto& sliderRegistry = sliderScene.registry();
+        auto& slider = sliderRegistry.get<SliderInputComponent>(sliderHandle.root);
+        for (float expansion : { 0.0f, 0.5f, 1.0f })
+        {
+            slider.hoverExpansion = expansion;
+            for (float value : { 0.0f, 50.0f, 100.0f })
+            {
+                slider.value = value;
+                sliderScene.build_render_plan(0.0, 0u);
+                ui_update_slider_visual(sliderScene, fontAtlas, sliderHandle.root);
+                sliderScene.build_render_plan(0.0, 0u);
+                const auto track = ui_entity_framebuffer_rect(sliderRegistry, sliderHandle.root);
+                const auto thumb = ui_entity_framebuffer_rect(sliderRegistry, sliderHandle.knob);
+                passed &= expect(thumb.x >= track.x - 0.01f &&
+                    thumb.x + thumb.z <= track.x + track.z + 0.01f,
+                    "slider thumb must remain inside both track ends at every hover size and DPI");
+            }
+        }
+        const auto track = ui_entity_framebuffer_rect(sliderRegistry, sliderHandle.root);
+        const float inset = ui_slider_thumb_inset(track.z, slider.hoveredThumbSize.x);
+        ui_set_slider_value_from_point(sliderScene, sliderHandle.root,
+            { track.x + inset, track.y });
+        passed &= expect(slider.value == 0.0f, "left thumb endpoint must select the minimum");
+        ui_set_slider_value_from_point(sliderScene, sliderHandle.root,
+            { track.x + track.z - inset, track.y });
+        passed &= expect(slider.value == 100.0f, "right thumb endpoint must select the maximum");
+        ui_set_slider_value_from_point(sliderScene, sliderHandle.root,
+            { track.x + inset + (track.z - 2.0f * inset) * 0.25f, track.y });
+        passed &= expect(std::abs(slider.value - 25.0f) < 0.01f,
+            "slider hit mapping must use the thumb travel range");
+    }
+
     return passed ? 0 : 1;
 }

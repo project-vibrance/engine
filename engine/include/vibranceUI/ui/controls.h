@@ -3599,7 +3599,7 @@ inline UiControlHandle ui_create_slider(
         options.thumbSize :
         glm::vec2(options.thumbDiameter);
     const glm::vec2 thumbSize {
-        std::max(requestedThumbSize.x, trackHeight),
+        std::min(std::max(requestedThumbSize.x, trackHeight), std::max(size.x, 0.0f)),
         std::max(requestedThumbSize.y, trackHeight)
     };
     const float hoveredTrackHeight = std::max(options.hoveredTrackHeight, trackHeight);
@@ -3670,7 +3670,7 @@ inline UiControlHandle ui_create_slider(
         handle.root,
         { 0.0f, 0.5f },
         { 0.5f, 0.5f },
-        scaled_offset(size.x * initialNormalized, 0.0f, ui.scale()),
+        scaled_offset(ui_slider_thumb_position(size.x, hoveredThumbSize.x, initialNormalized), 0.0f, ui.scale()),
         scaled_size(thumbSize.x, thumbSize.y, ui.scale()));
         
     if (options.renderThumbShadow)

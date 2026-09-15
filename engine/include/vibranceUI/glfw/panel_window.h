@@ -101,6 +101,8 @@ struct GlfwPanelWindowTemplateOptions
     glm::ivec2 initialSize { 0, 0 };
     glm::ivec2 minSize { 340, 220 };
     glm::ivec2 maxSize { 1600, 1200 };
+    // UI magnification in native window units; also used for chrome hit tests.
+    float uiScale = 1.0f;
     float titleHeight = 58.0f;
     float resizeEdgeThickness = 12.0f;
     float cornerRadius = 28.0f;
@@ -152,6 +154,8 @@ public:
     // Keeps the current chrome while swapping only the content builder
     void set_content_builder(GlfwPanelWindowContentBuilder builder);
     void set_size(int width, int height);
+    void set_ui_scale(float scale);
+    bool has_pointer_capture() const;
     // Forces a full scene rebuild after external state has changed
     void rebuild();
 

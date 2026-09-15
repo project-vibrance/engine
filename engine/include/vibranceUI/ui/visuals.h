@@ -561,7 +561,7 @@ inline void ui_update_slider_visual(
         slider->trackHeight,
         slider->hoveredTrackHeight,
         expansion);
-    const glm::vec2 desiredThumbSize = glm::mix(
+    glm::vec2 desiredThumbSize = glm::mix(
         slider->thumbSize,
         slider->hoveredThumbSize,
         expansion);
@@ -666,16 +666,19 @@ inline void ui_update_slider_visual(
 
     if (slider->thumbEntity != entt::null && registry.valid(slider->thumbEntity))
     {
+        desiredThumbSize.x = std::min(desiredThumbSize.x, size.x);
+        const float thumbPosition = ui_slider_thumb_position(size.x,
+            std::max(slider->thumbSize.x, slider->hoveredThumbSize.x), normalized);
         resize_shape(slider->thumbEntity, desiredThumbSize);
         if (Layout2DComponent* thumbLayout = registry.try_get<Layout2DComponent>(slider->thumbEntity))
         {
-            thumbLayout->offset.x = size.x * normalized;
+            thumbLayout->offset.x = thumbPosition;
             thumbLayout->offset.y = 0.0f;
             scene.mark_dirty(slider->thumbEntity);
         }
         else if (Transform2DComponent* thumbTransform = registry.try_get<Transform2DComponent>(slider->thumbEntity))
         {
-            thumbTransform->position.x = minPos.x + size.x * normalized;
+            thumbTransform->position.x = minPos.x + thumbPosition;
             thumbTransform->position.y = minPos.y + size.y * 0.5f;
             scene.mark_dirty(slider->thumbEntity);
         }

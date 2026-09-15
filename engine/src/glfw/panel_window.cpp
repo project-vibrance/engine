@@ -43,7 +43,7 @@ namespace
         glm::vec2 logicalPanelSize { 1.0f };
     };
 
-    LayoutScale panel_window_layout_scale(GLFWwindow* window, int framebufferWidth, int framebufferHeight)
+    LayoutScale panel_window_layout_scale(GLFWwindow* window, int framebufferWidth, int framebufferHeight, float uiScale)
     {
         LayoutScale scale = {};
 
@@ -67,19 +67,22 @@ namespace
             static_cast<float>(std::max(framebufferWidth, 1)) / static_cast<float>(std::max(windowWidth, 1)),
             static_cast<float>(std::max(framebufferHeight, 1)) / static_cast<float>(std::max(windowHeight, 1))
         };
+        uiScale = std::isfinite(uiScale) ? std::clamp(uiScale, 0.1f, 5.0f) : 1.0f;
+        scale.factor *= uiScale;
         scale.contentScale = glfw_content_scale(window);
         scale.logicalSize = {
             static_cast<float>(std::max(windowWidth, 1)),
             static_cast<float>(std::max(windowHeight, 1))
         };
+        scale.logicalSize /= uiScale;
         return scale;
     }
 
-    PanelGeometry make_panel_geometry(GLFWwindow* window, int framebufferWidth, int framebufferHeight, glm::vec4 panelInset)
+    PanelGeometry make_panel_geometry(GLFWwindow* window, int framebufferWidth, int framebufferHeight, glm::vec4 panelInset, float uiScale)
     {
         // Convert logical panel insets into framebuffer-space geometry
         PanelGeometry geometry = {};
-        geometry.scale = panel_window_layout_scale(window, framebufferWidth, framebufferHeight);
+        geometry.scale = panel_window_layout_scale(window, framebufferWidth, framebufferHeight, uiScale);
         geometry.framebufferSize = {
             static_cast<float>(std::max(framebufferWidth, 1)),
             static_cast<float>(std::max(framebufferHeight, 1))
@@ -104,7 +107,7 @@ namespace
         return geometry;
     }
 
-    bool panel_geometry_for_window(GLFWwindow* window, glm::vec4 panelInset, PanelGeometry& geometry)
+    bool panel_geometry_for_window(GLFWwindow* window, glm::vec4 panelInset, float uiScale, PanelGeometry& geometry)
     {
         int width = 0;
         int height = 0;
@@ -113,7 +116,7 @@ namespace
             return false;
         }
 
-        geometry = make_panel_geometry(window, width, height, panelInset);
+        geometry = make_panel_geometry(window, width, height, panelInset, uiScale);
         return true;
     }
 
@@ -308,6 +311,21 @@ void GlfwPanelWindow::set_size(int width, int height)
     const int clampedWidth = clamp_window_dimension(width, options.minSize.x, options.maxSize.x);
     const int clampedHeight = clamp_window_dimension(height, options.minSize.y, options.maxSize.y);
     set_glfw_window_size(window, clampedWidth, clampedHeight);
+}
+
+void GlfwPanelWindow::set_ui_scale(float scale)
+{
+    scale = std::isfinite(scale) ? std::clamp(scale, 0.1f, 5.0f) : 1.0f;
+    if (options.uiScale != scale)
+    {
+        options.uiScale = scale;
+        build_scene();
+    }
+}
+
+bool GlfwPanelWindow::has_pointer_capture() const
+{
+    return glfw_ui_input_has_pointer_capture(inputState);
 }
 
 void GlfwPanelWindow::rebuild()
@@ -621,7 +639,7 @@ void GlfwPanelWindow::build_scene()
     scene.clear();
     inputState = {};
     trafficLightIconEntities.fill(entt::null);
-    const PanelGeometry panelGeometry = make_panel_geometry(window, renderWidth, renderHeight, options.panelInset);
+    const PanelGeometry panelGeometry = make_panel_geometry(window, renderWidth, renderHeight, options.panelInset, options.uiScale);
     UiBuilder ui(scene, panelGeometry.scale);
 
     ShapeStyleComponent panelStyle = options.panelStyle.value_or(options.theme.panel_style(1.25f, 1.0f));
@@ -1186,7 +1204,7 @@ uint32_t GlfwPanelWindow::resize_edges_at(glm::vec2 windowPoint) const
     }
 
     PanelGeometry panelGeometry = {};
-    if (!panel_geometry_for_window(window, options.panelInset, panelGeometry))
+    if (!panel_geometry_for_window(window, options.panelInset, options.uiScale, panelGeometry))
     {
         return eResizeNone;
     }
@@ -1237,7 +1255,7 @@ bool GlfwPanelWindow::title_hit_test(glm::vec2 windowPoint) const
     }
 
     PanelGeometry panelGeometry = {};
-    if (!panel_geometry_for_window(window, options.panelInset, panelGeometry))
+    if (!panel_geometry_for_window(window, options.panelInset, options.uiScale, panelGeometry))
     {
         return false;
     }
@@ -1337,7 +1355,7 @@ GlfwPanelWindow::TrafficLightKind GlfwPanelWindow::traffic_light_at(glm::vec2 wi
     }
 
     PanelGeometry panelGeometry = {};
-    if (!panel_geometry_for_window(window, options.panelInset, panelGeometry))
+    if (!panel_geometry_for_window(window, options.panelInset, options.uiScale, panelGeometry))
     {
         return TrafficLightKind::eNone;
     }
@@ -1368,7 +1386,7 @@ GlfwPanelWindow::TrafficLightKind GlfwPanelWindow::traffic_light_at(glm::vec2 wi
 glm::vec2 GlfwPanelWindow::traffic_light_center(TrafficLightKind kind) const
 {
     PanelGeometry panelGeometry = {};
-    if (!panel_geometry_for_window(window, options.panelInset, panelGeometry))
+    if (!panel_geometry_for_window(window, options.panelInset, options.uiScale, panelGeometry))
     {
         return glm::vec2(0.0f);
     }
