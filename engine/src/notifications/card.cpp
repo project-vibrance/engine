@@ -519,12 +519,12 @@ UiNotificationCardHandle ui_create_notification_card(
         UiSurfaceBlockOptions layerOptions = {};
         layerOptions.style = make_frosted_panel_style(
             layerIndex == 1u ?
-                "rgba(222, 239, 243, 0.72)" :
-                "rgba(218, 235, 240, 0.56)",
+                options.theme.surfaceElevated :
+                options.theme.surfaceMuted,
             layerIndex == 1u ?
-                "rgba(194, 218, 225, 0.64)" :
-                "rgba(190, 213, 220, 0.48)",
-            "rgba(255, 255, 255, 0.54)",
+                options.theme.surfaceMuted :
+                options.theme.surfaceMuted,
+            options.theme.outline,
             0.8f,
             1.0f,
             22.0f,
@@ -555,14 +555,14 @@ UiNotificationCardHandle ui_create_notification_card(
 
     UiSurfaceBlockOptions cardOptions = {};
     cardOptions.style = make_frosted_panel_style(
-        "rgba(229, 243, 246, 0.76)",
-        "rgba(204, 229, 235, 0.68)",
-        "rgba(255, 255, 255, 0.62)",
+        options.theme.surfaceElevated,
+        options.theme.surfaceMuted,
+        options.theme.outline,
+        0.8f,
         1.0f,
-        1.0f,
-        26.0f,
+        22.0f,
         2u,
-        0.92f);
+        0.94f);
     cardOptions.primitive = Renderer2DPrimitive::eSquircle;
     cardOptions.cornerRadius = options.metrics.cornerRadius;
     cardOptions.layer = 2;
@@ -589,16 +589,16 @@ UiNotificationCardHandle ui_create_notification_card(
         ui,
         handle.surface,
         ui_system_glass_options(
-            24.0f,
-            1.12f,
-            { 0.80f, 0.91f, 0.94f, 0.20f },
+            22.0f,
+            1.06f,
+            { 0.98f, 0.985f, 1.0f, 0.035f },
             SystemBackdropProvider::eEngine));
 
     ShadowComponent shadow = {};
-    shadow.set_color("#07131E52");
-    shadow.offset = scaled_offset(0.0f, 8.0f, ui.scale());
-    shadow.blurRadius = scaled_scalar(16.0f, ui.scale());
-    shadow.spread = scaled_scalar(1.0f, ui.scale());
+    shadow.set_color("rgba(0, 0, 0, 0.34)");
+    shadow.offset = scaled_offset(0.0f, 2.0f, ui.scale());
+    shadow.blurRadius = scaled_scalar(8.0f, ui.scale());
+    shadow.spread = 0.0f;
     shadow.outsideOnly = true;
     ui.registry().emplace_or_replace<ShadowComponent>(handle.surface, shadow);
 
@@ -645,7 +645,7 @@ UiNotificationCardHandle ui_create_notification_card(
         handle.surface,
         headerIsRtl ? UiAlignment::eTopRight : UiAlignment::eTopLeft,
         10.5f,
-        notification_text_style("#59737EFF", 520.0f),
+        notification_text_style(options.theme.textMuted, 520.0f),
         4,
         options.order,
         { headerIsRtl ? -70.0f : contentLeft, 10.0f });
@@ -657,7 +657,7 @@ UiNotificationCardHandle ui_create_notification_card(
         handle.surface,
         UiAlignment::eTopRight,
         10.5f,
-        notification_text_style("#647B84D8", 460.0f),
+        notification_text_style(options.theme.textMuted, 460.0f),
         4,
         options.order + 1u,
         { -12.0f, 10.0f });
@@ -682,7 +682,7 @@ UiNotificationCardHandle ui_create_notification_card(
         handle.surface,
         titleIsRtl ? UiAlignment::eTopRight : UiAlignment::eTopLeft,
         14.5f,
-        notification_text_style("#111B22FF", 680.0f),
+        notification_text_style(options.theme.text, 680.0f),
         4,
         options.order + 2u,
         { titleIsRtl ? -14.0f : contentLeft, 27.0f });
@@ -714,7 +714,7 @@ UiNotificationCardHandle ui_create_notification_card(
             handle.surface,
             lineIsRtl ? UiAlignment::eTopRight : UiAlignment::eTopLeft,
             11.5f,
-            notification_text_style("#1E2C34F2", 460.0f),
+            notification_text_style(options.theme.text, 460.0f),
             4,
             options.order + 3u + static_cast<std::uint32_t>(lineIndex),
             {
@@ -727,13 +727,13 @@ UiNotificationCardHandle ui_create_notification_card(
     dismissOptions.icon = options.dismissIcon;
     dismissOptions.cornerRadius = 12.0f;
     dismissOptions.iconSize = 12.0f;
-    dismissOptions.iconTint = "#4E6570FF";
-    dismissOptions.backgroundColor = "rgba(220, 237, 241, 0.94)";
+    dismissOptions.iconTint = options.theme.icon;
+    dismissOptions.backgroundColor = options.theme.surfaceElevated;
     dismissOptions.hoveredBackgroundColor =
-        "rgba(240, 249, 251, 0.98)";
+        options.theme.surface;
     dismissOptions.pressedBackgroundColor =
-        "rgba(196, 220, 226, 0.98)";
-    dismissOptions.outlineColor = "rgba(255, 255, 255, 0.64)";
+        options.theme.surfaceMuted;
+    dismissOptions.outlineColor = options.theme.outline;
     dismissOptions.outlineWidth = 0.9f;
     if (options.callbacks.dismiss)
     {
@@ -767,15 +767,15 @@ UiNotificationCardHandle ui_create_notification_card(
         UiButtonOptions buttonOptions = {};
         buttonOptions.cornerRadius = 13.0f;
         buttonOptions.fontSize = 11.5f;
-        buttonOptions.textColor = "#17232AFF";
-        buttonOptions.backgroundColor = "rgba(168, 199, 205, 0.46)";
+        buttonOptions.textColor = options.theme.text;
+        buttonOptions.backgroundColor = options.theme.surfaceMuted;
         buttonOptions.hoveredBackgroundColor =
-            "rgba(187, 216, 222, 0.70)";
+            options.theme.surfaceElevated;
         buttonOptions.pressedBackgroundColor =
-            "rgba(145, 184, 192, 0.72)";
-        buttonOptions.outlineColor = "rgba(255, 255, 255, 0.22)";
+            options.theme.surface;
+        buttonOptions.outlineColor = options.theme.outline;
         buttonOptions.hoveredOutlineColor =
-            "rgba(255, 255, 255, 0.48)";
+            options.theme.outlineStrong;
         buttonOptions.outlineWidth = 0.7f;
         if (options.callbacks.showOptions)
         {

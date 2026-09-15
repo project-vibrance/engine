@@ -64,6 +64,16 @@ int main()
         options);
     entt::registry& registry = scene.registry();
     bool passed = true;
+    for (const auto& palette : { ui_light_theme(), ui_dark_theme() })
+    {
+        auto themedOptions = options;
+        themedOptions.theme = palette;
+        const auto themedCard = ui_create_notification_card(ui, fontAtlas, localisation, themedOptions);
+        const auto& style = registry.get<ShapeStyleComponent>(themedCard.surface);
+        passed &= expect(style.color0 == renderer2d_hex_color(palette.surfaceElevated),
+            "notification surface should use the selected theme");
+        scene.destroy_entity_tree(themedCard.root);
+    }
     passed &= expect(
         wrapped[0] == "abcde" && wrapped[1] == "fghij" &&
             wrapped[2] == "kl...",

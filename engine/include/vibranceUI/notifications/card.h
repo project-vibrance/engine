@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vibranceUI/export.h>
+#include <vibranceUI/ui/styles.h>
 #include <vibranceUI/renderer/renderer2d_components.h>
 
 #include <glm/vec2.hpp>
@@ -49,6 +50,7 @@ struct UiNotificationCardCallbacks
 
 struct UiNotificationCardOptions
 {
+    UiTheme theme = ui_light_theme();
     entt::entity parent = entt::null;
     glm::vec2 offset {};
     UiNotificationCardContent content {};
