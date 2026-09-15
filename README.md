@@ -11,6 +11,10 @@ with `add_subdirectory()`.
 
 ## Build and install
 
+To build a new application, see [Create an application](docs/creating-applications.md).
+The installed SDK includes starter scripts, a minimal template and the
+`vibrance_add_application` CMake helper.
+
 Configure dependency locations in a local `.env.cmake` using
 `envWindowsExample.cmake` or `envUnixExample.cmake` as a starting point.
 
@@ -28,20 +32,23 @@ mingwBuild.bat Release arm64
 mingwBuild.bat Release all
 ```
 
-`all` runs both architecture builds from one command. The normal no-prefix
-layout preserves the existing x64 SDK at `install` and places ARM64 at
-`install/windows-arm64`; their build trees are `build/Release` and
-`build/windows-arm64/Release`. With an explicit base prefix, `all` installs to
-`<prefix>/windows-x64` and `<prefix>/windows-arm64`. A single-architecture
-command installs directly to the prefix it is given.
+`all` builds and installs both Windows architectures. Defaults are symmetric:
 
-x64 continues to use GCC MinGW. Windows ARM64 uses the UCRT LLVM-MinGW
-cross-toolchain and Ninja. Set `LLVM_MINGW_PATH` to its unpacked root in the
-environment or `.env.cmake`. Install the Visual Studio C++ ARM64 build tools as
-well if the Composition and WinRT companion DLLs should be included. GLFW and
-FreeType must be source trees or ARM64 installs; x64 libraries are deliberately
-not reused. Static FFmpeg video support is disabled for ARM64 unless
-`FFMPEG_ARM64_PATH` identifies an ARM64 SDK.
+| Architecture | Build directory | SDK directory |
+| --- | --- | --- |
+| x64 | `build/windows-x64/Release` | `install/windows-x64` |
+| ARM64 | `build/windows-arm64/Release` | `install/windows-arm64` |
+
+`Debug` uses the corresponding configuration directory. With an explicit base
+prefix, `all` installs to `<prefix>/windows-x64` and `<prefix>/windows-arm64`.
+A single-architecture command honours its explicit prefix exactly. A direct
+Windows CMake configure also defaults to `install/windows-<architecture>`.
+
+Windows builds use the configured MinGW toolchain and GNU Make. ARM64 requires
+UCRT LLVM-MinGW; set `LLVM_MINGW_PATH` in the environment or `.env.cmake`.
+Install MSVC ARM64 build tools for the Composition and WinRT companion DLLs.
+GLFW and FreeType must be source trees or ARM64 installs. FFmpeg requires a
+matching ARM64 SDK selected through `FFMPEG_ARM64_PATH`.
 
 On Unix-like systems:
 
@@ -384,9 +391,13 @@ behaviour, and dynamic-cache participation are also regular options.
 Renderer-specific implementation is separated by API:
 
 ```text
-engine/src/vibranceUI/
-  vulkan/   Vulkan renderer and external-image interop
-  directx/  D3D/Windows Composition presentation and backdrop effects
+engine/src/
+  renderer/vulkan/  Vulkan renderer
+  animation/        Animation importers
+  graphics/         Shared material routing
+  platform/win32/   Windows Composition, interop and native tray
+  platform/macos/   macOS native adapters
+  platform/portable/ Explicit unsupported-platform fallbacks
 ```
 
 `RenderBackend` identifies the API that draws the UI. `PresentationBackend`

@@ -11,7 +11,7 @@ if(CMAKE_GENERATOR STREQUAL "MinGW Makefiles" AND MINGW_PATH AND
 endif()
 
 set(VIBRANCE_MAJOR 0)
-set(VIBRANCE_MINOR 6)
+set(VIBRANCE_MINOR 7)
 set(VIBRANCE_PATCH 0)
 
 project(vibrance_engine VERSION ${VIBRANCE_MAJOR}.${VIBRANCE_MINOR}.${VIBRANCE_PATCH} LANGUAGES C CXX)
@@ -64,10 +64,18 @@ else()
 endif()
 message(STATUS "Vibrance target platform: ${VIBRANCE_TARGET_PLATFORM}")
 
+if(WIN32 AND CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/install/${VIBRANCE_TARGET_PLATFORM}"
+        CACHE PATH "Engine SDK install prefix" FORCE)
+endif()
+
 include(CTest)
 
 if(APPLE)
     enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    set(CMAKE_OBJCXX_EXTENSIONS OFF)
 endif()
 
 include(GNUInstallDirs)

@@ -177,7 +177,6 @@ private:
 };
 
 VIBRANCE_GLFW_API GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo);
-VIBRANCE_GLFW_API GLFWwindow* build_glfw_window(int width, int height, const char* name, bool transparent);
 VIBRANCE_GLFW_API void destroy_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void terminate_glfw();
 VIBRANCE_GLFW_API std::vector<GlfwMonitorInfo> glfw_connected_monitors();

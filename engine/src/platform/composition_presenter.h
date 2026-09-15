@@ -13,7 +13,7 @@
 #include <memory>
 #include <vector>
 
-class WindowsCompositionPresenter
+class CompositionPresenter
 {
 public:
     enum class PresentResult : std::uint8_t
@@ -23,11 +23,11 @@ public:
         eDeferred
     };
 
-    WindowsCompositionPresenter();
-    ~WindowsCompositionPresenter();
+    CompositionPresenter();
+    ~CompositionPresenter();
 
-    WindowsCompositionPresenter(const WindowsCompositionPresenter&) = delete;
-    WindowsCompositionPresenter& operator=(const WindowsCompositionPresenter&) = delete;
+    CompositionPresenter(const CompositionPresenter&) = delete;
+    CompositionPresenter& operator=(const CompositionPresenter&) = delete;
 
     bool initialise(
         void* nativeWindow,

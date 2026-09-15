@@ -2,12 +2,16 @@
 #include <vibranceUI/core/engine_manifest.h>
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/core/file.h>
+#include <vibranceUI/core/process.h>
+#include <vibranceUI/platform/native_tray.h>
+#include <vibranceUI/display/panel_scaling.h>
 #include <vibranceUI/core/single_instance.h>
 #include <vibranceUI/core/secure_credential.h>
 #include <vibranceUI/audio/audio.h>
 #include <vibranceUI/audio/loopback_capture.h>
 #include <vibranceUI/audio/spectrum.h>
 #include <vibranceUI/display/display.h>
+#include <vibranceUI/display/foreground.h>
 #include <vibranceUI/glfw/ui_window.h>
 #include <vibranceUI/glfw/ui_surface.h>
 #include <vibranceUI/localisation/localisation.h>

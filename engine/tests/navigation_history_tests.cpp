@@ -56,7 +56,7 @@ int main()
             backHistory->cursor == 0u,
         "a history-enabled icon button should own its initial page");
     passed &= expect(
-        registry.try_get<UiNavClusterHistoryComponent>(backButton.root) != nullptr,
+        registry.try_get<UiNavigationHistoryComponent>(backButton.root) != nullptr,
         "the nav-cluster component compatibility name should resolve the shared history");
     passed &= expect(
         !registry.get<ButtonInputComponent>(backButton.root).enabled,

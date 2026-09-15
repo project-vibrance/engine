@@ -799,9 +799,6 @@ struct UiNavigationHistoryComponent
     std::function<void(std::size_t, const PointerInputEvent&)> onNavigate;
 };
 
-// Compatibility name retained for applications that inspect nav-cluster state.
-using UiNavClusterHistoryComponent = UiNavigationHistoryComponent;
-
 struct UiSidebarNavItemHandle
 {
     // Exposes both glyph and media slots because a nav item may use either style
@@ -1841,41 +1838,6 @@ inline bool ui_navigation_push_history(
         history->onNavigate(page, event);
     }
     return true;
-}
-
-// Nav-cluster names remain source-compatible while the implementation is shared
-// with singular history-enabled icon buttons.
-inline void ui_update_nav_cluster_history_visual(Renderer2DScene& scene, entt::entity entity)
-{
-    ui_update_navigation_history_visual(scene, entity);
-}
-
-inline bool ui_nav_cluster_navigate_to_history(
-    Renderer2DScene& scene,
-    entt::entity entity,
-    std::size_t cursor,
-    const PointerInputEvent& event)
-{
-    return ui_navigation_navigate_to_history(scene, entity, cursor, event);
-}
-
-inline bool ui_nav_cluster_go_back(Renderer2DScene& scene, entt::entity entity, const PointerInputEvent& event)
-{
-    return ui_navigation_go_back(scene, entity, event);
-}
-
-inline bool ui_nav_cluster_go_forward(Renderer2DScene& scene, entt::entity entity, const PointerInputEvent& event)
-{
-    return ui_navigation_go_forward(scene, entity, event);
-}
-
-inline bool ui_nav_cluster_push_history(
-    Renderer2DScene& scene,
-    entt::entity entity,
-    std::size_t page,
-    const PointerInputEvent& event)
-{
-    return ui_navigation_push_history(scene, entity, page, event);
 }
 
 inline float ui_control_ease_out(float t)

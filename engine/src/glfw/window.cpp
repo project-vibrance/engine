@@ -340,16 +340,6 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     return window;
 }
 
-GLFWwindow* build_glfw_window(int width, int height, const char* name, bool transparent)
-{
-    GlfwWindowCreateInfo createInfo = {};
-    createInfo.width = width;
-    createInfo.height = height;
-    createInfo.name = name;
-    createInfo.transparentFramebuffer = transparent;
-    return build_glfw_window(createInfo);
-}
-
 GlfwWindowHost::GlfwWindowHost(GlfwWindowHostOptions options) :
     hostOptions(std::move(options))
 {

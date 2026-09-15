@@ -1,4 +1,4 @@
-#include "../src/vibranceUI/animation/lottie.h"
+#include "../src/animation/lottie.h"
 
 #include <cassert>
 #include <string_view>

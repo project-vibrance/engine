@@ -4,3 +4,5 @@
 /install-*/
 .env.cmake
 .DS_Store
+
+/dist/

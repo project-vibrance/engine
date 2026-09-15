@@ -29,7 +29,7 @@ if /I "%TARGET_ARCH%"=="all" (
         call "%~f0" "%BUILD_TYPE%" "%INSTALL_ARG%\windows-arm64" arm64
         if errorlevel 1 goto :fail
     ) else (
-        call "%~f0" "%BUILD_TYPE%" "%~dp0install" x64
+        call "%~f0" "%BUILD_TYPE%" "%~dp0install\windows-x64" x64
         if errorlevel 1 goto :fail
         call "%~f0" "%BUILD_TYPE%" "%~dp0install\windows-arm64" arm64
         if errorlevel 1 goto :fail
@@ -46,8 +46,7 @@ if /I not "%TARGET_ARCH%"=="x64" if /I not "%TARGET_ARCH%"=="arm64" (
 )
 
 set "INSTALL_DIR=%INSTALL_ARG%"
-if not defined INSTALL_DIR if /I "%TARGET_ARCH%"=="arm64" set "INSTALL_DIR=%~dp0install\windows-arm64"
-if not defined INSTALL_DIR set "INSTALL_DIR=%~dp0install"
+if not defined INSTALL_DIR set "INSTALL_DIR=%~dp0install\windows-%TARGET_ARCH%"
 
 if not exist "build" mkdir "build"
 > "build\.active_build" echo %TARGET_ARCH%\%BUILD_TYPE%
@@ -55,11 +54,7 @@ if not exist "build" mkdir "build"
 echo Building vibrance-engine for Windows %TARGET_ARCH% with configuration: %BUILD_TYPE%
 echo Installing vibrance-engine SDK to: %INSTALL_DIR%
 
-if /I "%TARGET_ARCH%"=="arm64" (
-    set "TARGET_DIR=build\windows-arm64\%BUILD_TYPE%"
-) else (
-    set "TARGET_DIR=build\%BUILD_TYPE%"
-)
+set "TARGET_DIR=build\windows-%TARGET_ARCH%\%BUILD_TYPE%"
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 
 echo Configuring engine CMake for %BUILD_TYPE%...

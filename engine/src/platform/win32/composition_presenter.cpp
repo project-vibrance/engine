@@ -1,4 +1,5 @@
-#include "composition_presenter.h"
+#if defined(_WIN32)
+#include "../composition_presenter.h"
 #include "composition_bridge_abi.h"
 
 #include <vibranceUI/core/logger.h>
@@ -44,7 +45,7 @@ std::uint32_t memory_type_index(
 }
 }
 
-struct WindowsCompositionPresenter::Impl
+struct CompositionPresenter::Impl
 {
     struct SharedImage
     {
@@ -247,14 +248,14 @@ struct WindowsCompositionPresenter::Impl
 #endif
 };
 
-WindowsCompositionPresenter::WindowsCompositionPresenter() :
+CompositionPresenter::CompositionPresenter() :
     impl(std::make_unique<Impl>())
 {
 }
 
-WindowsCompositionPresenter::~WindowsCompositionPresenter() = default;
+CompositionPresenter::~CompositionPresenter() = default;
 
-bool WindowsCompositionPresenter::initialise(
+bool CompositionPresenter::initialise(
     void* nativeWindow,
     vk::PhysicalDevice physicalDevice,
     vk::Device logicalDevice,
@@ -420,7 +421,7 @@ bool WindowsCompositionPresenter::initialise(
 #endif
 }
 
-void WindowsCompositionPresenter::shutdown(vk::Device logicalDevice)
+void CompositionPresenter::shutdown(vk::Device logicalDevice)
 {
     if (!impl)
     {
@@ -454,22 +455,22 @@ void WindowsCompositionPresenter::shutdown(vk::Device logicalDevice)
 #endif
 }
 
-bool WindowsCompositionPresenter::available() const
+bool CompositionPresenter::available() const
 {
     return impl && impl->ready;
 }
 
-bool WindowsCompositionPresenter::gpu_interop() const
+bool CompositionPresenter::gpu_interop() const
 {
     return available() && impl->gpuInterop;
 }
 
-std::uint32_t WindowsCompositionPresenter::buffer_count() const
+std::uint32_t CompositionPresenter::buffer_count() const
 {
     return impl ? static_cast<std::uint32_t>(impl->images.size()) : 0u;
 }
 
-vk::Image WindowsCompositionPresenter::image(std::uint32_t index) const
+vk::Image CompositionPresenter::image(std::uint32_t index) const
 {
     if (!available() || index >= impl->images.size())
     {
@@ -478,7 +479,7 @@ vk::Image WindowsCompositionPresenter::image(std::uint32_t index) const
     return impl->images[index].image;
 }
 
-vk::DeviceMemory WindowsCompositionPresenter::memory(
+vk::DeviceMemory CompositionPresenter::memory(
     std::uint32_t index) const
 {
     if (!available() || index >= impl->images.size())
@@ -488,13 +489,13 @@ vk::DeviceMemory WindowsCompositionPresenter::memory(
     return impl->images[index].memory;
 }
 
-bool WindowsCompositionPresenter::first_use(std::uint32_t index) const
+bool CompositionPresenter::first_use(std::uint32_t index) const
 {
     return available() && index < impl->images.size() &&
         impl->images[index].firstUse;
 }
 
-void WindowsCompositionPresenter::mark_used(std::uint32_t index)
+void CompositionPresenter::mark_used(std::uint32_t index)
 {
     if (available() && index < impl->images.size())
     {
@@ -502,7 +503,7 @@ void WindowsCompositionPresenter::mark_used(std::uint32_t index)
     }
 }
 
-bool WindowsCompositionPresenter::acquire(std::uint32_t index)
+bool CompositionPresenter::acquire(std::uint32_t index)
 {
 #if defined(_WIN32)
     return available() && index < impl->images.size() &&
@@ -513,7 +514,7 @@ bool WindowsCompositionPresenter::acquire(std::uint32_t index)
 #endif
 }
 
-WindowsCompositionPresenter::PresentResult WindowsCompositionPresenter::present(
+CompositionPresenter::PresentResult CompositionPresenter::present(
     std::uint32_t index,
     bool synchronize,
     glm::uvec4 contentRect,
@@ -566,7 +567,7 @@ WindowsCompositionPresenter::PresentResult WindowsCompositionPresenter::present(
 #endif
 }
 
-bool WindowsCompositionPresenter::upload(
+bool CompositionPresenter::upload(
     std::uint32_t index,
     const void* rgba,
     std::uint32_t width,
@@ -605,7 +606,7 @@ bool WindowsCompositionPresenter::upload(
 #endif
 }
 
-bool WindowsCompositionPresenter::set_regions(
+bool CompositionPresenter::set_regions(
     const std::vector<SystemBackdropRegion>& regions)
 {
 #if !defined(_WIN32)
@@ -676,3 +677,5 @@ bool WindowsCompositionPresenter::set_regions(
     return false;
 #endif
 }
+
+#endif // defined(_WIN32)

@@ -2,7 +2,7 @@
 #include <vibranceUI/renderer/descriptors.h>
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
-#include "../animation/lottie.h"
+#include "../../animation/lottie.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>

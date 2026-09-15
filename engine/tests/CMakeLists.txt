@@ -1,14 +1,20 @@
+if(WIN32)
+    # Refresh the DLL even when the import library did not change and tests do
+    # not relink. All engine tests share one runtime directory.
+    add_custom_target(vibrance_engine_test_runtime ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:vibrance::engine>
+            $<TARGET_FILE_DIR:vibrance_countdown_timer_tests>
+        VERBATIM)
+    add_dependencies(vibrance_engine_test_runtime vibrance_engine)
+endif()
+
 function(vibrance_add_engine_test test_name source_file)
     add_executable(${test_name} ${source_file})
     target_link_libraries(${test_name} PRIVATE vibrance::engine)
 
     if(WIN32)
-        add_custom_command(
-            TARGET ${test_name}
-            POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:vibrance::engine>
-                $<TARGET_FILE_DIR:${test_name}>)
+        add_dependencies(${test_name} vibrance_engine_test_runtime)
     endif()
 
     add_test(NAME ${test_name} COMMAND ${test_name})
@@ -59,7 +65,7 @@ vibrance_add_engine_test(
 add_executable(
     vibrance_lottie_tests
     lottie_tests.cpp
-    ../src/vibranceUI/animation/lottie.cpp)
+    ../src/animation/lottie.cpp)
 target_link_libraries(
     vibrance_lottie_tests
     PRIVATE simdjson::simdjson)
@@ -147,3 +153,20 @@ vibrance_add_engine_test(
 vibrance_add_engine_test(
     vibrance_audio_loopback_capture_tests
     audio_loopback_capture_tests.cpp)
+
+vibrance_add_engine_test(vibrance_file_tests file_tests.cpp)
+if(WIN32)
+    vibrance_add_engine_test(vibrance_native_tray_tests native_tray_tests.cpp)
+    target_link_libraries(vibrance_native_tray_tests PRIVATE user32)
+endif()
+
+add_executable(vibrance_native_tray_portable_tests
+    native_tray_portable_tests.cpp
+    ../src/platform/portable/native_tray.cpp
+    ../src/platform/portable/composition_presenter.cpp)
+target_include_directories(vibrance_native_tray_portable_tests PRIVATE
+    ../include "${GLM_INCLUDE_DIR}" "${Vulkan_INCLUDE_DIRS}")
+target_compile_definitions(vibrance_native_tray_portable_tests PRIVATE
+    VIBRANCE_ENGINE_EXPORTS=1 VIBRANCE_FORCE_PORTABLE_NATIVE_TRAY=1
+    VIBRANCE_FORCE_PORTABLE_COMPOSITION=1)
+add_test(NAME vibrance_native_tray_portable_tests COMMAND vibrance_native_tray_portable_tests)

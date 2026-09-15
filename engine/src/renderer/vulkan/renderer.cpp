@@ -9,8 +9,10 @@
 #include <vibranceUI/renderer/swapchain.h>
 #include <vibranceUI/factories/mesh_factory.h>
 #include <vibranceUI/ui/text.h>
-#include "../directx/composition_presenter.h"
-#include "../directx/composition_bridge_abi.h"
+#include "../../platform/composition_presenter.h"
+#if defined(_WIN32)
+#include "../../platform/win32/composition_bridge_abi.h"
+#endif
 #include <sstream>
 #include <string_view>
 #include <deque>
@@ -897,7 +899,7 @@ private:
 	Swapchain swapchain;
 	bool rendererReady = false;
 	bool transparentFramebuffer = false;
-	WindowsCompositionPresenter compositionPresenter;
+	CompositionPresenter compositionPresenter;
 	bool compositionGpuInterop = false;
 	vk::Buffer compositionReadbackBuffer {};
 	VmaAllocation compositionReadbackAllocation = nullptr;
@@ -2037,11 +2039,11 @@ void Engine::Impl::publish_completed_composition_frames()
 			false,
 			frames[pending].compositionContentRect,
 			frames[pending].compositionDamageRect);
-		if (presentResult == WindowsCompositionPresenter::PresentResult::eDeferred)
+		if (presentResult == CompositionPresenter::PresentResult::eDeferred)
 		{
 			continue;
 		}
-		if (presentResult == WindowsCompositionPresenter::PresentResult::eFailed)
+		if (presentResult == CompositionPresenter::PresentResult::eFailed)
 		{
 			logger->warning(
 				"Windows Composition could not present a completed Vulkan frame.");
@@ -2620,8 +2622,8 @@ void Engine::Impl::draw()
 		{
 			const bool uploaded = compositionGpuPath ||
 				upload_software_composition(compositionBufferIndex);
-			WindowsCompositionPresenter::PresentResult presentResult =
-				WindowsCompositionPresenter::PresentResult::eFailed;
+			CompositionPresenter::PresentResult presentResult =
+				CompositionPresenter::PresentResult::eFailed;
 			if (uploaded)
 			{
 				apply_system_backdrop_regions(
@@ -2633,13 +2635,13 @@ void Engine::Impl::draw()
 					frame.compositionDamageRect);
 			}
 			if (presentResult ==
-				WindowsCompositionPresenter::PresentResult::eFailed)
+				CompositionPresenter::PresentResult::eFailed)
 			{
 				logger->warning("Windows Composition could not present the Vulkan frame.");
 			}
 			if (frameIndex < compositionFramePending.size() &&
 				presentResult !=
-					WindowsCompositionPresenter::PresentResult::eDeferred)
+					CompositionPresenter::PresentResult::eDeferred)
 			{
 				compositionFramePending[frameIndex] = false;
 			}

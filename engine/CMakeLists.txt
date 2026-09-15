@@ -1,13 +1,16 @@
 set(ENGINE_SOURCES
+    src/animation/lottie.cpp
     src/audio/audio.cpp
     src/audio/loopback_capture.cpp
     src/audio/spectrum.cpp
     src/core/camera.cpp
     src/core/file.cpp
     src/core/logger.cpp
+    src/core/process.cpp
     src/core/secure_credential.cpp
     src/core/single_instance.cpp
     src/core/vma_usage.cpp
+    src/display/foreground.cpp
     src/display/placement.cpp
     src/display/preferences.cpp
     src/factories/mesh_factory.cpp
@@ -15,6 +18,7 @@ set(ENGINE_SOURCES
     src/glfw/ui_surface.cpp
     src/glfw/ui_window.cpp
     src/glfw/window.cpp
+    src/graphics/backdrop.cpp
     src/localisation/localisation.cpp
     src/media/artwork.cpp
     src/media/artwork_view.cpp
@@ -24,31 +28,28 @@ set(ENGINE_SOURCES
     src/notifications/provider.cpp
     src/notifications/stack_layout.cpp
     src/platform/native_dialog.cpp
+    src/renderer/vulkan/buffer.cpp
+    src/renderer/vulkan/command.cpp
+    src/renderer/vulkan/descriptors.cpp
+    src/renderer/vulkan/device.cpp
+    src/renderer/vulkan/font_atlas.cpp
+    src/renderer/vulkan/frame.cpp
+    src/renderer/vulkan/image.cpp
+    src/renderer/vulkan/instance.cpp
+    src/renderer/vulkan/media2d.cpp
+    src/renderer/vulkan/renderer.cpp
+    src/renderer/vulkan/renderer2d.cpp
+    src/renderer/vulkan/renderer3d.cpp
+    src/renderer/vulkan/shader.cpp
+    src/renderer/vulkan/swapchain.cpp
+    src/renderer/vulkan/synchronisation.cpp
+    src/renderer/vulkan/text_direction.cpp
     src/time/countdown_timer.cpp
     src/ui/animated_text_view.cpp
     src/ui/context_menu.cpp
     src/ui/dialog_controls.cpp
     src/ui/resource_loading.cpp
     src/ui/theme.cpp
-    src/vibranceUI/animation/lottie.cpp
-    src/vibranceUI/backdrop.cpp
-    src/vibranceUI/directx/composition_presenter.cpp
-    src/vibranceUI/vulkan/buffer.cpp
-    src/vibranceUI/vulkan/command.cpp
-    src/vibranceUI/vulkan/descriptors.cpp
-    src/vibranceUI/vulkan/device.cpp
-    src/vibranceUI/vulkan/font_atlas.cpp
-    src/vibranceUI/vulkan/frame.cpp
-    src/vibranceUI/vulkan/image.cpp
-    src/vibranceUI/vulkan/instance.cpp
-    src/vibranceUI/vulkan/media2d.cpp
-    src/vibranceUI/vulkan/renderer.cpp
-    src/vibranceUI/vulkan/renderer2d.cpp
-    src/vibranceUI/vulkan/renderer3d.cpp
-    src/vibranceUI/vulkan/shader.cpp
-    src/vibranceUI/vulkan/swapchain.cpp
-    src/vibranceUI/vulkan/synchronisation.cpp
-    src/vibranceUI/vulkan/text_direction.cpp
 )
 # C++/WinRT stays in its MSVC companion DLL and must never enter the MinGW
 # engine target. The MinGW side talks to it through a versioned POD C ABI.
@@ -67,8 +68,16 @@ configure_file(
     @ONLY)
 list(APPEND ENGINE_SOURCES "${ENGINE_MANIFEST_CPP}")
 
-if(APPLE)
-    list(APPEND ENGINE_SOURCES src/glfw/window_macos.mm)
+if(WIN32)
+    list(APPEND ENGINE_SOURCES src/platform/win32/native_tray.cpp
+        src/platform/win32/composition_presenter.cpp)
+elseif(APPLE)
+    list(APPEND ENGINE_SOURCES src/glfw/window_macos.mm src/platform/macos/native_tray.mm)
+else()
+    list(APPEND ENGINE_SOURCES src/platform/portable/native_tray.cpp)
+endif()
+if(NOT WIN32)
+    list(APPEND ENGINE_SOURCES src/platform/portable/composition_presenter.cpp)
 endif()
 
 # Compile shader sources once, then turn the SPIR-V binaries into a generated
@@ -221,13 +230,13 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
         set(VIBRANCE_COMPOSITION_OBJECT_DIRECTORY
             "${VIBRANCE_COMPOSITION_DIRECTORY}/obj")
         set(VIBRANCE_COMPOSITION_SOURCE
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx/composition_bridge.cpp")
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_bridge.cpp")
         set(VIBRANCE_COMPOSITION_ABI_HEADER
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx/composition_bridge_abi.h")
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_bridge_abi.h")
         set(VIBRANCE_COMPOSITION_PRIVATE_HEADER
-            "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx/private_composition_19041.h")
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/private_composition_19041.h")
         set(VIBRANCE_COMPOSITION_BUILD_SCRIPT
-            "${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/build_composition_bridge.bat")
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_composition_bridge.bat")
         add_custom_command(
             OUTPUT "${VIBRANCE_COMPOSITION_DLL}"
             COMMAND
@@ -235,7 +244,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_VCVARSALL}"
                 "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
                 "${VIBRANCE_COMPOSITION_SOURCE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/src/vibranceUI/directx"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32"
                 "${VIBRANCE_COMPOSITION_DLL}"
                 "${VIBRANCE_COMPOSITION_OBJECT_DIRECTORY}"
                 "${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}"
@@ -321,7 +330,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
         set(VIBRANCE_WIN32_INTEROP_ABI_HEADER
             "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/platform/win32_interop_abi.h")
         set(VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT
-            "${CMAKE_CURRENT_SOURCE_DIR}/platform/win32/build_interop_bridge.bat")
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_interop_bridge.bat")
 
         add_custom_command(
             OUTPUT "${VIBRANCE_WIN32_INTEROP_DLL}"
@@ -564,3 +573,12 @@ install(FILES
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
+
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VibranceApplication.cmake"
+    DESTINATION "${CONFIG_INSTALL_DIR}")
+install(PROGRAMS
+    "${PROJECT_SOURCE_DIR}/scripts/create-vibrance-app.sh"
+    "${PROJECT_SOURCE_DIR}/scripts/create-vibrance-app.bat"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/tools")
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/scripts/templates"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/tools")

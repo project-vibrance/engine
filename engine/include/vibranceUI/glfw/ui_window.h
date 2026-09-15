@@ -8,6 +8,8 @@
 #include <glm/glm.hpp>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 struct UiWindowContext
@@ -19,6 +21,25 @@ struct UiWindowContext
     entt::entity root = entt::null;
     glm::vec2 windowSize { 0.0f };
     glm::vec2 contentSize { 0.0f };
+
+    // Create and place content in one expression. The placement is a temporary
+    // authoring handle; retain entity() if later callbacks need the object.
+    UiPlacement block(std::string_view colour, float cornerRadius = 0.0f)
+    {
+        return ui.place(ui.block(colour, cornerRadius)).inside(root);
+    }
+
+    UiPlacement text(std::string value, float size = 16.0f,
+        std::string_view colour = "#FFFFFFFF")
+    {
+        return ui.place(ui.text(std::move(value), fontAtlas, size, colour)).inside(root);
+    }
+
+    UiPlacement media(Media2DHandle handle, glm::vec2 size,
+        Media2DFit fit = Media2DFit::eContain)
+    {
+        return ui.place(ui.media(handle, size, fit)).inside(root).size(size);
+    }
 };
 
 using UiWindowContentBuilder = std::function<void(UiWindowContext&)>;
