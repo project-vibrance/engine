@@ -538,7 +538,10 @@ install(FILES "${ENGINE_MANIFEST_JSON}"
 
 # Copy every dependency header tree referenced by the public C++ API. All
 # compiled dependency code remains private inside vibrance_engine.
-install(DIRECTORY "${GLM_INCLUDE_DIR}/glm"
+# Homebrew exposes glm through a relative symlink. Copy the real directory so
+# the installed SDK does not retain a broken link into Homebrew's Cellar.
+file(REAL_PATH "${GLM_INCLUDE_DIR}/glm" _vibrance_glm_headers)
+install(DIRECTORY "${_vibrance_glm_headers}"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(DIRECTORY "${ENTT_INCLUDE_DIR}/entt"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
