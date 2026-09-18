@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 include(./.env.cmake OPTIONAL RESULT_VARIABLE LOCAL_ENV)
 message(STATUS "Local .env.cmake: ${LOCAL_ENV}")
 
-# The compiler must be selected before project() initializes the toolchain.
+# The compiler must be selected before project() initialises the toolchain.
 if(CMAKE_GENERATOR STREQUAL "MinGW Makefiles" AND MINGW_PATH AND
    NOT CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_C_COMPILER "${MINGW_PATH}/bin/gcc.exe" CACHE FILEPATH "" FORCE)
@@ -15,6 +15,26 @@ set(VIBRANCE_MINOR 7)
 set(VIBRANCE_PATCH 0)
 
 project(vibrance_engine VERSION ${VIBRANCE_MAJOR}.${VIBRANCE_MINOR}.${VIBRANCE_PATCH} LANGUAGES C CXX)
+
+if(APPLE)
+    set(_vibrance_macos_arch "${CMAKE_OSX_ARCHITECTURES}")
+    if(NOT _vibrance_macos_arch)
+        set(_vibrance_macos_arch "${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+    if(NOT _vibrance_macos_arch MATCHES "^(arm64|x86_64)$")
+        message(FATAL_ERROR "Build one macOS architecture at a time: arm64 or x86_64. Use unixBuild.sh with 'all' for both SDKs.")
+    endif()
+    if(_vibrance_macos_arch STREQUAL "arm64")
+        set(_vibrance_macos_suffix SILICON)
+    else()
+        set(_vibrance_macos_suffix INTEL)
+    endif()
+    foreach(_dependency GLFW FREETYPE FFMPEG)
+        if(${_dependency}_${_vibrance_macos_suffix}_PATH)
+            set(${_dependency}_PATH "${${_dependency}_${_vibrance_macos_suffix}_PATH}")
+        endif()
+    endforeach()
+endif()
 
 set(VIBRANCE_WINDOWS_ARCHITECTURE "auto" CACHE STRING
     "Windows target architecture: auto, x64, or arm64")
@@ -58,6 +78,8 @@ if(WIN32)
     set(VIBRANCE_WINDOWS_ARCHITECTURE "${_vibrance_requested_arch}" CACHE STRING
         "Windows target architecture: auto, x64, or arm64" FORCE)
     set(VIBRANCE_TARGET_PLATFORM "windows-${VIBRANCE_WINDOWS_ARCHITECTURE}")
+elseif(APPLE)
+    set(VIBRANCE_TARGET_PLATFORM "macos-${_vibrance_macos_arch}")
 else()
     string(TOLOWER "${CMAKE_SYSTEM_NAME}" _vibrance_system_name)
     set(VIBRANCE_TARGET_PLATFORM "${_vibrance_system_name}-${CMAKE_SYSTEM_PROCESSOR}")
@@ -72,7 +94,8 @@ endif()
 include(CTest)
 
 if(APPLE)
-    enable_language(OBJCXX)
+    # GLFW's .m files require Objective-C, while engine adapters use Objective-C++.
+    enable_language(OBJC OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
     set(CMAKE_OBJCXX_EXTENSIONS OFF)
@@ -213,10 +236,10 @@ endif()
 
 # FreeType is private to the DLL. Prefer a package, then accept a local static
 # build/source tree for the development setup used by this repository.
-if(WIN32 AND VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64" AND
+if((APPLE OR (WIN32 AND VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64")) AND
    DEFINED FREETYPE_PATH AND EXISTS "${FREETYPE_PATH}/CMakeLists.txt")
-    # Never let an x64 build directory under a shared source checkout satisfy
-    # an ARM64 configure. Build the source in this architecture's own tree.
+    # Build in this architecture's own tree rather than reusing a native archive
+    # under the shared source checkout.
     set(FT_DISABLE_ZLIB TRUE CACHE BOOL "" FORCE)
     set(FT_DISABLE_BZIP2 TRUE CACHE BOOL "" FORCE)
     set(FT_DISABLE_PNG TRUE CACHE BOOL "" FORCE)
@@ -359,6 +382,13 @@ if(VIBRANCE_ENABLE_FFMPEG AND DEFINED FFMPEG_PATH)
             # libavformat's built-in network protocols use Winsock even when
             # every optional external dependency is disabled.
             list(APPEND FFMPEG_LIBRARIES bcrypt ws2_32)
+        elseif(APPLE)
+            # The static macOS SDK's libavutil uses CoreVideo/CoreMedia even
+            # with external codec autodetection disabled.
+            list(APPEND FFMPEG_LIBRARIES
+                "-framework CoreFoundation"
+                "-framework CoreVideo"
+                "-framework CoreMedia")
         endif()
         if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
             list(APPEND FFMPEG_LIBRARIES m atomic)
@@ -481,7 +511,7 @@ find_program(GLSLC_EXECUTABLE
 
 if(DEFINED GLFW_PATH)
     set(GLFW_INCLUDE_DIRS "${GLFW_PATH}/include")
-    if(WIN32 AND VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64" AND
+    if((APPLE OR (WIN32 AND VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64")) AND
        EXISTS "${GLFW_PATH}/CMakeLists.txt")
         set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
         set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -496,7 +526,7 @@ if(DEFINED GLFW_PATH)
         set(_GLFW_LIBRARY_HINTS "${GLFW_PATH}/lib-vc2022" "${GLFW_PATH}/build/src")
         find_library(GLFW_LIBRARIES NAMES glfw3 glfw HINTS ${_GLFW_LIBRARY_HINTS} REQUIRED)
     else()
-        set(_GLFW_LIBRARY_HINTS "${GLFW_PATH}/build/src")
+        set(_GLFW_LIBRARY_HINTS "${GLFW_PATH}/lib" "${GLFW_PATH}/build/src")
         find_library(GLFW_LIBRARIES NAMES glfw3 glfw HINTS ${_GLFW_LIBRARY_HINTS} REQUIRED)
     endif()
 else()

@@ -52,9 +52,24 @@ matching ARM64 SDK selected through `FFMPEG_ARM64_PATH`.
 
 On Unix-like systems:
 
+For macOS prerequisites, dependency paths, and optional audio/video setup, follow
+the [macOS development setup guide](unix_env_setup.md) and
+[Unix environment example](envUnixExample.cmake).
+
 ```sh
-./unixBuild.sh Release /opt/vibranceUI
+./unixBuild.sh Release "$HOME/dev/vibranceUI"
 ```
+
+On macOS, build separate Apple Silicon and Intel SDKs with:
+
+```sh
+./unixBuild.sh Release '' all
+```
+
+This installs into `install/macos-arm64` and `install/macos-x86_64`, using separate
+build directories. The third argument also accepts `arm64`, `x86_64`, or `native`.
+Use GLFW and FreeType source trees for builds targeting both architectures; set
+`FFMPEG_SILICON_PATH` and `FFMPEG_INTEL_PATH` for the matching optional video SDKs.
 
 The selected prefix is a relocatable SDK:
 
@@ -265,7 +280,7 @@ already-visible viewport; colors, outline, corner radius, scrollbar behavior,
 edge fades, and scroll callbacks are regular options. The returned handle also
 exposes each retained entity for advanced styling without requiring it.
 
-Window hosts also expose independent initialization policy for focus, taskbar
+Window hosts also expose independent initialisation policy for focus, taskbar
 presence, and Alt-Tab/window-cycle presence. Disabling one of these policies
 causes the native window to be configured before its first visible frame.
 `GlfwWindowPositionOptions` adds reusable monitor-work-area alignment (including

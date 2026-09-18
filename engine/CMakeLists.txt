@@ -487,7 +487,12 @@ if(WIN32)
     target_link_libraries(vibrance_engine PRIVATE
         advapi32 dwmapi mmdevapi ole32 uuid winmm user32 gdi32 shell32)
 elseif(APPLE)
+    # Local static FreeType archives do not carry their compression dependencies.
+    find_package(ZLIB REQUIRED)
+    find_package(BZip2 REQUIRED)
     target_link_libraries(vibrance_engine PRIVATE
+        ZLIB::ZLIB
+        BZip2::BZip2
         "-framework Cocoa"
         "-framework CoreFoundation"
         "-framework Security")
