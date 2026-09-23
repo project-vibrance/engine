@@ -138,15 +138,15 @@ Select a macOS architecture with the third argument (an empty second argument
 uses the default install base):
 
 ```sh
-./unixBuild.sh Release '' arm64
-./unixBuild.sh Release '' x86_64
+./unixBuild.sh Release '' silicon
+./unixBuild.sh Release '' intel
 ./unixBuild.sh Release '' all
 # Or place both SDKs under a custom base:
 ./unixBuild.sh Release "$HOME/dev/vibrance-engine-sdk" all
 ```
 
-Build directories are `build/macos-arm64/Release` and
-`build/macos-x86_64/Release` (or `Debug`). Explicit architecture builds with an
+Build directories are `build/macos-silicon/Release` and
+`build/macos-intel/Release` (or `Debug`). Explicit architecture builds with an
 empty prefix install into `install/macos-<architecture>`. `all` always appends
 `macos-<architecture>` to the install base. A single-architecture build with an
 explicit prefix installs exactly there. Existing calls without a third argument
@@ -158,7 +158,7 @@ Multiple architectures in one CMake tree are rejected; use `all` instead.
 Only run tests for an architecture your Mac can execute. Cross-compiling does
 not validate behavior on the target hardware. The script configures,
 builds, and installs the SDK. It builds enabled test executables but does not run
-them; run `ctest --test-dir build/macos-arm64/Debug --output-on-failure` separately.
+them; run `ctest --test-dir build/macos-silicon/Debug --output-on-failure` separately.
 
 ## Troubleshooting
 

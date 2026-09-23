@@ -4,36 +4,51 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-# Usage: ./unixBuild.sh [Debug|Release] [SDK install prefix] [native|arm64|x86_64|all]
-# Existing calls without an architecture keep their install prefix semantics.
+# Usage: ./unixBuild.sh [Debug|Release] [SDK install prefix|platform] [platform]
+# Supported direct platform values: native, silicon, intel, all.
 case "${1:-Debug}" in
   Debug|debug) BUILD_TYPE=Debug ;;
   Release|release) BUILD_TYPE=Release ;;
   *) echo "Expected Debug or Release as the first argument." >&2; exit 1 ;;
 esac
 if (( $# > 3 )); then
-  echo "Usage: $0 [Debug|Release] [SDK install prefix] [native|arm64|x86_64|all]" >&2
+  echo "Usage: $0 [Debug|Release] [SDK install prefix|platform] [platform]" >&2
   exit 1
 fi
 
 PLATFORM=$(uname -s)
-ARCH=${3:-native}
-INSTALL_DIR=${2:-"${SCRIPT_DIR}/install"}
-# Resolve relative prefixes consistently for configure and install.
+ARCH=native
+INSTALL_DIR="${SCRIPT_DIR}/install"
+
+if [[ $# -ge 2 ]] && [[ "${2}" =~ ^(native|silicon|intel|all)$ ]]; then
+  ARCH="${2}"
+elif [[ $# -ge 2 ]]; then
+  INSTALL_DIR="${2}"
+  if [[ $# -ge 3 ]]; then
+    ARCH="${3}"
+  fi
+fi
+
 if [[ "${INSTALL_DIR}" != /* ]]; then
   INSTALL_DIR="${SCRIPT_DIR}/${INSTALL_DIR}"
 fi
 if [[ "${PLATFORM}" == Darwin ]]; then
   MACOS_SDK=${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}
-  [[ "${ARCH}" != native ]] || ARCH=$(uname -m)
+  if [[ "${ARCH}" == native ]]; then
+    case "$(uname -m)" in
+      arm64) ARCH=silicon ;;
+      x86_64) ARCH=intel ;;
+      *) echo "Unsupported macOS host architecture." >&2; exit 1 ;;
+    esac
+  fi
   case "${ARCH}" in
-    arm64|x86_64) ARCHITECTURES=("${ARCH}") ;;
-    all) ARCHITECTURES=(arm64 x86_64) ;;
-    *) echo "Expected native, arm64, x86_64, or all as the architecture." >&2; exit 1 ;;
+    silicon|intel) ARCHITECTURES=("${ARCH}") ;;
+    all) ARCHITECTURES=(silicon intel) ;;
+    *) echo "Expected native, silicon, intel, or all as the platform." >&2; exit 1 ;;
   esac
 else
   if [[ "${ARCH}" != native ]]; then
-    echo "Architecture selection is currently supported only on macOS." >&2
+    echo "Platform selection is currently supported only on macOS." >&2
     exit 1
   fi
   ARCHITECTURES=(native)
@@ -46,10 +61,17 @@ for TARGET_ARCH in "${ARCHITECTURES[@]}"; do
   TARGET_DIR="build/${BUILD_TYPE}"
   PREFIX="${INSTALL_DIR}"
   if [[ "${PLATFORM}" == Darwin ]]; then
-    TARGET_DIR="build/macos-${TARGET_ARCH}/${BUILD_TYPE}"
-    CONFIGURE_ARGS+=("-DCMAKE_OSX_SYSROOT=${MACOS_SDK}" "-DCMAKE_OSX_ARCHITECTURES=${TARGET_ARCH}")
+    if [[ "${TARGET_ARCH}" == silicon ]]; then
+      CMAKE_ARCH="arm64"
+      PLATFORM_NAME="macos-silicon"
+    else
+      CMAKE_ARCH="x86_64"
+      PLATFORM_NAME="macos-intel"
+    fi
+    TARGET_DIR="build/${PLATFORM_NAME}/${BUILD_TYPE}"
+    CONFIGURE_ARGS+=("-DCMAKE_OSX_SYSROOT=${MACOS_SDK}" "-DCMAKE_OSX_ARCHITECTURES=${CMAKE_ARCH}")
     if [[ "${ARCH}" == all || ( $# -ge 3 && -z "${2:-}" ) ]]; then
-      PREFIX="${INSTALL_DIR}/macos-${TARGET_ARCH}"
+      PREFIX="${INSTALL_DIR}/${PLATFORM_NAME}"
     fi
   fi
   echo "Building vibrance-engine ${BUILD_TYPE} (${TARGET_ARCH})"

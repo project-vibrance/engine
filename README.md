@@ -66,10 +66,11 @@ On macOS, build separate Apple Silicon and Intel SDKs with:
 ./unixBuild.sh Release '' all
 ```
 
-This installs into `install/macos-arm64` and `install/macos-x86_64`, using separate
-build directories. The third argument also accepts `arm64`, `x86_64`, or `native`.
-Use GLFW and FreeType source trees for builds targeting both architectures; set
-`FFMPEG_SILICON_PATH` and `FFMPEG_INTEL_PATH` for the matching optional video SDKs.
+This installs into separate Apple Silicon and Intel SDK directories, using
+separate build directories. The third argument also accepts `silicon`, `intel`,
+or `native`. Use GLFW and FreeType source trees for builds targeting both
+architectures; set `FFMPEG_SILICON_PATH` and `FFMPEG_INTEL_PATH` for the matching
+optional video SDKs.
 
 The selected prefix is a relocatable SDK:
 

@@ -494,7 +494,10 @@ elseif(APPLE)
         ZLIB::ZLIB
         BZip2::BZip2
         "-framework Cocoa"
+        "-framework IOKit"
         "-framework CoreFoundation"
+        "-framework CoreVideo"
+        "-framework QuartzCore"
         "-framework Security")
 else()
     target_link_libraries(vibrance_engine PRIVATE pthread dl m)
@@ -548,8 +551,11 @@ install(DIRECTORY "${ENTT_INCLUDE_DIR}/entt"
 install(FILES "${VMA_HEADER_TO_INSTALL}"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/vma"
     RENAME vk_mem_alloc.h)
-install(DIRECTORY "${GLFW_INCLUDE_DIRS}/GLFW"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+if(EXISTS "${GLFW_INCLUDE_DIRS}/GLFW")
+    file(REAL_PATH "${GLFW_INCLUDE_DIRS}/GLFW" _vibrance_glfw_headers)
+    install(DIRECTORY "${_vibrance_glfw_headers}/"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/GLFW")
+endif()
 install(DIRECTORY "${Vulkan_INCLUDE_DIRS}/vulkan"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 if(EXISTS "${Vulkan_INCLUDE_DIRS}/vk_video")
