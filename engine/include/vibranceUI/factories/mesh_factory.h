@@ -1,13 +1,17 @@
 #pragma once
 #include <glm/glm.hpp>
 #define VULKAN_HPP_NO_EXCEPTIONS
+#if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
+#endif
 #include <vector>
 #include <deque>
 #include <functional>
 #include <filesystem>
+#if !defined(__APPLE__)
 #include <vibranceUI/renderer/buffer.h>
+#endif
 
 struct Vertex
 {
@@ -21,6 +25,7 @@ struct Vertex
 	alignas(16) glm::vec4 material2;
 	alignas(16) glm::vec4 material3;
 
+#if !defined(__APPLE__)
     static vk::VertexInputBindingDescription2EXT get_binding_description()
     {
         vk::VertexInputBindingDescription2EXT description = {};
@@ -79,9 +84,11 @@ struct Vertex
 
         return attributes;
     }
+#endif
 };
 
 // Builds the renderer's fallback triangle buffer used by compute and graphics paths
+#if !defined(__APPLE__)
 StorageBuffer build_triangle(VmaAllocator& allocator, std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue, vk::CommandBuffer commandBuffer, vk::Queue queue);
 // Loads GLTF meshes into a GPU buffer with material descriptor sets
 Model3DAsset load_gltf_mesh(
@@ -94,3 +101,5 @@ Model3DAsset load_gltf_mesh(
 	vk::Device logicalDevice,
 	vk::DescriptorPool textureDescriptorPool,
 	vk::DescriptorSetLayout textureDescriptorSetLayout);
+
+#endif

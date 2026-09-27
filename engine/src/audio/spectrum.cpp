@@ -131,18 +131,18 @@ namespace
     constexpr float kSecondBarUpperResistanceStart = 0.42f;
     constexpr float kSecondBarUpperResistanceEnd = 0.76f;
 
-    constexpr float kThirdBarCurve = 1.16f;
-    constexpr float kFourthBarCurve = 0.72f;
+    constexpr float kThirdBarCurve = 1.42f;
+    constexpr float kFourthBarCurve = 0.64f;
     constexpr float kFifthBarCurve = 0.76f;
     constexpr float kSixthBarCurve = 0.86f;
-    constexpr float kThirdBarKickScale = 0.80f;
-    constexpr float kFourthBarKickScale = 1.18f;
-    constexpr float kThirdBarPresenceScale = 0.92f;
-    constexpr float kThirdBarPresenceReleaseStart = 0.82f;
-    constexpr float kThirdBarPresenceReleaseEnd = 0.995f;
-    constexpr float kFourthBarPresenceBoost = 0.13f;
-    constexpr float kFourthBarPresenceBoostStart = 0.10f;
-    constexpr float kFourthBarPresenceBoostEnd = 0.72f;
+    constexpr float kThirdBarKickScale = 0.68f;
+    constexpr float kFourthBarKickScale = 1.28f;
+    constexpr float kThirdBarPresenceScale = 0.84f;
+    constexpr float kThirdBarPresenceReleaseStart = 0.90f;
+    constexpr float kThirdBarPresenceReleaseEnd = 0.998f;
+    constexpr float kFourthBarPresenceBoost = 0.20f;
+    constexpr float kFourthBarPresenceBoostStart = 0.06f;
+    constexpr float kFourthBarPresenceBoostEnd = 0.62f;
     constexpr float kFifthBarPresenceBoost = 0.11f;
     constexpr float kSixthBarPresenceBoost = 0.055f;
 
@@ -157,18 +157,26 @@ namespace
     constexpr float kUpperBandLocalOnsetStart = 0.010f;
     constexpr float kUpperBandLocalOnsetEnd = 0.095f;
 
-    constexpr float kThirdBarOccupancyCurve = 2.55f;
-    constexpr float kThirdBarOccupancyReleaseStart = 0.93f;
-    constexpr float kThirdBarOccupancyReleaseEnd = 0.985f;
-    constexpr float kFourthBarOccupancyCurve = 2.80f;
-    constexpr float kFourthBarOccupancyReleaseStart = 0.84f;
-    constexpr float kFourthBarOccupancyReleaseEnd = 0.91f;
+    constexpr float kThirdBarOccupancyCurve = 3.05f;
+    constexpr float kThirdBarOccupancyReleaseStart = 0.955f;
+    constexpr float kThirdBarOccupancyReleaseEnd = 0.997f;
+    constexpr float kFourthBarOccupancyCurve = 1.65f;
+    constexpr float kFourthBarOccupancyReleaseStart = 0.72f;
+    constexpr float kFourthBarOccupancyReleaseEnd = 0.88f;
     constexpr float kFifthBarOccupancyCurve = 2.70f;
     constexpr float kFifthBarOccupancyReleaseStart = 0.965f;
     constexpr float kFifthBarOccupancyReleaseEnd = 0.995f;
     constexpr float kSixthBarOccupancyCurve = 1.78f;
     constexpr float kSixthBarOccupancyReleaseStart = 0.80f;
     constexpr float kSixthBarOccupancyReleaseEnd = 0.89f;
+
+    constexpr float kFourthBarPrecedenceRawStart = 0.10f;
+    constexpr float kFourthBarPrecedenceRawEnd = 0.58f;
+    constexpr float kFourthBarPrecedenceRatio = 1.08f;
+    constexpr float kFourthBarPrecedenceStrength = 0.92f;
+    constexpr float kFourthBarPrecedenceThirdDominanceStart = 1.55f;
+    constexpr float kFourthBarPrecedenceThirdDominanceEnd = 2.50f;
+    constexpr float kThirdBarPrecedenceSuppression = 0.42f;
 
     float smoothstep(float edge0, float edge1, float value)
     {
@@ -1399,6 +1407,49 @@ void AudioSpectrumProcessor::update(double deltaSeconds)
         }
 
         targets[band] = std::clamp(target, 0.0f, 1.0f);
+    }
+
+    if (impl->options.bandCount > 3u)
+    {
+        const float thirdRaw = raw[2];
+        const float fourthRaw = raw[3];
+
+        const float fourthPresence = smoothstep(
+            kFourthBarPrecedenceRawStart,
+            kFourthBarPrecedenceRawEnd,
+            fourthRaw);
+
+        const float thirdDominance = smoothstep(
+            kFourthBarPrecedenceThirdDominanceStart,
+            kFourthBarPrecedenceThirdDominanceEnd,
+            thirdRaw / std::max(fourthRaw, 0.001f));
+
+        const float precedence =
+            fourthPresence * (1.0f - thirdDominance);
+
+        const float desiredFourth = std::clamp(
+            targets[2] * kFourthBarPrecedenceRatio,
+            0.0f,
+            1.0f);
+
+        if (targets[3] < desiredFourth)
+        {
+            targets[3] +=
+                (desiredFourth - targets[3]) *
+                kFourthBarPrecedenceStrength *
+                precedence;
+        }
+
+        if (targets[2] > targets[3])
+        {
+            targets[2] -=
+                (targets[2] - targets[3]) *
+                kThirdBarPrecedenceSuppression *
+                precedence;
+        }
+
+        targets[2] = std::clamp(targets[2], 0.0f, 1.0f);
+        targets[3] = std::clamp(targets[3], 0.0f, 1.0f);
     }
 
     if (impl->options.bandCount > 1u)

@@ -6,7 +6,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include <vibranceUI/renderer/renderer2d.h>
+#include <vibranceUI/renderer/renderer2d_components.h>
 #include <vibranceUI/renderer/font_atlas.h>
 #include <vibranceUI/renderer/media2d.h>
 #include <vibranceUI/renderer/present_mode.h>
@@ -25,7 +25,10 @@ struct EngineCreateInfo
     // Requested MSAA samples for hosted 3D rendering; falls back to the nearest supported count
     uint32_t msaaSamples = 4;
     RendererPresentMode presentMode = RendererPresentMode::eAuto;
-    RenderBackend renderBackend = RenderBackend::eVulkan;
+    RenderBackend renderBackend = default_render_backend();
+    // Metal 4 is preferred by default. Transaction-backed surfaces can opt
+    // into Metal 3's command-buffer scheduling handshake.
+    bool preferMetal4 = true;
     PresentationBackend presentationBackend = PresentationBackend::eNative;
     // 0 means uncapped; otherwise draw waits to stay near the requested frame rate
     uint32_t targetFrameRate = 0;
@@ -50,6 +53,12 @@ class VIBRANCE_ENGINE_API Engine
 
     // Draws the current renderer scene once
     void draw();
+
+#if defined(__APPLE__)
+    // The application schedules a window independently at this UI cadence.
+    static void begin_externally_paced_frame(uint32_t frameRate);
+    static void end_externally_paced_frame();
+#endif
 
     // Updates frame timing and returns a measured FPS sample once per second
     int update_timing(double currentTimeSeconds);
@@ -114,6 +123,11 @@ class VIBRANCE_ENGINE_API Engine
 
     static std::string shared_locale();
 
+    // Main-thread event-loop hint after ticking all windows. A non-zero timeout
+    // permits an interruptible event wait once every renderer has settled.
+    // Backends which supply their own pacing may return zero.
+    static double idle_event_wait_seconds();
+
     std::string locale() const;
 
     std::string resolve_text(const Text& text) const;
@@ -124,7 +138,7 @@ class VIBRANCE_ENGINE_API Engine
 
     bool system_backdrop_available() const;
 
-    // True only after the Vulkan device, swapchain, pipelines, and frame
+    // True only after the device, surface, pipelines, and frame
     // resources are ready. Window hosts use this to fail visibly instead of
     // leaving a transparent but non-rendering native window on screen.
     bool ready() const;
@@ -132,6 +146,9 @@ class VIBRANCE_ENGINE_API Engine
     // Vulkan API level exposed by the selected native physical device, such
     // as "1.4.303". Empty means no physical device was selected.
     std::string vulkan_api_version() const;
+
+    // Active graphics API version (Metal 3/4 or Vulkan).
+    std::string graphics_api_version() const;
 
     // Re-resolves every LocalisedTextComponent in the active 2D scene
     void refresh_localised_texts();

@@ -1,7 +1,11 @@
 #pragma once
 
 #include "vibranceUI/export.h"
+#if defined(__APPLE__)
+#define GLFW_INCLUDE_NONE
+#else
 #define GLFW_INCLUDE_VULKAN
+#endif
 #include <GLFW/glfw3.h>
 #include <cstdint>
 #include <filesystem>
@@ -139,7 +143,7 @@ struct GlfwWindowHostOptions
     uint32_t maxRenderPixels = 0;
     uint32_t msaaSamples = 4;
     RendererPresentMode presentMode = RendererPresentMode::eAuto;
-    RenderBackend renderBackend = RenderBackend::eVulkan;
+    RenderBackend renderBackend = default_render_backend();
     // Empty selects native presentation, except transparent Win32 windows,
     // which request Composition and safely fall back inside Engine.
     std::optional<PresentationBackend> presentationBackend {};

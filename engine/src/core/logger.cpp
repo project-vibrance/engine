@@ -1,10 +1,17 @@
 #include <iostream>
 #include <chrono>
+#if !defined(__APPLE__)
 #include <format>
+#endif
+#include <iomanip>
+#include <sstream>
+#include <ctime>
 #include <filesystem>
 #include <cstdlib>
 #include <utility>
+#if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
+#endif
 #include <vibranceUI/core/logger.h>
 
 Logger* Logger::logger;
@@ -121,7 +128,16 @@ void Logger::reopen_file()
     const auto now = std::chrono::system_clock::now();
     const auto nowSeconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
     const std::string prefix = outputOptions.filePrefix.empty() ? "vibrance_log" : outputOptions.filePrefix;
-    const std::string fileName = std::format("{}_{:%Y-%m-%d_%H-%M-%S}.txt", prefix, nowSeconds);
+    const auto time = std::chrono::system_clock::to_time_t(nowSeconds);
+    std::tm utc {};
+#if defined(_WIN32)
+    gmtime_s(&utc, &time);
+#else
+    gmtime_r(&time, &utc);
+#endif
+    std::ostringstream filename;
+    filename << prefix << '_' << std::put_time(&utc, "%Y-%m-%d_%H-%M-%S") << ".txt";
+    const std::string fileName = filename.str();
     const std::filesystem::path docsPath = default_log_directory(outputOptions);
 
     try 
@@ -141,6 +157,7 @@ Logger::~Logger()
     if (logFile.is_open()) logFile.close();
 }
 
+#if !defined(__APPLE__)
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -172,6 +189,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     return vk::False;
 }
 
+#endif
 void Logger::set_mode(bool mode) { enabled = mode; }
 
 bool Logger::is_enabled() { return enabled; }
@@ -238,7 +256,12 @@ void Logger::log(LogLevel level, std::string message)
 
     auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
 
-    logOut << std::format("[{:02}:{:02}:{:02}.{:09}] [{:<5}] ", hours.count(), minutes.count(), seconds.count(), nanoseconds.count(), level_name(level)) << message << std::endl;
+    std::ostringstream line;
+    line << '[' << std::setfill('0') << std::setw(2) << hours.count() << ':'
+        << std::setw(2) << minutes.count() << ':' << std::setw(2) << seconds.count()
+        << '.' << std::setw(9) << nanoseconds.count() << "] ["
+        << std::setfill(' ') << std::left << std::setw(5) << level_name(level) << "] ";
+    logOut << line.str() << message << std::endl;
 }
 
 void Logger::trace(std::string message) { log(LogLevel::eTrace, std::move(message)); }
@@ -263,6 +286,7 @@ void Logger::vulkan(LogLevel level, std::string message)
 
 void Logger::vulkan(std::string message) { vulkan(LogLevel::eDebug, std::move(message)); }
 
+#if !defined(__APPLE__)
 void Logger::report_version_number(uint32_t version)
 {
     if (!is_vulkan_renderer_logging_enabled()) return;
@@ -607,3 +631,5 @@ suitable for use as a fragment shading rate attachment or shading rate image");
 
 	return result;
 }
+
+#endif

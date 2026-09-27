@@ -908,17 +908,26 @@ bool glfw_screen_cursor_position(
 
 int vibrance_glfw_create_surface(void* instance, void* userData, void* surfaceOut)
 {
+#if defined(__APPLE__)
+    (void)instance; (void)userData; (void)surfaceOut;
+    return -1;
+#else
     return glfwCreateWindowSurface(
         static_cast<VkInstance>(instance),
         static_cast<GLFWwindow*>(userData),
         nullptr,
         static_cast<VkSurfaceKHR*>(surfaceOut));
+#endif
 }
 
 const char** glfw_required_instance_extensions(uint32_t& count)
 {
     count = 0u;
+#if defined(__APPLE__)
+    return nullptr;
+#else
     return glfwGetRequiredInstanceExtensions(&count);
+#endif
 }
 
 bool glfw_framebuffer_size(GLFWwindow* window, int& width, int& height)
@@ -979,6 +988,19 @@ bool glfw_window_focused(GLFWwindow* window)
 
 bool glfw_window_hovered(GLFWwindow* window)
 {
+#if defined(__APPLE__)
+    // GLFW's Cocoa hover query asks WindowServer which window is topmost.
+    // Most overlay ticks have the pointer elsewhere: reject those locally
+    // before paying for the synchronous WindowServer round trip.
+    if (!window)
+        return false;
+    double x = 0.0, y = 0.0;
+    int width = 0, height = 0;
+    glfwGetCursorPos(window, &x, &y);
+    glfwGetWindowSize(window, &width, &height);
+    if (x < 0.0 || y < 0.0 || x >= width || y >= height)
+        return false;
+#endif
 #ifdef GLFW_HOVERED
     return window && glfwGetWindowAttrib(window, GLFW_HOVERED) == GLFW_TRUE;
 #else
@@ -1308,6 +1330,8 @@ void set_glfw_window_should_close(GLFWwindow* window, bool shouldClose)
     }
 }
 
+// The Cocoa implementation is in window_macos.mm.
+#if !defined(__APPLE__)
 void* glfw_native_window_handle(GLFWwindow* window)
 {
 #if defined(_WIN32)
@@ -1318,6 +1342,7 @@ void* glfw_native_window_handle(GLFWwindow* window)
 #endif
 }
 
+#endif
 #if !defined(__APPLE__)
 bool begin_glfw_native_window_drag(GLFWwindow* window)
 {

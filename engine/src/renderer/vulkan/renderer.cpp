@@ -1020,6 +1020,12 @@ uint32_t Engine::recommended_ui_update_rate() const
 	return impl->recommended_ui_update_rate();
 }
 
+double Engine::idle_event_wait_seconds()
+{
+	// Vulkan/Composition currently pace the host through draw().
+	return 0.0;
+}
+
 void Engine::resize(uint32_t framebufferWidth, uint32_t framebufferHeight)
 {
 	impl->resize(framebufferWidth, framebufferHeight);
@@ -3322,3 +3328,5 @@ Engine::Impl::~Impl()
         instanceDeletionQueue.pop_back();
     }
 }
+
+std::string Engine::graphics_api_version() const { return vulkan_api_version(); }

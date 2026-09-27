@@ -34,6 +34,10 @@ struct VIBRANCE_ENGINE_API UiAnimatedCharacterTextView
     entt::entity root = entt::null;
     std::vector<entt::entity> characters {};
     std::string value {};
+    bool proportionalSpacing = false;
+    float characterSpacing = 0.0f;
+    float punctuationBaselineOffset = 0.0f;
+    bool centrePunctuationInCell = false;
 
     void reset();
     bool valid(const Renderer2DScene& scene) const;
@@ -47,6 +51,16 @@ struct UiAnimatedCharacterTextOptions
     std::size_t characterCount = 1u;
     float cellWidthFactor = 0.58f;
     float lineHeightFactor = 1.22f;
+    // Fixed cells suit counters whose columns must never move. Proportional
+    // spacing uses the font's shaped glyph positions while retaining one
+    // entity per character for staggered transitions.
+    bool proportionalSpacing = false;
+    float characterSpacing = 0.0f;
+    // Positive values move punctuation down towards the digit baseline.
+    float punctuationBaselineOffset = 0.0f;
+    // Keeps punctuation optically centred while letters and digits share the
+    // shaped run's baseline.
+    bool centrePunctuationInCell = false;
     int32_t layer = 0;
     std::uint32_t order = 0u;
     TextStyleComponent style {};

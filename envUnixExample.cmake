@@ -5,6 +5,7 @@
 # GLM is discovered from Homebrew. For both architectures, download GLFW
 # source and let the engine build it for each target (Homebrew GLFW is native).
 set(GLFW_PATH "$ENV{HOME}/dev/glfw-3.4")
+set(MEDIAREMOTE_ADAPTER_ROOT "$ENV{HOME}/dev/mediaremote-adapter")
 # Vulkan is discovered from the
 # SDK environment (source its setup-env.sh before running unixBuild.sh).
 set(VMA_PATH "$ENV{HOME}/dev/VulkanMemoryAllocator-3.3.0")

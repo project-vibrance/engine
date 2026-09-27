@@ -294,6 +294,7 @@ struct AudioEngine::Impl
     ~Impl();
 
     bool available() const;
+    bool initialise() const; // Called with mutex held after construction.
     std::string backend_name() const;
     AudioClipHandle load_clip(const std::filesystem::path& path);
     AudioClipHandle find_clip(const std::filesystem::path& path) const;
@@ -329,7 +330,7 @@ struct AudioEngine::Impl
     };
 
     mutable SoLoud::Soloud soloud;
-    bool initialised = false;
+    mutable bool initialised = false;
     std::unordered_map<uint32_t, Clip> clips;
     std::unordered_map<std::string, uint32_t> clipIdsByPath;
     uint32_t nextClipId = 1u;
@@ -347,7 +348,19 @@ AudioEngine::Impl::Impl(bool enabled) : enabled(enabled)
         return;
     }
 
+#if !defined(__APPLE__)
+    initialise();
+#endif
+}
+
+bool AudioEngine::Impl::initialise() const
+{
+    if (!enabled)
+        return false;
+
 #if defined(VIBRANCE_HAS_SOLOUD)
+    if (initialised)
+        return true;
 #if defined(__APPLE__)
     constexpr unsigned int backendId = SoLoud::Soloud::COREAUDIO;
 #else
@@ -367,7 +380,7 @@ AudioEngine::Impl::Impl(bool enabled) : enabled(enabled)
         {
             logger->error("Audio init failed: " + std::string(soloud.getErrorString(result)));
         }
-        return;
+        return false;
     }
 
     initialised = true;
@@ -379,11 +392,13 @@ AudioEngine::Impl::Impl(bool enabled) : enabled(enabled)
             "Audio initialised with SoLoud backend: " +
             std::string(backendName ? backendName : "unknown"));
     }
+    return true;
 #else
     if (logger)
     {
         logger->warning("Audio disabled: SoLoud was not found at configure time.");
     }
+    return false;
 #endif
 }
 
@@ -406,7 +421,7 @@ bool AudioEngine::Impl::available() const
 {
 #if defined(VIBRANCE_HAS_SOLOUD)
     std::lock_guard<std::mutex> lock(mutex);
-    return initialised;
+    return initialise();
 #else
     return false;
 #endif
@@ -423,7 +438,7 @@ std::string AudioEngine::Impl::backend_name() const
     std::lock_guard<std::mutex> lock(mutex);
     if (!initialised)
     {
-        return "unavailable";
+        return "not started";
     }
     const char* backend = soloud.getBackendString();
     return backend ? backend : "unknown";
@@ -437,7 +452,7 @@ AudioClipHandle AudioEngine::Impl::load_clip(const std::filesystem::path& path)
 #if defined(VIBRANCE_HAS_SOLOUD)
     std::lock_guard<std::mutex> lock(mutex);
     AudioClipHandle handle = {};
-    if (!initialised)
+    if (!enabled)
     {
         return handle;
     }
@@ -462,7 +477,7 @@ AudioClipHandle AudioEngine::Impl::load_clip(const std::filesystem::path& path)
         }
         if (clip != clips.end())
         {
-            if (clip->second.wav)
+            if (initialised && clip->second.wav)
             {
                 soloud.stopAudioSource(*clip->second.wav);
             }
@@ -590,16 +605,14 @@ AudioVoiceHandle AudioEngine::Impl::play(AudioClipHandle clip, const AudioPlayOp
 #if defined(VIBRANCE_HAS_SOLOUD)
     std::lock_guard<std::mutex> lock(mutex);
     AudioVoiceHandle voice = {};
-    if (!initialised)
-    {
-        return voice;
-    }
-
     const auto it = clips.find(clip.id);
     if (it == clips.end() || !it->second.wav)
     {
         return voice;
     }
+
+    if (!initialise())
+        return voice;
 
     const SoLoud::handle soloudVoice = soloud.play(
         *it->second.wav,

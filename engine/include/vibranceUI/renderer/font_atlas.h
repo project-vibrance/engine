@@ -1,8 +1,12 @@
 #pragma once
 #define VULKAN_HPP_NO_EXCEPTIONS
 #include "vibranceUI/export.h"
+#if defined(__APPLE__)
+#include <vibranceUI/renderer/metal/resources.h>
+#else
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
+#endif
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -102,22 +106,30 @@ public:
     bool load_from_file(
         const std::filesystem::path& path,
         const Renderer2DFontAtlasLoadOptions& options,
+#if defined(__APPLE__)
+        const MetalTextureUpload& upload
+#else
         VmaAllocator& allocator,
         vk::CommandBuffer commandBuffer,
         vk::Queue queue,
         vk::Device logicalDevice,
         std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
         std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+#endif
     );
 
     bool load_from_file(
         const std::filesystem::path& path,
+#if defined(__APPLE__)
+        const MetalTextureUpload& upload
+#else
         VmaAllocator& allocator,
         vk::CommandBuffer commandBuffer,
         vk::Queue queue,
         vk::Device logicalDevice,
         std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
         std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+#endif
     );
 
     // Returns glyph positions in local text space for drawing and caret placement
@@ -159,6 +171,9 @@ private:
     std::unordered_map<uint32_t, GlyphRecord> glyphs;
     std::unordered_map<uint64_t, float> kerningTable;
     StorageImage* atlasImage = nullptr;
+#if defined(__APPLE__)
+    std::unique_ptr<StorageImage> metalAtlasImage;
+#endif
     glm::uvec2 atlasSize { 1u, 1u };
     std::string fontName = "Renderer2D Font";
     uint32_t atlasId = 1;

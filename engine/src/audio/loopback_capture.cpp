@@ -12,6 +12,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef __APPLE__
+#include "loopback_capture_macos.h"
+#endif
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -875,6 +879,8 @@ struct AudioLoopbackCapture::Impl
         {
             CoUninitialize();
         }
+#elif defined(__APPLE__)
+        mac_audio_capture_loop(callbacks, options, targetProcessId, captureRequested);
 #endif
     }
 
@@ -922,6 +928,8 @@ bool AudioLoopbackCapture::platform_supported()
 {
 #ifdef _WIN32
     return true;
+#elif defined(__APPLE__)
+    return mac_audio_capture_supported();
 #else
     return false;
 #endif

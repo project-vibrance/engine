@@ -9,7 +9,8 @@ enum class RenderBackend : std::uint32_t
 {
     eVulkan = 0u,
     eDirectX11 = 1u,
-    eDirectX12 = 2u
+    eDirectX12 = 2u,
+    eMetal = 3u
 };
 
 enum class PresentationBackend : std::uint32_t
@@ -19,3 +20,12 @@ enum class PresentationBackend : std::uint32_t
     eWindowsCompositionD3D12 = 2u
 };
 
+
+constexpr RenderBackend default_render_backend() noexcept
+{
+#if defined(__APPLE__)
+    return RenderBackend::eMetal;
+#else
+    return RenderBackend::eVulkan;
+#endif
+}

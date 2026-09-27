@@ -274,7 +274,7 @@ struct GlfwPanelWindowHostOptions
     uint32_t maxRenderPixels = 0;
     uint32_t msaaSamples = 4;
     RendererPresentMode presentMode = RendererPresentMode::eAuto;
-    RenderBackend renderBackend = RenderBackend::eVulkan;
+    RenderBackend renderBackend = default_render_backend();
     PresentationBackend presentationBackend = PresentationBackend::eNative;
     uint32_t targetFrameRate = 0;
     // Host-level override applied after makeTemplateOptions. This lets window

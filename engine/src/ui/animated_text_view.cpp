@@ -25,6 +25,99 @@ namespace
             }
         }
     }
+
+    void layout_animated_characters(
+        Renderer2DScene& scene,
+        const Renderer2DFontAtlas& fontAtlas,
+        UiAnimatedCharacterTextView& view)
+    {
+        if (view.root == entt::null || !scene.registry().valid(view.root))
+        {
+            return;
+        }
+
+        const std::size_t first = view.value.find_first_not_of(' ');
+        if (first == std::string::npos)
+        {
+            return;
+        }
+        const TextComponent* sample = nullptr;
+        for (const entt::entity character : view.characters)
+        {
+            sample = scene.registry().try_get<TextComponent>(character);
+            if (sample) break;
+        }
+        const ShapeComponent* rootShape =
+            scene.registry().try_get<ShapeComponent>(view.root);
+        if (!sample || !rootShape)
+        {
+            return;
+        }
+
+        TextLayout2DOptions options = {};
+        options.characterSpacing = view.characterSpacing;
+        const Renderer2DTextLayout run = fontAtlas.layout_text(
+            std::string_view(view.value).substr(first),
+            sample->fontSize,
+            options);
+        if (run.glyphs.empty())
+        {
+            return;
+        }
+        const float runLeft = std::max(rootShape->size.x - run.bounds.x, 0.0f);
+        float inkTop = run.glyphs.front().position.y;
+        float inkBottom = inkTop + run.glyphs.front().size.y;
+        for (const MSDFGlyph& glyph : run.glyphs)
+        {
+            inkTop = std::min(inkTop, glyph.position.y);
+            inkBottom = std::max(inkBottom, glyph.position.y + glyph.size.y);
+        }
+        const float inkCenter = (inkTop + inkBottom) * 0.5f;
+        std::size_t glyphIndex = 0u;
+        for (std::size_t index = first;
+             index < view.value.size() && index < view.characters.size();
+             ++index)
+        {
+            if (view.value[index] == ' ')
+            {
+                continue;
+            }
+            if (glyphIndex >= run.glyphs.size())
+            {
+                break;
+            }
+            Layout2DComponent* layout = scene.registry().try_get<Layout2DComponent>(
+                view.characters[index]);
+            const TextComponent* characterText =
+                scene.registry().try_get<TextComponent>(view.characters[index]);
+            if (!layout || !characterText || characterText->glyphs.empty())
+            {
+                ++glyphIndex;
+                continue;
+            }
+            const MSDFGlyph& glyph = run.glyphs[glyphIndex++];
+            const MSDFGlyph& characterGlyph = characterText->glyphs.front();
+            // Reconstruct the complete shaped run while each character stays
+            // in its own entity. Using the isolated glyph's bounds alone
+            // loses the shared baseline, which makes lowercase letters and
+            // punctuation drift relative to digits.
+            if (view.proportionalSpacing)
+            {
+                layout->offset.x = runLeft + glyph.position.x -
+                    characterGlyph.position.x + characterText->bounds.x * 0.5f;
+                layout->size.x = std::max(characterText->bounds.x, 1.0f);
+            }
+            const unsigned char value = static_cast<unsigned char>(view.value[index]);
+            const bool punctuation = std::ispunct(value) != 0;
+            layout->offset.y = punctuation && view.centrePunctuationInCell ?
+                0.0f :
+                glyph.position.y - inkCenter - characterGlyph.position.y +
+                    characterText->bounds.y * 0.5f +
+                    (punctuation ? view.punctuationBaselineOffset : 0.0f);
+            layout->pivot = { 0.5f, 0.5f };
+            scene.mark_dirty(view.characters[index]);
+        }
+    }
 }
 
 void UiAnimatedCharacterTextView::reset()
@@ -32,6 +125,10 @@ void UiAnimatedCharacterTextView::reset()
     root = entt::null;
     characters.clear();
     value.clear();
+    proportionalSpacing = false;
+    characterSpacing = 0.0f;
+    punctuationBaselineOffset = 0.0f;
+    centrePunctuationInCell = false;
 }
 
 bool UiAnimatedCharacterTextView::valid(const Renderer2DScene& scene) const
@@ -88,6 +185,12 @@ UiAnimatedCharacterTextView ui_create_animated_character_text(
     const UiAnimatedCharacterTextOptions& options)
 {
     UiAnimatedCharacterTextView view = {};
+    view.proportionalSpacing = options.proportionalSpacing;
+    view.characterSpacing = scaled_scalar(
+        options.characterSpacing, ui.scale());
+    view.punctuationBaselineOffset = scaled_scalar(
+        options.punctuationBaselineOffset, ui.scale());
+    view.centrePunctuationInCell = options.centrePunctuationInCell;
     const std::size_t characterCount =
         std::max<std::size_t>(options.characterCount, 1u);
     if (value.size() < characterCount)
@@ -151,6 +254,7 @@ UiAnimatedCharacterTextView ui_create_animated_character_text(
                     false;
         }
     }
+    layout_animated_characters(ui.scene(), fontAtlas, view);
     return view;
 }
 
@@ -237,4 +341,8 @@ void ui_update_animated_character_text(
             characterTransition);
     }
     view.value = std::move(value);
+    layout_animated_characters(
+        scene,
+        engine.renderer2d_font_atlas(),
+        view);
 }

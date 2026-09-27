@@ -146,3 +146,8 @@ bool begin_glfw_native_window_drag(GLFWwindow* window)
     return true;
 }
 #endif
+
+void* glfw_native_window_handle(GLFWwindow* window)
+{
+    return window ? (void*)glfwGetCocoaWindow(window) : nullptr;
+}

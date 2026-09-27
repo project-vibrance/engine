@@ -155,6 +155,9 @@ vibrance_add_engine_test(
     audio_loopback_capture_tests.cpp)
 
 vibrance_add_engine_test(vibrance_file_tests file_tests.cpp)
+if(SOLOUD_FOUND)
+    vibrance_add_engine_test(vibrance_audio_engine_tests audio_engine_tests.cpp)
+endif()
 if(WIN32)
     vibrance_add_engine_test(vibrance_native_tray_tests native_tray_tests.cpp)
     target_link_libraries(vibrance_native_tray_tests PRIVATE user32)
@@ -170,3 +173,48 @@ target_compile_definitions(vibrance_native_tray_portable_tests PRIVATE
     VIBRANCE_ENGINE_EXPORTS=1 VIBRANCE_FORCE_PORTABLE_NATIVE_TRAY=1
     VIBRANCE_FORCE_PORTABLE_COMPOSITION=1)
 add_test(NAME vibrance_native_tray_portable_tests COMMAND vibrance_native_tray_portable_tests)
+
+if(APPLE)
+    add_executable(vibrance_metal_device_tests metal_device_tests.cpp
+        ../src/renderer/metal/device.cpp "${METAL_SHADER_CPP}")
+    target_include_directories(vibrance_metal_device_tests PRIVATE ../include
+        "${METAL_CPP_INCLUDE_DIR}" "${GLM_INCLUDE_DIR}" "${ENTT_INCLUDE_DIR}")
+    target_compile_options(vibrance_metal_device_tests PRIVATE -fblocks)
+    target_link_libraries(vibrance_metal_device_tests PRIVATE
+        "-framework Foundation" "-framework Metal" "-framework QuartzCore")
+    add_test(NAME vibrance_metal_device_tests COMMAND vibrance_metal_device_tests)
+    set_tests_properties(vibrance_metal_device_tests PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+if(APPLE)
+    vibrance_add_engine_test(vibrance_metal_window_tests metal_window_tests.cpp)
+    set_tests_properties(vibrance_metal_window_tests PROPERTIES SKIP_RETURN_CODE 77)
+    vibrance_add_engine_test(vibrance_metal_frame_damage_tests metal_frame_damage_tests.cpp)
+endif()
+
+if(APPLE)
+    add_executable(vibrance_media_session_macos_tests media_session_macos_tests.mm)
+    target_include_directories(vibrance_media_session_macos_tests PRIVATE ../include)
+    target_compile_options(vibrance_media_session_macos_tests PRIVATE -fobjc-arc)
+    target_link_libraries(vibrance_media_session_macos_tests PRIVATE "-framework Foundation")
+    add_test(NAME vibrance_media_session_macos_tests COMMAND vibrance_media_session_macos_tests)
+endif()
+
+if(APPLE)
+    # Isolated companion fixtures exercise process I/O without controlling the
+    # user's real player. The production provider resolves beside this binary.
+    add_executable(vibrance_media_session_macos_provider_tests
+        media_session_macos_provider_tests.mm ../src/media/session_macos.mm)
+    set_target_properties(vibrance_media_session_macos_provider_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/media-session-fixture")
+    target_include_directories(vibrance_media_session_macos_provider_tests PRIVATE ../include)
+    target_compile_options(vibrance_media_session_macos_provider_tests PRIVATE -fobjc-arc)
+    target_link_libraries(vibrance_media_session_macos_provider_tests PRIVATE "-framework Foundation")
+    add_test(NAME vibrance_media_session_macos_provider_tests
+        COMMAND vibrance_media_session_macos_provider_tests)
+endif()
+
+if(APPLE)
+    add_executable(vibrance_audio_loopback_macos_tests audio_loopback_macos_tests.cpp)
+    add_test(NAME vibrance_audio_loopback_macos_tests COMMAND vibrance_audio_loopback_macos_tests)
+endif()

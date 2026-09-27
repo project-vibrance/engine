@@ -17,6 +17,8 @@ The installed SDK includes starter scripts, a minimal template and the
 
 Configure dependency locations in a local `.env.cmake` using
 `envWindowsExample.cmake` or `envUnixExample.cmake` as a starting point.
+On macOS, set `MEDIAREMOTE_ADAPTER_ROOT` to the MediaRemote adapter source
+directory under `~/dev`; the engine builds and bundles its companion framework.
 
 On Windows with MinGW:
 
@@ -124,12 +126,20 @@ capture.start();
 // ready to use with any UiBuilder owned by an engine window or panel.
 ```
 
+On macOS, loopback uses Core Audio process taps on 14.2+ and ScreenCaptureKit
+on 13.0–14.1. Set `AudioLoopbackCaptureMode::eProcessTree` to capture only a
+selected PID and its descendants; a missing target produces silence. The
+ScreenCaptureKit backend filters applications, so it cannot isolate browser
+tabs within one app. The host bundle must include `NSAudioCaptureUsageDescription`
+and the user must allow audio capture (Screen Recording for the older backend).
+
 `<vibranceUI/media/media.h>` similarly exposes UTF-8/time/aspect helpers,
 artwork presentation and playback animation, `RevisionedMediaSlot`, and
 `MediaArtworkView`. It also includes the portable `GlobalMediaSession` provider,
 status, commands, and snapshot contract from `<vibranceUI/media/session.h>`.
-The optional installed Win32 companion supplies GSMTC; other platforms fail
-closed until a provider is implemented. Applications provide refresh cadence,
+The installed Win32 companion supplies GSMTC. On macOS, the bundled
+MediaRemote adapter supplies metadata, cached artwork and transport controls.
+Other platforms fail closed until a provider is implemented. Applications provide refresh cadence,
 optimistic UI state, and product routing, while the SDK owns provider and
 renderer-local behavior.
 
@@ -408,7 +418,9 @@ Renderer-specific implementation is separated by API:
 
 ```text
 engine/src/
-  renderer/vulkan/  Vulkan renderer
+  renderer/common/  Shared scene planning, fonts and asset decoders
+  renderer/vulkan/  Vulkan renderer (Windows/Linux)
+  renderer/metal/   Native Metal 3/4 renderer and MSL shaders (macOS)
   animation/        Animation importers
   graphics/         Shared material routing
   platform/win32/   Windows Composition, interop and native tray
@@ -462,13 +474,14 @@ need no MSVC discovery or custom build/copy rules.
 ## Dependency policy
 
 Compiled third-party code is linked privately into the engine shared library.
-GLFW support and precompiled engine shaders are part of that same library.
-Public dependency headers used by the current C++ API (GLM, EnTT, VMA, GLFW,
-and Vulkan headers) are copied into the SDK and do not leak local source paths
-through the exported CMake target.
+GLFW support and embedded engine shaders are part of that same library.
+Public dependency headers (GLM, EnTT and GLFW, plus VMA/Vulkan on Windows
+and Linux) are copied into the SDK without exposing local source paths.
+Metal-cpp remains private to the macOS engine build.
 
 On MinGW, the GCC, standard C++, and threading runtimes are linked statically.
-The Vulkan loader remains a system/driver dependency by design.
+The Vulkan loader remains a system/driver dependency on Windows and Linux.
+macOS links Apple’s Metal framework and bundles no Vulkan loader or MoltenVK.
 
 FFmpeg is enabled only when `FFMPEG_PATH` supplies genuine static archives.
 Shared FFmpeg import libraries cannot be embedded in another DLL, so a
@@ -503,3 +516,74 @@ user directory.
 While implementation is currently somewhat vague, developers and users are welcome to audit the source code's infrastructure. Contribution to document the engine's capabilities and functionalities are always welcome.
 
 Developers can also create pull requests to implement features and fixing bugs or issues found within the source code.
+
+## Native Metal on macOS
+
+The minimum deployment target is macOS 13.0 for both `arm64` and `x86_64`.
+Metal 3 requires a Metal 3-capable GPU. On macOS 26 and newer, the engine uses
+Metal 4 when the device reports `MTLGPUFamilyMetal4`; Intel GPUs continue to use
+Metal 3. OS version alone never selects Metal 4. See
+[Apple’s GPU feature tables](https://developer.apple.com/metal/feature-sets/).
+
+Install the macOS 26 release (or newer) of [Metal-cpp](https://developer.apple.com/metal/cpp/)
+in `~/dev/metal-cpp`, or configure `-DMETAL_CPP_PATH=/path/to/metal-cpp`.
+The normal macOS build does not require a Vulkan SDK, VMA, glslc or SPIRV-Cross.
+Native MSL is embedded in the engine and compiled by Metal for the selected GPU;
+Metal 3 and Metal 4 share the shader maths, with separate command submission,
+resource residency and argument binding. Cocoa owns the `CAMetalLayer` only.
+
+```sh
+./unixBuild.sh Debug '' all
+ctest --test-dir build/macos-silicon/Debug --output-on-failure
+ctest --test-dir build/macos-intel/Debug --output-on-failure
+```
+
+Build the app and installer against their matching freshly installed SDKs.
+SDK metadata rejects the wrong architecture or a consumer deployment target
+older than the engine. The app and installer also reject legacy Vulkan SDKs.
+GPU tests require a logged-in graphical session: `vibrance_metal_device_tests`
+checks both command paths and pixel output; `vibrance_metal_window_tests` checks
+native presentation, text, blur, media, hosted MSAA 3D, and resizing. A host with
+no accessible Metal 3 device skips these tests.
+
+For repeatable CPU measurements, build `Release` and run:
+
+```sh
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-idle
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-idle-uncapped
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-animated
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-countdown 30
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-expansion 30
+```
+
+These exercise a fixed scene with text, blur, media and 3D, including the host's
+repeated size notifications. After a two-second warm-up they measure five seconds
+of process CPU time as a percentage of one core, matching Activity Monitor's
+convention. The animated mode forces a redraw on each tick. These are renderer
+measurements, not whole-app measurements or a fixed CPU budget on every machine.
+Unchanged sizes retain their textures; idle draws skip GPU submission and retain
+polling limits even with an uncapped frame rate. Metal compute passes reuse their
+encoder, and Metal 4 binding storage is reused only after GPU completion.
+The countdown and expansion modes use a wide interface with static labels and
+moving content. Their optional second argument fixes the frame rate for fair
+CPU comparisons; a faster renderer can otherwise spend its savings on more frames.
+Metal retains the colour surface and redraws the union of old and new paint
+bounds, replaying overlapping content in stacking order. Blur and hosted 3D keep
+the full redraw path. Disjoint glyphs share a compute dispatch; overlapping glyphs,
+shadows and glows remain ordered. Constant buffers use reusable pages and Metal 4
+keeps stable resources resident. Presentation is submitted without waiting on the
+CPU; completion is checked before reusing resources or crossing command queues.
+
+Hosts can call `Engine::idle_event_wait_seconds()` after ticking all windows and
+pass a positive result to `wait_glfw_events()`. Metal recommends a 50 ms event
+wait after all scenes have been unchanged for 250 ms, with no pending animation.
+Input wakes the event wait early; the timeout also polls pointer-pass-through
+overlays. CPU-driven animations retain their normal cadence until they settle.
+The Vulkan backend keeps its existing pacing and returns zero. On macOS, audio
+clips can be preloaded without starting CoreAudio; the output device opens on
+first playback or an explicit `AudioEngine::available()` probe.
+
+For shader maintainers, `python3 scripts/generate_metal_shaders.py` regenerates
+`engine/src/renderer/metal/shaders/*.metal` from the shared GLSL maths. This
+optional authoring step requires `glslc` and `spirv-cross`; generated MSL belongs
+in source control. Run the Metal GPU tests after changing shader bindings.

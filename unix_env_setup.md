@@ -24,23 +24,23 @@ using Homebrew discovery. For both architectures, download the
 extract it into `~/dev`, and set `GLFW_PATH` to `~/dev/glfw-3.4` using
 `$ENV{HOME}` syntax. The engine builds GLFW separately for each target. Homebrew
 binaries typically contain only the architecture of that Homebrew installation.
-GLM is header-only and can be shared between targets. The Vulkan loader must
-contain the requested architecture (`lipo -info /path/to/libvulkan.dylib`).
+GLM is header-only and can be shared between targets.
 For a nonstandard package prefix, add it to `CMAKE_PREFIX_PATH` in `.env.cmake`.
 
-Install the [LunarG macOS Vulkan SDK](https://vulkan.lunarg.com/sdk/home#mac),
-including its loader, headers, MoltenVK, and shader tools. Follow the
-[SDK environment instructions](https://vulkan.lunarg.com/doc/view/1.4.335.1/mac/getting_started.html).
-Before building, source the installed version's environment script, for example:
+Use Xcode 26 or newer and the macOS 26 release (or newer) of
+[Metal-cpp](https://developer.apple.com/metal/cpp/). Extract Metal-cpp into
+`~/dev/metal-cpp`; CMake discovers that location automatically. For another
+location, set `METAL_CPP_PATH` in `.env.cmake` or pass it with `-D`.
+Metal-cpp is header-only and the same checkout supports Intel and Apple silicon.
 
-```sh
-source "$HOME/VulkanSDK/1.4.341.0/setup-env.sh"
-command -v glslc
-```
+The macOS media session companion uses the MediaRemote adapter source tree.
+Set `MEDIAREMOTE_ADAPTER_ROOT` in `.env.cmake` to its directory under `~/dev`.
 
-Replace the version with your installed directory. `glslc` must be on `PATH`;
-it compiles the engine's embedded shaders. The SDK environment also configures
-Vulkan/MoltenVK for running applications. Launch IDE builds with that environment.
+The deployment target defaults to macOS 13.0. Metal 3 is used on supported GPUs
+on macOS 13–15 and on Intel Macs; macOS 26 and newer select Metal 4 when the GPU
+supports it, with Metal 3 as the compatibility path. Versions before macOS 13
+cannot provide Metal 3. There is no Vulkan/MoltenVK runtime or Vulkan SDK
+requirement for macOS builds.
 
 ## Source dependencies
 
@@ -50,7 +50,6 @@ they are examples, not automatic downloads or a dependency lockfile.
 
 | Dependency | Example folder / required contents | Configuration |
 | --- | --- | --- |
-| [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator) | `VulkanMemoryAllocator-3.3.0/include/vk_mem_alloc.h` | `VMA_PATH`: checkout root |
 | [EnTT](https://github.com/skypjack/entt) | `entt-3.16.0`, containing `single_include/entt/entt.hpp` or `src/entt/entt.hpp` | `ENTT_PATH`: checkout root |
 | [stb](https://github.com/nothings/stb) | `stb-master/stb_image.h` | `STB_PATH`: header directory |
 | [FreeType](https://freetype.org/download.html) | `freetype-2.14.3`, containing `CMakeLists.txt` and `include/ft2build.h` | `FREETYPE_PATH`: source root |

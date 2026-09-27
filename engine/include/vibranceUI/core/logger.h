@@ -8,8 +8,11 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <vector>
+#if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
+#endif
 
 enum class LogLevel : uint8_t
 {
@@ -88,6 +91,7 @@ class VIBRANCE_ENGINE_API Logger
     // Vulkan detail helpers are gated separately from ordinary app logs
     void vulkan(std::string message);
 
+#if !defined(__APPLE__)
     void report_version_number(uint32_t version);
 
     void print_list(const char** list, uint32_t count);
@@ -116,6 +120,7 @@ class VIBRANCE_ENGINE_API Logger
 
     void log(const VmaAllocationInfo& info);
 
+#endif
     private:
     bool enabled;
     bool vulkanRendererLoggingEnabled;
@@ -129,16 +134,21 @@ class VIBRANCE_ENGINE_API Logger
     Logger();
     void reopen_file();
 
+#if !defined(__APPLE__)
     std::vector<std::string> parse_transform_bits(vk::SurfaceTransformFlagsKHR bits);
 
     std::vector<std::string> parse_alpha_composite_bits(vk::CompositeAlphaFlagsKHR bits);
 
     std::vector<std::string> parse_image_usage_bits(vk::ImageUsageFlags bits);
+#endif
 };
 
+#if !defined(__APPLE__)
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
     void* pUserData
 );
+
+#endif

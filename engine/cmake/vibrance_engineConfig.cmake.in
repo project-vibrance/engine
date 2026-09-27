@@ -2,6 +2,37 @@
 
 set(vibrance_engine_VERSION "@PROJECT_VERSION@")
 set(vibrance_engine_TARGET_PLATFORM "@VIBRANCE_TARGET_PLATFORM@")
+set(vibrance_engine_RENDER_BACKEND "@VIBRANCE_RENDER_BACKEND@")
+set(vibrance_engine_MACOS_DEPLOYMENT_TARGET "@CMAKE_OSX_DEPLOYMENT_TARGET@")
+if(APPLE)
+    set_and_check(vibrance_engine_MEDIAREMOTE_FRAMEWORK
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/VibranceMediaRemoteAdapter.framework")
+    set_and_check(vibrance_engine_MEDIAREMOTE_SCRIPT
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/mediaremote-adapter.pl")
+    set_and_check(vibrance_engine_MEDIAREMOTE_LICENCE
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/vibrance_engine/licences/mediaremote-adapter.txt")
+    set_and_check(vibrance_engine_METAL_CPP_LICENCE
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/vibrance_engine/licences/metal-cpp.txt")
+    if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        set(_vibrance_consumer_platform macos-silicon)
+    elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+        set(_vibrance_consumer_platform macos-intel)
+    elseif(NOT CMAKE_OSX_ARCHITECTURES)
+        if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+            set(_vibrance_consumer_platform macos-silicon)
+        else()
+            set(_vibrance_consumer_platform macos-intel)
+        endif()
+    else()
+        message(FATAL_ERROR "Select one macOS architecture per build: arm64 or x86_64.")
+    endif()
+    if(NOT vibrance_engine_TARGET_PLATFORM STREQUAL _vibrance_consumer_platform)
+        message(FATAL_ERROR "The engine SDK architecture does not match this macOS build.")
+    endif()
+    if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS vibrance_engine_MACOS_DEPLOYMENT_TARGET)
+        message(FATAL_ERROR "The consumer deployment target is older than the engine SDK's minimum macOS version.")
+    endif()
+endif()
 set(vibrance_engine_RUNTIME_COMPANIONS "")
 if(WIN32)
     set(vibrance_engine_WIN32_COMPOSITION_DLL
@@ -72,6 +103,16 @@ if(NOT COMMAND vibrance_engine_copy_runtime_companions)
                     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                         "$<TARGET_FILE:vibrance::engine>"
                         "$<TARGET_FILE_DIR:${target_name}>/$<TARGET_SONAME_FILE_NAME:vibrance::engine>"
+                    VERBATIM)
+            endif()
+            if(APPLE)
+                add_custom_command(TARGET "${_vibrance_engine_copy_target}" POST_BUILD
+                    COMMAND /usr/bin/ditto
+                        "${vibrance_engine_MEDIAREMOTE_FRAMEWORK}"
+                        "$<TARGET_FILE_DIR:${target_name}>/VibranceMediaRemoteAdapter.framework"
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${vibrance_engine_MEDIAREMOTE_SCRIPT}"
+                        "$<TARGET_FILE_DIR:${target_name}>"
                     VERBATIM)
             endif()
             foreach(_vibrance_engine_companion IN LISTS vibrance_engine_RUNTIME_COMPANIONS)

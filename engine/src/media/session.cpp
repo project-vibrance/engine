@@ -17,6 +17,10 @@
 #include <string_view>
 #endif
 
+#if defined(__APPLE__) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+#include "session_macos.h"
+#endif
+
 struct GlobalMediaSession::Impl
 {
     MediaSessionSnapshot snapshot;
@@ -253,11 +257,17 @@ struct GlobalMediaSession::Impl
         return handle && seekMedia &&
             seekMedia(handle, std::max(positionMilliseconds, std::int64_t(0))) != 0u;
     }
+#elif defined(__APPLE__) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+    MacMediaSession provider;
+    Impl() { refresh(); }
+    bool refresh() { return provider.refresh(snapshot); }
+    bool send(MediaSessionCommand command) { return provider.send(command); }
+    bool seek(std::int64_t position) { return provider.seek(position); }
 #else
     Impl()
     {
         snapshot.diagnostic =
-            "Global media sessions are available on Win32 only.";
+            "Global media sessions are unavailable on this platform.";
     }
 
     bool refresh()
@@ -289,7 +299,7 @@ GlobalMediaSession& GlobalMediaSession::operator=(
 
 bool GlobalMediaSession::platform_supported()
 {
-#if defined(_WIN32) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+#if (defined(_WIN32) || defined(__APPLE__)) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
     return true;
 #else
     return false;

@@ -1,4 +1,13 @@
+if(APPLE)
+    set(VIBRANCE_RENDER_BACKEND Metal)
+else()
+    set(VIBRANCE_RENDER_BACKEND Vulkan)
+endif()
 set(ENGINE_SOURCES
+    src/renderer/common/scene.cpp
+    src/renderer/common/font_atlas.cpp
+    src/renderer/common/media2d.cpp
+    src/renderer/common/text_direction.cpp
     src/animation/lottie.cpp
     src/audio/audio.cpp
     src/audio/loopback_capture.cpp
@@ -9,11 +18,9 @@ set(ENGINE_SOURCES
     src/core/process.cpp
     src/core/secure_credential.cpp
     src/core/single_instance.cpp
-    src/core/vma_usage.cpp
     src/display/foreground.cpp
     src/display/placement.cpp
     src/display/preferences.cpp
-    src/factories/mesh_factory.cpp
     src/glfw/panel_window.cpp
     src/glfw/ui_surface.cpp
     src/glfw/ui_window.cpp
@@ -28,22 +35,6 @@ set(ENGINE_SOURCES
     src/notifications/provider.cpp
     src/notifications/stack_layout.cpp
     src/platform/native_dialog.cpp
-    src/renderer/vulkan/buffer.cpp
-    src/renderer/vulkan/command.cpp
-    src/renderer/vulkan/descriptors.cpp
-    src/renderer/vulkan/device.cpp
-    src/renderer/vulkan/font_atlas.cpp
-    src/renderer/vulkan/frame.cpp
-    src/renderer/vulkan/image.cpp
-    src/renderer/vulkan/instance.cpp
-    src/renderer/vulkan/media2d.cpp
-    src/renderer/vulkan/renderer.cpp
-    src/renderer/vulkan/renderer2d.cpp
-    src/renderer/vulkan/renderer3d.cpp
-    src/renderer/vulkan/shader.cpp
-    src/renderer/vulkan/swapchain.cpp
-    src/renderer/vulkan/synchronisation.cpp
-    src/renderer/vulkan/text_direction.cpp
     src/time/countdown_timer.cpp
     src/ui/animated_text_view.cpp
     src/ui/context_menu.cpp
@@ -51,6 +42,30 @@ set(ENGINE_SOURCES
     src/ui/resource_loading.cpp
     src/ui/theme.cpp
 )
+if(APPLE)
+    list(APPEND ENGINE_SOURCES
+        src/renderer/metal/renderer.cpp
+        src/renderer/metal/device.cpp
+        src/renderer/metal/surface.mm
+        src/renderer/metal/mesh.cpp)
+else()
+    list(APPEND ENGINE_SOURCES src/core/vma_usage.cpp src/factories/mesh_factory.cpp
+        src/renderer/vulkan/buffer.cpp
+        src/renderer/vulkan/command.cpp
+        src/renderer/vulkan/descriptors.cpp
+        src/renderer/vulkan/device.cpp
+        src/renderer/vulkan/frame.cpp
+        src/renderer/vulkan/image.cpp
+        src/renderer/vulkan/instance.cpp
+        src/renderer/vulkan/renderer.cpp
+        src/renderer/vulkan/renderer2d.cpp
+        src/renderer/vulkan/renderer3d.cpp
+        src/renderer/vulkan/shader.cpp
+        src/renderer/vulkan/swapchain.cpp
+        src/renderer/vulkan/synchronisation.cpp
+    )
+endif()
+
 # C++/WinRT stays in its MSVC companion DLL and must never enter the MinGW
 # engine target. The MinGW side talks to it through a versioned POD C ABI.
 
@@ -72,67 +87,22 @@ if(WIN32)
     list(APPEND ENGINE_SOURCES src/platform/win32/native_tray.cpp
         src/platform/win32/composition_presenter.cpp)
 elseif(APPLE)
-    list(APPEND ENGINE_SOURCES src/glfw/window_macos.mm src/platform/macos/native_tray.mm)
+    list(APPEND ENGINE_SOURCES src/glfw/window_macos.mm src/platform/macos/native_tray.mm
+        src/media/session_macos.mm src/audio/loopback_capture_macos.mm)
+    set_source_files_properties(src/media/session_macos.mm src/audio/loopback_capture_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 else()
     list(APPEND ENGINE_SOURCES src/platform/portable/native_tray.cpp)
 endif()
-if(NOT WIN32)
+if(NOT WIN32 AND NOT APPLE)
     list(APPEND ENGINE_SOURCES src/platform/portable/composition_presenter.cpp)
 endif()
 
-# Compile shader sources once, then turn the SPIR-V binaries into a generated
-# translation unit. Runtime applications therefore need neither shader files
-# nor shaderc beside the engine DLL.
-set(EMBEDDED_SHADER_DIR "${ENGINE_GENERATED_DIR}")
-set(EMBEDDED_SHADER_HEADER "${EMBEDDED_SHADER_DIR}/embedded_shaders.h")
-set(EMBEDDED_SHADER_CPP "${EMBEDDED_SHADER_DIR}/embedded_shaders.cpp")
-set(EMBEDDED_SHADER_MANIFEST "${EMBEDDED_SHADER_DIR}/embedded_shaders.manifest")
-file(MAKE_DIRECTORY "${EMBEDDED_SHADER_DIR}/spirv")
-file(CONFIGURE
-    OUTPUT "${EMBEDDED_SHADER_HEADER}"
-    CONTENT [[#pragma once
-#include <cstddef>
-#include <span>
-#include <string_view>
-std::span<const std::byte> vibrance_embedded_shader_spirv(std::string_view fileName);
-]])
+if(APPLE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/renderer/metal/shaders.cmake")
+else()
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/renderer/vulkan/shaders.cmake")
+endif()
 
-file(GLOB ENGINE_SHADER_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.comp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.vert"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag")
-set(EMBEDDED_SHADER_BINARIES)
-set(EMBEDDED_SHADER_MANIFEST_CONTENT "")
-foreach(SHADER_SOURCE IN LISTS ENGINE_SHADER_SOURCES)
-    get_filename_component(SHADER_NAME "${SHADER_SOURCE}" NAME)
-    set(SHADER_BINARY "${EMBEDDED_SHADER_DIR}/spirv/${SHADER_NAME}.spv")
-    add_custom_command(
-        OUTPUT "${SHADER_BINARY}"
-        COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.3 -O
-            "${SHADER_SOURCE}" -o "${SHADER_BINARY}"
-        DEPENDS "${SHADER_SOURCE}"
-        COMMENT "Compiling ${SHADER_NAME} to SPIR-V"
-        VERBATIM)
-    list(APPEND EMBEDDED_SHADER_BINARIES "${SHADER_BINARY}")
-    string(APPEND EMBEDDED_SHADER_MANIFEST_CONTENT "${SHADER_NAME}|${SHADER_BINARY}\n")
-endforeach()
-file(CONFIGURE
-    OUTPUT "${EMBEDDED_SHADER_MANIFEST}"
-    CONTENT "${EMBEDDED_SHADER_MANIFEST_CONTENT}")
-
-add_custom_command(
-    OUTPUT "${EMBEDDED_SHADER_CPP}"
-    COMMAND "${CMAKE_COMMAND}"
-        "-DMANIFEST=${EMBEDDED_SHADER_MANIFEST}"
-        "-DOUTPUT=${EMBEDDED_SHADER_CPP}"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake"
-    DEPENDS
-        ${EMBEDDED_SHADER_BINARIES}
-        "${EMBEDDED_SHADER_MANIFEST}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake"
-    COMMENT "Embedding engine SPIR-V in the DLL"
-    VERBATIM)
-list(APPEND ENGINE_SOURCES "${EMBEDDED_SHADER_CPP}")
 
 add_library(vibrance_engine SHARED ${ENGINE_SOURCES})
 add_library(vibrance::engine ALIAS vibrance_engine)
@@ -381,6 +351,10 @@ option(
     OFF)
 
 target_compile_features(vibrance_engine PUBLIC cxx_std_20)
+if(APPLE)
+    target_include_directories(vibrance_engine PRIVATE "${METAL_CPP_INCLUDE_DIR}")
+    target_compile_options(vibrance_engine PRIVATE -fblocks)
+endif()
 if (CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     # Debug retains symbols/assertions, but renderer hot paths must not run at
     # GCC's default -O0. -O2 is required here because this target contains the
@@ -405,7 +379,7 @@ target_include_directories(vibrance_engine
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${EMBEDDED_SHADER_DIR}"
+        "${ENGINE_GENERATED_DIR}"
         "${STB_INCLUDE_DIR}"
         ${FREETYPE_INCLUDE_DIRS})
 
@@ -452,7 +426,7 @@ if(SOLOUD_FOUND AND NOT TARGET soloud)
 endif()
 
 target_link_libraries(vibrance_engine PRIVATE
-    Vulkan::Vulkan
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:Vulkan::Vulkan>
     ${FREETYPE_LIBRARIES}
     ${GLFW_LIBRARIES})
 
@@ -493,9 +467,13 @@ elseif(APPLE)
     target_link_libraries(vibrance_engine PRIVATE
         ZLIB::ZLIB
         BZip2::BZip2
+        "-framework Metal"
         "-framework Cocoa"
         "-framework IOKit"
         "-framework CoreFoundation"
+        "-framework CoreAudio"
+        "-framework CoreMedia"
+        "-weak_framework ScreenCaptureKit"
         "-framework CoreVideo"
         "-framework QuartzCore"
         "-framework Security")
@@ -517,6 +495,10 @@ endif()
 include(CMakePackageConfigHelpers)
 set(CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/vibrance_engine")
 
+if(APPLE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/media/macos_adapter.cmake")
+endif()
+
 install(TARGETS vibrance_engine
     EXPORT vibrance_engineTargets
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
@@ -536,6 +518,12 @@ endif()
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/vibranceUI")
 
+if(APPLE)
+    install(FILES "${METAL_CPP_INCLUDE_DIR}/LICENSE.txt"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/licences"
+        RENAME metal-cpp.txt)
+endif()
+
 install(FILES "${ENGINE_MANIFEST_JSON}"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine")
 
@@ -548,19 +536,25 @@ install(DIRECTORY "${_vibrance_glm_headers}"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(DIRECTORY "${ENTT_INCLUDE_DIR}/entt"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+if(NOT APPLE)
 install(FILES "${VMA_HEADER_TO_INSTALL}"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/vma"
     RENAME vk_mem_alloc.h)
+endif()
+
 if(EXISTS "${GLFW_INCLUDE_DIRS}/GLFW")
     file(REAL_PATH "${GLFW_INCLUDE_DIRS}/GLFW" _vibrance_glfw_headers)
     install(DIRECTORY "${_vibrance_glfw_headers}/"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/GLFW")
 endif()
+if(NOT APPLE)
 install(DIRECTORY "${Vulkan_INCLUDE_DIRS}/vulkan"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 if(EXISTS "${Vulkan_INCLUDE_DIRS}/vk_video")
     install(DIRECTORY "${Vulkan_INCLUDE_DIRS}/vk_video"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+endif()
+
 endif()
 
 install(EXPORT vibrance_engineTargets

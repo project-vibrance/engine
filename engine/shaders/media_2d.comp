@@ -169,8 +169,12 @@ float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float p
     vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
     vec2 outside = max(q, vec2(0.0));
     float roundedNorm = length(outside);
+    if (amount <= 0.0)
+        return roundedNorm + min(max(q.x, q.y), 0.0) - safeRadius;
     float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
-    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    float squircleNorm = (outside.x == 0.0 || outside.y == 0.0)
+        ? outside.x + outside.y
+        : pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
     return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
 }
 
@@ -245,8 +249,12 @@ float sd_squircle_box_corners(vec2 p, vec2 halfSize, vec4 radii, float amount, f
     vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
     vec2 outside = max(q, vec2(0.0));
     float roundedNorm = length(outside);
+    if (amount <= 0.0)
+        return roundedNorm + min(max(q.x, q.y), 0.0) - safeRadius;
     float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
-    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    float squircleNorm = (outside.x == 0.0 || outside.y == 0.0)
+        ? outside.x + outside.y
+        : pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
     return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
 }
 
