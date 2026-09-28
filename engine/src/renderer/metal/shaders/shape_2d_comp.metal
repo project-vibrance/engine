@@ -413,7 +413,11 @@ float sd_liquid_bridge(thread const float2& p, thread const float2& halfSize, th
 {
     float radius = fast::max(halfSize.y, 0.5);
     float centerOffset = fast::max(halfSize.x - radius, 0.0);
-    float left = length(p - float2(-centerOffset, 0.0)) - radius;
+    // Continue the main island's right cap towards the left. This uses its
+    // existing edge as the liquid source instead of drawing a second circle
+    // that can emerge from behind the shell during separation.
+    float2 source = p - float2(-centerOffset, 0.0);
+    float left = length(float2(fast::max(source.x, 0.0), source.y)) - radius;
     float right = length(p - float2(centerOffset, 0.0)) - radius;
     float centerDistance = centerOffset * 2.0;
     float surfaceGap = fast::max(centerDistance - (radius * 2.0), 0.0);
@@ -1138,4 +1142,3 @@ kernel void shape_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], textur
     float4 param_5 = src;
     colorBuffer.write(blend_over(param_4, param_5), uint2(pixel));
 }
-

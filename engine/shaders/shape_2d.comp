@@ -305,13 +305,14 @@ float sd_circular_progress(vec2 pixel, vec4 rect, vec4 arcParams) {
     return min(length(p - startPoint), length(p - endPoint)) - halfStroke;
 }
 
-// Polynomial smooth union of the main island's real circular end cap and the
-// detached island's real circular shell. The rect spans both complete circles,
-// so the liquid neck shares their exact SDF instead of approximating endpoints.
+// Polynomial smooth union of the main island's right cap and the detached
+// island's circular shell. The source cap continues left inside the main
+// island, so no separate source circle can appear during separation.
 float sd_liquid_bridge(vec2 p, vec2 halfSize, float amount) {
     float radius = max(halfSize.y, 0.5);
     float centerOffset = max(halfSize.x - radius, 0.0);
-    float left = length(p - vec2(-centerOffset, 0.0)) - radius;
+    vec2 source = p - vec2(-centerOffset, 0.0);
+    float left = length(vec2(max(source.x, 0.0), source.y)) - radius;
     float right = length(p - vec2(centerOffset, 0.0)) - radius;
     float centerDistance = centerOffset * 2.0;
     float surfaceGap = max(centerDistance - radius * 2.0, 0.0);

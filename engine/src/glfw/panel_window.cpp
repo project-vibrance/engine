@@ -975,7 +975,13 @@ bool GlfwPanelWindow::begin_window_action(glm::vec2 framebufferPoint)
 
     if (move)
     {
-        begin_glfw_native_window_drag(window);
+        // AppKit tracks and moves the window for the full native drag. Do not
+        // arm the cursor-driven fallback afterwards, or the next panel tick
+        // can move the window a second time from a stale pointer sample.
+        if (begin_glfw_native_window_drag(window))
+        {
+            return true;
+        }
     }
 
     if (!cursor_screen_point(actionStartCursorScreen) ||
