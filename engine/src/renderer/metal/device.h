@@ -45,6 +45,7 @@ class Device
     Owned<MTL::ComputeCommandEncoder> encoder;
     Owned<MTL4::ComputeCommandEncoder> encoder4;
     MTL::ComputePipelineState *boundPipeline = nullptr;
+    std::array<MTL::Texture *, 5> boundMetal3Textures{};
     struct ConstantPage
     {
         Owned<MTL::Buffer> buffer;
@@ -54,6 +55,17 @@ class Device
     // tables are snapshotted by Metal at each dispatch, so one table suffices.
     std::vector<ConstantPage> constantPages;
     size_t constantPage = 0;
+    struct Metal3Frame
+    {
+        Owned<MTL::CommandBuffer> pending;
+        std::vector<ConstantPage> constantPages;
+        size_t constantPage = 0;
+    };
+    // The offscreen colour and scratch textures stay shared: Metal 3 command
+    // buffers submitted to one queue execute in order. Only CPU-written
+    // constants and command-buffer references need separate frame storage.
+    std::array<Metal3Frame, 2> metal3Frames;
+    size_t metal3Frame = 0;
     Owned<MTL4::ArgumentTable> arguments;
     std::array<MTL::ResourceID, 5> boundTextures{};
     struct ResidentResource
@@ -63,7 +75,26 @@ class Device
     };
     std::unordered_map<MTL::Resource *, ResidentResource> residentResources;
     bool residencyChanged = false;
-    std::unordered_map<std::string, Owned<MTL::ComputePipelineState>> pipelines;
+    struct PipelineNameHash
+    {
+        using is_transparent = void;
+        size_t operator()(std::string_view name) const noexcept
+        {
+            return std::hash<std::string_view>{}(name);
+        }
+    };
+    struct PipelineNameEqual
+    {
+        using is_transparent = void;
+        bool operator()(std::string_view left, std::string_view right) const noexcept
+        {
+            return left == right;
+        }
+    };
+    // Lookups run for every compute pass; accepting string_view avoids an
+    // allocation for shader names longer than std::string's inline capacity.
+    std::unordered_map<std::string, Owned<MTL::ComputePipelineState>, PipelineNameHash,
+                       PipelineNameEqual> pipelines;
     uint64_t serial = 0;
     bool recording = false;
     bool inFlight = false;
@@ -81,6 +112,7 @@ class Device
   private:
     void use_resource(MTL::Resource *resource);
     std::pair<MTL::Buffer *, size_t> write_constants(const void *data, size_t size);
+    void retire_metal3_frame(Metal3Frame &frame);
     void wait_idle();
 };
 } // namespace vibrance::metal

@@ -75,13 +75,14 @@ Device::Device(bool preferMetal4)
 }
 Device::~Device()
 {
-    if (inFlight)
+    if (metal4 && inFlight)
     {
-        if (metal4)
-            completed->waitUntilSignaledValue(serial, 60000);
-        else
-            commands->waitUntilCompleted();
+        completed->waitUntilSignaledValue(serial, 60000);
     }
+    if (!metal4)
+        for (auto &frame : metal3Frames)
+            if (frame.pending)
+                frame.pending->waitUntilCompleted();
 }
 Owned<MTL::Function> Device::function(const char *name)
 {
@@ -161,17 +162,19 @@ void Device::use_resource(MTL::Resource *resource)
 std::pair<MTL::Buffer *, size_t> Device::write_constants(const void *data, size_t size)
 {
     const size_t alignedSize = (size + 255u) & ~size_t(255u);
-    while (constantPage < constantPages.size() &&
-           constantPages[constantPage].buffer->length() - constantPages[constantPage].used < alignedSize)
-        ++constantPage;
-    if (constantPage == constantPages.size())
+    auto &pages = metal4 ? constantPages : metal3Frames[metal3Frame].constantPages;
+    auto &pageIndex = metal4 ? constantPage : metal3Frames[metal3Frame].constantPage;
+    while (pageIndex < pages.size() &&
+           pages[pageIndex].buffer->length() - pages[pageIndex].used < alignedSize)
+        ++pageIndex;
+    if (pageIndex == pages.size())
     {
         auto buffer =
             own(gpu->newBuffer(std::max(size_t(65536), alignedSize), MTL::ResourceStorageModeShared));
         require(bool(buffer), "Cannot allocate Metal constants");
-        constantPages.push_back({std::move(buffer), 0});
+        pages.push_back({std::move(buffer), 0});
     }
-    auto &page = constantPages[constantPage];
+    auto &page = pages[pageIndex];
     const auto offset = page.used;
     std::memcpy(static_cast<unsigned char *>(page.buffer->contents()) + offset, data, size);
     page.used += alignedSize;
@@ -182,12 +185,13 @@ void Device::dispatch(const char *name, const void *data, size_t size, uint32_t 
 {
     if (!width || !height || !count)
         return;
+    require(textures.size() <= boundTextures.size(), "Too many Metal texture bindings");
     auto state = pipeline(name);
     if (!recording)
     {
-        wait_idle();
         if (metal4)
         {
+            wait_idle();
             allocator4->reset();
             commands4->beginCommandBuffer(allocator4.get());
             encoder4 = NS::RetainPtr(commands4->computeCommandEncoder());
@@ -197,15 +201,17 @@ void Device::dispatch(const char *name, const void *data, size_t size, uint32_t 
         }
         else
         {
+            retire_metal3_frame(metal3Frames[metal3Frame]);
             commands = NS::RetainPtr(queue->commandBuffer());
             encoder = NS::RetainPtr(commands->computeCommandEncoder());
+            encoder->setSamplerState(sampler.get(), 0);
+            boundMetal3Textures.fill(nullptr);
         }
         boundPipeline = nullptr;
         recording = true;
     }
     if (metal4)
     {
-        require(textures.size() <= boundTextures.size(), "Too many Metal texture bindings");
         const auto [buffer, offset] = write_constants(data, size);
         use_resource(buffer);
         arguments->setAddress(buffer->gpuAddress() + offset, 0);
@@ -242,8 +248,14 @@ void Device::dispatch(const char *name, const void *data, size_t size, uint32_t 
         }
         size_t index = 0;
         for (auto image : textures)
-            encoder->setTexture(image, index++);
-        encoder->setSamplerState(sampler.get(), 0);
+        {
+            if (boundMetal3Textures[index] != image)
+            {
+                encoder->setTexture(image, index);
+                boundMetal3Textures[index] = image;
+            }
+            ++index;
+        }
         encoder->dispatchThreads(MTL::Size(width, height, count), MTL::Size(8, 8, 1));
     }
     boundPipeline = state;
@@ -292,29 +304,40 @@ void Device::submit(CA::MetalDrawable *drawable, bool presentWithTransaction)
             commands->waitUntilScheduled();
             drawable->present();
         }
+        metal3Frames[metal3Frame].pending = std::move(commands);
+        metal3Frame = (metal3Frame + 1) % metal3Frames.size();
     }
     recording = false;
-    inFlight = true;
+    if (metal4)
+        inFlight = true;
+}
+void Device::retire_metal3_frame(Metal3Frame &frame)
+{
+    if (!frame.pending)
+        return;
+    if (frame.pending->status() != MTL::CommandBufferStatusCompleted)
+        frame.pending->waitUntilCompleted();
+    require(frame.pending->status() != MTL::CommandBufferStatusError, "Metal GPU submission failed",
+            frame.pending->error());
+    frame.pending.reset();
+    frame.constantPage = 0;
+    for (auto &page : frame.constantPages)
+        page.used = 0;
 }
 void Device::wait_idle()
 {
+    if (!metal4)
+    {
+        for (auto &frame : metal3Frames)
+            retire_metal3_frame(frame);
+        return;
+    }
     if (!inFlight)
         return;
-    if (metal4)
-    {
-        // Read the shared completion value first. Normal frame pacing lets the
-        // GPU finish before reuse, avoiding a blocking IOKit call per frame.
-        if (completed->signaledValue() < serial)
-            require(completed->waitUntilSignaledValue(serial, 60000), "Metal 4 GPU submission timed out");
-    }
-    else
-    {
-        if (commands->status() != MTL::CommandBufferStatusCompleted)
-            commands->waitUntilCompleted();
-        require(commands->status() != MTL::CommandBufferStatusError, "Metal GPU submission failed",
-                commands->error());
-        commands.reset();
-    }
+    // Read the shared completion value first. Normal frame pacing lets the
+    // GPU finish before reuse, avoiding a blocking IOKit call per frame.
+    if (completed->signaledValue() < serial)
+        require(completed->waitUntilSignaledValue(serial, 60000), "Metal 4 GPU submission timed out");
     inFlight = false;
     constantPage = 0;
     for (auto &page : constantPages)

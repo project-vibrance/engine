@@ -139,12 +139,16 @@ void check_async_constants(Device &device)
         shape.rect = {0, 0, 8, 8};
         shape.effect0.w = 1;
         shape.data.x = uint32_t(Renderer2DPrimitive::eRectangle);
-        // Force constant storage past its first 64 KiB page, then reuse it on
-        // the next submission without an explicit intervening flush.
-        for (unsigned i = 0; i < 300; ++i)
+        // Large constants use shared Metal buffers instead of setBytes. Cross
+        // a 64 KiB page in each queued frame, then verify that recycling the
+        // first slot does not overwrite a submission still using its page.
+        std::array<unsigned char, 8192> constants{};
+        for (unsigned i = 0; i < 12; ++i)
         {
             shape.color0 = {(frame + 1) / 4.0f, (i % 2) / 2.0f, 0, 1};
-            device.dispatch("shape_2d_comp", &shape, sizeof(shape), 8, 8, {frames[frame].get()});
+            std::memcpy(constants.data(), &shape, sizeof(shape));
+            device.dispatch("shape_2d_comp", constants.data(), constants.size(), 8, 8,
+                            {frames[frame].get()});
         }
         device.submit();
     }

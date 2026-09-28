@@ -494,14 +494,6 @@ struct Engine::Impl
             presentedGeneration = scene.frame_generation();
             return;
         }
-        auto drawable = layer->nextDrawable();
-        if (!drawable)
-        {
-            frameDamage.invalidate();
-            return;
-        }
-        if (device.metal4)
-            device.queue4->wait(drawable);
         clear(colour.get(), damageBounds);
         if (hasBlur)
         {
@@ -630,6 +622,19 @@ struct Engine::Impl
             }
         }
         flush_text();
+        // Acquire the drawable after encoding the offscreen work. The first
+        // dispatch may wait for the previous submission to finish, and holding
+        // a CAMetalLayer drawable through that wait needlessly delays its
+        // return to Core Animation on high-refresh displays.
+        auto drawable = layer->nextDrawable();
+        if (!drawable)
+        {
+            device.submit();
+            frameDamage.invalidate();
+            return;
+        }
+        if (device.metal4)
+            device.queue4->wait(drawable);
         // Core Animation consumes premultiplied colour.
         glm::uvec4 composite(2u | 8u | (backdrop ? 1u : 0u), 0, 0, 0);
         device.dispatch("composite_2d_comp", &composite, sizeof(composite), extent.width, extent.height,
