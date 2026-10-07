@@ -1713,6 +1713,10 @@ void glfw_update_ui_drag_inputs(
     // Shared drag path for panels and direct-manipulation controls
     const bool leftPressed = glfw_left_mouse_pressed(window);
     Renderer2DScene& scene = engine.renderer2d_scene();
+    ui_update_switch_drag(scene, inputState, leftPressed, pointer.hasPoint, pointer.point);
+    if (const auto* toggle = scene.registry().try_get<UiSwitchControlComponent>(inputState.pressedInputEntity);
+        toggle && toggle->dragging && inputState.activeStretchDynamics != inputState.pressedInputEntity)
+        ui_begin_stretch_dynamics(scene, inputState, inputState.pressedInputEntity, toggle->dragPressPoint);
     ui_update_stretch_dynamics_drag(
         scene,
         inputState,

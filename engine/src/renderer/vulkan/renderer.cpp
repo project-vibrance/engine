@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <thread>
 
 #ifdef _WIN32
@@ -222,7 +223,9 @@ namespace
 				(std::isfinite(a) && std::isfinite(b) &&
 					std::abs(a - b) <= 0.05f);
 		};
-		return left.material == right.material &&
+        return left.identity == right.identity &&
+            left.material == right.material &&
+			left.liquidBackend == right.liquidBackend &&
 			left.provider == right.provider &&
 			left.shape == right.shape &&
 			close(left.x, right.x) && close(left.y, right.y) &&
@@ -232,10 +235,29 @@ namespace
 			close(left.topRightRadius, right.topRightRadius) &&
 			close(left.bottomRightRadius, right.bottomRightRadius) &&
 			close(left.bottomLeftRadius, right.bottomLeftRadius) &&
-			close(left.squircleAmount, right.squircleAmount) &&
-			close(left.squirclePower, right.squirclePower) &&
-			close(left.notchAmount, right.notchAmount) &&
+            left.squircleAmount == right.squircleAmount &&
+            left.squirclePower == right.squirclePower &&
+            left.notchAmount == right.notchAmount &&
 			close(left.notchDepth, right.notchDepth) &&
+			// Optical settings change in 1% steps; geometry's tolerance would
+			// suppress those updates and leave the native shader's values stale.
+			left.liquidRefraction == right.liquidRefraction &&
+			left.liquidBlur == right.liquidBlur &&
+			left.liquidRim == right.liquidRim &&
+            left.liquidDispersion == right.liquidDispersion &&
+            left.liquidTint.red == right.liquidTint.red &&
+            left.liquidTint.green == right.liquidTint.green &&
+            left.liquidTint.blue == right.liquidTint.blue &&
+            left.liquidTint.alpha == right.liquidTint.alpha &&
+            left.contourCount == right.contourCount &&
+            left.hasExclusion == right.hasExclusion &&
+            left.clipRawBackdropToShape == right.clipRawBackdropToShape &&
+            left.paintCapGradient == right.paintCapGradient &&
+            left.capGradient == right.capGradient && left.capColour == right.capColour &&
+            std::memcmp(left.contours.data(), right.contours.data(),
+                sizeof(left.contours)) == 0 &&
+            (!left.hasExclusion || std::memcmp(&left.exclusion,
+                &right.exclusion, sizeof(left.exclusion)) == 0) &&
 			close(left.verticalStart, right.verticalStart) &&
 			std::abs(left.opacity - right.opacity) <= 0.002f &&
 			close(left.blurRadius, right.blurRadius) &&
@@ -1825,10 +1847,11 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 		return {};
 	}
 
-	struct OrderedBackdropRegion
+    struct OrderedBackdropRegion
 	{
 		entt::entity entity = entt::null;
-		SystemBackdropRegion region = {};
+        SystemBackdropRegion region = {};
+        Renderer2DShapeVisualState visual = {};
 	};
 	std::vector<OrderedBackdropRegion> orderedRegions;
 	entt::registry& registry = renderer2DScene.registry();
@@ -1848,7 +1871,9 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 		const ShapeComponent& shape,
 		const SystemBackdropComponent& backdrop,
 		const RenderLayer2DComponent& layer) {
-		if (!layer.visible || backdrop.region.material != GlassMaterial::eSystemGlass ||
+		if (!layer.visible ||
+			(backdrop.region.material != GlassMaterial::eSystemGlass &&
+			 backdrop.region.material != GlassMaterial::eLiquid) ||
 			std::abs(transform.rotationRadians) > 0.0001f ||
 			glm::length(transform.rotation3DRadians) > 0.0001f)
 		{
@@ -1875,7 +1900,8 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 			return;
 		}
 
-		SystemBackdropRegion region = backdrop.region;
+        SystemBackdropRegion region = backdrop.region;
+        region.identity = static_cast<std::uint64_t>(entt::to_integral(entity)) + 1u;
 		region.opacity = std::clamp(
 			region.opacity * visual->opacity,
 			0.0f,
@@ -1912,9 +1938,12 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 			case Renderer2DPrimitive::eSquircle:
 				region.shape = SystemBackdropShape::eSquircle;
 				break;
-			case Renderer2DPrimitive::eNotchedSquircle:
-				region.shape = SystemBackdropShape::eNotchedSquircle;
-				break;
+            case Renderer2DPrimitive::eNotchedSquircle:
+                region.shape = SystemBackdropShape::eNotchedSquircle;
+                break;
+            case Renderer2DPrimitive::eLiquidBridge:
+                region.shape = SystemBackdropShape::eLiquidBridge;
+                break;
 			default:
 				region.shape = SystemBackdropShape::eRoundedRectangle;
 				break;
@@ -1928,30 +1957,155 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 			region.bottomRightRadius *= shapeScale;
 			region.bottomLeftRadius *= shapeScale;
 		}
-		orderedRegions.push_back({ entity, region });
+        orderedRegions.push_back({ entity, region, *visual });
 	});
 
-	// Composition retains one effect graph per vector slot. Material/provider/
-	// shape alone is not a stable identity: two equal-material entities could
-	// exchange slots when EnTT storage changed, making a moving lens reuse the
-	// other entity's backdrop history. Keep the entity id as the final key so a
-	// dragged region always updates its own retained graph.
+    const auto contourForRegion = [](const SystemBackdropRegion& region,
+        float originX, float originY) {
+        SystemBackdropRegion::Contour contour {};
+        contour.x = region.x - originX;
+        contour.y = region.y - originY;
+        contour.width = region.width;
+        contour.height = region.height;
+        contour.cornerRadius = region.cornerRadius;
+        contour.topLeftRadius = region.topLeftRadius;
+        contour.topRightRadius = region.topRightRadius;
+        contour.bottomRightRadius = region.bottomRightRadius;
+        contour.bottomLeftRadius = region.bottomLeftRadius;
+        contour.squircleAmount = region.squircleAmount;
+        contour.squirclePower = region.squirclePower;
+        contour.notchAmount = region.notchAmount;
+        contour.notchDepth = region.notchDepth;
+        contour.shape = static_cast<std::uint32_t>(region.shape);
+        return contour;
+    };
+    const auto contourForEntity = [&](entt::entity entity, float originX,
+        float originY) -> std::optional<SystemBackdropRegion::Contour> {
+        const auto* shape = registry.try_get<ShapeComponent>(entity);
+        const auto visual = renderer2DScene.resolved_shape_visual_state(entity,
+            renderTimeSeconds);
+        if (!shape || !visual) return std::nullopt;
+        SystemBackdropRegion source {};
+        source.x = visual->rect.x * outputScaleX;
+        source.y = visual->rect.y * outputScaleY;
+        source.width = visual->rect.z * outputScaleX;
+        source.height = visual->rect.w * outputScaleY;
+        const float scale = std::max(outputScaleX, outputScaleY);
+        const auto radii = shape->effective_corner_radii() * scale;
+        source.cornerRadius = shape->customCornerRadii ? 0.0f :
+            shape->cornerRadius * scale;
+        source.topLeftRadius = radii.x;
+        source.topRightRadius = radii.y;
+        source.bottomRightRadius = radii.z;
+        source.bottomLeftRadius = radii.w;
+        source.squircleAmount = shape->squircleAmount;
+        source.squirclePower = shape->squirclePower;
+        source.notchAmount = shape->notchAmount;
+        source.notchDepth = shape->notchDepth * scale;
+        switch (shape->primitive)
+        {
+        case Renderer2DPrimitive::eRectangle: source.shape = SystemBackdropShape::eRectangle; break;
+        case Renderer2DPrimitive::eEllipse: source.shape = SystemBackdropShape::eEllipse; break;
+        case Renderer2DPrimitive::eSquircle: source.shape = SystemBackdropShape::eSquircle; break;
+        case Renderer2DPrimitive::eNotchedSquircle: source.shape = SystemBackdropShape::eNotchedSquircle; break;
+        case Renderer2DPrimitive::eLiquidBridge: source.shape = SystemBackdropShape::eLiquidBridge; break;
+        default: source.shape = SystemBackdropShape::eRoundedRectangle; break;
+        }
+        return contourForRegion(source, originX, originY);
+    };
+    // Backing cards expose only the silhouette outside the card in front.
+    for (auto& entry : orderedRegions)
+    {
+        const auto* cutout = registry.try_get<ShapeCutout2DComponent>(entry.entity);
+        if (!cutout || !cutout->affectBackdrop || cutout->source == entt::null ||
+            !registry.valid(cutout->source)) continue;
+        if (const auto exclusion = contourForEntity(cutout->source,
+                entry.region.x, entry.region.y))
+        {
+            entry.region.exclusion = *exclusion;
+            entry.region.hasExclusion = true;
+        }
+    }
+    std::unordered_set<entt::entity> mergedParticipants;
+    for (auto& owner : orderedRegions)
+    {
+        const auto* group = registry.try_get<SystemBackdropUnionComponent>(owner.entity);
+        if (!group || owner.region.material != GlassMaterial::eLiquid) continue;
+        std::array<const OrderedBackdropRegion*, 3> participants {};
+        std::size_t count = 0u;
+        for (const auto entity : group->participants)
+        {
+            if (entity == entt::null || mergedParticipants.count(entity)) continue;
+            const auto found = std::find_if(orderedRegions.begin(), orderedRegions.end(),
+                [entity](const auto& entry) { return entry.entity == entity; });
+            if (found != orderedRegions.end() &&
+                found->region.material == owner.region.material &&
+                found->region.liquidBackend == owner.region.liquidBackend &&
+                std::none_of(participants.begin(), participants.begin() + count,
+                    [entity](const auto* entry) { return entry->entity == entity; }))
+                participants[count++] = &*found;
+        }
+        if (count < 2u || std::none_of(participants.begin(), participants.begin() + count,
+                [&](const auto* entry) { return entry->entity == owner.entity; })) continue;
+        float left = std::numeric_limits<float>::max();
+        float top = left;
+        float right = std::numeric_limits<float>::lowest();
+        float bottom = right;
+        for (std::size_t index = 0u; index < count; ++index)
+        {
+            const auto& region = participants[index]->region;
+            float flare = 0.0f;
+            if (region.shape == SystemBackdropShape::eNotchedSquircle)
+            {
+                const float progress = std::clamp((region.notchAmount - 0.85f) / 0.15f, 0.0f, 1.0f);
+                const float depth = region.notchDepth > 0.5f ? region.notchDepth :
+                    std::clamp(region.height * 0.62f, 0.0f, 92.0f);
+                flare = std::ceil(std::clamp(depth * 0.18f, 0.0f, region.height * 0.5f) *
+                    progress * progress);
+            }
+            left = std::min(left, region.x - flare);
+            top = std::min(top, region.y);
+            right = std::max(right, region.x + region.width + flare);
+            bottom = std::max(bottom, region.y + region.height);
+        }
+        auto merged = owner.region;
+        merged.x = left;
+        merged.y = top;
+        merged.width = right - left;
+        merged.height = bottom - top;
+        merged.shape = SystemBackdropShape::eRectangle;
+        merged.verticalStart = 0.0f;
+        merged.hasExclusion = false;
+        merged.contourCount = static_cast<std::uint32_t>(count);
+        merged.paintCapGradient = group->paintCapGradient;
+        merged.capGradient = group->capGradient;
+        merged.capColour = group->capColour;
+        for (std::size_t index = 0u; index < count; ++index)
+        {
+            merged.contours[index] = contourForRegion(participants[index]->region, left, top);
+            if (participants[index]->entity != owner.entity)
+                mergedParticipants.insert(participants[index]->entity);
+        }
+        owner.region = merged;
+    }
+    orderedRegions.erase(std::remove_if(orderedRegions.begin(), orderedRegions.end(),
+        [&](const auto& entry) { return mergedParticipants.count(entry.entity) != 0u; }),
+        orderedRegions.end());
+
+    // Native materials follow sharp content's paint order, so a detached shell
+    // cannot cover the main island during a merge. Identities retain their own
+    // shader slots when the sorted order changes.
 	std::stable_sort(
 		orderedRegions.begin(),
 		orderedRegions.end(),
 		[](const OrderedBackdropRegion& left, const OrderedBackdropRegion& right) {
-			if (left.region.material != right.region.material)
-			{
-				return left.region.material < right.region.material;
-			}
-			if (left.region.provider != right.region.provider)
-			{
-				return left.region.provider < right.region.provider;
-			}
-			if (left.region.shape != right.region.shape)
-			{
-				return left.region.shape < right.region.shape;
-			}
+            const auto& a = left.visual;
+            const auto& b = right.visual;
+            if (a.alwaysOnTop != b.alwaysOnTop) return b.alwaysOnTop;
+            if (a.stackLayer != b.stackLayer) return a.stackLayer < b.stackLayer;
+            if (a.stackOrder != b.stackOrder) return a.stackOrder < b.stackOrder;
+            if (a.layer != b.layer) return a.layer < b.layer;
+            if (a.order != b.order) return a.order < b.order;
 			return entt::to_integral(left.entity) < entt::to_integral(right.entity);
 		});
 	std::vector<SystemBackdropRegion> regions;

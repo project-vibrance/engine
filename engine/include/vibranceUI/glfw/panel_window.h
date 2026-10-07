@@ -119,6 +119,8 @@ struct GlfwPanelWindowTemplateOptions
     bool showTitleText = true;
     GlfwPanelWindowTrafficLightOptions trafficLights {};
     GlfwPanelWindowContentBuilder buildContent;
+    // Runs after control input and layout, before the scene is rendered.
+    std::function<void(Engine&)> beforeDraw;
 };
 
 struct GlfwPanelWindowTemplateContext
@@ -228,6 +230,7 @@ private:
     GlfwPanelWindowTemplateOptions options {};
     UiInputState inputState {};
     std::array<Media2DHandle, 3> trafficLightIcons {};
+    std::array<entt::entity, 3> trafficLightEntities { entt::null, entt::null, entt::null };
     std::array<entt::entity, 3> trafficLightIconEntities {
         entt::null,
         entt::null,

@@ -927,6 +927,12 @@ Renderer2DScene::resolved_shape_visual_state(
         std::clamp(style->opacity, 0.0f, 1.0f) : 1.0f;
 
     Renderer2DShapeVisualState state = {};
+    const auto paintOrder = render_layer_key(registry_, entity);
+    state.stackLayer = paintOrder.stackLayer;
+    state.stackOrder = paintOrder.stackOrder;
+    state.layer = paintOrder.layer;
+    state.order = paintOrder.order;
+    state.alwaysOnTop = paintOrder.alwaysOnTop;
     state.rect = apply_display_transition_scale(
         renderer2d_apply_interactive_visual_rect(
             registry_,
@@ -1086,6 +1092,15 @@ void Renderer2DScene::build_render_plan(
         const uint32_t transformFlags = transform2_5d_flags(transform);
         batch.effect1 = transformFlags == 0u ? shape_sdf_parameters(shape) : transform2_5d_effect(transform);
         batch.flags = shape_flags(shape, style) | transformFlags;
+        if (const LiquidGlassComponent* liquid =
+                registry_.try_get<LiquidGlassComponent>(entity);
+            liquid && liquid->material == GlassMaterial::eLiquid &&
+            style.outlineWidth > 0.001f)
+        {
+            // The UI supplies a neutral static stroke. Optical rendering owns
+            // the travelling highlight independently of retained UI paint.
+            batch.flags |= eRenderer2DStyleLiquidRim;
+        }
         if (transitionShapeBlur > 0.001f && transformFlags == 0u)
         {
             batch.flags |= eRenderer2DStyleBlur;
@@ -1110,6 +1125,37 @@ void Renderer2DScene::build_render_plan(
                     mask.squirclePower,
                     mask.notchAmount,
                     mask.notchDepth);
+                const auto radii = shape.effective_corner_radii();
+                const bool binaryCorners = std::all_of(&radii[0], &radii[0] + 4, [&](float radius) {
+                    return radius <= 0.001f || std::abs(radius - shape.cornerRadius) <= 0.001f;
+                });
+                const bool sharedSurfaceContour = (shape.primitive == Renderer2DPrimitive::eSquircle ||
+                    shape.primitive == Renderer2DPrimitive::eRoundedRectangle) && style.outlineWidth <= 0.001f && binaryCorners;
+                if (mask.cutout && ((batch.flags & eRenderer2DStyleLiquidRim) != 0u || sharedSurfaceContour) &&
+                    (mask.primitive == Renderer2DPrimitive::eRoundedRectangle ||
+                        mask.primitive == Renderer2DPrimitive::eEllipse ||
+                        mask.primitive == Renderer2DPrimitive::eRectangle))
+                {
+                    // Neutral liquid strokes leave their RGB channels free.
+                    // Preserve the panel's full-precision notch/squircle data
+                    // while effect1 describes the navigation cutout. Simple
+                    // mask shapes do not use these packed amount/power bits.
+                    batch.flags |= eRenderer2DStyleMaskedLiquidShapeParameters;
+                    batch.packedData = (batch.packedData & ~(0xffu << 12u)) |
+                        (pack_unorm8(style.outlineColor.a) << 12u);
+                    batch.color2 = shape_sdf_parameters(shape);
+                    if (sharedSurfaceContour && shape.customCornerRadii)
+                    {
+                        // A simple lens mask does not use notch-amount bits.
+                        // Retain the section's rounded outer corners and its
+                        // square joining edge without adding a second mask.
+                        uint32_t corners = 0u;
+                        for (uint32_t index = 0u; index < 4u; ++index)
+                            if (radii[index] > 0.001f) corners |= 1u << index;
+                        batch.flags |= eRenderer2DStyleCornerRadii;
+                        batch.packedData = (batch.packedData & ~(15u << 20u)) | (corners << 20u);
+                    }
+                }
             }
         }
 
@@ -1142,7 +1188,8 @@ void Renderer2DScene::build_render_plan(
             {
                 shadowBatch.flags |= eRenderer2DStyleShadowExcludeShapeExtensions;
             }
-            shadowBatch.flags &= ~eRenderer2DStyleTransform2_5D;
+            shadowBatch.flags &= ~(eRenderer2DStyleTransform2_5D |
+                eRenderer2DStyleMaskedLiquidShapeParameters);
             if ((shadowBatch.flags & eRenderer2DStyleCornerRadii) != 0u)
             {
                 shadowBatch.packedData = pack_corner_radii(padded_corner_radii(shape, shadow->spread));
@@ -1151,6 +1198,9 @@ void Renderer2DScene::build_render_plan(
         }
 
         const BlurComponent* blur = registry_.try_get<BlurComponent>(entity);
+        const auto* liquid = registry_.try_get<LiquidGlassComponent>(entity);
+        const bool sceneLiquid = liquid && liquid->material == GlassMaterial::eLiquid &&
+            liquid->sceneBackdrop && transformFlags == 0u;
         // Display-transition blur is a foreground primitive effect handled by
         // the shape pipeline above. Only explicit backdrop blur belongs here;
         // otherwise transparent layout roots create temporary rectangular panes.
@@ -1159,12 +1209,14 @@ void Renderer2DScene::build_render_plan(
         const bool styleBlurVisible = !blur &&
             style_backdrop_blur_visible(style) &&
             alpha_visible(visualOpacity);
-        if (explicitBlurVisible || styleBlurVisible)
+        if (explicitBlurVisible || styleBlurVisible || sceneLiquid)
         {
             Renderer2DBatch blurBatch = batch;
             const float blurCornerRadius = blurBatch.effect0.x;
             const float blurEdgeSoftness = blurBatch.effect0.z;
-            const float baseBlurRadius = blur ? blur->radius : style.backdropBlurRadius;
+            const float baseBlurRadius = sceneLiquid ?
+                std::clamp(liquid->blur, 0.0f, 1.0f) * 30.0f :
+                blur ? blur->radius : style.backdropBlurRadius;
             const uint32_t blurPasses = blur ? blur->passes : style.backdropBlurPasses;
             const float baseBlurOpacity = blur ?
                 blur->opacity :
@@ -1217,6 +1269,63 @@ void Renderer2DScene::build_render_plan(
                 eRenderer2DStyleCornerRadii |
                 eRenderer2DStyleShapeMask);
             blurBatch.packedData = 0u;
+            if (sceneLiquid)
+            {
+                // The blur pass snapshots earlier app content before any
+                // optical reads, so displaced samples cannot feed back.
+                blurBatch.flags |= eRenderer2DStyleLiquidGlass;
+                blurBatch.flags &= ~(eRenderer2DStyleGradient | eRenderer2DStyleRadialGradient |
+                    eRenderer2DStyleBlurFollowsFillAlpha);
+                blurBatch.effect0.y = blurCornerRadius;
+                blurBatch.effect0.z = 1.0f;
+                blurBatch.effect0.w = visualOpacity;
+                blurBatch.uvRect = shape_sdf_parameters(shape);
+                if ((blurBatch.flags & eRenderer2DStyleBlurInheritedShapeMask) == 0u)
+                    blurBatch.effect1.z = 0.0f;
+                blurBatch.packedData = pack_unorm8(liquid->refraction) / 2u |
+                    ((pack_unorm8(liquid->dispersion) / 2u) << 7u) |
+                    ((pack_unorm8(liquid->rim) / 2u) << 14u) |
+                    (pack_unorm8(static_cast<float>(std::fmod(currentTimeSeconds * 0.12, 1.0))) << 21u);
+                // A connected native island paints its cap in Composition
+                // instead of the UI texture. Include that same known paint
+                // beneath scene samples so child lenses still see the cap.
+                auto ancestor = entity;
+                for (unsigned depth = 0; depth < 64u; ++depth)
+                {
+                    const auto* parent = registry_.try_get<Parent2DComponent>(ancestor);
+                    if (!parent || !registry_.valid(parent->parent)) break;
+                    ancestor = parent->parent;
+                    const auto* glassUnion = registry_.try_get<SystemBackdropUnionComponent>(ancestor);
+                    if (!glassUnion || !glassUnion->paintCapGradient) continue;
+                    glm::vec4 capRect { 0.0f };
+                    bool hasCap = false;
+                    for (const auto participant : glassUnion->participants)
+                    {
+                        const auto visual = resolved_shape_visual_state(participant, currentTimeSeconds);
+                        if (!visual || visual->opacity <= 0.001f || rect_empty(visual->rect)) continue;
+                        if (!hasCap) capRect = visual->rect;
+                        else
+                        {
+                            const auto first = glm::min(glm::vec2(capRect), glm::vec2(visual->rect));
+                            const auto last = glm::max(glm::vec2(capRect) + glm::vec2(capRect.z, capRect.w),
+                                glm::vec2(visual->rect) + glm::vec2(visual->rect.z, visual->rect.w));
+                            capRect = { first.x, first.y, last.x - first.x, last.y - first.y };
+                        }
+                        hasCap = true;
+                    }
+                    if (hasCap)
+                    {
+                        blurBatch.backdropCapColour = pack_unorm8(glassUnion->capColour[0]) |
+                            (pack_unorm8(glassUnion->capColour[1]) << 8u) |
+                            (pack_unorm8(glassUnion->capColour[2]) << 16u);
+                        blurBatch.color0 = capRect;
+                        const auto& cap = glassUnion->capGradient;
+                        blurBatch.color1 = { cap[0], cap[1], cap[2], cap[3] };
+                        blurBatch.packedData |= 1u << 29u;
+                    }
+                    break;
+                }
+            }
             (cachedBatch ? plan.cachedBlurs : plan.blurs).push_back(blurBatch);
         }
 

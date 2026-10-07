@@ -6,3 +6,4 @@
 .DS_Store
 
 /dist/
+/scripts/windows-app-sdk/obj/

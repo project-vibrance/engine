@@ -106,13 +106,17 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleBlurFollowsFillAlpha = 1u << 20,
     eRenderer2DStyleBlurInheritedShapeMask = 1u << 21,
     eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
+    // Shader-specific bit: optical scene sampling in the blur pipeline.
+    eRenderer2DStyleLiquidGlass = 1u << 22,
     eRenderer2DStyleShadowOutsideOnly = 1u << 23,
     eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24,
     eRenderer2DStyleTextEdgeFade = 1u << 25,
     eRenderer2DStyleMediaSingleBlurSample = 1u << 26,
     eRenderer2DStyleMediaBlurHorizontal = 1u << 27,
     eRenderer2DStyleMediaBlurVertical = 1u << 28,
-    eRenderer2DStyleShapeCutout = 1u << 29
+    eRenderer2DStyleShapeCutout = 1u << 29,
+    eRenderer2DStyleLiquidRim = 1u << 30,
+    eRenderer2DStyleMaskedLiquidShapeParameters = 1u << 31
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -464,6 +468,7 @@ struct InteractiveVisual2DComponent
     bool blurSelf = true;
     glm::vec2 scale { 1.0f };
     glm::vec2 scaleOrigin { 0.0f };
+    glm::vec2 offset { 0.0f };
     float blurRadius = 0.0f;
     float opacity = 1.0f;
 };
@@ -533,7 +538,7 @@ inline glm::vec4 renderer2d_apply_interactive_visual_rect(
         const glm::vec2 safeScale =
             glm::max(visual.scale, glm::vec2(0.001f));
         const glm::vec2 minPosition = visual.scaleOrigin +
-            (glm::vec2(rect.x, rect.y) - visual.scaleOrigin) * safeScale;
+            (glm::vec2(rect.x, rect.y) - visual.scaleOrigin) * safeScale + visual.offset;
         const glm::vec2 size = glm::vec2(rect.z, rect.w) * safeScale;
         rect = { minPosition.x, minPosition.y, size.x, size.y };
     }
@@ -587,6 +592,20 @@ struct LayoutRect2DComponent
 struct ShapeCutout2DComponent
 {
     entt::entity source = entt::null;
+    // UI cap paint can expose a child lens without punching a hole in the
+    // native optical material underneath the complete panel.
+    bool affectBackdrop = true;
+};
+
+// Draw connected glass as one material while keeping each participant's UI.
+// All participants share this owner's scene and animation lifetime.
+struct SystemBackdropUnionComponent
+{
+    std::array<entt::entity, 3> participants {
+        entt::null, entt::null, entt::null };
+    bool paintCapGradient = false;
+    std::array<float, 3> capColour { 0.0f, 0.0f, 0.0f };
+    std::array<float, 4> capGradient { 0.98f, 0.015f, 0.0f, 1.0f };
 };
 
 struct Mask2DComponent
@@ -699,12 +718,16 @@ struct SystemBackdropComponent
 
 struct LiquidGlassComponent
 {
-    // Renderer-owned liquid glass request. It is intentionally separate from
-    // SystemBackdropComponent so eLiquid can never enter a native compositor
-    // effect graph. The entity supplies bounds and shape when a backend is
-    // implemented.
+    // Liquid glass request. Windows also attaches a shaped Composition
+    // backdrop component as the live blur fallback.
     GlassMaterial material = GlassMaterial::eOff;
     LiquidGlassBackend backend = LiquidGlassBackend::eEngineRenderer;
+    // Controls refract live app content through the portable GPU renderer.
+    bool sceneBackdrop = false;
+    float refraction = 0.70f;
+    float blur = 0.15f;
+    float rim = 0.60f;
+    float dispersion = 0.35f;
 };
 
 struct DragHandle2DComponent
@@ -1441,6 +1464,7 @@ struct Renderer2DBatch
     glm::vec4 effect1 { 0.0f };
     uint32_t flags = eRenderer2DStyleNone;
     uint32_t packedData = 0;
+    uint32_t backdropCapColour = 0u; // RGB8, used only by optical blur batches.
     uint32_t mediaId = 0;
     uint32_t frameIndex = 0;
 };
@@ -1451,6 +1475,12 @@ struct Renderer2DShapeVisualState
     // used when the renderer emits a shape batch.
     glm::vec4 rect { 0.0f };
     float opacity = 1.0f;
+    // The same inherited paint order as the sharp renderer content.
+    int32_t stackLayer = 0;
+    uint32_t stackOrder = 0;
+    int32_t layer = 0;
+    uint32_t order = 0;
+    bool alwaysOnTop = false;
 };
 
 struct Renderer3DModelBatch

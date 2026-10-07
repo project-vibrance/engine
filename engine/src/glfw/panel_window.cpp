@@ -2,6 +2,7 @@
 
 #include <vibranceUI/ui/builder.h>
 #include <vibranceUI/ui/controls.h>
+#include <vibranceUI/ui/liquid_controls.h>
 #include <vibranceUI/ui/styles.h>
 #include <vibranceUI/ui/surfaces.h>
 #include <vibranceUI/ui/text.h>
@@ -234,6 +235,7 @@ void GlfwPanelWindow::tick()
     if (hasUiUpdateSample &&
         now - lastUiUpdateSeconds < uiUpdateInterval)
     {
+        if (options.beforeDraw) options.beforeDraw(*engine);
         engine->draw();
         return;
     }
@@ -276,6 +278,7 @@ void GlfwPanelWindow::tick()
         build_scene();
     }
 
+    if (options.beforeDraw) options.beforeDraw(*engine);
     engine->draw();
 }
 
@@ -430,7 +433,9 @@ void GlfwPanelWindow::handle_mouse_button(int button, int action, int mods)
                 traffic_light_at(input.point) : TrafficLightKind::eNone;
             if (light != TrafficLightKind::eNone)
             {
-                perform_traffic_light_action(light);
+                // Actions commit on an ordinary release. A captured glass
+                // drag consumes that click and leaves the window in place.
+                glfw_handle_ui_pointer_button(window, *engine, inputState, button, action, mods);
                 return;
             }
 
@@ -638,6 +643,7 @@ void GlfwPanelWindow::build_scene()
     const Localisation& localisation = engine->localisation();
     scene.clear();
     inputState = {};
+    trafficLightEntities.fill(entt::null);
     trafficLightIconEntities.fill(entt::null);
     const PanelGeometry panelGeometry = make_panel_geometry(window, renderWidth, renderHeight, options.panelInset, options.uiScale);
     UiBuilder ui(scene, panelGeometry.scale);
@@ -717,6 +723,22 @@ void GlfwPanelWindow::build_scene()
                 dotStyle,
                 Renderer2DPrimitive::eEllipse);
             ui.set_layer(dot, 100, static_cast<uint32_t>(i), true);
+            trafficLightEntities[i] = dot;
+            scene.registry().emplace<Parent2DComponent>(dot, Parent2DComponent { panel });
+            ButtonInputComponent input {};
+            input.enabled = enabled && options.trafficLights.accessible;
+            input.onClick = [this, kind](const PointerInputEvent&) { perform_traffic_light_action(kind); };
+            scene.registry().emplace<ButtonInputComponent>(dot, std::move(input));
+            StretchDynamicsOptions stretch {};
+            stretch.enabled = false; // Enabled with the Liquid Glass material.
+            stretch.grabScale = 1.15f;
+            stretch.maximumStretch = 0.18f;
+            stretch.maximumCompression = 0.08f;
+            stretch.returnDampingFraction = 0.54f;
+            stretch.consumeClickAfterDrag = true;
+            ui_enable_stretch_dynamics(scene, dot, stretch);
+            scene.registry().emplace<UiLiquidControlSurface>(dot,
+                UiLiquidControlSurface { false, false, true });
 
             if (enabled && options.trafficLights.showIconsOnHover)
             {
@@ -737,6 +759,7 @@ void GlfwPanelWindow::build_scene()
                     }
                     RenderLayer2DComponent& iconLayer = ui.set_layer(icon, 101, static_cast<uint32_t>(i), true);
                     iconLayer.visible = hoveredTrafficLight == kind;
+                    ui.attach_aligned(icon, dot, UiAlignment::eCentre, glm::vec2(0.0f), iconSize);
                     trafficLightIconEntities[i] = icon;
                 }
             }
@@ -1154,6 +1177,10 @@ void GlfwPanelWindow::update_hover_cursor()
         inputState,
         true,
         point);
+    for (std::size_t index = 0; index < trafficLightEntities.size(); ++index)
+        if (inputState.hoveredButton == trafficLightEntities[index] && inputState.hoveredButton != entt::null)
+            set_hovered_traffic_light(index == 0 ? TrafficLightKind::eClose :
+                index == 1 ? TrafficLightKind::eMinimise : TrafficLightKind::eMaximise);
     if (hover.cursor != UiCursorKind::eDefault)
     {
         set_glfw_cursor_for_kind(window, cursors, hover.cursor);

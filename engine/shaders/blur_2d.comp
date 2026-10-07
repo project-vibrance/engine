@@ -10,8 +10,10 @@ const uint STYLE_BLUR_HORIZONTAL = 1u << 17;
 const uint STYLE_BLUR_VERTICAL = 1u << 18;
 const uint STYLE_BLUR_FOLLOWS_FILL_ALPHA = 1u << 20;
 const uint STYLE_BLUR_INHERITED_SHAPE_MASK = 1u << 21;
+const uint STYLE_LIQUID_GLASS = 1u << 22;
 const uint BLUR_USE_STATIC_BACKDROP = 1u << 31;
 const uint BLUR_USE_EXTERNAL_BACKDROP = 1u << 30;
+const uint LIQUID_USE_PARENT_CAP = 1u << 29;
 const uint PASS_INDEX_MASK = 65535u;
 const uint PRIMITIVE_RECTANGLE = 1u;
 const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
@@ -89,6 +91,20 @@ vec4 source_color(ivec2 pixel) {
 
     if ((pc.data.z & BLUR_USE_EXTERNAL_BACKDROP) != 0u) {
         source = blend_over(imageLoad(uiExternalBackdropSurface, pixel), source);
+    }
+
+    if ((pc.data.y & STYLE_LIQUID_GLASS) != 0u &&
+        (pc.data.z & LIQUID_USE_PARENT_CAP) != 0u) {
+        vec2 p = vec2(pixel) + vec2(0.5);
+        if (all(greaterThanEqual(p, pc.color0.xy)) &&
+            all(lessThanEqual(p, pc.color0.xy + pc.color0.zw))) {
+            float y = (p.y - pc.color0.y) / max(pc.color0.w, 1.0);
+            float t = clamp((y - pc.color1.z) / max(pc.color1.w - pc.color1.z, 0.0001), 0.0, 1.0);
+            float alpha = clamp(mix(pc.color1.x, pc.color1.y, t), 0.0, 1.0);
+            vec3 capColour = vec3((pc.data.x >> 8u) & 255u,
+                (pc.data.x >> 16u) & 255u, (pc.data.x >> 24u) & 255u) / 255.0;
+            source = blend_over(vec4(capColour, alpha), source);
+        }
     }
 
     return source;
@@ -263,7 +279,8 @@ float sd_notched_squircle(
 }
 
 float shape_sdf(vec2 pixel) {
-    if ((pc.data.y & STYLE_BLUR_INHERITED_SHAPE_MASK) != 0u) {
+    if ((pc.data.y & STYLE_BLUR_INHERITED_SHAPE_MASK) != 0u &&
+        (pc.data.y & STYLE_LIQUID_GLASS) == 0u) {
         vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
         vec2 center = pc.rect.xy + halfSize;
         return sd_box(pixel - center, halfSize);
@@ -273,18 +290,20 @@ float shape_sdf(vec2 pixel) {
     vec2 center = pc.rect.xy + halfSize;
     vec2 p = pixel - center;
 
-    if (pc.data.x == PRIMITIVE_ELLIPSE) {
+    if ((pc.data.x & 255u) == PRIMITIVE_ELLIPSE) {
         vec2 q = p / halfSize;
         return (length(q) - 1.0) * min(halfSize.x, halfSize.y);
     }
 
-    float radius = pc.data.x == PRIMITIVE_RECTANGLE ? 0.0 : clamp(pc.effect1.x, 0.0, min(halfSize.x, halfSize.y));
+    float radius = (pc.data.x & 255u) == PRIMITIVE_RECTANGLE ? 0.0 :
+        clamp((pc.data.y & STYLE_LIQUID_GLASS) != 0u ? pc.effect0.y : pc.effect1.x,
+            0.0, min(halfSize.x, halfSize.y));
     float squircleAmount = clamp(pc.uvRect.x, 0.0, 1.0);
     float squirclePower = clamp(pc.uvRect.y <= 0.001 ? 4.0 : pc.uvRect.y, 2.0, 5.0);
-    if (pc.data.x == PRIMITIVE_SQUIRCLE) {
+    if ((pc.data.x & 255u) == PRIMITIVE_SQUIRCLE) {
         return sd_squircle_box(p, halfSize, radius, squircleAmount, squirclePower);
     }
-    if (pc.data.x == PRIMITIVE_NOTCHED_SQUIRCLE) {
+    if ((pc.data.x & 255u) == PRIMITIVE_NOTCHED_SQUIRCLE) {
         return sd_notched_squircle(
             pixel,
             pc.rect,
@@ -302,7 +321,8 @@ float shape_mask(vec2 pixel) {
         return smoothstep(0.75, -0.75, shape_sdf(pixel));
     }
 
-    float featherRadius = (pc.data.y & STYLE_BLUR_INHERITED_SHAPE_MASK) != 0u ? 0.0 : max(pc.effect1.z, 0.0);
+    float featherRadius = (pc.data.y & (STYLE_BLUR_INHERITED_SHAPE_MASK | STYLE_LIQUID_GLASS)) != 0u ?
+        0.0 : max(pc.effect1.z, 0.0);
     if (featherRadius > 0.001) {
         return 1.0 - smoothstep(0.0, featherRadius, shape_sdf(pixel));
     }
@@ -312,14 +332,14 @@ float shape_mask(vec2 pixel) {
 }
 
 float primitive_bounds_padding() {
-    if (pc.data.x != PRIMITIVE_NOTCHED_SQUIRCLE) {
+    if ((pc.data.x & 255u) != PRIMITIVE_NOTCHED_SQUIRCLE) {
         return 0.0;
     }
     return notch_flare_size(max(pc.rect.zw, vec2(1.0)), pc.uvRect.z, pc.uvRect.w) + 6.0;
 }
 
 uint blur_pass_index() {
-    return pc.data.z & PASS_INDEX_MASK;
+    return (pc.data.y & STYLE_LIQUID_GLASS) != 0u ? 0u : pc.data.z & PASS_INDEX_MASK;
 }
 
 vec2 blur_primary_axis(uint passIndex) {
@@ -455,7 +475,7 @@ void main() {
     }
 
     vec2 p = vec2(pixel) + vec2(0.5);
-    float featherRadius = max(pc.effect1.z, 0.0);
+    float featherRadius = (pc.data.y & STYLE_LIQUID_GLASS) != 0u ? 0.0 : max(pc.effect1.z, 0.0);
     float boundsPad = featherRadius + primitive_bounds_padding();
     if (p.x < pc.rect.x - boundsPad ||
         p.y < pc.rect.y - boundsPad ||
@@ -475,6 +495,28 @@ void main() {
         blur_axis(passIndex, true),
         radius,
         true);
+    if ((pc.data.y & STYLE_LIQUID_GLASS) != 0u) {
+        float distance = shape_sdf(p);
+        vec2 normal = vec2(shape_sdf(p + vec2(0.5, 0.0)) - shape_sdf(p - vec2(0.5, 0.0)),
+            shape_sdf(p + vec2(0.0, 0.5)) - shape_sdf(p - vec2(0.0, 0.5)));
+        normal /= max(length(normal), 0.0001);
+        float shortSide = min(pc.rect.z, pc.rect.w);
+        float edge = clamp(shortSide * 0.16, 4.0, 44.0);
+        float band = clamp(1.0 + distance / edge, 0.0, 1.0);
+        float strength = float(pc.data.z & 127u) / 127.0;
+        float bend = min(strength * 56.0 * clamp(pc.rect.z / 500.0, 0.35, 2.0), shortSide * 0.38);
+        vec2 samplePoint = vec2(pixel) - normal * bend * band * band;
+        source = sample_axis_blur_at(samplePoint, vec2(0.0, 1.0), radius, true);
+        float dispersion = float((pc.data.z >> 7u) & 127u) / 127.0 * 3.0 * band;
+        source.r = sample_axis_blur_at(samplePoint + normal * dispersion,
+            vec2(0.0, 1.0), radius, true).r;
+        source.b = sample_axis_blur_at(samplePoint - normal * dispersion,
+            vec2(0.0, 1.0), radius, true).b;
+        float phase = float((pc.data.z >> 21u) & 255u) / 255.0 * 6.2831853;
+        float light = pow(clamp(0.5 + 0.5 * cos(atan(normal.y, normal.x) - phase), 0.0, 1.0), 12.0);
+        float rim = float((pc.data.z >> 14u) & 127u) / 127.0 * 0.55;
+        source.rgb += vec3(rim * 0.65 * exp(-distance * distance / 2.25) * (0.25 + 0.75 * light));
+    }
     float gradientAlpha = blur_gradient_alpha_factor(p);
     if (pc.effect0.z > 0.5) {
         // Store the unmasked result; apply coverage once during replacement.

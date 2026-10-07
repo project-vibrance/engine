@@ -39,9 +39,36 @@ if(WIN32)
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/vibrance_win32_composition.dll")
     set(vibrance_engine_WIN32_INTEROP_DLL
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/vibrance_win32_interop.dll")
+    set(vibrance_engine_LIQUID_DWM_EXTENSION
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/vibrance_liquid_dwm_extension.dll")
+    set(vibrance_engine_LIQUID_DWM_BROKER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_dwm_broker.exe")
+    set(vibrance_engine_LIQUID_DBGHELP_RUNTIME
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/dbghelp.dll")
+    set(vibrance_engine_LIQUID_SYMSRV_RUNTIME
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/symsrv.dll")
+    set(vibrance_engine_LIQUID_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_win32.cso")
+    set(vibrance_engine_LIQUID_UI_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_ui_win32.cso")
+    set(vibrance_engine_LIQUID_FULLSCREEN_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_fullscreen.cso")
+    set(vibrance_engine_LIQUID_BLUR_HORIZONTAL_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_blur_horizontal.cso")
+    set(vibrance_engine_LIQUID_BLUR_VERTICAL_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_blur_vertical.cso")
     foreach(_vibrance_engine_companion IN ITEMS
         "${vibrance_engine_WIN32_COMPOSITION_DLL}"
-        "${vibrance_engine_WIN32_INTEROP_DLL}")
+        "${vibrance_engine_WIN32_INTEROP_DLL}"
+        "${vibrance_engine_LIQUID_DWM_EXTENSION}"
+        "${vibrance_engine_LIQUID_DWM_BROKER}"
+        "${vibrance_engine_LIQUID_DBGHELP_RUNTIME}"
+        "${vibrance_engine_LIQUID_SYMSRV_RUNTIME}"
+        "${vibrance_engine_LIQUID_SHADER}"
+        "${vibrance_engine_LIQUID_UI_SHADER}"
+        "${vibrance_engine_LIQUID_FULLSCREEN_SHADER}"
+        "${vibrance_engine_LIQUID_BLUR_HORIZONTAL_SHADER}"
+        "${vibrance_engine_LIQUID_BLUR_VERTICAL_SHADER}")
         if(EXISTS "${_vibrance_engine_companion}")
             list(APPEND
                 vibrance_engine_RUNTIME_COMPANIONS

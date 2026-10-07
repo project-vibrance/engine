@@ -238,5 +238,53 @@ int main()
             button.root),
         "icon-button options should expose the engine stretch capability");
 
+    {
+        float reference = 0.0f;
+        float referenceVelocity = 0.0f;
+        for (int rate : { 30, 60, 144 })
+        {
+            float value = 1.10f;
+            float velocity = 0.0f;
+            for (int step = 0; step < rate / 6; ++step)
+                value = ui_stretch_dynamics_spring_step(value, velocity, 1.0f,
+                    1.0 / rate, 0.28f, 0.54f);
+            passed &= expect(value < 1.0f,
+                "a released stretch must visibly bounce past its resting size");
+            if (rate == 30) { reference = value; referenceVelocity = velocity; }
+            else passed &= expect(std::abs(value - reference) < 0.00001f &&
+                std::abs(velocity - referenceVelocity) < 0.0001f,
+                "release bounce must agree at different display rates");
+        }
+        auto& dynamics = registry.get<StretchDynamicsComponent>(panel);
+        dynamics.options.consumeClickAfterDrag = true;
+        dynamics.options.inwardReleaseDistance = 0.0f;
+        ui_begin_stretch_dynamics(scene, state, panel, { 60.0f, 45.0f });
+        ui_update_stretch_dynamics_drag(scene, state, true, true, { 90.0f, 45.0f });
+        passed &= expect(ui_release_stretch_dynamics(scene, state, true, { 90.0f, 45.0f }),
+            "a real stretch drag must consume its release click so the return bounce remains visible");
+    }
+
+    {
+        Renderer2DScene boundsScene;
+        auto& registry = boundsScene.registry();
+        const auto parent = boundsScene.create_shape({ 0.0f, 0.0f }, { 100.0f, 60.0f }, make_solid_style("#202020FF"));
+        const auto child = boundsScene.create_shape({ 20.0f, 20.0f }, { 40.0f, 20.0f }, make_solid_style("#FFFFFF10"));
+        registry.get<Transform2DComponent>(parent).origin = glm::vec2(0.0f);
+        registry.get<Transform2DComponent>(child).origin = glm::vec2(0.0f);
+        registry.emplace<Parent2DComponent>(child, Parent2DComponent { parent });
+        StretchDynamicsOptions options {};
+        options.constrainToParent = true;
+        options.maximumStretch = 3.0f;
+        options.dragResistance = 10.0f;
+        ui_enable_stretch_dynamics(boundsScene, child, options);
+        UiInputState input {};
+        ui_begin_stretch_dynamics(boundsScene, input, child, { 50.0f, 35.0f });
+        ui_update_stretch_dynamics_drag(boundsScene, input, true, true, { 500.0f, 500.0f });
+        const auto visual = ui_entity_visual_framebuffer_rect(registry, child);
+        passed &= expect(visual.x >= 0.0f && visual.y >= 0.0f &&
+            visual.x + visual.z <= 100.01f && visual.y + visual.w <= 60.01f,
+            "a constrained glass control must never stretch beyond its enclosing interface");
+    }
+
     return passed ? 0 : 1;
 }

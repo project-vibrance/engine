@@ -1,0 +1,864 @@
+#include "../../engine/src/platform/win32/liquid_glass_d3d11.h"
+
+#include <d3d11.h>
+#include <wrl/client.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <vector>
+
+using Microsoft::WRL::ComPtr;
+
+int wmain(int argc, wchar_t** argv)
+{
+    if (argc < 2 || argc > 3)
+    {
+        std::wcerr << L"Usage: test_liquid_glass_d3d11 shader-directory [preview.ppm]\n";
+        return 2;
+    }
+    constexpr UINT width = 512;
+    constexpr UINT height = 256;
+    std::vector<std::uint32_t> pixels(width * height);
+    for (UINT y = 0; y < height; ++y)
+    {
+        for (UINT x = 0; x < width; ++x)
+        {
+            const bool stripe = ((x / 8u) & 1u) != 0u;
+            pixels[y * width + x] = stripe ? 0xffff6040u : 0xff1848e0u;
+        }
+    }
+
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    D3D_FEATURE_LEVEL level {};
+    const D3D_FEATURE_LEVEL requested[] = { D3D_FEATURE_LEVEL_11_0 };
+    HRESULT result = D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, requested, 1,
+        D3D11_SDK_VERSION, &device, &level, &context);
+    if (FAILED(result))
+    {
+        result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+                                   requested, 1, D3D11_SDK_VERSION, &device,
+                                   &level, &context);
+    }
+    if (FAILED(result))
+    {
+        std::cerr << "D3D11CreateDevice failed: " << std::hex << result << '\n';
+        return 3;
+    }
+
+    D3D11_TEXTURE2D_DESC desc {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA data {};
+    data.pSysMem = pixels.data();
+    data.SysMemPitch = width * sizeof(std::uint32_t);
+    ComPtr<ID3D11Texture2D> backdrop;
+    result = device->CreateTexture2D(&desc, &data, &backdrop);
+    if (FAILED(result))
+    {
+        std::cerr << "CreateTexture2D failed\n";
+        return 4;
+    }
+    ComPtr<ID3D11RenderTargetView> target;
+    if (FAILED(device->CreateRenderTargetView(backdrop.Get(), nullptr, &target)))
+    {
+        return 5;
+    }
+
+    vibrance::win32::LiquidGlassD3D11 lens;
+    if (!lens.initialise(device.Get(), argv[1]))
+    {
+        std::cerr << "Lens initialisation failed\n";
+        return 6;
+    }
+    vibrance::win32::LiquidGlassRenderRegion region;
+    region.x = 64;
+    region.y = 32;
+    region.width = 384;
+    region.height = 192;
+    D3D11_VIEWPORT originalViewport {};
+    originalViewport.TopLeftX = 3.0f;
+    originalViewport.TopLeftY = 4.0f;
+    originalViewport.Width = 100.0f;
+    originalViewport.Height = 80.0f;
+    originalViewport.MaxDepth = 1.0f;
+    context->RSSetViewports(1, &originalViewport);
+    ID3D11RenderTargetView* originalTarget = target.Get();
+    context->OMSetRenderTargets(1, &originalTarget, nullptr);
+    if (!lens.render(context.Get(), backdrop.Get(), target.Get(), region))
+    {
+        std::cerr << "Lens render failed\n";
+        return 7;
+    }
+    UINT viewportCount = 1;
+    D3D11_VIEWPORT restoredViewport {};
+    context->RSGetViewports(&viewportCount, &restoredViewport);
+    ComPtr<ID3D11RenderTargetView> restoredTarget;
+    context->OMGetRenderTargets(1, &restoredTarget, nullptr);
+    if (viewportCount != 1 || restoredViewport.TopLeftX != 3.0f ||
+        restoredViewport.TopLeftY != 4.0f ||
+        restoredViewport.Width != 100.0f ||
+        restoredViewport.Height != 80.0f ||
+        restoredTarget.Get() != target.Get())
+    {
+        std::cerr << "D3D11 context state was not restored\n";
+        return 11;
+    }
+
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> readback;
+    if (FAILED(device->CreateTexture2D(&desc, nullptr, &readback)))
+    {
+        return 8;
+    }
+    context->CopyResource(readback.Get(), backdrop.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+    {
+        return 9;
+    }
+    std::size_t insideChanged = 0;
+    std::size_t outsideChanged = 0;
+    std::vector<std::uint32_t> opticalPixels(width * height);
+    std::ofstream preview;
+    if (argc == 3)
+    {
+        preview.open(argv[2], std::ios::binary);
+        preview << "P6\n" << width << ' ' << height << "\n255\n";
+    }
+    for (UINT y = 0; y < height; ++y)
+    {
+        const auto* row = reinterpret_cast<const std::uint32_t*>(
+            static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+        for (UINT x = 0; x < width; ++x)
+        {
+            opticalPixels[y * width + x] = row[x];
+            if (preview)
+            {
+                const char rgb[3] = {
+                    static_cast<char>(row[x] & 0xffu),
+                    static_cast<char>((row[x] >> 8u) & 0xffu),
+                    static_cast<char>((row[x] >> 16u) & 0xffu)
+                };
+                preview.write(rgb, sizeof(rgb));
+            }
+            if (row[x] == pixels[y * width + x])
+            {
+                continue;
+            }
+            const bool inside = x >= static_cast<UINT>(region.x) &&
+                x < static_cast<UINT>(region.x) + region.width &&
+                y >= static_cast<UINT>(region.y) &&
+                y < static_cast<UINT>(region.y) + region.height;
+            ++(inside ? insideChanged : outsideChanged);
+        }
+    }
+    context->Unmap(readback.Get(), 0);
+    std::cout << "Changed inside: " << insideChanged
+              << ", outside: " << outsideChanged << '\n';
+    if (insideChanged <= 1000 || outsideChanged != 0) return 10;
+
+    // The native compositor clip applies only to the final optical draw.
+    // Sampling and blur must still match the full, unclipped reference.
+    context->UpdateSubresource(backdrop.Get(), 0, nullptr, pixels.data(),
+        width * sizeof(std::uint32_t), 0);
+    const D3D11_VIEWPORT nativeViewports[2] = {
+        { 11.5f, 9.25f, 123.5f, 87.75f, 0.125f, 0.875f },
+        { 191.0f, 17.0f, 96.0f, 40.0f, 0.25f, 0.75f }
+    };
+    const D3D11_RECT nativeScissors[2] = {
+        { 8, 12, 96, 74 }, { 101, 92, 251, 173 }
+    };
+    D3D11_RASTERIZER_DESC nativeRasteriserDesc {};
+    nativeRasteriserDesc.FillMode = D3D11_FILL_WIREFRAME;
+    nativeRasteriserDesc.CullMode = D3D11_CULL_FRONT;
+    nativeRasteriserDesc.DepthClipEnable = TRUE;
+    nativeRasteriserDesc.ScissorEnable = TRUE;
+    ComPtr<ID3D11RasterizerState> nativeRasteriser;
+    if (FAILED(device->CreateRasterizerState(&nativeRasteriserDesc,
+            &nativeRasteriser))) return 16;
+    context->RSSetState(nativeRasteriser.Get());
+    context->RSSetViewports(2, nativeViewports);
+    context->RSSetScissorRects(2, nativeScissors);
+    const D3D11_RECT opticalClip {
+        region.x - 24, region.y + 40,
+        region.x + static_cast<LONG>(region.width / 2u),
+        region.y + static_cast<LONG>(region.height) + 24
+    };
+    if (!lens.render(context.Get(), backdrop.Get(), target.Get(), region,
+            0, 0, &opticalClip)) return 17;
+
+    UINT nativeViewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    UINT nativeScissorCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    D3D11_VIEWPORT restoredNativeViewports[
+        D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] {};
+    D3D11_RECT restoredNativeScissors[
+        D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] {};
+    ComPtr<ID3D11RasterizerState> restoredRasteriser;
+    context->RSGetViewports(&nativeViewportCount, restoredNativeViewports);
+    context->RSGetScissorRects(&nativeScissorCount, restoredNativeScissors);
+    context->RSGetState(&restoredRasteriser);
+    context->OMGetRenderTargets(1, &restoredTarget, nullptr);
+    bool nativeStateRestored = nativeViewportCount == 2 &&
+        nativeScissorCount == 2 &&
+        restoredRasteriser.Get() == nativeRasteriser.Get() &&
+        restoredTarget.Get() == target.Get();
+    for (UINT i = 0; i < 2; ++i)
+    {
+        const auto& actualViewport = restoredNativeViewports[i];
+        const auto& expectedViewport = nativeViewports[i];
+        const auto& actualScissor = restoredNativeScissors[i];
+        const auto& expectedScissor = nativeScissors[i];
+        nativeStateRestored = nativeStateRestored &&
+            actualViewport.TopLeftX == expectedViewport.TopLeftX &&
+            actualViewport.TopLeftY == expectedViewport.TopLeftY &&
+            actualViewport.Width == expectedViewport.Width &&
+            actualViewport.Height == expectedViewport.Height &&
+            actualViewport.MinDepth == expectedViewport.MinDepth &&
+            actualViewport.MaxDepth == expectedViewport.MaxDepth &&
+            actualScissor.left == expectedScissor.left &&
+            actualScissor.top == expectedScissor.top &&
+            actualScissor.right == expectedScissor.right &&
+            actualScissor.bottom == expectedScissor.bottom;
+    }
+    if (!nativeStateRestored)
+    {
+        std::cerr << "Clipped draw did not restore native D3D11 rasteriser state\n";
+        return 18;
+    }
+
+    context->CopyResource(readback.Get(), backdrop.Get());
+    if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+            &mapped))) return 19;
+    std::size_t clippedInsideChanged = 0;
+    std::size_t clippedOutsideChanged = 0;
+    std::size_t clippedReferenceMismatches = 0;
+    for (UINT y = 0; y < height; ++y)
+    {
+        const auto* row = reinterpret_cast<const std::uint32_t*>(
+            static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+        for (UINT x = 0; x < width; ++x)
+        {
+            const bool insideIntersection =
+                static_cast<LONG>(x) >= std::max(
+                    static_cast<LONG>(region.x), opticalClip.left) &&
+                static_cast<LONG>(x) < std::min(
+                    region.x + static_cast<LONG>(region.width), opticalClip.right) &&
+                static_cast<LONG>(y) >= std::max(
+                    static_cast<LONG>(region.y), opticalClip.top) &&
+                static_cast<LONG>(y) < std::min(
+                    region.y + static_cast<LONG>(region.height), opticalClip.bottom);
+            const std::size_t index = y * width + x;
+            if (row[x] != pixels[index])
+            {
+                ++(insideIntersection ? clippedInsideChanged : clippedOutsideChanged);
+            }
+            if (insideIntersection && row[x] != opticalPixels[index])
+            {
+                ++clippedReferenceMismatches;
+            }
+        }
+    }
+    context->Unmap(readback.Get(), 0);
+    std::cout << "Clipped changed inside intersection: " << clippedInsideChanged
+              << ", outside: " << clippedOutsideChanged
+              << ", reference mismatches: " << clippedReferenceMismatches << '\n';
+    if (clippedInsideChanged <= 1000 || clippedOutsideChanged != 0 ||
+        clippedReferenceMismatches != 0) return 20;
+
+    // Uniform input isolates lens coverage from refraction, blur and the rim.
+    // Interior cross bands and corner neighbourhoods must have no dark holes,
+    // whichever supported corner exponent is selected.
+    const std::vector<std::uint32_t> whitePixels(width * height, 0xffffffffu);
+    D3D11_TEXTURE2D_DESC whiteDesc = desc;
+    whiteDesc.Usage = D3D11_USAGE_DEFAULT;
+    whiteDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    whiteDesc.CPUAccessFlags = 0;
+    D3D11_SUBRESOURCE_DATA whiteData { whitePixels.data(),
+        width * sizeof(std::uint32_t), 0 };
+    ComPtr<ID3D11Texture2D> whiteBackdrop;
+    if (FAILED(device->CreateTexture2D(&whiteDesc, &whiteData,
+            &whiteBackdrop))) return 21;
+    auto coverageRegion = region;
+    coverageRegion.cornerRadius = 28.0f;
+    coverageRegion.blurRadius = 0.0f;
+    coverageRegion.refractionStrength = 0.0f;
+    coverageRegion.dispersionStrength = 0.0f;
+    coverageRegion.rimStrength = 0.0f;
+    coverageRegion.opacity = 1.0f;
+    coverageRegion.tintAlpha = 0.0f;
+    constexpr UINT innerCorners[4][2] = {
+        { 54, 54 }, { 329, 54 }, { 54, 137 }, { 329, 137 }
+    };
+    const FLOAT dark[4] = { 16.0f / 255.0f, 16.0f / 255.0f,
+        16.0f / 255.0f, 1.0f };
+    const auto bright = [](std::uint32_t pixel) {
+        return (pixel & 0xffu) >= 248u &&
+            ((pixel >> 8u) & 0xffu) >= 248u &&
+            ((pixel >> 16u) & 0xffu) >= 248u &&
+            (pixel >> 24u) == 255u;
+    };
+    std::vector<std::uint32_t> coveragePixels(width * height);
+    for (const float exponent : { 2.0f, 4.0f, 6.0f })
+    {
+        coverageRegion.cornerExponent = exponent;
+        context->ClearRenderTargetView(target.Get(), dark);
+        if (!lens.render(context.Get(), whiteBackdrop.Get(), target.Get(),
+                coverageRegion)) return 22;
+        context->CopyResource(readback.Get(), backdrop.Get());
+        if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+                &mapped))) return 23;
+        const auto readPixel = [&](UINT x, UINT y) {
+            const auto* row = reinterpret_cast<const std::uint32_t*>(
+                static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+            return row[x];
+        };
+        std::size_t crossFailures = 0;
+        std::size_t innerCornerFailures = 0;
+        std::size_t outsideFailures = 0;
+        for (UINT y = 0; y < height; ++y)
+        {
+            for (UINT x = 0; x < width; ++x)
+            {
+                coveragePixels[y * width + x] = readPixel(x, y);
+                const bool insideBounds = x >= 64u && x < 448u &&
+                    y >= 32u && y < 224u;
+                if (!insideBounds)
+                {
+                    if (readPixel(x, y) != 0xff101010u) ++outsideFailures;
+                    continue;
+                }
+                const UINT localX = x - 64u;
+                const UINT localY = y - 32u;
+                const bool horizontalBand = localX >= 2u && localX < 382u &&
+                    localY >= 28u && localY < 164u;
+                const bool verticalBand = localX >= 28u && localX < 356u &&
+                    localY >= 2u && localY < 190u;
+                if ((horizontalBand || verticalBand) && !bright(readPixel(x, y)))
+                {
+                    ++crossFailures;
+                }
+            }
+        }
+        for (const auto& corner : innerCorners)
+        {
+            for (UINT y = corner[1] - 1u; y <= corner[1] + 1u; ++y)
+            {
+                for (UINT x = corner[0] - 1u; x <= corner[0] + 1u; ++x)
+                {
+                    if (!bright(readPixel(64u + x, 32u + y))) ++innerCornerFailures;
+                }
+            }
+        }
+        // All four pixels are inside the panel bounds but outside its rounded
+        // silhouette for exponents 2, 4 and 6; they must retain the dark target.
+        for (const UINT y : { 32u, 223u })
+        {
+            for (const UINT x : { 64u, 447u })
+            {
+                if (readPixel(x, y) != 0xff101010u) ++outsideFailures;
+            }
+        }
+        context->Unmap(readback.Get(), 0);
+        std::cout << "Coverage exponent " << exponent
+                  << ": cross failures: " << crossFailures
+                  << ", inner corner failures: " << innerCornerFailures
+                  << ", outside failures: " << outsideFailures << '\n';
+        if (crossFailures != 0 || innerCornerFailures != 0 ||
+            outsideFailures != 0) return 24;
+    }
+
+    // A 10-pixel marker inset leaves room for the notch's 9.9-pixel flares.
+    // Check pixels outside the 364-pixel body so merely forwarding the shape
+    // parameters without drawing the flares cannot pass this regression.
+    auto notchRegion = coverageRegion;
+    notchRegion.shape = 4u;
+    notchRegion.cornerExponent = 4.0f;
+    notchRegion.notchAmount = 1.0f;
+    notchRegion.notchDepth = 55.0f;
+    notchRegion.markerInsetX = 10.0f;
+    context->ClearRenderTargetView(target.Get(), dark);
+    if (!lens.render(context.Get(), whiteBackdrop.Get(), target.Get(),
+            notchRegion)) return 25;
+    context->CopyResource(readback.Get(), backdrop.Get());
+    if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+            &mapped))) return 26;
+    const auto notchPixel = [&](UINT localX, UINT localY) {
+        const auto* row = reinterpret_cast<const std::uint32_t*>(
+            static_cast<const std::uint8_t*>(mapped.pData) +
+                (32u + localY) * mapped.RowPitch);
+        return row[64u + localX];
+    };
+    const std::size_t notchBodyFailures =
+        static_cast<std::size_t>(!bright(notchPixel(11u, 1u))) +
+        static_cast<std::size_t>(!bright(notchPixel(372u, 1u))) +
+        static_cast<std::size_t>(!bright(notchPixel(192u, 96u)));
+    const std::size_t notchFlareFailures =
+        static_cast<std::size_t>(!bright(notchPixel(8u, 1u))) +
+        static_cast<std::size_t>(!bright(notchPixel(375u, 1u)));
+    const std::size_t notchCutoutFailures =
+        static_cast<std::size_t>(notchPixel(8u, 8u) != 0xff101010u) +
+        static_cast<std::size_t>(notchPixel(375u, 8u) != 0xff101010u);
+    const std::size_t notchBottomFailures =
+        static_cast<std::size_t>(notchPixel(10u, 191u) != 0xff101010u) +
+        static_cast<std::size_t>(notchPixel(373u, 191u) != 0xff101010u) +
+        static_cast<std::size_t>(notchPixel(0u, 191u) != 0xff101010u) +
+        static_cast<std::size_t>(notchPixel(383u, 191u) != 0xff101010u);
+    context->Unmap(readback.Get(), 0);
+    std::cout << "Notch coverage body failures: " << notchBodyFailures
+              << ", flare failures: " << notchFlareFailures
+              << ", cutout failures: " << notchCutoutFailures
+              << ", bottom failures: " << notchBottomFailures << '\n';
+    if (notchBodyFailures != 0 || notchFlareFailures != 0 ||
+        notchCutoutFailures != 0 || notchBottomFailures != 0) return 27;
+
+    // Moving the full lens partly outside the target must crop its existing
+    // silhouette, rather than round a new corner at the screen's edge.
+    const std::int32_t partialPositions[4][2] = {
+        { -20, -16 }, { 300, 180 }, { -500, -300 }, { 600, 300 }
+    };
+    const auto nearlySamePixel = [](std::uint32_t actual, std::uint32_t expected) {
+        for (UINT shift = 0; shift < 32u; shift += 8u)
+        {
+            if (std::abs(static_cast<int>((actual >> shift) & 0xffu) -
+                    static_cast<int>((expected >> shift) & 0xffu)) > 1)
+                return false;
+        }
+        return true;
+    };
+    for (UINT position = 0; position < 4u; ++position)
+    {
+        auto partialRegion = coverageRegion;
+        partialRegion.x = partialPositions[position][0];
+        partialRegion.y = partialPositions[position][1];
+        context->ClearRenderTargetView(target.Get(), dark);
+        if (!lens.render(context.Get(), whiteBackdrop.Get(), target.Get(),
+                partialRegion)) return 28;
+        context->CopyResource(readback.Get(), backdrop.Get());
+        if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+                &mapped))) return 29;
+        std::size_t partialReferenceFailures = 0;
+        std::size_t partialOutsideFailures = 0;
+        std::size_t partialInsideChanged = 0;
+        for (UINT y = 0; y < height; ++y)
+        {
+            const auto* row = reinterpret_cast<const std::uint32_t*>(
+                static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+            for (UINT x = 0; x < width; ++x)
+            {
+                const auto localX = static_cast<std::int64_t>(x) - partialRegion.x;
+                const auto localY = static_cast<std::int64_t>(y) - partialRegion.y;
+                if (localX >= 0 && localY >= 0 &&
+                    localX < partialRegion.width && localY < partialRegion.height)
+                {
+                    const auto reference = coveragePixels[
+                        static_cast<std::size_t>(32 + localY) * width + 64 + localX];
+                    if (!nearlySamePixel(row[x], reference)) ++partialReferenceFailures;
+                    if (row[x] != 0xff101010u) ++partialInsideChanged;
+                }
+                else if (row[x] != 0xff101010u) ++partialOutsideFailures;
+            }
+        }
+        context->Unmap(readback.Get(), 0);
+        std::cout << "Off-screen lens " << partialRegion.x << ',' << partialRegion.y
+                  << ": reference failures: " << partialReferenceFailures
+                  << ", outside failures: " << partialOutsideFailures
+                  << ", changed inside: " << partialInsideChanged << '\n';
+        if (partialReferenceFailures != 0 || partialOutsideFailures != 0 ||
+            (position < 2u ? partialInsideChanged <= 1000u : partialInsideChanged != 0u))
+            return 30;
+    }
+
+    std::vector<std::uint32_t> samplePixels(width * height);
+    const auto renderSample = [&](ID3D11Texture2D* source,
+        const vibrance::win32::LiquidGlassRenderRegion& sampleRegion) {
+        context->ClearRenderTargetView(target.Get(), dark);
+        if (!lens.render(context.Get(), source, target.Get(), sampleRegion))
+            return false;
+        context->CopyResource(readback.Get(), backdrop.Get());
+        if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+                &mapped))) return false;
+        for (UINT y = 0; y < height; ++y)
+        {
+            const auto* row = reinterpret_cast<const std::uint32_t*>(
+                static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+            std::copy_n(row, width, samplePixels.begin() + y * width);
+        }
+        context->Unmap(readback.Get(), 0);
+        return true;
+    };
+
+    // Blur must affect the centre, where the edge's refraction band is zero.
+    // Compare stripe contrast there: an edge-only frost blend cannot pass.
+    D3D11_SUBRESOURCE_DATA stripedData { pixels.data(),
+        width * sizeof(std::uint32_t), 0 };
+    ComPtr<ID3D11Texture2D> stripedBackdrop;
+    if (FAILED(device->CreateTexture2D(&whiteDesc, &stripedData,
+            &stripedBackdrop))) return 31;
+    auto frostedRegion = coverageRegion;
+    const auto centreContrast = [&]() {
+        std::uint64_t sum = 0u;
+        std::uint64_t sumSquares = 0u;
+        std::uint64_t count = 0u;
+        for (UINT y = 104u; y < 152u; ++y)
+        {
+            for (UINT x = 160u; x < 352u; ++x)
+            {
+                const auto red = samplePixels[y * width + x] & 0xffu;
+                sum += red;
+                sumSquares += red * red;
+                ++count;
+            }
+        }
+        const double mean = static_cast<double>(sum) / count;
+        return static_cast<double>(sumSquares) / count - mean * mean;
+    };
+    if (!renderSample(stripedBackdrop.Get(), frostedRegion)) return 32;
+    const auto clearContrast = centreContrast();
+    std::size_t clearReferenceFailures = 0u;
+    for (UINT y = 104u; y < 152u; ++y)
+        for (UINT x = 160u; x < 352u; ++x)
+            if (samplePixels[y * width + x] != pixels[y * width + x])
+                ++clearReferenceFailures;
+    frostedRegion.blurRadius = 30.0f;
+    if (!renderSample(stripedBackdrop.Get(), frostedRegion)) return 32;
+    const auto frostedContrast = centreContrast();
+    std::cout << "Centre blur stripe contrast, clear: " << clearContrast
+              << ", frosted: " << frostedContrast
+              << ", clear reference failures: " << clearReferenceFailures << '\n';
+    if (clearReferenceFailures != 0u || clearContrast < 2000.0 ||
+        frostedContrast * 3.0 >= clearContrast) return 33;
+
+    // Dense Gaussian sampling must progressively smooth small details in both
+    // axes. At maximum blur, ten-pixel stripes form continuous transitions,
+    // rather than the secondary hard bands produced by sparse wide offsets.
+    for (UINT pattern = 0u; pattern < 3u; ++pattern)
+    {
+        std::vector<std::uint32_t> detailPixels(width * height);
+        for (UINT y = 0u; y < height; ++y)
+        {
+            for (UINT x = 0u; x < width; ++x)
+            {
+                const bool light = pattern == 0u ? ((x + y) & 1u) != 0u :
+                    (((pattern == 1u ? x : y) / 10u) & 1u) != 0u;
+                const auto value = light ? 224u : 64u;
+                detailPixels[y * width + x] = 0xff000000u |
+                    value | (value << 8u) | (value << 16u);
+            }
+        }
+        D3D11_SUBRESOURCE_DATA detailData { detailPixels.data(),
+            width * sizeof(std::uint32_t), 0 };
+        ComPtr<ID3D11Texture2D> detailBackdrop;
+        if (FAILED(device->CreateTexture2D(&whiteDesc, &detailData,
+                &detailBackdrop))) return 39;
+        auto detailRegion = coverageRegion;
+        double precedingContrast = 0.0;
+        double originalContrast = 0.0;
+        for (const float blur : { 0.0f, 6.0f, 12.0f, 18.0f, 24.0f, 30.0f })
+        {
+            detailRegion.blurRadius = blur;
+            if (!renderSample(detailBackdrop.Get(), detailRegion)) return 40;
+            const auto contrast = centreContrast();
+            std::cout << "Dense blur pattern " << pattern << ", radius " << blur
+                      << ": centre contrast " << contrast << '\n';
+            if (blur == 0.0f)
+            {
+                originalContrast = contrast;
+                for (UINT y = 104u; y < 152u; ++y)
+                    for (UINT x = 160u; x < 352u; ++x)
+                        if (samplePixels[y * width + x] != detailPixels[y * width + x])
+                            return 41;
+            }
+            else if (contrast > precedingContrast + 1.0 ||
+                contrast > originalContrast * 0.99) return 42;
+            precedingContrast = contrast;
+        }
+        if (precedingContrast > (pattern == 0u ? 1.0 : 10.0)) return 43;
+        if (pattern != 0u)
+        {
+            int largestCurvature = 0;
+            for (UINT y = 105u; y < 151u; ++y)
+            {
+                for (UINT x = 161u; x < 351u; ++x)
+                {
+                    const auto centre = y * width + x;
+                    const UINT axisStep = pattern == 1u ? 1u : width;
+                    const int previous = samplePixels[centre - axisStep] & 0xffu;
+                    const int current = samplePixels[centre] & 0xffu;
+                    const int next = samplePixels[centre + axisStep] & 0xffu;
+                    largestCurvature = std::max(largestCurvature,
+                        std::abs(next - 2 * current + previous));
+                }
+            }
+            std::cout << "Dense stripe pattern " << pattern
+                      << ": largest transition curvature " << largestCurvature << '\n';
+            if (largestCurvature > 7) return 44;
+        }
+    }
+
+    // Zero tint preserves the white source; full tint reaches the chosen
+    // colour independently of the source. Verify a centre area, not one pixel.
+    auto tintedRegion = coverageRegion;
+    tintedRegion.tintRed = 0.2f;
+    tintedRegion.tintGreen = 0.55f;
+    tintedRegion.tintBlue = 0.8f;
+    std::size_t tintEndpointFailures = 0u;
+    for (const float amount : { 0.0f, 1.0f })
+    {
+        tintedRegion.tintAlpha = amount;
+        if (!renderSample(whiteBackdrop.Get(), tintedRegion)) return 34;
+        for (UINT y = 112u; y < 144u; ++y)
+        {
+            for (UINT x = 224u; x < 288u; ++x)
+            {
+                const auto pixel = samplePixels[y * width + x];
+                const int expected[4] = {
+                    amount == 0.0f ? 255 : 51,
+                    amount == 0.0f ? 255 : 140,
+                    amount == 0.0f ? 255 : 204,
+                    255
+                };
+                for (UINT channel = 0u; channel < 4u; ++channel)
+                    if (std::abs(static_cast<int>(
+                            (pixel >> (channel * 8u)) & 0xffu) - expected[channel]) > 1)
+                        ++tintEndpointFailures;
+            }
+        }
+    }
+    std::cout << "Tint endpoint failures: " << tintEndpointFailures << '\n';
+    if (tintEndpointFailures != 0u) return 35;
+
+    // The merge amount opens a curved neck between two caps. Its source cap
+    // continues left into the main island; its detached end stays circular.
+    auto bridgeRegion = coverageRegion;
+    bridgeRegion.x = 136;
+    bridgeRegion.y = 96;
+    bridgeRegion.width = 192u;
+    bridgeRegion.height = 64u;
+    bridgeRegion.shape = 5u;
+    bridgeRegion.notchAmount = 0.0f;
+    if (!renderSample(whiteBackdrop.Get(), bridgeRegion)) return 36;
+    const auto bridgePixel = [&](UINT localX, UINT localY) {
+        return samplePixels[(96u + localY) * width + 136u + localX];
+    };
+    const bool unmergedNeckEmpty = bridgePixel(96u, 12u) == 0xff101010u;
+    bridgeRegion.notchAmount = 1.0f;
+    if (!renderSample(whiteBackdrop.Get(), bridgeRegion)) return 36;
+    const bool bridgeCoverageCorrect = unmergedNeckEmpty &&
+        bright(bridgePixel(96u, 12u)) &&
+        bright(bridgePixel(32u, 32u)) &&
+        bright(bridgePixel(160u, 32u)) &&
+        bright(bridgePixel(0u, 4u)) &&
+        bridgePixel(191u, 3u) == 0xff101010u;
+    const auto bridgeReference = samplePixels;
+    std::cout << "Liquid bridge neck and cap coverage: "
+              << (bridgeCoverageCorrect ? "pass" : "fail") << '\n';
+    if (!bridgeCoverageCorrect) return 37;
+
+    bridgeRegion.x = -40;
+    bridgeRegion.y = -20;
+    if (!renderSample(whiteBackdrop.Get(), bridgeRegion)) return 36;
+    std::size_t bridgeCropFailures = 0u;
+    for (UINT y = 0u; y < height; ++y)
+    {
+        for (UINT x = 0u; x < width; ++x)
+        {
+            const auto localX = static_cast<std::int64_t>(x) - bridgeRegion.x;
+            const auto localY = static_cast<std::int64_t>(y) - bridgeRegion.y;
+            const auto expected = localX < bridgeRegion.width &&
+                localY < bridgeRegion.height ? bridgeReference[
+                    static_cast<std::size_t>(96 + localY) * width + 136 + localX] :
+                0xff101010u;
+            if (!nearlySamePixel(samplePixels[y * width + x], expected))
+                ++bridgeCropFailures;
+        }
+    }
+    std::cout << "Off-screen liquid bridge crop failures: "
+              << bridgeCropFailures << '\n';
+    if (bridgeCropFailures != 0u) return 38;
+
+    // One native lens covers the main shell, merge neck and detached circle.
+    // Its neck's left cap must stop at its own bounds, preserving main corners.
+    auto unionRegion = coverageRegion;
+    unionRegion.x = 64;
+    unionRegion.y = 80;
+    unionRegion.width = 284u;
+    unionRegion.height = 96u;
+    unionRegion.shape = 0u;
+    unionRegion.contourCount = 3u;
+    unionRegion.contours[0].width = 192.0f;
+    unionRegion.contours[0].height = 96.0f;
+    unionRegion.contours[0].cornerRadius = 24.0f;
+    unionRegion.contours[0].shape = 1u;
+    unionRegion.contours[1].x = 128.0f;
+    unionRegion.contours[1].y = 16.0f;
+    unionRegion.contours[1].width = 156.0f;
+    unionRegion.contours[1].height = 64.0f;
+    unionRegion.contours[1].notchAmount = 1.0f;
+    unionRegion.contours[1].shape = 5u;
+    unionRegion.contours[2].x = 220.0f;
+    unionRegion.contours[2].y = 16.0f;
+    unionRegion.contours[2].width = 64.0f;
+    unionRegion.contours[2].height = 64.0f;
+    unionRegion.contours[2].shape = 2u;
+    if (!renderSample(whiteBackdrop.Get(), unionRegion)) return 45;
+    const auto unionPixel = [&](UINT localX, UINT localY) {
+        return samplePixels[(80u + localY) * width + 64u + localX];
+    };
+    const bool unionCoverageCorrect = bright(unionPixel(96u, 48u)) &&
+        bright(unionPixel(208u, 48u)) && bright(unionPixel(252u, 48u)) &&
+        unionPixel(0u, 0u) == 0xff101010u &&
+        unionPixel(0u, 16u) == 0xff101010u &&
+        unionPixel(208u, 94u) == 0xff101010u &&
+        unionPixel(283u, 16u) == 0xff101010u;
+    std::cout << "Union shell, bounded neck and circle coverage: "
+              << (unionCoverageCorrect ? "pass" : "fail") << '\n';
+    if (!unionCoverageCorrect) return 46;
+    const auto unionReference = samplePixels;
+    auto croppedUnion = unionRegion;
+    croppedUnion.x = -40;
+    croppedUnion.y = -20;
+    if (!renderSample(whiteBackdrop.Get(), croppedUnion)) return 45;
+    std::size_t unionCropFailures = 0u;
+    for (UINT y = 0u; y < height; ++y)
+    {
+        for (UINT x = 0u; x < width; ++x)
+        {
+            const auto localX = static_cast<std::int64_t>(x) - croppedUnion.x;
+            const auto localY = static_cast<std::int64_t>(y) - croppedUnion.y;
+            const auto expected = localX < croppedUnion.width &&
+                localY < croppedUnion.height ? unionReference[
+                    static_cast<std::size_t>(80 + localY) * width + 64 + localX] :
+                0xff101010u;
+            if (!nearlySamePixel(samplePixels[y * width + x], expected))
+                ++unionCropFailures;
+        }
+    }
+    std::cout << "Off-screen union crop failures: " << unionCropFailures << '\n';
+    if (unionCropFailures != 0u) return 47;
+
+    // Exclusion follows the front card's rounded silhouette, not its rectangle.
+    // Its centre remains untouched while pixels beyond its curved corner fill.
+    auto excludedRegion = coverageRegion;
+    excludedRegion.hasExclusion = true;
+    excludedRegion.exclusion.x = 128.0f;
+    excludedRegion.exclusion.y = 64.0f;
+    excludedRegion.exclusion.width = 128.0f;
+    excludedRegion.exclusion.height = 64.0f;
+    excludedRegion.exclusion.cornerRadius = 16.0f;
+    excludedRegion.exclusion.shape = 1u;
+    if (!renderSample(whiteBackdrop.Get(), excludedRegion)) return 48;
+    const bool exclusionCorrect = samplePixels[128u * width + 256u] == 0xff101010u &&
+        bright(samplePixels[96u * width + 192u]) &&
+        bright(samplePixels[128u * width + 160u]);
+    std::cout << "Front card exclusion coverage: "
+              << (exclusionCorrect ? "pass" : "fail") << '\n';
+    if (!exclusionCorrect) return 49;
+
+    const std::vector<std::uint32_t> neutralPixels(width * height, 0xff606060u);
+    D3D11_SUBRESOURCE_DATA neutralData { neutralPixels.data(),
+        width * sizeof(std::uint32_t), 0 };
+    ComPtr<ID3D11Texture2D> neutralBackdrop;
+    if (FAILED(device->CreateTexture2D(&whiteDesc, &neutralData,
+            &neutralBackdrop))) return 50;
+    // A joined contour has one outer rim. The old main shell's edge inside
+    // the neck cannot generate a second bright line through the union.
+    unionRegion.rimStrength = 1.0f;
+    if (!renderSample(neutralBackdrop.Get(), unionRegion)) return 50;
+    const auto internalEdge = unionPixel(191u, 48u) & 0xffu;
+    const auto outerEdge = unionPixel(283u, 48u) & 0xffu;
+    std::cout << "Union rim, internal edge: " << internalEdge
+              << ", outer edge: " << outerEdge << '\n';
+    if (std::abs(static_cast<int>(internalEdge) - 96) > 1 || outerEdge < 160u)
+        return 51;
+
+    // The cap is painted once across the complete union. Overlapping main,
+    // bridge and circle pixels at the same height must have equal brightness.
+    unionRegion.rimStrength = 0.0f;
+    unionRegion.paintCapGradient = true;
+    unionRegion.capGradient = { 1.0f, 0.0f, 0.0f, 1.0f };
+    if (!renderSample(neutralBackdrop.Get(), unionRegion)) return 50;
+    std::size_t gradientFailures = 0u;
+    for (const UINT localX : { 96u, 191u, 208u, 252u })
+        if (std::abs(static_cast<int>(unionPixel(localX, 48u) & 0xffu) - 49) > 1)
+            ++gradientFailures;
+    if ((unionPixel(96u, 8u) & 0xffu) >= 20u ||
+        (unionPixel(96u, 87u) & 0xffu) <= 80u) ++gradientFailures;
+    std::cout << "Shared cap gradient failures: " << gradientFailures << '\n';
+    if (gradientFailures != 0u) return 52;
+
+    unionRegion.capColour = { 0.9f, 0.9f, 0.9f };
+    if (!renderSample(neutralBackdrop.Get(), unionRegion)) return 50;
+    std::size_t lightGradientFailures = 0u;
+    for (const UINT localX : { 96u, 191u, 208u, 252u })
+        if (std::abs(static_cast<int>(unionPixel(localX, 48u) & 0xffu) - 162) > 2)
+            ++lightGradientFailures;
+    if ((unionPixel(96u, 8u) & 0xffu) < 200u ||
+        (unionPixel(96u, 87u) & 0xffu) > 130u) ++lightGradientFailures;
+    std::cout << "Themed light cap gradient failures: " << lightGradientFailures << '\n';
+    if (lightGradientFailures != 0u) return 52;
+
+    auto invalidMask = unionRegion;
+    invalidMask.contourCount = 4u;
+    if (lens.render(context.Get(), neutralBackdrop.Get(), target.Get(), invalidMask))
+        return 53;
+    invalidMask = unionRegion;
+    invalidMask.contours[1].width = std::numeric_limits<float>::quiet_NaN();
+    if (lens.render(context.Get(), neutralBackdrop.Get(), target.Get(), invalidMask))
+        return 53;
+    invalidMask = excludedRegion;
+    invalidMask.exclusion.height = 0.0f;
+    if (lens.render(context.Get(), neutralBackdrop.Get(), target.Get(), invalidMask))
+        return 53;
+    invalidMask = unionRegion;
+    invalidMask.capGradient[0] = std::numeric_limits<float>::quiet_NaN();
+    if (lens.render(context.Get(), neutralBackdrop.Get(), target.Get(), invalidMask))
+        return 53;
+
+    invalidMask = unionRegion;
+    invalidMask.capColour[1] = std::numeric_limits<float>::quiet_NaN();
+    if (lens.render(context.Get(), neutralBackdrop.Get(), target.Get(), invalidMask))
+        return 53;
+
+    // Missing compositor pixels must not replace an existing surface with
+    // opaque black. The island's UI is composited separately by DWM.
+    std::fill(pixels.begin(), pixels.end(), 0xff000000u);
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags = 0;
+    D3D11_SUBRESOURCE_DATA blackData { pixels.data(),
+        width * sizeof(std::uint32_t), 0 };
+    ComPtr<ID3D11Texture2D> emptyBackdrop;
+    if (FAILED(device->CreateTexture2D(&desc, &blackData,
+            &emptyBackdrop))) return 12;
+    const FLOAT grey[4] = { 0.3f, 0.4f, 0.5f, 1.0f };
+    context->ClearRenderTargetView(target.Get(), grey);
+    if (!lens.render(context.Get(), emptyBackdrop.Get(), target.Get(),
+            region)) return 13;
+    context->CopyResource(readback.Get(), backdrop.Get());
+    if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+            &mapped))) return 14;
+    const auto* middle = reinterpret_cast<const std::uint32_t*>(
+        static_cast<const std::uint8_t*>(mapped.pData) +
+            (height / 2u) * mapped.RowPitch);
+    const std::uint32_t centre = middle[width / 2u];
+    context->Unmap(readback.Get(), 0);
+    const auto near_channel = [](std::uint32_t actual, int expected) {
+        return std::abs(static_cast<int>(actual) - expected) <= 2;
+    };
+    return near_channel(centre & 0xffu, 77) &&
+        near_channel((centre >> 8u) & 0xffu, 102) &&
+        near_channel((centre >> 16u) & 0xffu, 128) ? 0 : 15;
+}

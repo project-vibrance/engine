@@ -228,6 +228,16 @@ void BlurPipeline::record_batch(
         return;
     }
 
+    const bool liquid = (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
+    Renderer2DBatch sourceBatch = batch;
+    // Populate the complete sampling halo even when a scroll viewport clips
+    // the control. Only the final optical output uses the original clip.
+    if (liquid) sourceBatch.clipRect = { 0.0f, 0.0f,
+        static_cast<float>(swapchain.extent.width),
+        static_cast<float>(swapchain.extent.height) };
+    const DispatchBounds sourceBounds = liquid ?
+        make_blur_dispatch_bounds(swapchain, sourceBatch) : bounds;
+
     bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, postScope);
 
@@ -249,7 +259,8 @@ void BlurPipeline::record_batch(
     dispatch_bounds(commandBuffer, bounds);
     insert_compute_memory_barrier(commandBuffer);
 
-    const uint32_t passCount = std::max(1u, static_cast<uint32_t>(std::round(std::max(batch.effect0.y, 1.0f))));
+    const uint32_t passCount = liquid ? 1u :
+        std::max(1u, static_cast<uint32_t>(std::round(std::max(batch.effect0.y, 1.0f))));
     Renderer2DBatch passBatch = batch;
     const float targetOpacity = std::clamp(batch.effect0.w, 0.0f, 1.0f);
     passBatch.effect0.w = passCount > 1u
@@ -257,7 +268,7 @@ void BlurPipeline::record_batch(
         : targetOpacity;
     for (uint32_t pass = 0; pass < passCount; ++pass)
     {
-        uint32_t passData = pass;
+        uint32_t passData = liquid ? batch.packedData : pass;
         if (includeStaticBackdrop)
         {
             passData |= kBlurUseStaticBackdrop;
@@ -267,14 +278,16 @@ void BlurPipeline::record_batch(
             passData |= kBlurUseExternalBackdrop;
         }
 
-        constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
+        constants = make_push_constants(passBatch, passData, sourceBounds.x, sourceBounds.y);
+        constants.data.x |= batch.backdropCapColour << 8u;
         constants.data.y |= eRenderer2DStyleBlurHorizontal;
         commandBuffer.pushConstants(pipelineLayouts[pipelineType],
             vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
-        dispatch_bounds(commandBuffer, bounds);
+        dispatch_bounds(commandBuffer, sourceBounds);
         insert_compute_memory_barrier(commandBuffer);
 
         constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
+        constants.data.x |= batch.backdropCapColour << 8u;
         constants.data.y |= eRenderer2DStyleBlurVertical;
         commandBuffer.pushConstants(pipelineLayouts[pipelineType],
             vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);

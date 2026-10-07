@@ -474,6 +474,8 @@ namespace
 
     float notched_squircle_dispatch_padding(const Renderer2DBatch& batch, glm::vec4 shapeParams)
     {
+        if ((batch.flags & eRenderer2DStyleMaskedLiquidShapeParameters) != 0u)
+            shapeParams = batch.color2;
         if (batch.primitive != Renderer2DPrimitive::eNotchedSquircle ||
             (batch.flags & eRenderer2DStyleTransform2_5D) != 0u)
         {
@@ -650,9 +652,9 @@ namespace
             swapchain,
             expand_and_clip_rect(
                 batch.rect,
-                std::max(
-                    std::max(batch.effect0.x, 0.0f),
-                    std::max(batch.effect1.z, 0.0f)) +
+                ((batch.flags & eRenderer2DStyleLiquidGlass) != 0u ?
+                    std::max(batch.effect0.x, 0.0f) + std::min(batch.rect.z, batch.rect.w) * 0.40f :
+                    std::max(std::max(batch.effect0.x, 0.0f), std::max(batch.effect1.z, 0.0f))) +
                     notched_squircle_dispatch_padding(batch, batch.uvRect),
                 batch.clipRect),
             0.0f);

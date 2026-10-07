@@ -205,6 +205,16 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_bridge_abi.h")
         set(VIBRANCE_COMPOSITION_PRIVATE_HEADER
             "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/private_composition_19041.h")
+        set(VIBRANCE_LIQUID_SHADER_ABI_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_shader_abi.h")
+        set(VIBRANCE_LIQUID_D3D_SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_d3d11.cpp")
+        set(VIBRANCE_LIQUID_D3D_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_d3d11.h")
+        set(VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_protocol.h")
+        set(VIBRANCE_LIQUID_DWM_SECURITY_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_security.h")
         set(VIBRANCE_COMPOSITION_BUILD_SCRIPT
             "${PROJECT_SOURCE_DIR}/scripts/win32/build_composition_bridge.bat")
         add_custom_command(
@@ -225,6 +235,11 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_COMPOSITION_SOURCE}"
                 "${VIBRANCE_COMPOSITION_ABI_HEADER}"
                 "${VIBRANCE_COMPOSITION_PRIVATE_HEADER}"
+                "${VIBRANCE_LIQUID_SHADER_ABI_HEADER}"
+                "${VIBRANCE_LIQUID_D3D_SOURCE}"
+                "${VIBRANCE_LIQUID_D3D_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
                 "${VIBRANCE_COMPOSITION_BUILD_SCRIPT}"
             BYPRODUCTS
                 "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_win32_composition.exp"
@@ -234,6 +249,149 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
         add_custom_target(vibrance_win32_composition ALL
             DEPENDS "${VIBRANCE_COMPOSITION_DLL}")
         add_dependencies(vibrance_engine vibrance_win32_composition)
+        set(VIBRANCE_LIQUID_DWM_EXTENSION
+            "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_liquid_dwm_extension.dll")
+        set(VIBRANCE_LIQUID_DWM_BROKER
+            "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_dwm_broker.exe")
+        # Symbol-server support is supplied by the matching Debugging Tools
+        # runtime; the OS DbgHelp alone cannot fetch a fresh DWM symbol cache.
+        get_filename_component(_vibrance_debugging_kits_root
+            "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]"
+            ABSOLUTE)
+        find_file(VIBRANCE_LIQUID_DBGHELP_RUNTIME NAMES dbghelp.dll
+            HINTS "${_vibrance_sdk_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+                "${_vibrance_debugging_kits_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+            NO_DEFAULT_PATH)
+        find_file(VIBRANCE_LIQUID_SYMSRV_RUNTIME NAMES symsrv.dll
+            HINTS "${_vibrance_sdk_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+                "${_vibrance_debugging_kits_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+            NO_DEFAULT_PATH)
+        set(VIBRANCE_LIQUID_DWM_EXTENSION_SCRIPT
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_liquid_dwm_extension.bat")
+        set(VIBRANCE_LIQUID_DWM_BROKER_SCRIPT
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_liquid_dwm_broker.bat")
+        set(VIBRANCE_LIQUID_DWM_EXTENSION_SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_present.cpp")
+        set(VIBRANCE_LIQUID_DWM_BROKER_SOURCE
+            "${PROJECT_SOURCE_DIR}/scripts/win32/liquid_glass_dwm_broker.cpp")
+        add_custom_command(
+            OUTPUT "${VIBRANCE_LIQUID_DWM_EXTENSION}"
+            COMMAND "${VIBRANCE_LIQUID_DWM_EXTENSION_SCRIPT}"
+                "${VIBRANCE_VCVARSALL}"
+                "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32"
+                "${VIBRANCE_LIQUID_DWM_EXTENSION}"
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/dwm-extension-obj"
+                "${VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT}"
+                "${VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR}"
+                "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
+            DEPENDS "${VIBRANCE_LIQUID_DWM_EXTENSION_SOURCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_batch.h"
+                "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
+                "${VIBRANCE_LIQUID_D3D_SOURCE}"
+                "${VIBRANCE_LIQUID_D3D_HEADER}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/detours/detours.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/detours/modules.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/detours/disasm.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/detours/detours.h"
+                "${VIBRANCE_LIQUID_DWM_EXTENSION_SCRIPT}"
+            COMMENT "Building Windows Liquid Glass DWM extension with MSVC"
+            VERBATIM)
+        add_custom_target(vibrance_liquid_dwm_extension ALL
+            DEPENDS "${VIBRANCE_LIQUID_DWM_EXTENSION}")
+        add_custom_command(
+            OUTPUT "${VIBRANCE_LIQUID_DWM_BROKER}"
+            COMMAND "${VIBRANCE_LIQUID_DWM_BROKER_SCRIPT}"
+                "${VIBRANCE_VCVARSALL}"
+                "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
+                "${VIBRANCE_LIQUID_DWM_BROKER}"
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/dwm-broker-obj"
+                "${VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT}"
+                "${VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR}"
+                "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
+            DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER_SOURCE}"
+                "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_BROKER_SCRIPT}"
+            COMMENT "Building Windows Liquid Glass DWM broker with MSVC"
+            VERBATIM)
+        add_custom_target(vibrance_liquid_dwm_broker ALL
+            DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER}")
+        add_dependencies(vibrance_engine
+            vibrance_liquid_dwm_extension vibrance_liquid_dwm_broker)
+        find_program(VIBRANCE_LIQUID_FXC_EXECUTABLE
+            NAMES fxc.exe
+            HINTS
+                "${_vibrance_sdk_root}/bin/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}/x64"
+                "${_vibrance_sdk_root}/bin/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+            NO_DEFAULT_PATH)
+        if(VIBRANCE_LIQUID_FXC_EXECUTABLE)
+            set(VIBRANCE_LIQUID_SHADER_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_win32.hlsl")
+            set(VIBRANCE_LIQUID_SHADER_OBJECT
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_win32.cso")
+            add_custom_command(
+                OUTPUT "${VIBRANCE_LIQUID_SHADER_OBJECT}"
+                COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                    /nologo /T ps_4_0 /E main
+                    /Fo "${VIBRANCE_LIQUID_SHADER_OBJECT}"
+                    "${VIBRANCE_LIQUID_SHADER_SOURCE}"
+                DEPENDS "${VIBRANCE_LIQUID_SHADER_SOURCE}"
+                COMMENT "Compiling the Windows Liquid Glass optical pixel shader"
+                VERBATIM)
+            add_custom_target(vibrance_liquid_glass_shader ALL
+                DEPENDS "${VIBRANCE_LIQUID_SHADER_OBJECT}")
+            set(VIBRANCE_LIQUID_UI_SHADER_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_ui_win32.hlsl")
+            set(VIBRANCE_LIQUID_UI_SHADER_OBJECT
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_ui_win32.cso")
+            add_custom_command(
+                OUTPUT "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}"
+                COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                    /nologo /T ps_4_0_level_9_3 /E main
+                    /Fo "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}"
+                    "${VIBRANCE_LIQUID_UI_SHADER_SOURCE}"
+                DEPENDS "${VIBRANCE_LIQUID_UI_SHADER_SOURCE}"
+                COMMENT "Compiling the Windows Liquid Glass UI composite pixel shader"
+                VERBATIM)
+            add_custom_target(vibrance_liquid_glass_ui_shader ALL
+                DEPENDS "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}")
+            set(VIBRANCE_LIQUID_FULLSCREEN_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_fullscreen_win32.hlsl")
+            set(VIBRANCE_LIQUID_FULLSCREEN_OBJECT
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_fullscreen.cso")
+            add_custom_command(
+                OUTPUT "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}"
+                COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                    /nologo /T vs_4_0 /E main
+                    /Fo "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}"
+                    "${VIBRANCE_LIQUID_FULLSCREEN_SOURCE}"
+                DEPENDS "${VIBRANCE_LIQUID_FULLSCREEN_SOURCE}"
+                COMMENT "Compiling Windows Liquid Glass fullscreen vertex shader"
+                VERBATIM)
+            add_custom_target(vibrance_liquid_glass_fullscreen_shader ALL
+                DEPENDS "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}")
+            set(VIBRANCE_LIQUID_BLUR_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_blur_win32.hlsl")
+            set(VIBRANCE_LIQUID_BLUR_OBJECTS "")
+            foreach(_vibrance_blur_axis IN ITEMS horizontal vertical)
+                set(_vibrance_blur_object
+                    "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_blur_${_vibrance_blur_axis}.cso")
+                add_custom_command(
+                    OUTPUT "${_vibrance_blur_object}"
+                    COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                        /nologo /T ps_4_0 /E "blur_${_vibrance_blur_axis}"
+                        /Fo "${_vibrance_blur_object}"
+                        "${VIBRANCE_LIQUID_BLUR_SOURCE}"
+                    DEPENDS "${VIBRANCE_LIQUID_BLUR_SOURCE}"
+                    COMMENT "Compiling Windows Liquid Glass ${_vibrance_blur_axis} blur pass"
+                    VERBATIM)
+                list(APPEND VIBRANCE_LIQUID_BLUR_OBJECTS "${_vibrance_blur_object}")
+            endforeach()
+            add_custom_target(vibrance_liquid_glass_blur_shaders ALL
+                DEPENDS ${VIBRANCE_LIQUID_BLUR_OBJECTS})
+        endif()
         set(VIBRANCE_WIN32_COMPOSITION_AVAILABLE ON)
         if(VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT AND
            VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR AND
@@ -508,7 +666,26 @@ install(TARGETS vibrance_engine
 if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
     install(FILES "${VIBRANCE_COMPOSITION_DLL}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(FILES "${VIBRANCE_LIQUID_DWM_EXTENSION}"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(PROGRAMS "${VIBRANCE_LIQUID_DWM_BROKER}"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    if(VIBRANCE_LIQUID_DBGHELP_RUNTIME AND VIBRANCE_LIQUID_SYMSRV_RUNTIME)
+        install(FILES "${VIBRANCE_LIQUID_DBGHELP_RUNTIME}"
+            "${VIBRANCE_LIQUID_SYMSRV_RUNTIME}"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    endif()
 endif()
+if(TARGET vibrance_liquid_glass_shader)
+    install(FILES "${VIBRANCE_LIQUID_SHADER_OBJECT}"
+        "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}"
+        "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}"
+        ${VIBRANCE_LIQUID_BLUR_OBJECTS}
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/licences/liquid-glass-winui.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/licences/detours.txt"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/licences")
 if(VIBRANCE_WIN32_INTEROP_AVAILABLE)
     install(FILES "${VIBRANCE_WIN32_INTEROP_DLL}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")

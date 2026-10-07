@@ -515,6 +515,25 @@ inline void ui_apply_stretch_dynamics_visual(
     visual.inheritToChildren = dynamics.options.stretchDescendants;
     visual.blurSelf = dynamics.options.inwardBlurSelf;
     visual.scale = glm::max(dynamics.scale, glm::vec2(0.001f));
+    if (dynamics.options.constrainToParent)
+    {
+        const auto* parent = registry.try_get<Parent2DComponent>(entity);
+        if (parent && registry.valid(parent->parent))
+        {
+            const auto bounds = ui_entity_base_framebuffer_rect(registry, parent->parent);
+            const auto own = ui_entity_base_framebuffer_rect(registry, entity);
+            for (int axis = 0; axis < 2; ++axis)
+            {
+                const float origin = dynamics.scaleOrigin[axis];
+                const float nearDistance = origin - own[axis];
+                const float farDistance = own[axis] + own[axis + 2] - origin;
+                if (nearDistance > 0.001f)
+                    visual.scale[axis] = std::min(visual.scale[axis], std::max(0.001f, (origin - bounds[axis]) / nearDistance));
+                if (farDistance > 0.001f)
+                    visual.scale[axis] = std::min(visual.scale[axis], std::max(0.001f, (bounds[axis] + bounds[axis + 2] - origin) / farDistance));
+            }
+        }
+    }
     visual.scaleOrigin = dynamics.scaleOrigin;
     visual.blurRadius = std::max(dynamics.blurRadius, 0.0f);
     visual.opacity = 1.0f;
@@ -537,6 +556,7 @@ inline bool ui_begin_stretch_dynamics(
 
     dynamics->dragging = true;
     dynamics->settling = false;
+    dynamics->dragMoved = false;
     dynamics->pressPoint = point;
     dynamics->baseRect = ui_entity_base_framebuffer_rect(registry, entity);
     const glm::vec2 baseCenter {
@@ -566,7 +586,7 @@ inline bool ui_begin_stretch_dynamics(
         dynamics->options.verticalAnchor);
     dynamics->outwardAxes = eStretchDynamicsNone;
     dynamics->displacement = glm::vec2(0.0f);
-    dynamics->scale = glm::vec2(1.0f);
+    dynamics->scale = glm::vec2(std::max(dynamics->options.grabScale, 1.0f));
     dynamics->scaleVelocity = glm::vec2(0.0f);
     dynamics->scaleOrigin = {
         dynamics->baseRect.x + dynamics->baseRect.z * 0.5f,
@@ -633,6 +653,7 @@ inline bool ui_release_stretch_dynamics(
         hasPoint ? point : dynamics->pressPoint + dynamics->displacement,
         *dynamics);
     const bool inwardReleaseArmed = event.inwardReleaseArmed;
+    const bool consumeClick = dynamics->options.consumeClickAfterDrag && dynamics->dragMoved;
     const auto onRelease = dynamics->options.onRelease;
     const auto onInwardRelease = dynamics->options.onInwardRelease;
     const float returnActiveSeconds =
@@ -649,7 +670,7 @@ inline bool ui_release_stretch_dynamics(
         scene,
         entity,
         returnActiveSeconds);
-    return inwardReleaseArmed;
+    return inwardReleaseArmed || consumeClick;
 }
 
 inline bool ui_update_stretch_dynamics_drag(
@@ -686,6 +707,8 @@ inline bool ui_update_stretch_dynamics_drag(
 
     dynamics->displacement = point - dynamics->pressPoint;
     const StretchDynamicsOptions& options = dynamics->options;
+    const float deadZone = std::max(options.dragDeadZone, 0.0f);
+    dynamics->dragMoved = dynamics->dragMoved || glm::dot(dynamics->displacement, dynamics->displacement) > deadZone * deadZone;
     const auto updateDirectionAwareSide = [&options, dynamics](
         std::size_t axis,
         uint32_t axisFlag,
@@ -744,6 +767,7 @@ inline bool ui_update_stretch_dynamics_drag(
             options.dragDeadZone);
     }
 
+    dynamics->scale *= std::max(options.grabScale, 1.0f);
     dynamics->scaleOrigin = {
         (options.axes & eStretchDynamicsHorizontal) != 0u ?
             dynamics->baseRect.x +
@@ -795,24 +819,8 @@ inline float ui_stretch_dynamics_spring_step(
     float dampingFraction)
 {
     constexpr float twoPi = 6.28318530718f;
-    const float dt = static_cast<float>(
-        std::clamp(deltaSeconds, 0.0, 1.0 / 30.0));
-    if (dt <= 0.0f)
-    {
-        return value;
-    }
-    const float frequency = twoPi / std::max(response, 0.001f);
-    const float acceleration =
-        -frequency * frequency * (value - target) -
-        2.0f * std::max(dampingFraction, 0.0f) * frequency * velocity;
-    velocity += acceleration * dt;
-    value += velocity * dt;
-    if (std::abs(value - target) < 0.0005f &&
-        std::abs(velocity) < 0.0005f)
-    {
-        value = target;
-        velocity = 0.0f;
-    }
+    ui_damped_spring_step(value, velocity, target, deltaSeconds,
+        twoPi / std::max(response, 0.001f), std::max(dampingFraction, 0.0f));
     return value;
 }
 
@@ -960,10 +968,12 @@ inline void ui_handle_pointer_button(
         // Text focus follows left-click ownership before any drag-only controls react
         ui_focus_text_input(scene, fontAtlas, state, textOwner);
         if (input.hasPoint && stretchOwner != entt::null &&
-            sliderOwner == entt::null && scrollOwner == entt::null &&
+            sliderOwner == entt::null &&
+            (scrollOwner == entt::null || buttonOwner == stretchOwner || textOwner == stretchOwner) &&
             scrollBarOwner == entt::null &&
             (!stretchBlocker || !stretchBlocker->enabled) &&
-            textOwner == entt::null)
+            (textOwner == entt::null ||
+                registry.get<StretchDynamicsComponent>(stretchOwner).options.allowTextInputDrag))
         {
             ui_begin_stretch_dynamics(
                 scene,

@@ -4,8 +4,12 @@
 #define NOMINMAX
 #include <windows.h>
 #include <initguid.h>
+#include <shellapi.h>
 
 #include "composition_bridge_abi.h"
+#include "liquid_glass_d3d11.h"
+#include "liquid_glass_dwm_protocol.h"
+#include "liquid_glass_dwm_security.h"
 #include "private_composition_19041.h"
 
 #include <DispatcherQueue.h>
@@ -30,12 +34,15 @@
 #include <winrt/base.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -62,6 +69,7 @@ namespace abi_effects = ABI::Windows::Graphics::Effects;
 namespace composition = winrt::Windows::UI::Composition;
 namespace effects = winrt::Windows::Graphics::Effects;
 namespace private_composition = vibrance::directx::private_composition_19041;
+
 
 template <>
 inline constexpr winrt::guid winrt::impl::guid_v<
@@ -91,6 +99,61 @@ constexpr HRESULT windowAlreadyComposed =
 
 std::mutex activeCompositionWindowsMutex;
 std::unordered_set<HWND> activeCompositionWindows;
+std::once_flag liquidExtensionLaunch;
+
+void launch_liquid_extension_once()
+{
+    std::call_once(liquidExtensionLaunch, [] {
+        std::thread([] {
+        wchar_t executable[MAX_PATH] {};
+        const DWORD pathLength = GetModuleFileNameW(nullptr, executable,
+            ARRAYSIZE(executable));
+        if (!pathLength || pathLength >= ARRAYSIZE(executable))
+        {
+            return;
+        }
+        std::wstring directory(executable, pathLength);
+        const auto separator = directory.find_last_of(L"\\/");
+        if (separator == std::wstring::npos)
+        {
+            return;
+        }
+        directory.resize(separator + 1);
+        const std::wstring broker = directory +
+            L"liquid_glass_dwm_broker.exe";
+        const std::wstring extension = directory +
+            L"vibrance_liquid_dwm_extension.dll";
+        if (GetFileAttributesW(broker.c_str()) ==
+                INVALID_FILE_ATTRIBUTES ||
+            GetFileAttributesW(extension.c_str()) ==
+                INVALID_FILE_ATTRIBUTES)
+        {
+            return;
+        }
+        wchar_t appData[MAX_PATH] {};
+        const DWORD appDataLength = GetEnvironmentVariableW(L"LOCALAPPDATA",
+            appData, ARRAYSIZE(appData));
+        if (!appDataLength || appDataLength >= ARRAYSIZE(appData))
+        {
+            return;
+        }
+        const std::wstring cache = std::wstring(appData, appDataLength) +
+            L"\\VibranceDwmSymbols";
+        const std::wstring parameters = L"\"" + extension +
+            L"\" \"" + cache + L"\"";
+        SHELLEXECUTEINFOW launch { sizeof(launch) };
+        launch.fMask = SEE_MASK_NOCLOSEPROCESS;
+        launch.lpVerb = L"runas";
+        launch.lpFile = broker.c_str();
+        launch.lpParameters = parameters.c_str();
+        launch.nShow = SW_HIDE;
+        if (ShellExecuteExW(&launch) && launch.hProcess)
+        {
+            CloseHandle(launch.hProcess);
+        }
+        }).detach();
+    });
+}
 
 bool claim_composition_window(HWND window)
 {
@@ -138,7 +201,7 @@ winrt::Windows::UI::Color color(
 
 // Windows Composition only supplies rectangle, rounded-rectangle, and ellipse
 // geometry directly. This adapter exposes a D2D superellipse path through the
-// WinRT geometry-source contract so Composition can clip HostBackdrop to the
+// WinRT geometry-source contract so Composition can clip the backdrop to the
 // same squircle used by the Vulkan renderer.
 class SquircleGeometrySource :
     public winrt::implements<
@@ -549,14 +612,35 @@ private:
 
 class CompositionBridge
 {
+    struct LiquidTile
+    {
+        composition::CompositionSurfaceBrush brush { nullptr };
+        composition::SpriteVisual visual { nullptr };
+    };
+
     struct RegionVisualState
     {
         VibranceCompositionRegion descriptor {};
         composition::ContainerVisual container { nullptr };
         composition::ContainerVisual materialContainer { nullptr };
         composition::SpriteVisual materialVisual { nullptr };
+        composition::SpriteVisual rawBackdropVisual { nullptr };
+        composition::SpriteVisual liquidSourceVisual { nullptr };
+        composition::CompositionVisualSurface liquidSurface { nullptr };
+        std::vector<LiquidTile> liquidTiles;
         composition::SpriteVisual tintVisual { nullptr };
         bool materialInset = false;
+        bool shaderOnly = false;
+        bool rimClockRunning = false;
+        std::uint32_t shaderSlot = vibrance::win32::liquidDwmRegionSlots;
+    };
+
+    struct LiquidRegionBinding
+    {
+        std::uint64_t identity = 0u;
+        std::uint64_t regionId = 0u;
+        vibrance::win32::LiquidDwmRegion* view = nullptr;
+        std::uint32_t slot = vibrance::win32::liquidDwmRegionSlots;
     };
 
 public:
@@ -578,6 +662,20 @@ public:
 
     ~CompositionBridge()
     {
+        for (const auto& binding : liquidRegionBindings_)
+            release_liquid_region(binding);
+        liquidRegionBindings_.clear();
+        refresh_liquid_region_alias();
+        if (liquidRegionTable_)
+        {
+            UnmapViewOfFile(liquidRegionTable_);
+        }
+        if (liquidRegionMapping_)
+        {
+            CloseHandle(liquidRegionMapping_);
+        }
+        if (uiCpuView_) UnmapViewOfFile(uiCpuView_);
+        if (uiCpuMapping_) CloseHandle(uiCpuMapping_);
         release_composition_target();
         content_ = nullptr;
         regions_ = nullptr;
@@ -599,6 +697,12 @@ public:
         }
 
         queries_.clear();
+        for (HANDLE handle : uiMirrorHandles_)
+        {
+            if (handle) CloseHandle(handle);
+        }
+        uiMirrorMutexes_ = {};
+        uiMirrorTextures_ = {};
         sharedMutexes_.clear();
         sharedTextures_.clear();
         backBuffers_.clear();
@@ -909,12 +1013,36 @@ public:
             };
         };
 
+        for (const auto& binding : liquidRegionBindings_)
+        {
+            if (!binding.view || !binding.view->active) continue;
+            // The native shader samples beyond the UI's changed pixels.
+            // Announce that entire source footprint to DWM so retained UI or
+            // an earlier lens cannot be sampled as the next frame's backdrop.
+            // Copy the same area into this rotating back buffer before Present.
+            const auto& lens = *binding.view;
+            const float reach = std::max({ lens.blurRadius * 5.0f,
+                lens.refractionStrength + lens.dispersionStrength + 2.0f,
+                4.0f });
+            const auto margin = static_cast<std::int64_t>(std::ceil(reach));
+            const auto horizontalMargin = margin +
+                static_cast<std::int64_t>(lens.markerInsetX);
+            RECT opticalDamage {
+                static_cast<LONG>(std::max<std::int64_t>(0, lens.x - horizontalMargin)),
+                static_cast<LONG>(std::max<std::int64_t>(0, lens.y - margin)),
+                static_cast<LONG>(std::min<std::int64_t>(width_,
+                    static_cast<std::int64_t>(lens.x) + lens.width + horizontalMargin)),
+                static_cast<LONG>(std::min<std::int64_t>(height_,
+                    static_cast<std::int64_t>(lens.y) + lens.height + margin))
+            };
+            damageRect = union_rect(damageRect, opticalDamage);
+        }
+
         for (RECT& pendingDamage : backBufferPendingDamageRects_)
         {
             pendingDamage = union_rect(pendingDamage, damageRect);
         }
         RECT copyRect = backBufferPendingDamageRects_[backBufferIndex];
-
         if (!cpuUpload_ &&
             (index >= sharedMutexes_.size() || !sharedMutexes_[index]))
         {
@@ -1027,6 +1155,75 @@ public:
         {
             return false;
         }
+        std::vector<std::uint32_t> shaderSlots(count,
+            vibrance::win32::liquidDwmRegionSlots);
+        std::unordered_set<std::uint64_t> nativeIdentities;
+        bool shaderCandidateSeen = false;
+        for (std::uint32_t index = 0u; index < count; ++index)
+        {
+            if (regions[index].material == 2u &&
+                regions[index].liquidBackend == 2u &&
+                regions[index].width > 0.0f && regions[index].height > 0.0f)
+            {
+                shaderCandidateSeen = true;
+                if (regions[index].identity != 0u)
+                    nativeIdentities.insert(regions[index].identity);
+            }
+        }
+        const bool shaderReady = shaderCandidateSeen &&
+            ensure_liquid_region_mapping() && liquid_extension_ready();
+        if (shaderCandidateSeen && !shaderReady)
+        {
+            launch_liquid_extension_once();
+            lastCompositionError = liquidRegionTable_ ?
+                "Liquid Glass DWM extension is starting or unavailable" :
+                "Liquid Glass region table is unavailable";
+        }
+        // Bindings follow stable entities rather than the sorted input index.
+        // Removed cards release their claim before replacement cards allocate.
+        for (auto iterator = liquidRegionBindings_.begin();
+             iterator != liquidRegionBindings_.end();)
+        {
+            if (!shaderReady || nativeIdentities.count(iterator->identity) == 0u)
+            {
+                release_liquid_region(*iterator);
+                iterator = liquidRegionBindings_.erase(iterator);
+            }
+            else ++iterator;
+        }
+        bool hasShaderRegion = false;
+        if (shaderReady)
+        {
+            std::unordered_set<std::uint64_t> publishedIdentities;
+            for (std::uint32_t index = 0u; index < count; ++index)
+            {
+                const auto& region = regions[index];
+                if (region.material != 2u || region.liquidBackend != 2u ||
+                    region.width <= 0.0f || region.height <= 0.0f) continue;
+                if (region.identity == 0u ||
+                    !publishedIdentities.insert(region.identity).second)
+                {
+                    lastCompositionError =
+                        "Liquid Glass regions require unique non-zero identities";
+                    continue;
+                }
+                auto* binding = find_liquid_region_identity(region.identity);
+                if (!binding) binding = claim_liquid_region(region.identity);
+                if (!binding)
+                {
+                    lastCompositionError = "Liquid Glass region table is full";
+                    continue;
+                }
+                shaderSlots[index] = binding->slot;
+                publish_liquid_region(*binding, &region);
+                hasShaderRegion = true;
+            }
+        }
+        refresh_liquid_region_alias();
+        // Keep background pixels under artwork available to the optical
+        // shader. An exactly opaque UI lets DWM cull those pixels before the
+        // lens bends into them; this sub-pixel alpha difference prevents that.
+        content_.Opacity(hasShaderRegion ? 0.999f : 1.0f);
         try
         {
             bool canUpdateGeometry = regionVisuals_.size() == count;
@@ -1035,6 +1232,17 @@ public:
             {
                 for (std::uint32_t index = 0u; index < count; ++index)
                 {
+                    const bool shaderOnly =
+                        shaderSlots[index] < vibrance::win32::liquidDwmRegionSlots;
+                    if (regionVisuals_[index].shaderOnly != shaderOnly ||
+                        regionVisuals_[index].shaderSlot != shaderSlots[index] ||
+                        regionVisuals_[index].descriptor.identity !=
+                            regions[index].identity)
+                    {
+                        canUpdateGeometry = false;
+                        exactlyUnchanged = false;
+                        break;
+                    }
                     exactlyUnchanged = exactlyUnchanged &&
                         std::memcmp(
                             &regionVisuals_[index].descriptor,
@@ -1056,7 +1264,7 @@ public:
             if (canUpdateGeometry)
             {
                 // Position, size, radii, squircle and notch changes only alter
-                // visual geometry. Retain the HostBackdrop effect and glaze
+                // visual geometry. Retain the backdrop effect and glaze
                 // graph while an island morphs; rebuilding every region
                 // on every spring sample creates a large transient GPU/resource
                 // backlog in DWM that can remain visible after hover ends.
@@ -1077,7 +1285,9 @@ public:
                 sizeof(disabled));
             for (std::uint32_t index = 0u; index < count; ++index)
             {
-                if (!add_region(regions[index]))
+                if (!add_region(regions[index],
+                        shaderSlots[index] < vibrance::win32::liquidDwmRegionSlots,
+                        shaderSlots[index]))
                 {
                     continue;
                 }
@@ -1102,6 +1312,478 @@ public:
     }
 
 private:
+    bool ensure_liquid_cpu_ui()
+    {
+        if (uiCpuView_) return true;
+        const std::uint64_t pixels = static_cast<std::uint64_t>(width_) *
+            height_ * 4u;
+        if (!pixels || pixels > 64u * 1024u * 1024u) return false;
+        D3D11_TEXTURE2D_DESC staging {};
+        staging.Width = width_;
+        staging.Height = height_;
+        staging.MipLevels = 1;
+        staging.ArraySize = 1;
+        staging.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        staging.SampleDesc.Count = 1;
+        staging.Usage = D3D11_USAGE_STAGING;
+        staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (auto& texture : uiCpuStaging_)
+        {
+            if (FAILED(device_->CreateTexture2D(&staging, nullptr,
+                    texture.put()))) return false;
+        }
+        vibrance::win32::PublicReadSecurity security;
+        const std::wstring name = vibrance::win32::liquid_dwm_cpu_ui_name(
+            GetCurrentProcessId(), reinterpret_cast<std::uint64_t>(window_),
+            width_, height_);
+        const std::uint64_t size =
+            sizeof(vibrance::win32::LiquidDwmCpuUiHeader) + pixels;
+        uiCpuMapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE,
+            security.get(), PAGE_READWRITE,
+            static_cast<DWORD>(size >> 32), static_cast<DWORD>(size),
+            name.c_str());
+        if (!uiCpuMapping_) return false;
+        uiCpuView_ = static_cast<vibrance::win32::LiquidDwmCpuUiHeader*>(
+            MapViewOfFile(uiCpuMapping_, FILE_MAP_WRITE, 0, 0,
+                static_cast<SIZE_T>(size)));
+        if (!uiCpuView_) return false;
+        uiCpuView_->version = vibrance::win32::liquidDwmProtocolVersion;
+        uiCpuView_->width = width_;
+        uiCpuView_->height = height_;
+        uiCpuView_->rowPitch = width_ * 4u;
+        uiCpuView_->ownerPid = GetCurrentProcessId();
+        uiCpuView_->hwnd = reinterpret_cast<std::uint64_t>(window_);
+        return true;
+    }
+
+    bool ensure_liquid_ui_transport()
+    {
+        if (!ensure_liquid_cpu_ui()) return false;
+        if (!uiMirrorAttempted_)
+        {
+            uiMirrorAttempted_ = true;
+            (void)ensure_liquid_ui_mirrors();
+        }
+        return true;
+    }
+
+    void publish_cpu_ui(ID3D11Texture2D* source) noexcept
+    {
+        if (!source || !uiCpuView_) return;
+        for (std::size_t index = 0; index < uiCpuStaging_.size(); ++index)
+        {
+            if (!uiCpuPending_[index]) continue;
+            D3D11_MAPPED_SUBRESOURCE mapped {};
+            if (context_->Map(uiCpuStaging_[index].get(), 0,
+                    D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT,
+                    &mapped) != S_OK) continue;
+            if (uiCpuSourceFrame_[index] > uiCpuLastPublishedSource_)
+            {
+                auto* sequence = reinterpret_cast<volatile LONG*>(
+                    &uiCpuView_->sequence);
+                InterlockedIncrement(sequence);
+                auto* pixels = reinterpret_cast<std::uint8_t*>(
+                    uiCpuView_ + 1);
+                const auto* sourceBytes = static_cast<const std::uint8_t*>(
+                    mapped.pData);
+                for (std::uint32_t row = 0; row < height_; ++row)
+                {
+                    std::memcpy(pixels + static_cast<std::size_t>(row) *
+                            width_ * 4u,
+                        sourceBytes + static_cast<std::size_t>(row) *
+                            mapped.RowPitch,
+                        static_cast<std::size_t>(width_) * 4u);
+                }
+                uiCpuView_->frame = ++uiCpuFrame_;
+                MemoryBarrier();
+                InterlockedIncrement(sequence);
+                uiCpuLastPublishedSource_ = uiCpuSourceFrame_[index];
+            }
+            context_->Unmap(uiCpuStaging_[index].get(), 0);
+            uiCpuPending_[index] = false;
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (now - uiCpuLastScheduleTick_ < 33u) return;
+        for (std::size_t index = 0; index < uiCpuStaging_.size(); ++index)
+        {
+            if (uiCpuPending_[index]) continue;
+            context_->CopyResource(uiCpuStaging_[index].get(), source);
+            uiCpuPending_[index] = true;
+            uiCpuSourceFrame_[index] = ++uiCpuScheduleSerial_;
+            uiCpuLastScheduleTick_ = now;
+            return;
+        }
+    }
+
+    bool ensure_liquid_ui_mirrors()
+    {
+        if (uiMirrorHandles_[0] && uiMirrorHandles_[1]) return true;
+        vibrance::win32::PublicReadSecurity security;
+        for (std::uint32_t index = 0;
+             index < vibrance::win32::liquidDwmUiBuffers; ++index)
+        {
+            if (uiMirrorHandles_[index]) continue;
+            D3D11_TEXTURE2D_DESC description {};
+            description.Width = width_;
+            description.Height = height_;
+            description.MipLevels = 1;
+            description.ArraySize = 1;
+            description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            description.SampleDesc.Count = 1;
+            description.Usage = D3D11_USAGE_DEFAULT;
+            description.BindFlags = D3D11_BIND_SHADER_RESOURCE |
+                D3D11_BIND_RENDER_TARGET;
+            description.MiscFlags = kSharedTextureMiscFlags;
+            if (FAILED(device_->CreateTexture2D(&description, nullptr,
+                    uiMirrorTextures_[index].put())) ||
+                FAILED(uiMirrorTextures_[index]->QueryInterface(
+                    uiMirrorMutexes_[index].put())))
+            {
+                return false;
+            }
+            winrt::com_ptr<IDXGIResource1> resource;
+            const std::wstring name = vibrance::win32::liquid_dwm_ui_name(
+                GetCurrentProcessId(),
+                reinterpret_cast<std::uint64_t>(window_), index);
+            if (FAILED(uiMirrorTextures_[index]->QueryInterface(resource.put())) ||
+                FAILED(resource->CreateSharedHandle(security.get(),
+                    DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+                    name.c_str(), &uiMirrorHandles_[index])))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void mirror_ui_frame(ID3D11Texture2D* source) noexcept
+    {
+        if (!source || !liquidRegionView_->active) return;
+        for (std::uint32_t offset = 0;
+             offset < vibrance::win32::liquidDwmUiBuffers; ++offset)
+        {
+            const std::uint32_t index =
+                (uiFrame_ + offset) % vibrance::win32::liquidDwmUiBuffers;
+            if (!uiMirrorMutexes_[index] ||
+                uiMirrorMutexes_[index]->AcquireSync(0, 0) != S_OK)
+            {
+                continue;
+            }
+            context_->CopyResource(uiMirrorTextures_[index].get(), source);
+            if (FAILED(uiMirrorMutexes_[index]->ReleaseSync(1)))
+            {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(liquidRegionWriteMutex_);
+            auto* sequence = reinterpret_cast<volatile LONG*>(
+                &liquidRegionView_->sequence);
+            InterlockedIncrement(sequence);
+            liquidRegionView_->uiBufferIndex = index;
+            liquidRegionView_->uiFrame = ++uiFrame_;
+            MemoryBarrier();
+            InterlockedIncrement(sequence);
+            return;
+        }
+    }
+
+    bool liquid_extension_ready() const noexcept
+    {
+        const HANDLE ready = OpenEventW(SYNCHRONIZE, FALSE,
+            vibrance::win32::liquidDwmReadyName);
+        if (!ready)
+        {
+            return false;
+        }
+        const bool signalled = WaitForSingleObject(ready, 0) == WAIT_OBJECT_0;
+        CloseHandle(ready);
+        return signalled;
+    }
+
+    bool ensure_liquid_region_mapping()
+    {
+        if (liquidRegionTable_)
+        {
+            return true;
+        }
+        vibrance::win32::PublicReadSecurity security;
+        liquidRegionMapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE,
+            security.get(), PAGE_READWRITE, 0,
+            sizeof(vibrance::win32::LiquidDwmRegionTable),
+            vibrance::win32::liquidDwmRegionName);
+        if (!liquidRegionMapping_)
+        {
+            return false;
+        }
+        liquidRegionTable_ = static_cast<vibrance::win32::LiquidDwmRegionTable*>(
+            MapViewOfFile(liquidRegionMapping_, FILE_MAP_WRITE, 0, 0,
+                sizeof(vibrance::win32::LiquidDwmRegionTable)));
+        if (!liquidRegionTable_)
+        {
+            CloseHandle(liquidRegionMapping_);
+            liquidRegionMapping_ = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    LiquidRegionBinding* find_liquid_region_identity(std::uint64_t identity) noexcept
+    {
+        const auto found = std::find_if(liquidRegionBindings_.begin(),
+            liquidRegionBindings_.end(), [identity](const auto& binding) {
+                return binding.identity == identity;
+            });
+        return found == liquidRegionBindings_.end() ? nullptr : &*found;
+    }
+
+    LiquidRegionBinding* find_liquid_region_slot(std::uint32_t slot) noexcept
+    {
+        const auto found = std::find_if(liquidRegionBindings_.begin(),
+            liquidRegionBindings_.end(), [slot](const auto& binding) {
+                return binding.slot == slot;
+            });
+        return found == liquidRegionBindings_.end() ? nullptr : &*found;
+    }
+
+    void refresh_liquid_region_alias() noexcept
+    {
+        // Reserved UI transport helpers still refer to this first-view alias;
+        // native rendering never uses those helpers or their UI copies.
+        liquidRegionView_ = liquidRegionBindings_.empty() ? nullptr :
+            liquidRegionBindings_.front().view;
+    }
+
+    LiquidRegionBinding* claim_liquid_region(std::uint64_t identity)
+    {
+        if (!identity || !ensure_liquid_region_mapping()) return nullptr;
+        const auto hwnd = static_cast<LONG64>(
+            reinterpret_cast<std::uintptr_t>(window_));
+        for (std::uint32_t index = 0;
+             index < vibrance::win32::liquidDwmRegionSlots; ++index)
+        {
+            if (find_liquid_region_slot(index)) continue;
+            auto& slot = liquidRegionTable_->regions[index];
+            LONG64 previous = InterlockedCompareExchange64(
+                reinterpret_cast<volatile LONG64*>(&slot.hwnd), hwnd, 0);
+            if (previous != 0 && previous != hwnd)
+            {
+                DWORD windowOwner = 0;
+                if (IsWindow(reinterpret_cast<HWND>(previous)))
+                    GetWindowThreadProcessId(
+                        reinterpret_cast<HWND>(previous), &windowOwner);
+                if (windowOwner == 0 ||
+                    (slot.ownerPid != 0 && slot.ownerPid != windowOwner))
+                {
+                    if (InterlockedCompareExchange64(
+                            reinterpret_cast<volatile LONG64*>(&slot.hwnd),
+                            hwnd, previous) == previous)
+                        previous = 0;
+                }
+            }
+            if (previous == 0 || previous == hwnd)
+            {
+                // A new allocation gets a distinct lifetime token even if a
+                // removed entity or the same HWND later reuses this slot.
+                static volatile LONG64 allocationSerial =
+                    static_cast<LONG64>(GetTickCount64());
+                std::uint64_t regionId = static_cast<std::uint64_t>(
+                    InterlockedIncrement64(&allocationSerial));
+                if (!regionId) regionId = static_cast<std::uint64_t>(
+                    InterlockedIncrement64(&allocationSerial));
+                try
+                {
+                    liquidRegionBindings_.push_back({ identity, regionId, &slot, index });
+                }
+                catch (...)
+                {
+                    InterlockedCompareExchange64(
+                        reinterpret_cast<volatile LONG64*>(&slot.hwnd), 0, hwnd);
+                    return nullptr;
+                }
+                auto* binding = &liquidRegionBindings_.back();
+                publish_liquid_region(*binding, nullptr);
+                return binding;
+            }
+        }
+        return nullptr;
+    }
+
+    void release_liquid_region(const LiquidRegionBinding& binding) noexcept
+    {
+        if (!binding.view ||
+            binding.view->hwnd != reinterpret_cast<std::uint64_t>(window_) ||
+            binding.view->ownerPid != GetCurrentProcessId() ||
+            binding.view->regionId != binding.regionId) return;
+        publish_liquid_region(binding, nullptr);
+        InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(
+            &binding.view->hwnd), 0,
+            static_cast<LONG64>(reinterpret_cast<std::uintptr_t>(window_)));
+    }
+
+    static float liquid_marker_padding(
+        const VibranceCompositionRegion& region) noexcept
+    {
+        if (region.contourCount != 0u)
+        {
+            // Union regions already include their notch flares in the supplied
+            // bounds. Add padding only if an exposed contour exceeds them.
+            float padding = 0.0f;
+            for (std::uint32_t index = 0u;
+                index < std::min(region.contourCount, 3u); ++index)
+            {
+                const auto& contour = region.contours[index];
+                VibranceCompositionRegion shape {};
+                shape.shape = contour.shape;
+                shape.height = contour.height;
+                shape.notchAmount = contour.notchAmount;
+                shape.notchDepth = contour.notchDepth;
+                const float flare = liquid_marker_padding(shape);
+                padding = std::max({ padding, flare - contour.x,
+                    contour.x + contour.width + flare - region.width });
+            }
+            // Bounding-box subtraction may leave a fractional-ulp excess.
+            return padding > 0.01f ? std::ceil(padding) : 0.0f;
+        }
+        if (region.shape != 4u) return 0.0f;
+        // Match notch_flare_size in shape_2d.comp, including the late morph
+        // threshold. The island body remains centred inside this wider marker.
+        constexpr float morphThreshold = 0.85f;
+        const float height = std::max(region.height, 1.0f);
+        const float progress = std::clamp(
+            (std::clamp(region.notchAmount, 0.0f, 1.0f) - morphThreshold) /
+                (1.0f - morphThreshold),
+            0.0f, 1.0f);
+        const float depth = region.notchDepth > 0.5f ? region.notchDepth :
+            std::clamp(height * 0.62f, 0.0f, 92.0f);
+        const float flareTarget = std::clamp(depth * 0.18f,
+            0.0f, height * 0.5f);
+        const float sizeRatio = std::clamp(height * 0.5f /
+            std::max(flareTarget, 0.001f), 0.0f, 1.0f);
+        const float flareT = sizeRatio * progress;
+        return std::ceil(flareTarget * flareT * flareT);
+    }
+
+    static float liquid_refraction(const VibranceCompositionRegion& region) noexcept
+    {
+        const float size = std::clamp(region.width / 500.0f, 0.35f, 2.0f);
+        return std::min(std::clamp(region.liquidRefraction, 0.0f, 1.0f) * 56.0f * size,
+            std::min(region.width, region.height) * 0.38f);
+    }
+
+    static float liquid_blur(const VibranceCompositionRegion& region) noexcept
+    {
+        return std::clamp(region.liquidBlur, 0.0f, 1.0f) * 30.0f;
+    }
+
+    static float liquid_dispersion(const VibranceCompositionRegion& region) noexcept
+    {
+        return std::clamp(region.liquidDispersion, 0.0f, 1.0f) * 3.0f;
+    }
+
+    static float liquid_source_margin(const VibranceCompositionRegion& region) noexcept
+    {
+        return std::ceil(std::max({ liquid_blur(region) * 5.0f,
+            liquid_refraction(region) + liquid_dispersion(region) + 2.0f, 4.0f }));
+    }
+
+    void publish_liquid_region(const LiquidRegionBinding& binding,
+        const VibranceCompositionRegion* region) noexcept
+    {
+        if (!binding.view)
+        {
+            return;
+        }
+        vibrance::win32::LiquidDwmRegion next {};
+        next.hwnd = reinterpret_cast<std::uint64_t>(window_);
+        next.ownerPid = GetCurrentProcessId();
+        next.regionId = binding.regionId;
+        if (region && region->width > 0.0f && region->height > 0.0f)
+        {
+            const float top = std::clamp(region->verticalStart,
+                0.0f, 0.98f) * region->height;
+            next.x = static_cast<std::int32_t>(std::lround(region->x));
+            next.y = static_cast<std::int32_t>(std::lround(region->y + top));
+            next.width = static_cast<std::uint32_t>(std::lround(region->width));
+            next.height = static_cast<std::uint32_t>(std::lround(
+                region->height - top));
+            next.cornerRadius = region->cornerRadius;
+            next.shape = region->shape;
+            next.squircleAmount = std::clamp(region->squircleAmount, 0.0f, 1.0f);
+            next.notchAmount = std::clamp(region->notchAmount, 0.0f, 1.0f);
+            next.notchDepth = std::max(region->notchDepth, 0.0f);
+            const float maximumRadius = std::min(region->width,
+                region->height) * 0.5f;
+            const auto radius = [maximumRadius](float requested, float fallback) {
+                return std::clamp(requested > 0.0f ? requested : fallback,
+                    0.0f, maximumRadius);
+            };
+            next.topLeftRadius = radius(region->topLeftRadius, region->cornerRadius);
+            next.topRightRadius = radius(region->topRightRadius, region->cornerRadius);
+            next.bottomRightRadius = radius(region->bottomRightRadius, region->cornerRadius);
+            next.bottomLeftRadius = radius(region->bottomLeftRadius, region->cornerRadius);
+            next.markerInsetX = liquid_marker_padding(*region);
+            next.edgeThickness = std::clamp(std::min(region->width, region->height) * 0.16f,
+                4.0f, 44.0f);
+            next.refractionStrength = liquid_refraction(*region);
+            next.dispersionStrength = liquid_dispersion(*region);
+            next.blurRadius = liquid_blur(*region);
+            next.rimStrength = std::clamp(region->liquidRim, 0.0f, 1.0f) * 0.55f;
+            next.opacity = std::clamp(region->opacity, 0.0f, 1.0f);
+            next.tintRed = std::clamp(region->liquidTintRed, 0.0f, 1.0f);
+            next.tintGreen = std::clamp(region->liquidTintGreen, 0.0f, 1.0f);
+            next.tintBlue = std::clamp(region->liquidTintBlue, 0.0f, 1.0f);
+            next.tintAlpha = std::clamp(region->liquidTintAlpha, 0.0f, 1.0f);
+            next.cornerExponent = std::clamp(region->squirclePower,
+                2.0f, 5.0f);
+            static_assert(sizeof(VibranceCompositionContour) ==
+                sizeof(vibrance::win32::LiquidDwmContour));
+            next.contourCount = std::min(region->contourCount, 3u);
+            next.hasExclusion = region->hasExclusion != 0u ? 1u : 0u;
+            next.paintCapGradient = region->paintCapGradient;
+            std::copy_n(region->capGradient, 4u, next.capGradient);
+            std::memcpy(next.contours, region->contours, sizeof(next.contours));
+            std::memcpy(&next.exclusion, &region->exclusion, sizeof(next.exclusion));
+            // The native marker starts at materialTop. Keep all contour sizes,
+            // radii and flare depths in the caller's framebuffer units while
+            // translating their body-relative origin to that marker.
+            for (std::uint32_t index = 0u; index < next.contourCount; ++index)
+                next.contours[index].y -= top;
+            if (next.hasExclusion != 0u) next.exclusion.y -= top;
+            POINT origin {};
+            MONITORINFO monitor { sizeof(monitor) };
+            if (ClientToScreen(window_, &origin) &&
+                GetMonitorInfoW(MonitorFromWindow(window_,
+                    MONITOR_DEFAULTTONEAREST), &monitor))
+            {
+                next.screenX = origin.x;
+                next.screenY = origin.y;
+                next.monitorLeft = monitor.rcMonitor.left;
+                next.monitorTop = monitor.rcMonitor.top;
+                next.monitorWidth = static_cast<std::uint32_t>(
+                    monitor.rcMonitor.right - monitor.rcMonitor.left);
+                next.monitorHeight = static_cast<std::uint32_t>(
+                    monitor.rcMonitor.bottom - monitor.rcMonitor.top);
+                next.clientWidth = width_;
+                next.clientHeight = height_;
+                next.active = 1;
+            }
+        }
+        std::lock_guard<std::mutex> lock(liquidRegionWriteMutex_);
+        if (next.active)
+        {
+            next.uiBufferIndex = binding.view->uiBufferIndex;
+            next.uiFrame = binding.view->uiFrame;
+        }
+        auto* sequence = reinterpret_cast<volatile LONG*>(
+            &binding.view->sequence);
+        InterlockedIncrement(sequence);
+        std::memcpy(reinterpret_cast<char*>(binding.view) +
+                sizeof(binding.view->sequence),
+            reinterpret_cast<const char*>(&next) + sizeof(next.sequence),
+            sizeof(next) - sizeof(next.sequence));
+        MemoryBarrier();
+        InterlockedIncrement(sequence);
+    }
+
     bool validate_window_redirection_for_transparency()
     {
         if (!transparentFramebuffer_)
@@ -1137,7 +1819,7 @@ private:
         // The private Win32 interop compositor uses IDComposition and does not
         // auto-commit Windows.UI.Composition property changes. Without this
         // transaction, an island can collapse in the Vulkan surface while its
-        // old expanded HostBackdrop geometry remains cached by DWM.
+        // old expanded backdrop geometry remains cached by DWM.
         if (!compositionDevice_)
         {
             return true;
@@ -1189,7 +1871,104 @@ private:
         right.notchDepth = 0.0f;
         left.opacity = 0.0f;
         right.opacity = 0.0f;
+        const auto clearShaderMask = [](VibranceCompositionRegion& region) {
+            // Mask geometry and the cap gradient are published uniforms. A
+            // contour transition must retain its native brush and draw order.
+            region.contourCount = 0u;
+            region.hasExclusion = 0u;
+            region.paintCapGradient = 0u;
+            region.flags &= 1u;
+            std::fill_n(region.capGradient, 4u, 0.0f);
+            std::fill_n(region.contours, 3u, VibranceCompositionContour {});
+            region.exclusion = {};
+        };
+        clearShaderMask(left);
+        clearShaderMask(right);
+        if (left.material == 2u && right.material == 2u &&
+            left.liquidBackend == 2u && right.liquidBackend == 2u)
+        {
+            left.liquidRefraction = right.liquidRefraction = 0.0f;
+            left.liquidBlur = right.liquidBlur = 0.0f;
+            left.liquidRim = right.liquidRim = 0.0f;
+            left.liquidDispersion = right.liquidDispersion = 0.0f;
+            left.liquidTintRed = right.liquidTintRed = 0.0f;
+            left.liquidTintGreen = right.liquidTintGreen = 0.0f;
+            left.liquidTintBlue = right.liquidTintBlue = 0.0f;
+            left.liquidTintAlpha = right.liquidTintAlpha = 0.0f;
+        }
         return std::memcmp(&left, &right, sizeof(left)) == 0;
+    }
+
+    bool initialise_liquid_pipeline()
+    {
+        if (liquidShaderProbeDone_)
+        {
+            return liquidShaderProbeResult_;
+        }
+        liquidShaderProbeDone_ = true;
+        wchar_t executablePath[32768] {};
+        const DWORD pathLength = GetModuleFileNameW(
+            nullptr, executablePath, ARRAYSIZE(executablePath));
+        if (pathLength == 0u || pathLength >= ARRAYSIZE(executablePath))
+        {
+            return false;
+        }
+        std::wstring directory(executablePath, pathLength);
+        const auto separator = directory.find_last_of(L"\\/");
+        if (separator == std::wstring::npos)
+        {
+            return false;
+        }
+        directory.resize(separator + 1u);
+
+        liquidShaderProbeResult_ = liquidRenderer_.initialise(device_.get(), directory);
+        return liquidShaderProbeResult_;
+    }
+
+    static float liquid_sample_coordinate(float coordinate, float extent) noexcept
+    {
+        const float half = std::max(extent * 0.5f, 1.0f);
+        const float u = std::clamp((coordinate - half) / half, -1.0f, 1.0f);
+        const float edge = std::pow(std::abs(u), 6.0f);
+        // Magnify the whole surface gently, then concentrate the additional
+        // bend at the perimeter. Both terms remain monotone at any size.
+        const float depth = std::min(extent * 0.125f, 34.0f);
+        return coordinate - depth * u * (0.55f + 0.45f * edge);
+    }
+
+    static void update_liquid_tiles(RegionVisualState& state,
+                                    float width,
+                                    float height)
+    {
+        constexpr std::size_t columns = 20u;
+        constexpr std::size_t rows = 8u;
+        if (state.liquidTiles.size() != columns * rows)
+        {
+            return;
+        }
+        for (std::size_t row = 0u; row < rows; ++row)
+        {
+            const float top = height * static_cast<float>(row) / static_cast<float>(rows);
+            const float bottom = height * static_cast<float>(row + 1u) / static_cast<float>(rows);
+            const float sourceTop = liquid_sample_coordinate(top, height);
+            const float sourceBottom = liquid_sample_coordinate(bottom, height);
+            for (std::size_t column = 0u; column < columns; ++column)
+            {
+                const float left = width * static_cast<float>(column) / static_cast<float>(columns);
+                const float right = width * static_cast<float>(column + 1u) / static_cast<float>(columns);
+                const float sourceLeft = liquid_sample_coordinate(left, width);
+                const float sourceRight = liquid_sample_coordinate(right, width);
+                const float xScale = (right - left) /
+                    std::max(sourceRight - sourceLeft, 0.01f);
+                const float yScale = (bottom - top) /
+                    std::max(sourceBottom - sourceTop, 0.01f);
+                auto& tile = state.liquidTiles[row * columns + column];
+                tile.visual.Offset({ left, top, 0.0f });
+                tile.visual.Size({ right - left, bottom - top });
+                tile.brush.Scale({ xScale, yScale });
+                tile.brush.Offset({ -sourceLeft * xScale, -sourceTop * yScale });
+            }
+        }
     }
 
     void update_region_geometry(
@@ -1207,6 +1986,22 @@ private:
         const bool materialGeometryChanged =
             sizeChanged ||
             previous.verticalStart != region.verticalStart;
+        const bool maskGeometryChanged =
+            previous.contourCount != region.contourCount ||
+            previous.hasExclusion != region.hasExclusion ||
+            std::memcmp(previous.contours, region.contours,
+                sizeof(region.contours)) != 0 ||
+            std::memcmp(&previous.exclusion, &region.exclusion,
+                sizeof(region.exclusion)) != 0;
+        const bool markerGeometryChanged = materialGeometryChanged ||
+            (state.shaderOnly &&
+                (maskGeometryChanged || previous.shape != region.shape ||
+                    previous.notchAmount != region.notchAmount ||
+                    previous.notchDepth != region.notchDepth));
+        const bool sourceFootprintChanged = markerGeometryChanged ||
+            previous.liquidRefraction != region.liquidRefraction ||
+            previous.liquidBlur != region.liquidBlur ||
+            previous.liquidDispersion != region.liquidDispersion;
         const bool clipChanged =
             sizeChanged ||
             previous.shape != region.shape ||
@@ -1218,7 +2013,7 @@ private:
             previous.squircleAmount != region.squircleAmount ||
             previous.squirclePower != region.squirclePower ||
             previous.notchAmount != region.notchAmount ||
-            previous.notchDepth != region.notchDepth;
+            previous.notchDepth != region.notchDepth || previous.flags != region.flags;
 
         if (state.container)
         {
@@ -1234,7 +2029,7 @@ private:
             {
                 state.container.Opacity(std::clamp(region.opacity, 0.0f, 1.0f));
             }
-            if (clipChanged)
+            if (clipChanged && !state.shaderOnly)
             {
                 // Composition clips are immutable geometry objects. Replacing
                 // one for a pure translation allocated compositor resources
@@ -1254,15 +2049,46 @@ private:
             }
             state.materialContainer.Size({ region.width, materialHeight });
         }
-        if (materialGeometryChanged && state.materialVisual)
+        if (markerGeometryChanged && state.materialVisual)
         {
-            state.materialVisual.Size({ region.width, materialHeight });
+            const float padding = state.shaderOnly ?
+                liquid_marker_padding(region) : 0.0f;
+            state.materialVisual.Offset({ -padding, 0.0f, 0.0f });
+            state.materialVisual.Size({ region.width + padding * 2.0f,
+                materialHeight });
+        }
+        if ((sourceFootprintChanged || clipChanged) && state.rawBackdropVisual)
+        {
+            // The source footprint includes the shader's bounded sampling
+            // margin, while the marker retains the exact optical bounds.
+            const float margin = liquid_source_margin(region);
+            const float horizontalMargin = margin + liquid_marker_padding(region);
+            state.rawBackdropVisual.Offset({ -horizontalMargin, -margin, 0.0f });
+            state.rawBackdropVisual.Size({ region.width + horizontalMargin * 2.0f,
+                materialHeight + margin * 2.0f });
+            sync_raw_backdrop_clip(state, region);
+        }
+        if (materialGeometryChanged && state.liquidSourceVisual)
+        {
+            state.liquidSourceVisual.Size({ region.width, materialHeight });
+        }
+        if (materialGeometryChanged && state.liquidSurface)
+        {
+            state.liquidSurface.SourceSize({ region.width, materialHeight });
+            update_liquid_tiles(state, region.width, materialHeight);
         }
         if (materialGeometryChanged && state.tintVisual)
         {
             state.tintVisual.Size({ region.width, materialHeight });
         }
+        sync_liquid_rim_clock(state, region);
         state.descriptor = region;
+        if (state.shaderOnly)
+        {
+            if (const auto* binding = find_liquid_region_slot(state.shaderSlot);
+                binding && binding->identity == region.identity)
+                publish_liquid_region(*binding, &region);
+        }
     }
 
     void initialise_dispatcher()
@@ -1764,27 +2590,50 @@ private:
         }
     }
 
-    composition::CompositionBrush make_effect_brush(
+    composition::CompositionEffectBrush make_effect_brush(
         const VibranceCompositionRegion& region)
     {
         auto sourceParameter =
             composition::CompositionEffectSourceParameter(L"backdrop");
+        // Liquid glass needs a legible backdrop for the lens to refract.
+        // The system material retains its broader frosted blur.
+        const float blurRadius = region.material == 2u ?
+            std::min(std::max(region.blurRadius, 0.0f), 3.0f) :
+            std::max(region.blurRadius, 0.0f);
         auto blur = winrt::make<GaussianBlurEffect>(
-            sourceParameter,
-            std::max(region.blurRadius, 0.0f));
+            sourceParameter, blurRadius);
         effects::IGraphicsEffect graph = blur;
         if (std::abs(region.saturation - 1.0f) > 0.001f)
         {
             graph = winrt::make<SaturationEffect>(
-                blur.as<effects::IGraphicsEffectSource>(),
+                graph.as<effects::IGraphicsEffectSource>(),
                 region.saturation);
         }
         auto factory = compositor_.CreateEffectFactory(graph);
         auto brush = factory.CreateBrush();
-        brush.SetSourceParameter(
-            L"backdrop",
-            compositor_.CreateHostBackdropBrush());
+        brush.SetSourceParameter(L"backdrop",
+            region.material == 2u ? compositor_.CreateBackdropBrush() :
+                compositor_.CreateHostBackdropBrush());
         return brush;
+    }
+
+    void sync_raw_backdrop_clip(RegionVisualState& state,
+        const VibranceCompositionRegion& region)
+    {
+        if (!state.rawBackdropVisual) return;
+        if ((region.flags & 1u) == 0u)
+        {
+            state.rawBackdropVisual.Clip(nullptr);
+            return;
+        }
+        auto clip = make_clip(region);
+        if (clip)
+        {
+            const float margin = liquid_source_margin(region);
+            const float horizontal = margin + liquid_marker_padding(region);
+            clip.TransformMatrix({ 1.0f, 0.0f, 0.0f, 1.0f, horizontal, margin });
+        }
+        state.rawBackdropVisual.Clip(clip);
     }
 
     composition::CompositionClip make_clip(
@@ -1862,15 +2711,100 @@ private:
         }
     }
 
-    bool add_region(const VibranceCompositionRegion& region)
+    void sync_liquid_rim_clock(RegionVisualState& state,
+        const VibranceCompositionRegion& region)
     {
-        // ABI material 1 is eSystemGlass. No other material is allowed into
-        // the native compositor bridge.
-        if (region.material != 1u ||
+        const bool animate = state.shaderOnly && state.rawBackdropVisual &&
+            region.liquidRim > 0.0f && region.opacity > 0.001f;
+        if (animate == state.rimClockRunning) return;
+        if (animate)
+        {
+            // Composition advances this clock at display cadence, even when
+            // the HWND is unfocused and its sharp UI buffer is retained. The
+            // identity backdrop is blended over the identical source, so its
+            // changing opacity does not change the visible background. It
+            // invalidates the lens dependency for the native animated rim.
+            auto clock = compositor_.CreateScalarKeyFrameAnimation();
+            auto linear = compositor_.CreateLinearEasingFunction();
+            clock.InsertKeyFrame(0.0f, 1.0f, linear);
+            clock.InsertKeyFrame(0.5f, 0.99f, linear);
+            clock.InsertKeyFrame(1.0f, 1.0f, linear);
+            clock.Duration(std::chrono::seconds(4));
+            clock.IterationBehavior(composition::AnimationIterationBehavior::Forever);
+            state.rawBackdropVisual.StartAnimation(L"Opacity", clock);
+        }
+        else if (state.rawBackdropVisual)
+        {
+            state.rawBackdropVisual.StopAnimation(L"Opacity");
+            state.rawBackdropVisual.Opacity(1.0f);
+        }
+        state.rimClockRunning = animate;
+    }
+
+    bool add_region(const VibranceCompositionRegion& region, bool shaderOnly,
+        std::uint32_t shaderSlot)
+    {
+        // ABI material 1 is system glass; 2 is the shaped liquid underlay.
+        if ((region.material != 1u && region.material != 2u) ||
             region.width <= 0.0f ||
             region.height <= 0.0f)
         {
             return false;
+        }
+
+        if (shaderOnly)
+        {
+            // Replace this translucent native brush at its composition draw.
+            // It keeps the background visible and the UI in normal window order.
+            RegionVisualState state;
+            state.descriptor = region;
+            state.shaderOnly = true;
+            state.shaderSlot = shaderSlot;
+            state.container = compositor_.CreateContainerVisual();
+            state.container.Offset({ region.x, region.y, 0.0f });
+            state.container.Size({ region.width, region.height });
+            state.container.Opacity(std::clamp(region.opacity, 0.0f, 1.0f));
+            const float top = std::clamp(region.verticalStart, 0.0f, 0.98f) * region.height;
+            state.materialContainer = compositor_.CreateContainerVisual();
+            state.materialContainer.Offset({ 0.0f, top, 0.0f });
+            state.materialContainer.Size({ region.width, region.height - top });
+            state.materialInset = true;
+            // Declare a native dependency on the unmodified pixels behind the
+            // lens. The identity effect keeps independently presented desktop
+            // layers available to DWM without applying a system glass material.
+            // HLSL owns the blur, refraction and rim above this raw source.
+            auto rawSource = composition::CompositionEffectSourceParameter(
+                L"rawBackdrop");
+            auto rawEffect = winrt::make<SaturationEffect>(rawSource, 1.0f);
+            auto rawFactory = compositor_.CreateEffectFactory(rawEffect);
+            auto rawBrush = rawFactory.CreateBrush();
+            rawBrush.SetSourceParameter(L"rawBackdrop",
+                compositor_.CreateBackdropBrush());
+            state.rawBackdropVisual = compositor_.CreateSpriteVisual();
+            const float markerPadding = liquid_marker_padding(region);
+            const float margin = liquid_source_margin(region);
+            const float horizontalMargin = margin + markerPadding;
+            state.rawBackdropVisual.Offset({ -horizontalMargin, -margin, 0.0f });
+            state.rawBackdropVisual.Size({ region.width + horizontalMargin * 2.0f,
+                region.height - top + margin * 2.0f });
+            state.rawBackdropVisual.Brush(rawBrush);
+            sync_raw_backdrop_clip(state, region);
+            state.materialContainer.Children().InsertAtBottom(
+                state.rawBackdropVisual);
+            state.materialVisual = compositor_.CreateSpriteVisual();
+            state.materialVisual.Offset({ -markerPadding, 0.0f, 0.0f });
+            state.materialVisual.Size({ region.width + markerPadding * 2.0f,
+                region.height - top });
+            state.materialVisual.Brush(compositor_.CreateColorBrush(
+                winrt::Windows::UI::Color { vibrance::win32::liquidMarkerAlpha,
+                    static_cast<std::uint8_t>(vibrance::win32::liquidMarkerRed + shaderSlot), vibrance::win32::liquidMarkerGreen,
+                    vibrance::win32::liquidMarkerBlue }));
+            state.materialContainer.Children().InsertAtTop(state.materialVisual);
+            sync_liquid_rim_clock(state, region);
+            state.container.Children().InsertAtBottom(state.materialContainer);
+            regions_.Children().InsertAtTop(state.container);
+            regionVisuals_.push_back(std::move(state));
+            return true;
         }
 
         // Native Mica/Acrylic are window-level rectangles in this non-XAML
@@ -1940,6 +2874,46 @@ private:
         backdrop.Brush(make_effect_brush(materialRegion));
         materialContainer.Children().InsertAtBottom(backdrop);
         state.materialVisual = backdrop;
+        if (region.material == 2u && region.liquidBackend != 2u)
+        {
+            try
+            {
+                // The backdrop cannot be sampled by the app renderer. A live
+                // visual surface lets Composition resample it in clipped
+                // affine tiles, giving the island an edge-dependent lens.
+                auto lensSource = compositor_.CreateSpriteVisual();
+                lensSource.Size(materialContainer.Size());
+                VibranceCompositionRegion lensRegion = materialRegion;
+                lensRegion.blurRadius = 0.75f;
+                lensSource.Brush(make_effect_brush(lensRegion));
+                materialContainer.Children().InsertAtBottom(lensSource);
+                auto surface = compositor_.CreateVisualSurface();
+                surface.SourceVisual(lensSource);
+                surface.SourceSize({ region.width, materialRegion.height });
+                state.liquidSourceVisual = lensSource;
+                state.liquidSurface = surface;
+                constexpr std::size_t tileCount = 20u * 8u;
+                state.liquidTiles.reserve(tileCount);
+                for (std::size_t index = 0u; index < tileCount; ++index)
+                {
+                    auto brush = compositor_.CreateSurfaceBrush(surface);
+                    brush.Stretch(composition::CompositionStretch::None);
+                    brush.HorizontalAlignmentRatio(0.0f);
+                    brush.VerticalAlignmentRatio(0.0f);
+                    auto visual = compositor_.CreateSpriteVisual();
+                    visual.Brush(brush);
+                    visual.Opacity(0.92f);
+                    materialContainer.Children().InsertAtTop(visual);
+                    state.liquidTiles.push_back({ brush, visual });
+                }
+                update_liquid_tiles(state, region.width, materialRegion.height);
+            }
+            catch (const winrt::hresult_error&)
+            {
+                OutputDebugStringW(
+                    L"vibranceUI: liquid refraction unavailable; retaining shaped backdrop blur.\n");
+            }
+        }
 
         if (region.tintAlpha > 0.0001f)
         {
@@ -1972,6 +2946,31 @@ private:
 
     winrt::Windows::System::DispatcherQueueController dispatcherController_ { nullptr };
     winrt::com_ptr<ID3D11Device5> device_;
+    vibrance::win32::LiquidGlassD3D11 liquidRenderer_;
+    bool liquidShaderProbeDone_ = false;
+    bool liquidShaderProbeResult_ = false;
+    HANDLE liquidRegionMapping_ = nullptr;
+    vibrance::win32::LiquidDwmRegionTable* liquidRegionTable_ = nullptr;
+    std::vector<LiquidRegionBinding> liquidRegionBindings_;
+    vibrance::win32::LiquidDwmRegion* liquidRegionView_ = nullptr;
+    std::mutex liquidRegionWriteMutex_;
+    std::uint32_t uiFrame_ = 0;
+    std::array<winrt::com_ptr<ID3D11Texture2D>,
+        vibrance::win32::liquidDwmUiBuffers> uiMirrorTextures_;
+    std::array<winrt::com_ptr<IDXGIKeyedMutex>,
+        vibrance::win32::liquidDwmUiBuffers> uiMirrorMutexes_;
+    std::array<HANDLE, vibrance::win32::liquidDwmUiBuffers>
+        uiMirrorHandles_ {};
+    bool uiMirrorAttempted_ = false;
+    HANDLE uiCpuMapping_ = nullptr;
+    vibrance::win32::LiquidDwmCpuUiHeader* uiCpuView_ = nullptr;
+    std::array<winrt::com_ptr<ID3D11Texture2D>, 3> uiCpuStaging_;
+    std::array<bool, 3> uiCpuPending_ {};
+    std::array<std::uint32_t, 3> uiCpuSourceFrame_ {};
+    std::uint32_t uiCpuScheduleSerial_ = 0;
+    std::uint32_t uiCpuLastPublishedSource_ = 0;
+    std::uint32_t uiCpuFrame_ = 0;
+    ULONGLONG uiCpuLastScheduleTick_ = 0;
     winrt::com_ptr<ID3D11DeviceContext4> context_;
     winrt::com_ptr<IDXGISwapChain1> swapchain_;
     winrt::com_ptr<IDXGISwapChain3> swapchain3_;

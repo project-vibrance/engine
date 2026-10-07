@@ -565,6 +565,8 @@ inline void ui_update_slider_visual(
         slider->thumbSize,
         slider->hoveredThumbSize,
         expansion);
+    if (slider->liquidThumbEnabled)
+        desiredThumbSize = slider->thumbSize * slider->liquidThumbScale;
 
     const auto resize_shape = [&](entt::entity target, glm::vec2 desiredSize)
     {
@@ -599,6 +601,10 @@ inline void ui_update_slider_visual(
 
     if (ShapeComponent* track = registry.try_get<ShapeComponent>(entity))
     {
+        // Grow about the authored centre, including top-aligned tracks. The
+        // thumb must not move vertically just because the track is hovered.
+        if (auto* layout = registry.try_get<Layout2DComponent>(entity))
+            layout->offset.y -= (desiredTrackHeight - track->size.y) * (0.5f - layout->pivot.y);
         resize_shape(entity, { track->size.x, desiredTrackHeight });
     }
     if (slider->maskEntity != entt::null && registry.valid(slider->maskEntity))
@@ -644,7 +650,14 @@ inline void ui_update_slider_visual(
         Layout2DComponent* fillLayout = registry.try_get<Layout2DComponent>(slider->fillEntity);
         if (ShapeComponent* trackShape = registry.try_get<ShapeComponent>(entity))
         {
-            const float desiredWidth = trackShape->size.x * normalized;
+            const auto* thumbPaint = registry.try_get<ShapeStyleComponent>(slider->thumbEntity);
+            const bool visibleThumb = thumbPaint &&
+                std::max(thumbPaint->color0.a, thumbPaint->color1.a) * thumbPaint->opacity > 0.001f;
+            // The fill and knob use the same inset travel. A full-track
+            // percentage leaves a dark gap just before low-valued thumbs.
+            const float desiredWidth = visibleThumb ?
+                ui_slider_thumb_position(trackShape->size.x, ui_slider_thumb_reserved_width(*slider), normalized) :
+                trackShape->size.x * normalized;
             if (fillShape)
             {
                 fillShape->size.x = desiredWidth;
@@ -668,7 +681,7 @@ inline void ui_update_slider_visual(
     {
         desiredThumbSize.x = std::min(desiredThumbSize.x, size.x);
         const float thumbPosition = ui_slider_thumb_position(size.x,
-            std::max(slider->thumbSize.x, slider->hoveredThumbSize.x), normalized);
+            ui_slider_thumb_reserved_width(*slider), normalized);
         resize_shape(slider->thumbEntity, desiredThumbSize);
         if (Layout2DComponent* thumbLayout = registry.try_get<Layout2DComponent>(slider->thumbEntity))
         {
@@ -739,6 +752,15 @@ inline void ui_update_slider_smoothing(
         }
 
         const float previousExpansion = slider.hoverExpansion;
+        const float previousThumbScale = slider.liquidThumbScale;
+        if (slider.liquidThumbEnabled)
+        {
+            // Exact damped spring: a small overshoot on grab and a soft return
+            // on release, independent of frame rate or pointer event frequency.
+            const float targetScale = slider.enabled && slider.dragging ? 1.25f : 1.0f;
+            ui_damped_spring_step(slider.liquidThumbScale, slider.liquidThumbVelocity,
+                targetScale, deltaSeconds, 26.0f, 0.58f);
+        }
         const float expansionTarget = slider.hovered || slider.dragging ? 1.0f : 0.0f;
         const float expansionRate = std::max(slider.hoverExpansionRate, 0.0f);
         const float expansionAlpha = expansionRate <= 0.0f ?
@@ -751,7 +773,8 @@ inline void ui_update_slider_smoothing(
         }
 
         if (std::abs(slider.visualValue - previous) > 0.00001f ||
-            std::abs(slider.hoverExpansion - previousExpansion) > 0.0001f)
+            std::abs(slider.hoverExpansion - previousExpansion) > 0.0001f ||
+            std::abs(slider.liquidThumbScale - previousThumbScale) > 0.00001f)
         {
             ui_mark_moving_entity_dirty(scene, entity, 1.0f / 30.0f);
             if (slider.fillEntity != entt::null && registry.valid(slider.fillEntity))
