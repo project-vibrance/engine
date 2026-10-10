@@ -17,6 +17,13 @@ The installed SDK includes starter scripts, a minimal template and the
 
 Configure dependency locations in a local `.env.cmake` using
 `envWindowsExample.cmake` or `envUnixExample.cmake` as a starting point.
+Colour emoji shaping uses a private static HarfBuzz build from the local
+source tree specified by `HARFBUZZ_PATH` in `.env.cmake`, for example
+`set(HARFBUZZ_PATH "C:/dev/harfbuzz-11.4.5")`. The directory must contain
+`src/harfbuzz.cc`, `src/hb.h` and `COPYING`. CMake builds those sources separately
+for each target architecture and installs their licence with the SDK. HarfBuzz
+11.4.5 is the tested version. Colour bitmap PNGs use the existing image decoder,
+so FreeType does not need libpng.
 On macOS, set `MEDIAREMOTE_ADAPTER_ROOT` to the MediaRemote adapter source
 directory under `~/dev`; the engine builds and bundles its companion framework.
 
@@ -380,6 +387,13 @@ direction. Explicit newlines receive `paragraphSpacing`; automatically wrapped
 lines receive the chosen line height and line spacing. `set_text_entity`
 reflows an existing block, including after localization changes, and
 `ui_set_text_block_layout` updates its editorial settings in logical pixels.
+`<vibranceUI/ui/content_sizing.h>` adds retained intrinsic sizing through
+`ui_fit_content_size`. It measures untransformed text, media or shape dimensions
+plus logical padding, with independent width and height fitting and minimum
+bounds. `UiButtonOptions::fitContentWidth` makes a text button's requested width
+a minimum and accounts for its label, padding and optional icons. Label or
+locale changes resize the existing button and its hit region during layout.
+
 Use a shared-width `layout_group` or `UiStackLayout` when headings and body
 blocks need the same edge and controlled spacing between differently styled
 sections.
@@ -579,9 +593,23 @@ pass a positive result to `wait_glfw_events()`. Metal recommends a 50 ms event
 wait after all scenes have been unchanged for 250 ms, with no pending animation.
 Input wakes the event wait early; the timeout also polls pointer-pass-through
 overlays. CPU-driven animations retain their normal cadence until they settle.
-The Vulkan backend keeps its existing pacing and returns zero. On macOS, audio
+Vulkan recommends a 16.7 ms interruptible event wait once every window retains
+an unchanged scene with no pending animation or presentation. Active scenes
+keep their existing display and user frame-rate pacing. On macOS, audio
 clips can be preloaded without starting CoreAudio; the output device opens on
 first playback or an explicit `AudioEngine::available()` probe.
+
+Set `VIBRANCE_RENDER_DIAGNOSTICS=2` for one-second Vulkan submission and scene
+activity logging, renderer CPU wall timings and panel UI phase timings. Renderer
+timings exclude frame pacing; panel draw timing includes pacing and is reported
+separately from input and other UI work. On Windows,
+`VIBRANCE_RENDER_DIAGNOSTICS=1` additionally samples
+GPU timestamps once per 16 successful submissions and reports the sampled
+command-buffer mean, maximum and sample count, plus approximate 2D, composite
+and output-copy checkpoint means. Samples use the existing completed frame
+fences; unsupported timestamp clocks are skipped. The GPU maximum covers sampled
+frames. Use `2` for CPU phase diagnosis without timestamp-query overhead. Leave
+the variable unset for normal process resource comparisons.
 
 For shader maintainers, `python3 scripts/generate_metal_shaders.py` regenerates
 `engine/src/renderer/metal/shaders/*.metal` from the shared GLSL maths. This

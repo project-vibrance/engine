@@ -5,6 +5,7 @@
 #include <vibranceUI/factories/mesh_factory.h>
 #include <vibranceUI/renderer/renderer2d.h>
 #include <vibranceUI/renderer/renderer3d.h>
+#include "timestamp_diagnostics.h"
 #include <array>
 #include <vector>
 
@@ -45,6 +46,8 @@ namespace
 		frame.compositionSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
 			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
 		frame.uiBlurSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.foregroundBlurSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
 			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
 		// Media's separable source blur needs an intermediate with enough colour
 		// and alpha precision to avoid an extra visible 8-bit quantisation between
@@ -121,6 +124,8 @@ namespace
 
 		add_image_write(DescriptorScope::eFrame, 0, frame.depthBuffer);
 		add_image_write(DescriptorScope::eFrame, 1, frame.colorBuffer);
+		add_image_write(DescriptorScope::eForegroundBlur, 0, frame.depthBuffer);
+		add_image_write(DescriptorScope::eForegroundBlur, 1, frame.foregroundBlurSurface);
 		add_image_write(DescriptorScope::eModelFrame, 0, frame.modelDepthBuffer);
 		add_image_write(DescriptorScope::eModelFrame, 1, frame.modelColorBuffer);
 		add_image_write(DescriptorScope::ePost, 0, frame.tempSurface);
@@ -200,6 +205,8 @@ void Frame::record_command_buffer(
 	uint32_t graphicsQueueFamilyIndex)
 {
 	// Record all passes for one swapchain image, including UI cache and final composite
+	gpuTimestampsRecorded = false;
+	const bool recordGpuTimestamps = gpuTimestampQueryPool && gpuTimestampSampleEnabled;
 	Logger* logger = Logger::fetch_logger();
 	Swapchain renderTarget;
 	renderTarget.extent = renderExtent;
@@ -217,6 +224,13 @@ void Frame::record_command_buffer(
 	{
 		logger->vulkan("Failed to begin command buffer.");
 		return;
+	}
+
+	if (recordGpuTimestamps)
+	{
+		commandBuffer.resetQueryPool(gpuTimestampQueryPool, 0u, 4u);
+		commandBuffer.writeTimestamp(
+			vk::PipelineStageFlagBits::eTopOfPipe, gpuTimestampQueryPool, 0u);
 	}
 
 	auto transition_render_target = [&](StorageImage* image, vk::AccessFlags dstAccessMask) {
@@ -284,6 +298,7 @@ void Frame::record_command_buffer(
 	// dispatch envelope itself. Preserve its contents here so a small moving
 	// island does not force a full-screen transfer clear on every frame.
 	prepare_cache_target(colorBuffer);
+	prepare_cache_target(foregroundBlurSurface);
 	if (renderHosted3D)
 	{
 		clear_render_target(modelDepthBuffer, farDepth);
@@ -309,6 +324,7 @@ void Frame::record_command_buffer(
 
 	barrier_render_target(uiBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
 	barrier_render_target(mediaBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	barrier_render_target(foregroundBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
 
 	renderer2D.record(
 		commandBuffer,
@@ -327,7 +343,13 @@ void Frame::record_command_buffer(
 		hosted3DRenderPass,
 		hosted3DFramebuffer,
 		hosted3DSamples != vk::SampleCountFlagBits::e1,
-		externalBackdropAvailable);
+		externalBackdropAvailable,
+		foregroundBlurSurface);
+	if (recordGpuTimestamps)
+	{
+		commandBuffer.writeTimestamp(
+			vk::PipelineStageFlagBits::eBottomOfPipe, gpuTimestampQueryPool, 1u);
+	}
 	glm::uvec4 contentRect = renderer2D.content_bounds();
 	glm::uvec4 damageRect = renderer2D.damage_bounds();
 	if (useExternalBackdropUnderlay)
@@ -442,6 +464,12 @@ void Frame::record_command_buffer(
 			writeNativeContent,
 			writeCompositionSurface,
 			writeCompositionSurface ? compositionUpdateRect : contentRect);
+	}
+
+	if (recordGpuTimestamps)
+	{
+		commandBuffer.writeTimestamp(
+			vk::PipelineStageFlagBits::eBottomOfPipe, gpuTimestampQueryPool, 2u);
 	}
 
 	if (presentNativeSurface)
@@ -632,12 +660,99 @@ void Frame::record_command_buffer(
 			releaseBarrier);
 	}
 
+	if (recordGpuTimestamps)
+	{
+		commandBuffer.writeTimestamp(
+			vk::PipelineStageFlagBits::eBottomOfPipe, gpuTimestampQueryPool, 3u);
+	}
+
 	result = commandBuffer.end();
 	if (result != vk::Result::eSuccess)
 	{
 		logger->vulkan("Failed to end command buffer.");
 		return;
 	}
+	gpuTimestampsRecorded = recordGpuTimestamps;
+}
+
+bool Frame::enable_gpu_timing(
+	uint32_t timestampValidBits,
+	double timestampPeriodNanoseconds,
+	std::deque<std::function<void(vk::Device)>>& deletionQueue)
+{
+	if (gpuTimestampQueryPool)
+	{
+		return true;
+	}
+	if (!vibrance::renderer_diagnostics::supports_timestamp_clock(
+		timestampValidBits, timestampPeriodNanoseconds))
+	{
+		return false;
+	}
+
+	vk::QueryPoolCreateInfo queryPoolInfo {};
+	queryPoolInfo.queryType = vk::QueryType::eTimestamp;
+	queryPoolInfo.queryCount = 4u;
+	const auto result = logicalDevice.createQueryPool(queryPoolInfo);
+	if (result.result != vk::Result::eSuccess)
+	{
+		Logger::fetch_logger()->warning(
+			"GPU timestamp diagnostics could not create a query pool.");
+		return false;
+	}
+	gpuTimestampQueryPool = result.value;
+	gpuTimestampValidBits = timestampValidBits;
+	gpuTimestampPeriodNanoseconds = timestampPeriodNanoseconds;
+	const VkQueryPool queryPoolHandle = gpuTimestampQueryPool;
+	// Use the engine queue, which survives per-frame image resizing.
+	deletionQueue.push_back([queryPoolHandle](vk::Device device) {
+		device.destroyQueryPool(queryPoolHandle);
+	});
+	return true;
+}
+
+void Frame::set_gpu_timing_sample_enabled(bool enabled)
+{
+	gpuTimestampSampleEnabled = enabled;
+}
+
+void Frame::mark_gpu_timing_submitted()
+{
+	gpuTimestampsPending = gpuTimestampsRecorded;
+}
+
+bool Frame::take_completed_gpu_timings(GpuRenderTimings& timings)
+{
+	if (!gpuTimestampsPending)
+	{
+		return false;
+	}
+	gpuTimestampsPending = false;
+	std::array<uint64_t, 4> timestamps {};
+	// The existing fence has already completed. Never wait for query results,
+	// and discard unavailable/error samples before this slot resets its pool.
+	const VkResult result = vkGetQueryPoolResults(
+		logicalDevice, gpuTimestampQueryPool, 0u,
+		static_cast<uint32_t>(timestamps.size()), sizeof(timestamps),
+		timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+	if (result != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	auto elapsed = [&](std::size_t begin, std::size_t end) {
+		return vibrance::renderer_diagnostics::timestamp_elapsed_milliseconds(
+			timestamps[begin], timestamps[end], gpuTimestampValidBits,
+			gpuTimestampPeriodNanoseconds);
+	};
+	timings.totalMilliseconds = elapsed(0u, 3u);
+	// These are completion checkpoints rather than isolated pass durations;
+	// adjacent GPU work can overlap. The 2D interval includes setup and hosted
+	// 3D, and output includes Vulkan copy/release, excluding D3D presentation.
+	timings.render2DMilliseconds = elapsed(0u, 1u);
+	timings.compositeMilliseconds = elapsed(1u, 2u);
+	timings.outputMilliseconds = elapsed(2u, 3u);
+	return true;
 }
 
 void Frame::resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModelRenderExtent)
@@ -693,6 +808,7 @@ void Frame::free_resources()
 	delete_storage_image(compositionSurface);
 	delete_storage_image(uiBlurSurface);
 	delete_storage_image(mediaBlurSurface);
+	delete_storage_image(foregroundBlurSurface);
 	delete_storage_image(uiStaticSurface);
 	delete_storage_image(uiStaticBlurSurface);
 	delete_storage_image(externalBackdropSurface);

@@ -204,32 +204,51 @@ float4 main(PixelInput input) : SV_Target
         return float4(0.0, 0.0, 0.0, 0.0);
 
     float band = saturate(1.0 + distance / max(edgeThickness, 1.0));
-    float2 normal = surface_normal(pixelPosition);
+    // Interior pixels have no displacement. Beyond sixteen pixels the rim's
+    // Gaussian underflows to zero even before multiplication; avoid four
+    // additional contour evaluations there without changing the result.
+    float2 normal = float2(0.0, -1.0);
+    [branch]
+    if (band > 0.0 || distance > -16.0)
+        normal = surface_normal(pixelPosition);
     float bend = refractionStrength * band * band;
     float2 backdropUv = backdropUvOrigin + input.uv * backdropUvScale;
     float2 refractedUv = backdropUv - normal * bend * backdropTexelSize;
     float2 dispersion = normal * dispersionStrength * band *
         backdropTexelSize;
 
-    float4 sharpSample = sharpBackdrop.Sample(backdropSampler, refractedUv);
+    // Scratch textures contain one mip. Explicit LOD keeps conditional taps
+    // independent of implicit derivatives across the lens's edge branches.
+    float4 sharpSample = sharpBackdrop.SampleLevel(backdropSampler, refractedUv, 0.0);
     float3 centre = sharpSample.rgb;
-    float3 refracted = float3(
-        sharpBackdrop.Sample(backdropSampler, refractedUv + dispersion).r,
-        centre.g,
-        sharpBackdrop.Sample(backdropSampler, refractedUv - dispersion).b);
+    float frost = saturate(blurRadius / 16.0);
+    float3 refracted = centre;
+    [branch]
+    if (band > 0.0 && dispersionStrength != 0.0 && frost < 1.0)
+    {
+        refracted.r = sharpBackdrop.SampleLevel(backdropSampler, refractedUv + dispersion, 0.0).r;
+        refracted.b = sharpBackdrop.SampleLevel(backdropSampler, refractedUv - dispersion, 0.0).b;
+    }
     // Frost the complete live background, including the centre of the lens.
     // Zero gives clear refraction; the maximum gives the full Gaussian pass.
-    float frost = saturate(blurRadius / 16.0);
-    float3 colour = lerp(refracted,
-        blurredBackdrop.Sample(backdropSampler, refractedUv).rgb, frost);
+    float3 colour = refracted;
+    [branch]
+    if (frost > 0.0)
+        colour = lerp(refracted,
+            blurredBackdrop.SampleLevel(backdropSampler, refractedUv, 0.0).rgb, frost);
     colour = lerp(colour, tintColour, saturate(tintStrength));
 
-    float angle = atan2(normal.y, normal.x);
-    float travellingLight = pow(saturate(0.5 + 0.5 *
-        cos(angle - lightPhase)), 12.0);
-    float edgeDistance = max(-distance, 0.0);
-    float brightCore = exp(-edgeDistance * edgeDistance / 2.25);
-    float fresnel = brightCore * (0.25 + 0.75 * travellingLight);
+    float fresnel = 0.0;
+    [branch]
+    if (distance > -16.0)
+    {
+        float angle = atan2(normal.y, normal.x);
+        float travellingLight = pow(saturate(0.5 + 0.5 *
+            cos(angle - lightPhase)), 12.0);
+        float edgeDistance = max(-distance, 0.0);
+        float brightCore = exp(-edgeDistance * edgeDistance / 2.25);
+        fresnel = brightCore * (0.25 + 0.75 * travellingLight);
+    }
     colour += rimStrength * 0.65 * fresnel;
     if ((paintCapGradient & 1u) != 0)
     {

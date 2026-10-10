@@ -73,7 +73,7 @@ struct Engine::Impl
     std::unordered_map<uint32_t, Owned<MTL::Buffer>> modelBuffers;
     std::unordered_map<std::string, uint32_t> modelCache, mediaCache;
     uint32_t nextMedia = 1, nextModel = 1;
-    Owned<MTL::Texture> colour, temporary, blur, depth, hosted, hostedDepth, hostedMSAA;
+    Owned<MTL::Texture> colour, temporary, blur, foregroundBlurSource, depth, hosted, hostedDepth, hostedMSAA;
     Owned<MTL::RenderPipelineState> modelPipeline;
     Owned<MTL::DepthStencilState> depthState;
     std::unordered_map<std::string, Owned<MTL::SamplerState>> modelSamplers;
@@ -148,6 +148,7 @@ struct Engine::Impl
             colour.reset();
             temporary.reset();
             blur.reset();
+            foregroundBlurSource.reset();
             depth.reset();
             hosted.reset();
             hostedDepth.reset();
@@ -468,6 +469,63 @@ struct Engine::Impl
             plan.cachedTexts);
         add_model_ops(ops, plan.models);
         sort_render_ops(ops);
+        entt::entity foregroundBlurRoot = entt::null;
+        float foregroundBlurRadius = 0.0f;
+        const auto foregroundBlurGroups =
+            scene.registry().view<const ForegroundBlurGroup2DComponent>();
+        for (const entt::entity entity : foregroundBlurGroups)
+        {
+            const float radius =
+                foregroundBlurGroups.get<const ForegroundBlurGroup2DComponent>(entity).radius;
+            if (radius > 0.01f)
+            {
+                foregroundBlurRoot = entity;
+                foregroundBlurRadius = radius;
+                break;
+            }
+        }
+        DispatchBounds foregroundBlurContentBounds {};
+        for (const Renderer2DRenderOp& op : ops)
+        {
+            if (foregroundBlurRoot == entt::null || !op.batch ||
+                op.batch->foregroundBlurGroup != foregroundBlurRoot)
+            {
+                continue;
+            }
+            const DispatchBounds bounds = operation_bounds(op);
+            if (bounds.empty())
+            {
+                continue;
+            }
+            if (foregroundBlurContentBounds.empty())
+            {
+                foregroundBlurContentBounds = bounds;
+                continue;
+            }
+            const uint32_t left = std::min(foregroundBlurContentBounds.x, bounds.x);
+            const uint32_t top = std::min(foregroundBlurContentBounds.y, bounds.y);
+            const uint32_t right = std::max(
+                foregroundBlurContentBounds.x + foregroundBlurContentBounds.width,
+                bounds.x + bounds.width);
+            const uint32_t bottom = std::max(
+                foregroundBlurContentBounds.y + foregroundBlurContentBounds.height,
+                bounds.y + bounds.height);
+            foregroundBlurContentBounds = {left, top, right - left, bottom - top};
+        }
+        Renderer2DBatch foregroundBlurBatch {};
+        DispatchBounds foregroundBlurBounds {};
+        if (!foregroundBlurContentBounds.empty())
+        {
+            foregroundBlurBatch.entity = foregroundBlurRoot;
+            foregroundBlurBatch.rect = {
+                float(foregroundBlurContentBounds.x), float(foregroundBlurContentBounds.y),
+                float(foregroundBlurContentBounds.width), float(foregroundBlurContentBounds.height)};
+            foregroundBlurBatch.clipRect = {
+                0.0f, 0.0f, float(extent.width), float(extent.height)};
+            foregroundBlurBatch.primitive = Renderer2DPrimitive::eRectangle;
+            foregroundBlurBatch.effect0 = {foregroundBlurRadius, 1.0f, 0.0f, 1.0f};
+            foregroundBlurBounds = make_blur_dispatch_bounds(*this, foregroundBlurBatch);
+        }
         paintItems.clear();
         bool hasBlur = false;
         for (const auto &op : ops)
@@ -479,6 +537,16 @@ struct Engine::Impl
                                   op.type == Renderer2DRenderOpType::eBlur ||
                                       op.type == Renderer2DRenderOpType::ePanelBlur});
             hasBlur = hasBlur || paintItems.back().backdropEffect;
+        }
+        if (!foregroundBlurBounds.empty())
+        {
+            paintItems.push_back({
+                foregroundBlurBatch,
+                {foregroundBlurBounds.x, foregroundBlurBounds.y,
+                 foregroundBlurBounds.width, foregroundBlurBounds.height},
+                uint32_t(Renderer2DRenderOpType::eBlur) + 100u,
+                false});
+            hasBlur = true;
         }
         // Models have their own camera/material state and cross-queue rendering.
         // Backdrop blur reads earlier layers beyond an individual primitive.
@@ -494,7 +562,32 @@ struct Engine::Impl
             presentedGeneration = scene.frame_generation();
             return;
         }
+        std::vector<Renderer2DRenderOp> foregroundBlurOps;
+        if (!foregroundBlurBounds.empty())
+        {
+            std::erase_if(ops, [&](const Renderer2DRenderOp& op) {
+                if (op.batch && op.batch->foregroundBlurGroup == foregroundBlurRoot)
+                {
+                    foregroundBlurOps.push_back(op);
+                    return true;
+                }
+                return false;
+            });
+        }
+        if (!foregroundBlurOps.empty() && !foregroundBlurSource)
+            foregroundBlurSource = device.target(extent.width, extent.height);
         clear(colour.get(), damageBounds);
+        if (!foregroundBlurOps.empty())
+        {
+            const DispatchBounds sourceClearBounds = make_dispatch_bounds(
+                *this,
+                expand_and_clip_rect(
+                    foregroundBlurBatch.rect,
+                    foregroundBlurRadius * 2.0f + 2.0f,
+                    foregroundBlurBatch.clipRect),
+                0.0f);
+            clear(foregroundBlurSource.get(), sourceClearBounds);
+        }
         if (hasBlur)
         {
             if (!temporary)
@@ -513,10 +606,10 @@ struct Engine::Impl
             clear(temporary.get(), scratch);
             clear(blur.get(), scratch);
         }
-        for (size_t opIndex = 0; opIndex < ops.size(); ++opIndex)
+        auto render_ops = [&](const std::vector<Renderer2DRenderOp>& renderOps) {
+        for (const Renderer2DRenderOp& op : renderOps)
         {
-            const auto &op = ops[opIndex];
-            const auto b = paintItems[opIndex].bounds;
+            const auto b = operation_bounds(op);
             if (clipped_to_damage({b.x, b.y, b.z, b.w}).empty())
                 continue;
             if (op.model)
@@ -622,6 +715,42 @@ struct Engine::Impl
             }
         }
         flush_text();
+        };
+
+        if (!foregroundBlurOps.empty())
+        {
+            std::swap(colour, foregroundBlurSource);
+            render_ops(foregroundBlurOps);
+            std::swap(colour, foregroundBlurSource);
+        }
+        render_ops(ops);
+
+        if (!foregroundBlurBounds.empty())
+        {
+            Renderer2DBatch clearBatch {};
+            clearBatch.rect = {
+                float(foregroundBlurBounds.x), float(foregroundBlurBounds.y),
+                float(foregroundBlurBounds.width), float(foregroundBlurBounds.height)};
+            clearBatch.primitive = Renderer2DPrimitive::eClear;
+            clearBatch.flags = eRenderer2DStyleClear;
+            const auto groupBindings = {
+                colour.get(), foregroundBlurSource.get(),
+                backdrop ? texture(backdrop.get()) : colour.get(),
+                temporary.get(), blur.get()};
+            dispatch("blur_2d_comp", clearBatch, foregroundBlurBounds, 0, groupBindings);
+
+            auto passBatch = foregroundBlurBatch;
+            passBatch.flags = eRenderer2DStyleBlurHorizontal | eRenderer2DStyleBlurForegroundGroupSource;
+            dispatch("blur_2d_comp", passBatch, foregroundBlurBounds, 0,
+                     groupBindings);
+            passBatch.flags = eRenderer2DStyleBlurVertical | eRenderer2DStyleBlurForegroundGroupSource;
+            dispatch("blur_2d_comp", passBatch, foregroundBlurBounds, 0,
+                     groupBindings);
+            passBatch.flags = eRenderer2DStyleBlurComposite;
+            dispatch("blur_2d_comp", passBatch, foregroundBlurBounds, 0,
+                     groupBindings);
+        }
+
         // Acquire the drawable after encoding the offscreen work. The first
         // dispatch may wait for the previous submission to finish, and holding
         // a CAMetalLayer drawable through that wait needlessly delays its
@@ -808,7 +937,7 @@ Media2DHandle Engine::load_media_2d(const std::filesystem::path &path, const Med
         << '|' << options.srgb << '|' << options.generateMipmaps << '|' << options.premultiplyAlpha << '|'
         << options.maxAnimationFrames << '|' << options.svgAnimationFrames << '|'
         << options.svgAnimationFrameRate << '|' << options.lottieAnimationFrames << '|'
-        << options.maxVideoFrames << '|' << options.maxVideoPixels;
+        << options.maxVideoFrames << '|' << options.maxVideoPixels << '|' << options.trimTransparentBorders;
     if (auto found = impl->mediaCache.find(key.str()); found != impl->mediaCache.end())
         return impl->media.at(found->second).handle();
     Media2DAsset asset;

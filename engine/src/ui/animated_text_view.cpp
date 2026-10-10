@@ -56,6 +56,7 @@ namespace
 
         TextLayout2DOptions options = {};
         options.characterSpacing = view.characterSpacing;
+        options.tabularDigits = view.tabularDigits;
         const Renderer2DTextLayout run = fontAtlas.layout_text(
             std::string_view(view.value).substr(first),
             sample->fontSize,
@@ -126,6 +127,7 @@ void UiAnimatedCharacterTextView::reset()
     characters.clear();
     value.clear();
     proportionalSpacing = false;
+    tabularDigits = true;
     characterSpacing = 0.0f;
     punctuationBaselineOffset = 0.0f;
     centrePunctuationInCell = false;
@@ -186,6 +188,7 @@ UiAnimatedCharacterTextView ui_create_animated_character_text(
 {
     UiAnimatedCharacterTextView view = {};
     view.proportionalSpacing = options.proportionalSpacing;
+    view.tabularDigits = options.tabularDigits;
     view.characterSpacing = scaled_scalar(
         options.characterSpacing, ui.scale());
     view.punctuationBaselineOffset = scaled_scalar(
@@ -245,6 +248,12 @@ UiAnimatedCharacterTextView ui_create_animated_character_text(
             options.order + static_cast<std::uint32_t>(index),
             scaled_size(cellWidth, rootSize.y, ui.scale()));
         view.characters.push_back(character);
+        if (!options.tabularDigits)
+        {
+            auto& textLayout = ui.registry().emplace<TextLayout2DComponent>(character);
+            textLayout.options.tabularDigits = false;
+            apply_font_layout(fontAtlas, ui.registry(), character);
+        }
         if (options.hideWhitespace && whitespace)
         {
             ui.set_layer(

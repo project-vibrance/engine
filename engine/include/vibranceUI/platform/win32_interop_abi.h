@@ -13,7 +13,14 @@
 // This header is the only contract shared by SDK consumers and the MSVC
 // C++/WinRT companion. Keep it POD-only: no C++ standard-library objects,
 // COM pointers, or allocations may cross the DLL boundary.
-constexpr std::uint32_t VIBRANCE_WIN32_INTEROP_ABI_VERSION = 7u;
+constexpr std::uint32_t VIBRANCE_WIN32_INTEROP_ABI_VERSION = 8u;
+
+enum VibranceWin32MediaPlaybackQuality : std::uint32_t
+{
+    VIBRANCE_WIN32_MEDIA_QUALITY_UNKNOWN = 0u,
+    VIBRANCE_WIN32_MEDIA_QUALITY_LOSSLESS = 1u,
+    VIBRANCE_WIN32_MEDIA_QUALITY_DOLBY_ATMOS = 2u
+};
 
 enum VibranceWin32MediaPlaybackStatus : std::uint32_t
 {
@@ -74,6 +81,7 @@ struct VibranceWin32MediaSnapshot
     char album[256] {};
     char thumbnailPath[768] {};
     char diagnostic[384] {};
+    std::uint32_t playbackQuality = VIBRANCE_WIN32_MEDIA_QUALITY_UNKNOWN;
 };
 
 struct VibranceWin32NotificationSnapshot

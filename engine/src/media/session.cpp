@@ -192,6 +192,18 @@ struct GlobalMediaSession::Impl
         snapshot.album = bridgeSnapshot.album;
         snapshot.thumbnailPath = bridgeSnapshot.thumbnailPath;
         snapshot.diagnostic = bridgeSnapshot.diagnostic;
+        switch (bridgeSnapshot.playbackQuality)
+        {
+            case VIBRANCE_WIN32_MEDIA_QUALITY_DOLBY_ATMOS:
+                snapshot.playbackQuality = MediaPlaybackQuality::eDolbyAtmos;
+                break;
+            case VIBRANCE_WIN32_MEDIA_QUALITY_LOSSLESS:
+                snapshot.playbackQuality = MediaPlaybackQuality::eLossless;
+                break;
+            default:
+                snapshot.playbackQuality = MediaPlaybackQuality::eUnknown;
+                break;
+        }
 
         switch (bridgeSnapshot.playbackStatus)
         {

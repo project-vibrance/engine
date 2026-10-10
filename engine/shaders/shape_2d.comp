@@ -563,7 +563,54 @@ vec4 resolve_accumulated_shape(vec3 premultiplied, float alpha, float weightSum)
     return vec4(rgb, alpha);
 }
 
+bool constant_solid_interior(vec2 pixelCenter) {
+    // The rotated four-sample footprint reaches at most 0.375 pixels along
+    // either axis. Use a conservative half-pixel inset, plus every fill/edge
+    // transition, to prove all four samples have full and identical coverage.
+    // These box checks avoid evaluating another SDF before the normal filter.
+    const uint varyingStyles = STYLE_GRADIENT | STYLE_RADIAL_GRADIENT |
+        STYLE_TRANSFORM_2_5D | STYLE_BLUR | STYLE_CORNER_RADII | STYLE_SHAPE_CUTOUT;
+    if ((pc.data.y & varyingStyles) != 0u ||
+        (pc.data.x != PRIMITIVE_RECTANGLE &&
+            pc.data.x != PRIMITIVE_ROUNDED_RECTANGLE &&
+            pc.data.x != PRIMITIVE_SQUIRCLE)) {
+        return false;
+    }
+
+    vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
+    float radius = pc.data.x == PRIMITIVE_RECTANGLE ? 0.0 :
+        clamp(pc.effect0.x, 0.0, min(halfSize.x, halfSize.y));
+    float softness = max(pc.effect0.z, 0.5);
+    float inset = radius + max(pc.effect0.y, 0.0) + softness + 0.5;
+    vec2 distanceFromCentre = abs(pixelCenter - (pc.rect.xy + halfSize));
+    if (any(greaterThanEqual(distanceFromCentre, halfSize - vec2(inset)))) {
+        return false;
+    }
+
+    if ((pc.data.y & STYLE_SHAPE_MASK) != 0u) {
+        uint maskPrimitive = (pc.data.z >> MASK_PRIMITIVE_SHIFT) & 15u;
+        if (maskPrimitive != PRIMITIVE_RECTANGLE &&
+            maskPrimitive != PRIMITIVE_ROUNDED_RECTANGLE &&
+            maskPrimitive != PRIMITIVE_SQUIRCLE) {
+            return false;
+        }
+        vec2 maskHalfSize = max(pc.effect1.zw * 0.5, vec2(0.5));
+        float maskRadius = maskPrimitive == PRIMITIVE_RECTANGLE ? 0.0 :
+            clamp(float(pc.data.z & MASK_RADIUS_BITS), 0.0,
+                min(maskHalfSize.x, maskHalfSize.y));
+        float maskInset = maskRadius + max(softness, 0.75) + 0.5;
+        vec2 maskDistance = abs(pixelCenter - (pc.effect1.xy + maskHalfSize));
+        if (any(greaterThanEqual(maskDistance, maskHalfSize - vec2(maskInset)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 vec4 resolve_filtered_shape(vec2 pixelCenter) {
+    if (constant_solid_interior(pixelCenter)) {
+        return shade_shape_sample(pixelCenter);
+    }
     vec3 premultiplied = vec3(0.0);
     float alpha = 0.0;
     float weightSum = 0.0;

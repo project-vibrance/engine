@@ -41,6 +41,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <memory>
+#include "playback_quality_probe.h"
 
 namespace
 {
@@ -610,6 +612,7 @@ bool same_payload(
         left.playbackStatus == right.playbackStatus &&
         left.capabilities == right.capabilities &&
         left.sourceProcessId == right.sourceProcessId &&
+        left.playbackQuality == right.playbackQuality &&
         left.thumbnailRevision == right.thumbnailRevision &&
         left.positionMilliseconds == right.positionMilliseconds &&
         left.durationMilliseconds == right.durationMilliseconds &&
@@ -659,6 +662,8 @@ public:
     {
         snapshot.structSize = sizeof(snapshot);
         notificationSnapshot.structSize = sizeof(notificationSnapshot);
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_MEDIA) != 0u)
+            qualityProbe = std::make_unique<Win32PlaybackQualityProbe>(quality_source_window);
         worker = std::thread(&Win32InteropBridge::run, this);
     }
 
@@ -1150,6 +1155,7 @@ private:
             manager.GetCurrentSession();
         if (!session)
         {
+            if (qualityProbe) qualityProbe->refresh({});
             publish(next);
             return;
         }
@@ -1237,6 +1243,25 @@ private:
             std::max(
                 milliseconds(timeline.EndTime()) - startMilliseconds,
                 std::int64_t(0));
+        if (qualityProbe)
+        {
+            const auto quality = qualityProbe->refresh({ next.sourceProcessId,
+                std::wstring(sourceApp), std::wstring(mediaProperties.Title()),
+                std::wstring(mediaProperties.Artist()),
+                next.playbackStatus == VIBRANCE_WIN32_MEDIA_PLAYING ||
+                    next.playbackStatus == VIBRANCE_WIN32_MEDIA_PAUSED,
+                std::wstring(mediaProperties.AlbumTitle()), next.durationMilliseconds });
+            switch (quality)
+            {
+                case MediaPlaybackQuality::eDolbyAtmos:
+                    next.playbackQuality = VIBRANCE_WIN32_MEDIA_QUALITY_DOLBY_ATMOS;
+                    break;
+                case MediaPlaybackQuality::eLossless:
+                    next.playbackQuality = VIBRANCE_WIN32_MEDIA_QUALITY_LOSSLESS;
+                    break;
+                default: break;
+            }
+        }
         publish(next);
     }
 
@@ -1677,6 +1702,31 @@ private:
         return search.result;
     }
 
+    static HWND quality_source_window(const Win32PlaybackQualityProbe::Request& request)
+    {
+        // UI ownership can be above the audio helper in Electron/browser apps.
+        // Follow that process ancestry only for metadata inspection; keep the
+        // original audio-session PID for capture. Track identity is rechecked
+        // inside the accessibility snapshot before accepting a badge.
+        const auto processes = process_snapshot();
+        const auto executable = process_executable_path(request.processId);
+        DWORD processId = request.processId;
+        for (unsigned depth = 0; processId != 0u && depth < 32u; ++depth)
+        {
+            if (processId != request.processId &&
+                !source_matches_process(request.sourceApp, processId) &&
+                (executable.empty() || !equal_aumid(
+                    process_executable_path(processId), executable))) break;
+            if (HWND window = find_source_window({}, processId)) return window;
+            const auto entry = std::find_if(processes.begin(), processes.end(),
+                [processId](const ProcessEntry& value) { return value.processId == processId; });
+            if (entry == processes.end() || entry->parentProcessId == processId) break;
+            processId = entry->parentProcessId;
+        }
+        // Packaged apps can have an ApplicationFrameHost-owned top-level HWND.
+        return find_source_window(request.sourceApp);
+    }
+
     static bool foreground_source_window(HWND window)
     {
         if (!window)
@@ -2076,6 +2126,7 @@ private:
     bool notificationChangePending = false;
     std::uint32_t featureMask = VIBRANCE_WIN32_INTEROP_MEDIA;
     bool stopping = false;
+    std::unique_ptr<Win32PlaybackQualityProbe> qualityProbe;
     std::thread worker;
 };
 }

@@ -956,6 +956,60 @@ inline entt::entity ui_resizable_panel_at(Renderer2DScene& scene, glm::vec2 poin
     return ui_resizable_panel_at_from_hit(scene, scene.entity_at(point), point, edges);
 }
 
+inline entt::entity ui_draggable_parent_from_hit(const entt::registry& registry, entt::entity hit)
+{
+    entt::entity current = hit;
+    for (uint32_t depth = 0u; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+    {
+        if (!ui_entity_visible_by_hierarchy(registry, current))
+            return entt::null;
+        if (const auto* handle = registry.try_get<DragHandle2DComponent>(current);
+            handle && handle->enabled)
+        {
+            const entt::entity target = handle->target != entt::null ? handle->target : current;
+            return registry.valid(target) ? target : entt::null;
+        }
+        if (const auto* shape = registry.try_get<ShapeComponent>(current); shape && shape->draggable)
+            return current;
+        const auto* parent = registry.try_get<Parent2DComponent>(current);
+        if (!parent || parent->parent == entt::null || parent->parent == current)
+            break;
+        current = parent->parent;
+    }
+    return entt::null;
+}
+
+inline bool ui_pointer_capture_blocks_window_action(const UiInputState& state)
+{
+    return state.pressedInputEntity != entt::null ||
+        state.pointerInputCapture != entt::null ||
+        state.activeSlider != entt::null || state.activeScrollBar != entt::null;
+}
+
+inline bool ui_hit_blocks_window_action(Renderer2DScene& scene,
+    const UiInputState& state, glm::vec2 point, entt::entity hit)
+{
+    if (ui_pointer_capture_blocks_window_action(state))
+        return true;
+    const auto& registry = scene.registry();
+    if (ui_draggable_parent_from_hit(registry, hit) != entt::null)
+        return true;
+    uint32_t resizeEdges = ePanelResizeNone;
+    if (ui_resizable_panel_at_from_hit(scene, hit, point, resizeEdges) != entt::null)
+        return true;
+    if (const auto owner = ui_component_owner<ButtonInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<ButtonInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<TextInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<TextInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<DropTargetComponent>(registry, hit); owner != entt::null)
+        return registry.get<DropTargetComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<ScrollBarInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<ScrollBarInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<SliderInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<SliderInputComponent>(owner).enabled;
+    return false;
+}
+
 inline bool ui_append_codepoint(std::string& value, unsigned int codepoint, std::size_t maxBytes)
 {
     if (codepoint < 32u || codepoint == 127u || value.size() >= maxBytes)

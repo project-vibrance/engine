@@ -45,6 +45,7 @@ namespace media_ui
 
         entt::entity entity() const;
         bool valid(const Renderer2DScene& scene) const;
+        bool transitioning() const;
         MediaArtworkPresentation& presentation();
         const MediaArtworkPresentation& presentation() const;
 

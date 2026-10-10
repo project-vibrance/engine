@@ -1343,15 +1343,16 @@ inline void ui_handle_drop(
     scene.activate_dynamic(dropOwner, 0.5f);
 }
 
-inline UiHoverResult ui_update_input_hover(
+inline UiHoverResult ui_update_input_hover_from_hit(
     Renderer2DScene& scene,
     const Renderer2DFontAtlas& fontAtlas,
     UiInputState& state,
     bool hasPoint,
-    glm::vec2 point)
+    glm::vec2 point,
+    entt::entity resolvedHit)
 {
     entt::registry& registry = scene.registry();
-    const entt::entity hit = hasPoint ? scene.entity_at(point) : entt::null;
+    const entt::entity hit = hasPoint ? resolvedHit : entt::null;
     entt::entity buttonOwner = ui_component_owner<ButtonInputComponent>(registry, hit);
     entt::entity textOwner = ui_component_owner<TextInputComponent>(registry, hit);
     entt::entity dropOwner = ui_component_owner<DropTargetComponent>(registry, hit);
@@ -1577,6 +1578,17 @@ inline UiHoverResult ui_update_input_hover(
         resizeEdges,
         ui_cursor_kind_for_hover(registry, textOwner, buttonOwner, sliderOwner, scrollBarOwner, resizeEdges)
     };
+}
+
+inline UiHoverResult ui_update_input_hover(
+    Renderer2DScene& scene,
+    const Renderer2DFontAtlas& fontAtlas,
+    UiInputState& state,
+    bool hasPoint,
+    glm::vec2 point)
+{
+    return ui_update_input_hover_from_hit(scene, fontAtlas, state, hasPoint, point,
+        hasPoint ? scene.entity_at(point) : entt::null);
 }
 
 inline bool ui_update_slider_drag(

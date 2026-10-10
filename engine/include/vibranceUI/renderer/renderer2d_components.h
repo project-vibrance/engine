@@ -92,6 +92,8 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleMsdfText = 1u << 6,
     eRenderer2DStyleClear = 1u << 7,
     eRenderer2DStyleAtlasText = 1u << 8,
+    // Text-specific bit, shared with the media pipeline's separate shader.
+    eRenderer2DStyleColourGlyph = 1u << 10,
     eRenderer2DStyleBlurComposite = 1u << 9,
     eRenderer2DStyleMedia = 1u << 10,
     eRenderer2DStyleRadialGradient = 1u << 11,
@@ -112,6 +114,9 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24,
     eRenderer2DStyleTextEdgeFade = 1u << 25,
     eRenderer2DStyleMediaSingleBlurSample = 1u << 26,
+    // Blur-specific flag. Optical parameters, including all eight animation
+    // phase bits, occupy the separate packed-data word.
+    eRenderer2DStyleBlurForegroundGroupSource = 1u << 26,
     eRenderer2DStyleMediaBlurHorizontal = 1u << 27,
     eRenderer2DStyleMediaBlurVertical = 1u << 28,
     eRenderer2DStyleShapeCutout = 1u << 29,
@@ -500,6 +505,11 @@ struct Parent2DComponent
     entt::entity parent = entt::null;
 };
 
+struct ForegroundBlurGroup2DComponent
+{
+    float radius = 0.0f;
+};
+
 inline glm::vec4 renderer2d_apply_interactive_visual_rect(
     const entt::registry& registry,
     entt::entity entity,
@@ -624,6 +634,18 @@ struct Layout2DComponent
     glm::vec2 offset { 0.0f };
     glm::vec2 size { 0.0f };
     glm::vec4 margin { 0.0f };
+};
+
+struct ContentSize2DComponent
+{
+    // Intrinsic content sizing uses framebuffer pixels, like Layout2DComponent.
+    // The source must have independent dimensions, rather than stretch to this
+    // container. Transient scale/rotation does not change its measured size.
+    entt::entity source = entt::null;
+    glm::vec2 minimumSize { 0.0f };
+    glm::vec4 padding { 0.0f };
+    bool fitWidth = true;
+    bool fitHeight = false;
 };
 
 enum class GridTrackUnit2D : uint32_t
@@ -1180,6 +1202,11 @@ struct ScrollEdgeFade2DComponent
     float bottomHeight = 0.0f;
     float minimumOpacity = 0.0f;
     float maximumBlurRadius = 0.0f;
+    // Horizontal rulers use topHeight/bottomHeight for their left/right edges.
+    bool horizontal = false;
+    // Relative extents are fractions of the resolved viewport dimension, so
+    // the fade follows resizing and DPI without rebuilding the content.
+    bool relativeExtents = false;
 };
 
 struct TextEdgeFade2DComponent
@@ -1291,6 +1318,7 @@ struct MSDFGlyph
     glm::vec2 uvMin { 0.0f };
     glm::vec2 uvMax { 1.0f };
     float advance = 0.0f;
+    bool coloured = false;
 };
 
 struct MSDFGlyphAtlasComponent
@@ -1332,6 +1360,9 @@ struct TextLayout2DOptions
     float paragraphSpacing = 0.0f;
     float characterSpacing = 0.0f;
     float wordSpacing = 0.0f;
+    // Centre 0-9 in equal-width cells. Include those cells in measured bounds
+    // so timestamps and counters do not resize when their digit values change.
+    bool tabularDigits = true;
 };
 
 struct TextLayout2DComponent
@@ -1339,6 +1370,14 @@ struct TextLayout2DComponent
     TextLayout2DOptions options {};
     uint32_t lineCount = 0u;
     float resolvedLineHeight = 0.0f;
+};
+
+// Opt-in alignment for labels beside icons. The first-line capital-height
+// midpoint follows the layout anchor; ascenders/descenders retain their natural
+// positions instead of changing the vertical centring of the entire run.
+struct TextCapHeightAlignment2DComponent
+{
+    float centreOffsetY = 0.0f;
 };
 
 struct TextComponent
@@ -1447,6 +1486,7 @@ struct TextStyleComponent
 struct Renderer2DBatch
 {
     entt::entity entity = entt::null;
+    entt::entity foregroundBlurGroup = entt::null;
     int32_t stackLayer = 0;
     uint32_t stackOrder = 0;
     int32_t layer = 0;
@@ -1486,6 +1526,7 @@ struct Renderer2DShapeVisualState
 struct Renderer3DModelBatch
 {
     entt::entity entity = entt::null;
+    entt::entity foregroundBlurGroup = entt::null;
     uint32_t modelId = 0;
     uint32_t firstTriangle = 0;
     uint32_t triangleCount = 0;
@@ -1510,6 +1551,9 @@ struct Renderer3DModelBatch
 
 struct Renderer2DRenderPlan
 {
+    // Cache ownership includes invisible and clipped drawable entities. Paint
+    // visibility can change without migrating their pixels into the cache.
+    std::vector<uint32_t> dynamicEntities;
     std::vector<Renderer2DBatch> panelBlurs;
     std::vector<Renderer2DBatch> shadows;
     std::vector<Renderer2DBatch> blurs;

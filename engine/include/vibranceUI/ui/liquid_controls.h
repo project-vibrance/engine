@@ -276,12 +276,6 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             region.liquidDispersion = options.liquidDispersion;
             region.liquidTint = options.liquidTint;
         }
-        else if (options.liquidRim > 0.0f)
-        {
-            // The portable phase follows the renderer clock while the lens is
-            // visible, including a thumb held still during a drag.
-            scene.mark_dirty(entity);
-        }
     };
     for (auto entity : registry.view<UiLiquidControlSurface>()) apply(entity);
     const auto thumb = [&](entt::entity entity, bool dragging) {

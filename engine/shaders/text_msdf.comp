@@ -6,6 +6,7 @@ const uint STYLE_SHADOW = 1u << 3;
 const uint STYLE_GLOW = 1u << 4;
 const uint STYLE_BLUR = 1u << 5;
 const uint STYLE_ATLAS_TEXT = 1u << 8;
+const uint STYLE_COLOUR_GLYPH = 1u << 10;
 const uint STYLE_SHAPE_MASK = 1u << 15;
 const uint STYLE_TEXT_EDGE_FADE = 1u << 25;
 const uint PRIMITIVE_RECTANGLE = 1u;
@@ -46,6 +47,10 @@ layout (push_constant) uniform Renderer2DConstants {
     vec4 effect1;
     uvec4 data;
 } pc;
+
+// Atlas geometry stays fixed across every coverage sample in this invocation.
+ivec2 atlasDimensions;
+float atlasPixelsPerScreenPixel;
 
 ivec2 dispatch_origin() {
     return ivec2(int(pc.data.w & 65535u), int((pc.data.w >> 16u) & 65535u));
@@ -89,8 +94,7 @@ float msdf_alpha(vec2 uv, float offset) {
 }
 
 ivec2 font_atlas_size() {
-    ivec2 packedSize = imageSize(fontAtlas);
-    return ivec2(packedSize.x * 4, packedSize.y);
+    return atlasDimensions;
 }
 
 float load_font_atlas(ivec2 pixel) {
@@ -119,11 +123,25 @@ float sample_font_atlas(vec2 atlasUv) {
     return mix(top, bottom, blend.y);
 }
 
+// Colour glyphs occupy whole RGBA texels in the same packed atlas.
+vec4 sample_colour_glyph(vec2 localUv) {
+    if (any(lessThan(localUv, vec2(0.0))) || any(greaterThan(localUv, vec2(1.0)))) return vec4(0.0);
+    ivec2 dimensions = imageSize(fontAtlas);
+    vec2 texel = mix(pc.uvRect.xy, pc.uvRect.zw, localUv) * vec2(dimensions) - vec2(0.5);
+    ivec2 base = ivec2(floor(texel));
+    vec2 weight = fract(texel);
+    ivec2 maximum = dimensions - ivec2(1);
+    vec4 top = mix(imageLoad(fontAtlas, clamp(base, ivec2(0), maximum)),
+        imageLoad(fontAtlas, clamp(base + ivec2(1, 0), ivec2(0), maximum)), weight.x);
+    vec4 bottom = mix(imageLoad(fontAtlas, clamp(base + ivec2(0, 1), ivec2(0), maximum)),
+        imageLoad(fontAtlas, clamp(base + ivec2(1, 1), ivec2(0), maximum)), weight.x);
+    vec4 colour = mix(top, bottom, weight.y);
+    if (colour.a > 0.0001) colour.rgb /= colour.a;
+    return colour;
+}
+
 float atlas_pixels_per_screen_pixel() {
-    ivec2 atlasSize = font_atlas_size();
-    vec2 glyphAtlasSize = max((pc.uvRect.zw - pc.uvRect.xy) * vec2(atlasSize), vec2(1.0));
-    vec2 atlasPerScreen = glyphAtlasSize / max(pc.rect.zw, vec2(1.0));
-    return max(min(atlasPerScreen.x, atlasPerScreen.y), 0.001);
+    return atlasPixelsPerScreenPixel;
 }
 
 float atlas_signed_distance_pixels(vec2 localUv) {
@@ -401,6 +419,13 @@ vec4 shade_text_sample(
     bool renderGlow) {
     vec2 uv = (samplePoint - pc.rect.xy) / max(pc.rect.zw, vec2(1.0));
 
+    if ((pc.data.y & STYLE_COLOUR_GLYPH) != 0u) {
+        if (!renderForeground) return vec4(0.0);
+        vec4 colour = sample_colour_glyph(uv);
+        colour.a *= pc.color0.a * pc.effect0.w * inherited_shape_mask_alpha(samplePoint) * text_edge_fade_alpha(samplePoint);
+        return colour;
+    }
+
     float fillAlpha = 0.0;
     float outlineAlpha = 0.0;
     float weightExpansion = glyph_weight_expansion_pixels();
@@ -559,6 +584,13 @@ void main() {
     }
 
     bool atlasText = (pc.data.y & STYLE_ATLAS_TEXT) != 0u;
+    if (atlasText) {
+        ivec2 packedSize = imageSize(fontAtlas);
+        atlasDimensions = ivec2(packedSize.x * 4, packedSize.y);
+        vec2 glyphAtlasSize = max((pc.uvRect.zw - pc.uvRect.xy) * vec2(atlasDimensions), vec2(1.0));
+        vec2 atlasPerScreen = glyphAtlasSize / max(pc.rect.zw, vec2(1.0));
+        atlasPixelsPerScreenPixel = max(min(atlasPerScreen.x, atlasPerScreen.y), 0.001);
+    }
     uint textPass = pc.data.z & TEXT_PASS_MASK;
     bool renderUnderlay = textPass == TEXT_PASS_ALL || textPass == TEXT_PASS_UNDERLAY;
     bool renderForeground = textPass == TEXT_PASS_ALL || textPass == TEXT_PASS_FOREGROUND;

@@ -49,8 +49,10 @@ struct alignas(16) LiquidGlassShaderParameters
 struct alignas(16) LiquidGlassBlurParameters
 {
     float texelSize[2];
-    float blurRadius;
-    float unused;
+    float centreWeight;
+    std::uint32_t pairCount;
+    // Adjacent Gaussian taps share one linear fetch: offset, weight, padding.
+    float pairs[15][4];
 };
 
 static_assert(sizeof(LiquidGlassContourParameters) == 64);
@@ -63,4 +65,5 @@ static_assert(offsetof(LiquidGlassShaderParameters, tintStrength) == 128);
 static_assert(offsetof(LiquidGlassShaderParameters, capGradient) == 144);
 static_assert(offsetof(LiquidGlassShaderParameters, contours) == 160);
 static_assert(offsetof(LiquidGlassShaderParameters, exclusion) == 352);
-static_assert(sizeof(LiquidGlassBlurParameters) == 16);
+static_assert(sizeof(LiquidGlassBlurParameters) == 256);
+static_assert(offsetof(LiquidGlassBlurParameters, pairs) == 16);

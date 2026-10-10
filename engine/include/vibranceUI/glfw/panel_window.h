@@ -83,6 +83,7 @@ struct GlfwPanelWindowTemplateOptions
     std::filesystem::path fontDirectory {};
     std::filesystem::path fontProfilePath {};
     std::vector<std::filesystem::path> fallbackFontPaths {};
+    std::vector<std::filesystem::path> emojiFontPaths {};
     int fontWeight = 0;
     bool requireLocalisedGlyphs = true;
     bool useLocalePrimaryFont = true;

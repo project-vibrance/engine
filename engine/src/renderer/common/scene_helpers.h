@@ -2,8 +2,10 @@
 #include <vibranceUI/renderer/renderer2d_components.h>
 #include <vibranceUI/renderer/render_types.h>
 #include <vibranceUI/renderer/dispatch_bounds.h>
+#include <vibranceUI/renderer/content_size.h>
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <unordered_set>
 namespace
 {
@@ -112,6 +114,33 @@ namespace
         uint32_t order = 0;
         bool alwaysOnTop = false;
     };
+
+    entt::entity foreground_blur_group_for(
+        const entt::registry& registry,
+        entt::entity entity)
+    {
+        entt::entity current = entity;
+        for (uint32_t depth = 0u; depth < 64u && current != entt::null &&
+             registry.valid(current); ++depth)
+        {
+            const Parent2DComponent* parent =
+                registry.try_get<Parent2DComponent>(current);
+            if (!parent || parent->parent == entt::null ||
+                !registry.valid(parent->parent))
+            {
+                return entt::null;
+            }
+
+            current = parent->parent;
+            const ForegroundBlurGroup2DComponent* group =
+                registry.try_get<ForegroundBlurGroup2DComponent>(current);
+            if (group && group->radius > 0.01f)
+            {
+                return current;
+            }
+        }
+        return entt::null;
+    }
 
     struct RenderLayer2DKey
     {
@@ -648,16 +677,190 @@ namespace
         const auto& swapchain,
         const Renderer2DBatch& batch)
     {
+        // Inherited masks store their rectangle in effect1, so its width is
+        // not a feather radius. Otherwise a small scrolling fade filters the
+        // whole viewport on every frame.
+        const float feather = (batch.flags & eRenderer2DStyleBlurInheritedShapeMask) != 0u ?
+            0.0f : std::max(batch.effect1.z, 0.0f);
         return make_dispatch_bounds(
             swapchain,
             expand_and_clip_rect(
                 batch.rect,
                 ((batch.flags & eRenderer2DStyleLiquidGlass) != 0u ?
                     std::max(batch.effect0.x, 0.0f) + std::min(batch.rect.z, batch.rect.w) * 0.40f :
-                    std::max(std::max(batch.effect0.x, 0.0f), std::max(batch.effect1.z, 0.0f))) +
+                    std::max(std::max(batch.effect0.x, 0.0f), feather)) +
                     notched_squircle_dispatch_padding(batch, batch.uvRect),
                 batch.clipRect),
             0.0f);
+    }
+
+    DispatchBounds make_liquid_output_dispatch_bounds(
+        const auto& swapchain,
+        const Renderer2DBatch& batch)
+    {
+        // Horizontal filtering still needs the full source halo. Clear,
+        // vertical optics and final composition only write the lens and its
+        // antialiased edge. Keep authored feathering and notched flares.
+        const float notchPadding = notched_squircle_dispatch_padding(batch, batch.uvRect);
+        const float softness = (batch.flags & eRenderer2DStyleBlurInheritedShapeMask) != 0u ?
+            0.75f : std::max(batch.effect1.y, 0.75f);
+        const float sourcePadding = std::max(batch.effect0.x, 0.0f) +
+            std::min(batch.rect.z, batch.rect.w) * 0.40f + notchPadding;
+        return make_dispatch_bounds(swapchain,
+            expand_and_clip_rect(batch.rect,
+                std::min(softness + notchPadding, sourcePadding), batch.clipRect), 0.0f);
+    }
+
+    DispatchBounds make_blur_replay_dispatch_bounds(
+        const auto& swapchain,
+        const Renderer2DBatch& batch)
+    {
+        Renderer2DBatch sourceBatch = batch;
+        if ((batch.flags & eRenderer2DStyleLiquidGlass) != 0u)
+        {
+            if (make_liquid_output_dispatch_bounds(swapchain, batch).empty())
+            {
+                return {};
+            }
+            // Liquid filtering reads outside an inherited output clip. Match
+            // its horizontal source pass when deciding which moving pixels
+            // affect a cached lens and which higher layers must be replayed
+            // before they can contaminate its retained backdrop.
+            sourceBatch.clipRect = { 0.0f, 0.0f,
+                static_cast<float>(swapchain.extent.width),
+                static_cast<float>(swapchain.extent.height) };
+        }
+        return make_blur_dispatch_bounds(swapchain, sourceBatch);
+    }
+
+    DispatchBounds make_dynamic_coverage_bounds(
+        const auto& swapchain,
+        const Renderer2DRenderPlan& plan)
+    {
+        DispatchBounds coverage {};
+        const auto include_batches = [&](const std::vector<Renderer2DBatch>& batches,
+            DispatchBoundsMode mode, bool blurBounds = false) {
+            for (const Renderer2DBatch& batch : batches)
+            {
+                coverage = union_dispatch_bounds(coverage, blurBounds ?
+                    make_blur_replay_dispatch_bounds(swapchain, batch) :
+                    make_dispatch_bounds(swapchain, batch, mode));
+            }
+        };
+        // Clips bound where a primitive may draw, not where it actually
+        // writes. A small animated lens must not promote a whole panel merely
+        // because it inherits that panel's clip rectangle. Its source halo
+        // still participates so upper panes cannot flatten into its backdrop.
+        include_batches(plan.panelBlurs, DispatchBoundsMode::eExact, true);
+        include_batches(plan.shadows, DispatchBoundsMode::eShadow);
+        include_batches(plan.blurs, DispatchBoundsMode::eExact, true);
+        include_batches(plan.shapes, DispatchBoundsMode::eShape);
+        include_batches(plan.media, DispatchBoundsMode::eExact);
+        include_batches(plan.texts, DispatchBoundsMode::eText);
+        for (const Renderer3DModelBatch& model : plan.models)
+        {
+            coverage = union_dispatch_bounds(coverage, make_dispatch_bounds(
+                swapchain, expand_and_clip_rect(model.viewportRect, 0.0f, model.clipRect), 2.0f));
+        }
+        return align_dispatch_bounds_to_workgroups(swapchain, coverage);
+    }
+
+    DispatchBounds expand_cached_replay_bounds(
+        const auto& swapchain,
+        const Renderer2DRenderPlan& cachedPlan,
+        const RenderLayer2DKey& lowestDynamicLayer,
+        DispatchBounds coverage)
+    {
+        bool expanded = false;
+        do
+        {
+            expanded = false;
+            const auto include_overlays = [&](const std::vector<Renderer2DBatch>& batches,
+                DispatchBoundsMode mode, bool blurBounds = false) {
+                for (const Renderer2DBatch& batch : batches)
+                {
+                    if (!render_layer_key_less(lowestDynamicLayer, render_layer_key(batch)))
+                    {
+                        continue;
+                    }
+                    const DispatchBounds bounds = blurBounds ?
+                        make_blur_replay_dispatch_bounds(swapchain, batch) :
+                        make_dispatch_bounds(swapchain, batch, mode);
+                    if (!dispatch_bounds_overlap(coverage, bounds))
+                    {
+                        continue;
+                    }
+                    const DispatchBounds combined = align_dispatch_bounds_to_workgroups(
+                        swapchain, union_dispatch_bounds(coverage, bounds));
+                    if (combined.x != coverage.x || combined.y != coverage.y ||
+                        combined.width != coverage.width || combined.height != coverage.height)
+                    {
+                        coverage = combined;
+                        expanded = true;
+                    }
+                }
+            };
+            // A replayed pane can extend past the original animated control.
+            // Include overlapping cached content transitively so its normal
+            // paint order survives outside that control's original bounds.
+            // A lens also owns its unclipped sampling halo: higher content
+            // there must leave the flattened static backdrop before filtering.
+            include_overlays(cachedPlan.cachedPanelBlurs, DispatchBoundsMode::eExact, true);
+            include_overlays(cachedPlan.cachedShadows, DispatchBoundsMode::eShadow);
+            include_overlays(cachedPlan.cachedBlurs, DispatchBoundsMode::eExact, true);
+            include_overlays(cachedPlan.cachedShapes, DispatchBoundsMode::eShape);
+            include_overlays(cachedPlan.cachedMedia, DispatchBoundsMode::eExact);
+            include_overlays(cachedPlan.cachedTexts, DispatchBoundsMode::eText);
+        } while (expanded);
+        return align_dispatch_bounds_to_workgroups(swapchain, coverage);
+    }
+
+    void collect_cached_replay_membership(
+        const auto& swapchain,
+        const Renderer2DRenderPlan& cachedPlan,
+        const RenderLayer2DKey& lowestDynamicLayer,
+        const DispatchBounds& coverage,
+        bool hasDynamicLayer,
+        std::vector<std::pair<uint32_t, std::size_t>>& membership)
+    {
+        membership.clear();
+        if (!hasDynamicLayer)
+        {
+            return;
+        }
+        const auto include_overlays = [&](const std::vector<Renderer2DBatch>& batches,
+            Renderer2DRenderOpType type, DispatchBoundsMode mode, bool blurBounds = false) {
+            for (std::size_t index = 0u; index < batches.size(); ++index)
+            {
+                const Renderer2DBatch& batch = batches[index];
+                if (!render_layer_key_less(lowestDynamicLayer, render_layer_key(batch)))
+                {
+                    continue;
+                }
+                const DispatchBounds bounds = blurBounds ?
+                    make_blur_replay_dispatch_bounds(swapchain, batch) :
+                    make_dispatch_bounds(swapchain, batch, mode);
+                if (dispatch_bounds_overlap(coverage, bounds))
+                {
+                    // Each cached batch keeps its index while the static
+                    // generation is unchanged. Store the exact membership,
+                    // rather than invalidating for every moving rectangle.
+                    membership.emplace_back(static_cast<uint32_t>(type), index);
+                }
+            }
+        };
+        include_overlays(cachedPlan.cachedPanelBlurs, Renderer2DRenderOpType::ePanelBlur,
+            DispatchBoundsMode::eExact, true);
+        include_overlays(cachedPlan.cachedShadows, Renderer2DRenderOpType::eShadow,
+            DispatchBoundsMode::eShadow);
+        include_overlays(cachedPlan.cachedBlurs, Renderer2DRenderOpType::eBlur,
+            DispatchBoundsMode::eExact, true);
+        include_overlays(cachedPlan.cachedShapes, Renderer2DRenderOpType::eShape,
+            DispatchBoundsMode::eShape);
+        include_overlays(cachedPlan.cachedMedia, Renderer2DRenderOpType::eMedia,
+            DispatchBoundsMode::eExact);
+        include_overlays(cachedPlan.cachedTexts, Renderer2DRenderOpType::eText,
+            DispatchBoundsMode::eText);
     }
 
     Renderer2DCacheComponent& cache_or_default(entt::registry& registry, entt::entity entity)
@@ -816,7 +1019,7 @@ namespace
         const entt::registry& registry,
         entt::entity entity,
         double currentTimeSeconds,
-        std::unordered_map<uint32_t, EntityDynamicState>& memo,
+        entt::dense_map<uint32_t, EntityDynamicState>& memo,
         std::vector<entt::entity>& stack)
     {
         if (entity == entt::null || !registry.valid(entity))
@@ -883,7 +1086,7 @@ namespace
         const entt::registry& registry,
         entt::entity entity,
         double currentTimeSeconds,
-        std::unordered_map<uint32_t, EntityDynamicState>& memo,
+        entt::dense_map<uint32_t, EntityDynamicState>& memo,
         std::vector<entt::entity>& stack)
     {
         return entity_dynamic_state(registry, entity, currentTimeSeconds, memo, stack).self;
@@ -1470,7 +1673,16 @@ namespace
         return true;
     }
 
-    glm::vec4 inherited_mask_clip_rect(const entt::registry& registry, entt::entity entity)
+    glm::vec4 animated_layout_rect(const entt::registry& registry, entt::entity entity,
+        glm::vec4 rect, std::optional<double> currentTimeSeconds)
+    {
+        rect = renderer2d_apply_interactive_visual_rect(registry, entity, rect);
+        return currentTimeSeconds ? apply_display_transition_scale(rect,
+            inherited_display_transition_effect(registry, entity, *currentTimeSeconds)) : rect;
+    }
+
+    glm::vec4 inherited_mask_clip_rect(const entt::registry& registry, entt::entity entity,
+        std::optional<double> currentTimeSeconds = {})
     {
         glm::vec4 clip = unclipped_rect();
         entt::entity current = entity;
@@ -1487,10 +1699,10 @@ namespace
             {
                 clip = intersect_rect(
                     clip,
-                    renderer2d_apply_interactive_visual_rect(
+                    animated_layout_rect(
                         registry,
                         parent->parent,
-                        entity_mask_rect(registry, parent->parent, *mask)));
+                        entity_mask_rect(registry, parent->parent, *mask), currentTimeSeconds));
                 if (rect_empty(clip))
                 {
                     break;
@@ -1502,7 +1714,21 @@ namespace
         return clip;
     }
 
-    ShapeMaskClip inherited_shape_mask_clip(const entt::registry& registry, entt::entity entity)
+    ShapeMaskClip shape_mask_clip_for_entity(const entt::registry& registry,
+        entt::entity entity, std::optional<double> currentTimeSeconds, bool cutout = false)
+    {
+        const auto& shape = registry.get<ShapeComponent>(entity);
+        const auto rect = animated_layout_rect(registry, entity,
+            rect_from_layout(entity_layout_bounds(registry, entity)), currentTimeSeconds);
+        const float scale = std::min(rect.z / std::max(shape.size.x, 0.0001f),
+            rect.w / std::max(shape.size.y, 0.0001f));
+        return { true, shape.primitive, rect, shape.cornerRadius * scale,
+            shape.squircleAmount, shape.squirclePower, shape.notchAmount,
+            shape.notchDepth * scale, cutout };
+    }
+
+    ShapeMaskClip inherited_shape_mask_clip(const entt::registry& registry, entt::entity entity,
+        std::optional<double> currentTimeSeconds = {})
     {
         entt::entity current = entity;
         for (uint32_t depth = 0; depth < 64u && current != entt::null && registry.valid(current); ++depth)
@@ -1517,21 +1743,7 @@ namespace
             const ShapeComponent* shape = registry.try_get<ShapeComponent>(parent->parent);
             if (mask && mask->enabled && shape && shape_mask_clip_needed(*shape))
             {
-                return {
-                    true,
-                    shape->primitive,
-                    renderer2d_apply_interactive_visual_rect(
-                        registry,
-                        parent->parent,
-                        rect_from_layout(entity_layout_bounds(
-                            registry,
-                            parent->parent))),
-                    shape->cornerRadius,
-                    shape->squircleAmount,
-                    shape->squirclePower,
-                    shape->notchAmount,
-                    shape->notchDepth
-                };
+                return shape_mask_clip_for_entity(registry, parent->parent, currentTimeSeconds);
             }
 
             current = parent->parent;
@@ -1563,7 +1775,11 @@ namespace
                     if (const Mask2DComponent* mask = registry.try_get<Mask2DComponent>(viewportAncestor);
                         mask && mask->enabled)
                     {
-                        viewport = entity_mask_rect(registry, viewportAncestor, *mask);
+                        viewport = fade->horizontal ?
+                            rect_from_layout(mask->useContentRect ?
+                                entity_content_rect(registry, viewportAncestor) :
+                                entity_layout_bounds(registry, viewportAncestor)) :
+                            entity_mask_rect(registry, viewportAncestor, *mask);
                         break;
                     }
                 }
@@ -1573,24 +1789,29 @@ namespace
                 }
 
                 const entt::entity sampleEntity = current == entity ? entity : childOfCurrent;
-                const float centerY = display_transition_origin(registry, sampleEntity).y;
+                const glm::vec2 sampleCentre = display_transition_origin(registry, sampleEntity);
+                const float position = fade->horizontal ? sampleCentre.x : sampleCentre.y;
+                const float start = fade->horizontal ? viewport.x : viewport.y;
+                const float extent = fade->horizontal ? viewport.z : viewport.w;
+                const float extentScale = fade->relativeExtents ? extent : 1.0f;
+                const float leadingExtent = fade->topHeight * extentScale;
+                const float trailingExtent = fade->bottomHeight * extentScale;
                 const auto smooth = [](float value) {
                     const float t = std::clamp(value, 0.0f, 1.0f);
                     return t * t * (3.0f - 2.0f * t);
                 };
                 float visibility = 1.0f;
-                if (fade->topHeight > 0.0f)
+                if (leadingExtent > 0.0f)
                 {
                     visibility = std::min(
                         visibility,
-                        smooth((centerY - viewport.y) / fade->topHeight));
+                        smooth((position - start) / leadingExtent));
                 }
-                if (fade->bottomHeight > 0.0f)
+                if (trailingExtent > 0.0f)
                 {
-                    const float bottom = viewport.y + viewport.w;
                     visibility = std::min(
                         visibility,
-                        smooth((bottom - centerY) / fade->bottomHeight));
+                        smooth((start + extent - position) / trailingExtent));
                 }
 
                 DisplayTransitionEffect2D effect = {};
@@ -1635,16 +1856,10 @@ namespace
         {
             if (const auto* shape = registry.try_get<ShapeComponent>(cutout->source))
             {
-                return { true, shape->primitive,
-                    apply_display_transition_scale(
-                        renderer2d_apply_interactive_visual_rect(registry, cutout->source,
-                            rect_from_layout(entity_layout_bounds(registry, cutout->source))),
-                        inherited_visual_effect(registry, cutout->source, now)),
-                    shape->cornerRadius, shape->squircleAmount, shape->squirclePower,
-                    shape->notchAmount, shape->notchDepth, true };
+                return shape_mask_clip_for_entity(registry, cutout->source, now, true);
             }
         }
-        return inherited_shape_mask_clip(registry, entity);
+        return inherited_shape_mask_clip(registry, entity, now);
     }
 
     glm::vec2 fallback_model_size(const entt::registry& registry, entt::entity entity, const Model3DComponent& model)
@@ -2097,13 +2312,16 @@ namespace
         const entt::registry& registry,
         entt::entity entity,
         glm::vec4 viewport,
-        const Model3DComponent& model)
+        const Model3DComponent& model,
+        std::optional<double> currentTimeSeconds = {})
     {
+        if (currentTimeSeconds) viewport = apply_display_transition_scale(viewport,
+            inherited_display_transition_effect(registry, entity, *currentTimeSeconds));
         glm::vec4 clip = model.clipToBounds ? viewport : unclipped_rect();
 
         if (!model.clipToParent)
         {
-            return intersect_rect(clip, inherited_mask_clip_rect(registry, entity));
+            return intersect_rect(clip, inherited_mask_clip_rect(registry, entity, currentTimeSeconds));
         }
 
         entt::entity current = entity;
@@ -2115,7 +2333,8 @@ namespace
                 break;
             }
 
-            clip = intersect_rect(clip, rect_from_layout(entity_content_rect(registry, parent->parent)));
+            clip = intersect_rect(clip, animated_layout_rect(registry, parent->parent,
+                rect_from_layout(entity_content_rect(registry, parent->parent)), currentTimeSeconds));
             if (rect_empty(clip))
             {
                 break;
@@ -2123,7 +2342,7 @@ namespace
             current = parent->parent;
         }
 
-        return intersect_rect(clip, inherited_mask_clip_rect(registry, entity));
+        return intersect_rect(clip, inherited_mask_clip_rect(registry, entity, currentTimeSeconds));
     }
 
     glm::vec2 entity_child_resize_scale(
@@ -2336,7 +2555,7 @@ namespace
         entt::registry& registry,
         entt::entity entity,
         std::vector<entt::entity>& stack,
-        std::unordered_set<uint32_t>& resolved)
+        entt::dense_set<uint32_t>& resolved)
     {
         const uint32_t key = entity_key(entity);
         if (resolved.find(key) != resolved.end())
@@ -2385,6 +2604,16 @@ namespace
             {
                 resolvedSize.y = layout->size.y * childResizeScale.y;
             }
+        }
+
+        if (const auto* fit = registry.try_get<ContentSize2DComponent>(entity);
+            fit && registry.valid(fit->source) && fit->source != entity)
+        {
+            const auto fitted = ui_padded_content_size(
+                ui_intrinsic_content_size(registry, fit->source), fit->padding,
+                fit->minimumSize) * childResizeScale;
+            if (fit->fitWidth) resolvedSize.x = fitted.x;
+            if (fit->fitHeight) resolvedSize.y = fitted.y;
         }
 
         if (is_layout_stretched_x(*layout))
@@ -2437,7 +2666,9 @@ namespace
         auto layoutView = registry.view<Transform2DComponent, const Parent2DComponent, const Layout2DComponent>();
         std::vector<entt::entity> stack;
         stack.reserve(8);
-        std::unordered_set<uint32_t> resolved;
+        // Contiguous lookup storage avoids one heap allocation per entity on
+        // every animated layout pass while retaining cycle protection.
+        entt::dense_set<uint32_t> resolved;
         resolved.reserve(layoutView.size_hint());
         layoutView.each([&](entt::entity entity, Transform2DComponent&, const Parent2DComponent&, const Layout2DComponent&) {
             resolve_entity_layout(registry, entity, stack, resolved);

@@ -11,6 +11,7 @@
 #include "liquid_glass_dwm_protocol.h"
 #include "liquid_glass_dwm_security.h"
 #include "private_composition_19041.h"
+#include "system_backdrop_policy.h"
 
 #include <DispatcherQueue.h>
 #include <d2d1_2.h>
@@ -680,6 +681,7 @@ public:
         content_ = nullptr;
         regions_ = nullptr;
         root_ = nullptr;
+        rawBackdropEffectFactory_ = nullptr;
         compositor_ = nullptr;
         privateCompositorPartner_ = nullptr;
         d2dDevice_ = nullptr;
@@ -1223,9 +1225,13 @@ public:
         // Keep background pixels under artwork available to the optical
         // shader. An exactly opaque UI lets DWM cull those pixels before the
         // lens bends into them; this sub-pixel alpha difference prevents that.
-        content_.Opacity(hasShaderRegion ? 0.999f : 1.0f);
         try
         {
+            if (contentHasShaderRegion_ != hasShaderRegion)
+            {
+                content_.Opacity(hasShaderRegion ? 0.999f : 1.0f);
+                contentHasShaderRegion_ = hasShaderRegion;
+            }
             bool canUpdateGeometry = regionVisuals_.size() == count;
             bool exactlyUnchanged = canUpdateGeometry;
             if (canUpdateGeometry)
@@ -1250,7 +1256,7 @@ public:
                             sizeof(regions[index])) == 0;
                     if (!same_region_effect_graph(
                             regionVisuals_[index].descriptor,
-                            regions[index]))
+                            regions[index], shaderOnly))
                     {
                         canUpdateGeometry = false;
                         break;
@@ -1270,19 +1276,23 @@ public:
                 // backlog in DWM that can remain visible after hover ends.
                 for (std::uint32_t index = 0u; index < count; ++index)
                 {
-                    update_region_geometry(regionVisuals_[index], regions[index]);
+                    if (std::memcmp(&regionVisuals_[index].descriptor,
+                            &regions[index], sizeof(regions[index])) != 0)
+                    {
+                        update_region_geometry(regionVisuals_[index], regions[index]);
+                    }
                 }
                 return commit_composition_changes();
             }
 
             regions_.Children().RemoveAll();
             regionVisuals_.clear();
-            const DWM_SYSTEMBACKDROP_TYPE disabled = DWMSBT_NONE;
-            DwmSetWindowAttribute(
-                window_,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                &disabled,
-                sizeof(disabled));
+            if (windows_build_number() >= 22621u)
+            {
+                const DWM_SYSTEMBACKDROP_TYPE disabled = DWMSBT_NONE;
+                DwmSetWindowAttribute(window_, DWMWA_SYSTEMBACKDROP_TYPE,
+                    &disabled, sizeof(disabled));
+            }
             for (std::uint32_t index = 0u; index < count; ++index)
             {
                 if (!add_region(regions[index],
@@ -1773,13 +1783,22 @@ private:
             next.uiBufferIndex = binding.view->uiBufferIndex;
             next.uiFrame = binding.view->uiFrame;
         }
+        // Other regions can change while this lens's published data stays the
+        // same. Leave its seqlock stable so DWM retains its cached snapshot.
+        const auto* publishedPayload = reinterpret_cast<const char*>(
+            binding.view) + sizeof(binding.view->sequence);
+        const auto* nextPayload = reinterpret_cast<const char*>(&next) +
+            sizeof(next.sequence);
+        const std::size_t payloadSize = sizeof(next) - sizeof(next.sequence);
+        if (std::memcmp(publishedPayload, nextPayload, payloadSize) == 0)
+        {
+            return;
+        }
         auto* sequence = reinterpret_cast<volatile LONG*>(
             &binding.view->sequence);
         InterlockedIncrement(sequence);
         std::memcpy(reinterpret_cast<char*>(binding.view) +
-                sizeof(binding.view->sequence),
-            reinterpret_cast<const char*>(&next) + sizeof(next.sequence),
-            sizeof(next) - sizeof(next.sequence));
+            sizeof(binding.view->sequence), nextPayload, payloadSize);
         MemoryBarrier();
         InterlockedIncrement(sequence);
     }
@@ -1837,8 +1856,17 @@ private:
 
     static bool same_region_effect_graph(
         VibranceCompositionRegion left,
-        VibranceCompositionRegion right) noexcept
+        VibranceCompositionRegion right,
+        bool shaderOnly) noexcept
     {
+        // A native lens always uses the same identity backdrop and marker
+        // brush. Its vertical split, optical controls and mask are geometry
+        // or shared uniforms, so retain the native graph throughout changes.
+        // Identity and shader-slot compatibility are checked by the caller.
+        if (shaderOnly)
+        {
+            return true;
+        }
         // These fields affect only visual geometry. Material/provider, blur,
         // saturation, tint and vertical split still require a new effect graph.
         left.shape = 0u;
@@ -2083,12 +2111,6 @@ private:
         }
         sync_liquid_rim_clock(state, region);
         state.descriptor = region;
-        if (state.shaderOnly)
-        {
-            if (const auto* binding = find_liquid_region_slot(state.shaderSlot);
-                binding && binding->identity == region.identity)
-                publish_liquid_region(*binding, &region);
-        }
     }
 
     void initialise_dispatcher()
@@ -2499,7 +2521,8 @@ private:
         // this attribute the brush can resolve to an opaque/black surface even
         // though the Composition visual and effect graph were created.
         const BOOL enabled = TRUE;
-        hostBackdropEnabled_ = SUCCEEDED(DwmSetWindowAttribute(
+        hostBackdropEnabled_ = vibrance::win32::system_backdrop_uses_host_brush(windows_build_number()) &&
+            SUCCEEDED(DwmSetWindowAttribute(
             window_,
             DWMWA_USE_HOSTBACKDROPBRUSH,
             &enabled,
@@ -2611,9 +2634,10 @@ private:
         }
         auto factory = compositor_.CreateEffectFactory(graph);
         auto brush = factory.CreateBrush();
-        brush.SetSourceParameter(L"backdrop",
-            region.material == 2u ? compositor_.CreateBackdropBrush() :
-                compositor_.CreateHostBackdropBrush());
+        const bool hostBrush = region.material != 2u && hostBackdropEnabled_ &&
+            vibrance::win32::system_backdrop_uses_host_brush(windows_build_number());
+        brush.SetSourceParameter(L"backdrop", hostBrush ?
+            compositor_.CreateHostBackdropBrush() : compositor_.CreateBackdropBrush());
         return brush;
     }
 
@@ -2726,9 +2750,13 @@ private:
             // invalidates the lens dependency for the native animated rim.
             auto clock = compositor_.CreateScalarKeyFrameAnimation();
             auto linear = compositor_.CreateLinearEasingFunction();
-            clock.InsertKeyFrame(0.0f, 1.0f, linear);
-            clock.InsertKeyFrame(0.5f, 0.99f, linear);
-            clock.InsertKeyFrame(1.0f, 1.0f, linear);
+            // Keep every frame translucent, including the loop boundary.
+            // At unity opacity DWM can promote the raw backdrop to an opaque
+            // draw and discard the native lens dependency until it changes
+            // back, making the glass disappear once per clock iteration.
+            clock.InsertKeyFrame(0.0f, 0.99f, linear);
+            clock.InsertKeyFrame(0.5f, 0.98f, linear);
+            clock.InsertKeyFrame(1.0f, 0.99f, linear);
             clock.Duration(std::chrono::seconds(4));
             clock.IterationBehavior(composition::AnimationIterationBehavior::Forever);
             state.rawBackdropVisual.StartAnimation(L"Opacity", clock);
@@ -2736,7 +2764,7 @@ private:
         else if (state.rawBackdropVisual)
         {
             state.rawBackdropVisual.StopAnimation(L"Opacity");
-            state.rawBackdropVisual.Opacity(1.0f);
+            state.rawBackdropVisual.Opacity(0.99f);
         }
         state.rimClockRunning = animate;
     }
@@ -2773,14 +2801,18 @@ private:
             // lens. The identity effect keeps independently presented desktop
             // layers available to DWM without applying a system glass material.
             // HLSL owns the blur, refraction and rim above this raw source.
-            auto rawSource = composition::CompositionEffectSourceParameter(
-                L"rawBackdrop");
-            auto rawEffect = winrt::make<SaturationEffect>(rawSource, 1.0f);
-            auto rawFactory = compositor_.CreateEffectFactory(rawEffect);
-            auto rawBrush = rawFactory.CreateBrush();
+            if (!rawBackdropEffectFactory_)
+            {
+                auto rawSource = composition::CompositionEffectSourceParameter(
+                    L"rawBackdrop");
+                auto rawEffect = winrt::make<SaturationEffect>(rawSource, 1.0f);
+                rawBackdropEffectFactory_ = compositor_.CreateEffectFactory(rawEffect);
+            }
+            auto rawBrush = rawBackdropEffectFactory_.CreateBrush();
             rawBrush.SetSourceParameter(L"rawBackdrop",
                 compositor_.CreateBackdropBrush());
             state.rawBackdropVisual = compositor_.CreateSpriteVisual();
+            state.rawBackdropVisual.Opacity(0.99f);
             const float markerPadding = liquid_marker_padding(region);
             const float margin = liquid_source_margin(region);
             const float horizontalMargin = margin + markerPadding;
@@ -2811,7 +2843,9 @@ private:
         // backend. Partial or non-rectangular requests are deliberately
         // rejected so an unbounded system backdrop can never leak outside the
         // requested region.
-        if (region.provider != 0u)
+        const auto implementation = vibrance::win32::system_backdrop_implementation(
+            region.provider, windows_build_number());
+        if (implementation != vibrance::win32::SystemBackdropImplementation::eCompositionAcrylic)
         {
             const bool coversWindow =
                 region.x <= 0.5f && region.y <= 0.5f &&
@@ -2824,7 +2858,8 @@ private:
                     L"vibranceUI: Windows Acrylic/Mica requires a full-window rectangle in the raw Win32 backend; request resolved to off.\n");
                 return false;
             }
-            const DWM_SYSTEMBACKDROP_TYPE type = region.provider == 1u ?
+            const DWM_SYSTEMBACKDROP_TYPE type =
+                implementation == vibrance::win32::SystemBackdropImplementation::eDwmAcrylic ?
                 DWMSBT_TRANSIENTWINDOW : DWMSBT_MAINWINDOW;
             if (FAILED(DwmSetWindowAttribute(
                     window_,
@@ -2997,6 +3032,8 @@ private:
     composition::ContainerVisual root_ { nullptr };
     composition::ContainerVisual regions_ { nullptr };
     composition::SpriteVisual content_ { nullptr };
+    composition::CompositionEffectFactory rawBackdropEffectFactory_ { nullptr };
+    bool contentHasShaderRegion_ = false;
     std::vector<RegionVisualState> regionVisuals_;
     std::vector<std::uint8_t> cpuUploadPixels_;
 };

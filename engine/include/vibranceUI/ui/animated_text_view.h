@@ -38,6 +38,7 @@ struct VIBRANCE_ENGINE_API UiAnimatedCharacterTextView
     float characterSpacing = 0.0f;
     float punctuationBaselineOffset = 0.0f;
     bool centrePunctuationInCell = false;
+    bool tabularDigits = true;
 
     void reset();
     bool valid(const Renderer2DScene& scene) const;
@@ -65,6 +66,7 @@ struct UiAnimatedCharacterTextOptions
     std::uint32_t order = 0u;
     TextStyleComponent style {};
     bool hideWhitespace = true;
+    bool tabularDigits = true;
 };
 
 VIBRANCE_ENGINE_API void ui_set_animated_text(

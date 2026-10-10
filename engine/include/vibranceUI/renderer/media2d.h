@@ -36,6 +36,9 @@ struct Media2DLoadOptions
     // reduces the number of unique frames available during playback.
     uint32_t maxVideoFrames = 0;
     uint32_t maxVideoPixels = 640u * 640u;
+    // Trim transparent outer pixels from static images before upload, keeping
+    // a one-pixel filtering gutter. Animated images retain their full canvas.
+    bool trimTransparentBorders = false;
 };
 
 struct Media2DAsset

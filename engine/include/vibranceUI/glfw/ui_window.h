@@ -79,6 +79,7 @@ struct UiWindowOptions
     std::filesystem::path fontDirectory {};
     std::filesystem::path fontProfilePath {};
     std::vector<std::filesystem::path> fallbackFontPaths {};
+    std::vector<std::filesystem::path> emojiFontPaths {};
     // Selects a static face from collections such as Inter.ttc. Zero leaves
     // collection face selection at its legacy default.
     int fontWeight = 0;

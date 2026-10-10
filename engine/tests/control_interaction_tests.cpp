@@ -10,6 +10,37 @@
 
 namespace
 {
+    // Exercise the private renderer damage handshake without widening the
+    // production API. Explicit member-pointer instantiations permit access.
+    template <typename Tag, typename Tag::type Member>
+    struct SceneMemberAccess
+    {
+        friend typename Tag::type scene_member(Tag) { return Member; }
+    };
+    struct SceneDamagePending
+    {
+        using type = bool (Renderer2DScene::*)(entt::entity, double) const;
+        friend type scene_member(SceneDamagePending);
+    };
+    struct SceneCommitBounds
+    {
+        using type = void (Renderer2DScene::*)(
+            std::vector<std::pair<entt::entity, glm::uvec4>>);
+        friend type scene_member(SceneCommitBounds);
+    };
+    template struct SceneMemberAccess<SceneDamagePending, &Renderer2DScene::damage_pending>;
+    template struct SceneMemberAccess<SceneCommitBounds, &Renderer2DScene::commit_presented_bounds>;
+
+    bool scene_damage_pending(const Renderer2DScene& scene, entt::entity entity, double time)
+    {
+        return (scene.*scene_member(SceneDamagePending {}))(entity, time);
+    }
+    void commit_scene_bounds(Renderer2DScene& scene,
+        std::vector<std::pair<entt::entity, glm::uvec4>> bounds)
+    {
+        (scene.*scene_member(SceneCommitBounds {}))(std::move(bounds));
+    }
+
     bool expect(bool condition, std::string_view message)
     {
         if (!condition)
@@ -51,6 +82,8 @@ int main()
         ButtonInputComponent button {};
         button.onClick = [&](const PointerInputEvent&) { ++actions; };
         registry.emplace<ButtonInputComponent>(light, std::move(button));
+        registry.emplace<ButtonVisualComponent>(light,
+            ui_fixed_colour_button_visual(registry.get<ShapeStyleComponent>(light)));
         StretchDynamicsOptions stretch {};
         stretch.enabled = false;
         stretch.grabScale = 1.15f;
@@ -99,6 +132,35 @@ int main()
             registry.get<ShapeStyleComponent>(light).color0 == colour &&
             !registry.any_of<ShadowComponent>(light) && !registry.get<StretchDynamicsComponent>(light).options.enabled,
             "traffic lights must restore their solid colour when Liquid Glass is disabled");
+    }
+
+    for (const auto colour : { "#FF5F57FF", "#FEBC2EFF", "#28C840FF", "#80808094" })
+    {
+        Renderer2DScene scene;
+        auto& registry = scene.registry();
+        const auto authored = make_solid_style(colour);
+        const auto light = scene.create_shape({}, { 14.0f, 14.0f }, authored,
+            Renderer2DPrimitive::eEllipse);
+        registry.emplace<ButtonInputComponent>(light);
+        registry.emplace<ButtonVisualComponent>(light, ui_fixed_colour_button_visual(authored));
+        registry.emplace<UiLiquidControlSurface>(light, UiLiquidControlSurface { false, false, true });
+        for (const bool afterLiquid : { false, true })
+        {
+            if (afterLiquid) ui_update_liquid_controls(scene, true, ui_liquid_glass_options());
+            ui_update_liquid_controls(scene, false, ui_liquid_glass_options());
+            for (int state = 0; state < 4; ++state)
+            {
+                auto& button = registry.get<ButtonInputComponent>(light);
+                button.hovered = state == 1;
+                button.leftPressed = state == 2;
+                button.enabled = state != 3;
+                ui_update_button_visual(scene, light);
+                const auto& paint = registry.get<ShapeStyleComponent>(light);
+                passed &= expect(paint.color0 == authored.color0 && paint.color1 == authored.color1 &&
+                    paint.outlineColor == authored.outlineColor,
+                    "traffic light idle, hover, press and disabled states must preserve their authored colour before and after liquid mode");
+            }
+        }
     }
 
     const std::filesystem::path themeDirectory =
@@ -165,11 +227,115 @@ int main()
     passed &= expect(
         inputState.hoveredButton == menu,
         "the menu surface should initially own its padding hover");
-    ui_update_input_hover(scene, fontAtlas, inputState, true, { 120.0f, 20.0f });
+    const glm::vec2 rowPoint { 120.0f, 20.0f };
+    const entt::entity rowHit = scene.entity_at(rowPoint);
+    ui_update_input_hover_from_hit(scene, fontAtlas, inputState, true, rowPoint, rowHit);
     passed &= expect(
         inputState.hoveredButton == row &&
             registry.get<ButtonInputComponent>(row).hovered,
         "a nested row should take hover ownership from its menu parent");
+    passed &= expect(ui_hit_blocks_window_action(scene, inputState, rowPoint, rowHit),
+        "a transparent row must block window dragging when hover and chrome share its hit");
+
+    {
+        Renderer2DScene sharedScene;
+        auto& sharedRegistry = sharedScene.registry();
+        const auto back = sharedScene.create_shape({ 0.0f, 0.0f }, { 100.0f, 100.0f }, visibleStyle);
+        const auto front = sharedScene.create_shape({ 0.0f, 0.0f }, { 100.0f, 100.0f }, transparentStyle);
+        for (const auto entity : { back, front })
+        {
+            sharedRegistry.get<Transform2DComponent>(entity).origin = { 0.0f, 0.0f };
+            sharedRegistry.emplace<ButtonInputComponent>(entity);
+        }
+        sharedRegistry.emplace<HitRegion2DComponent>(front);
+        sharedRegistry.get<RenderLayer2DComponent>(front).order = 10u;
+        const glm::vec2 point { 40.0f, 40.0f };
+        const auto hit = sharedScene.entity_at(point);
+        UiInputState state;
+        const auto hover = ui_update_input_hover_from_hit(sharedScene, fontAtlas, state, true, point, hit);
+        passed &= expect(hit == front && hover.buttonOwner == front && state.hoveredButton == front &&
+            ui_hit_blocks_window_action(sharedScene, state, point, hit),
+            "one hit must give transparent front controls the same hover and window-action ownership");
+        sharedRegistry.get<ButtonInputComponent>(front).enabled = false;
+        sharedRegistry.emplace<TextInputComponent>(front);
+        passed &= expect(!ui_hit_blocks_window_action(sharedScene, state, point, hit),
+            "a disabled button must retain its existing priority over another input family on the same hit");
+        sharedRegistry.get<ButtonInputComponent>(front).enabled = true;
+        sharedRegistry.remove<TextInputComponent>(front);
+
+        for (const auto member : { &UiInputState::pressedInputEntity, &UiInputState::pointerInputCapture,
+            &UiInputState::activeSlider, &UiInputState::activeScrollBar })
+        {
+            UiInputState captured;
+            captured.*member = front;
+            passed &= expect(ui_hit_blocks_window_action(sharedScene, captured, { 200.0f, 200.0f }, entt::null),
+                "active pointer capture must block window actions even when no entity is under the pointer");
+        }
+        ui_update_input_hover_from_hit(sharedScene, fontAtlas, state, true, point, entt::null);
+        passed &= expect(state.hoveredButton == front,
+            "a temporarily empty supplied hit must preserve a previous owner that still contains the pointer");
+
+        const auto generation = sharedScene.frame_generation();
+        sharedRegistry.get<RenderLayer2DComponent>(front).visible = false;
+        passed &= expect(sharedScene.frame_generation() == generation,
+            "the fresh-query regression must mutate the registry without advancing scene generation");
+        ui_update_input_hover(sharedScene, fontAtlas, state, true, point);
+        passed &= expect(state.hoveredButton == back,
+            "ordinary hover must query again at the same point after a direct registry visibility change");
+        sharedRegistry.get<RenderLayer2DComponent>(front).visible = true;
+        ui_update_input_hover(sharedScene, fontAtlas, state, true, point);
+        passed &= expect(state.hoveredButton == front,
+            "ordinary hover must observe restored visibility without retaining a hit from an earlier update");
+        ui_update_input_hover_from_hit(sharedScene, fontAtlas, state, false, point, front);
+        passed &= expect(state.hoveredButton == entt::null,
+            "an absent pointer must clear hover even if a caller supplies an old hit");
+    }
+
+    {
+        Renderer2DScene dragScene;
+        auto& dragRegistry = dragScene.registry();
+        const auto panel = dragScene.create_shape({ 0.0f, 0.0f }, { 100.0f, 100.0f }, visibleStyle);
+        const auto child = dragScene.create_shape({ 0.0f, 0.0f }, { 20.0f, 20.0f }, visibleStyle);
+        const auto target = dragScene.create_shape({ 140.0f, 0.0f }, { 20.0f, 20.0f }, visibleStyle);
+        for (const auto entity : { panel, child, target })
+            dragRegistry.get<Transform2DComponent>(entity).origin = { 0.0f, 0.0f };
+        dragRegistry.emplace<Parent2DComponent>(child, Parent2DComponent { panel });
+        dragRegistry.get<RenderLayer2DComponent>(child).order = 10u;
+        dragRegistry.get<ShapeComponent>(panel).draggable = true;
+        const glm::vec2 point { 3.0f, 15.0f };
+        const auto hit = dragScene.entity_at(point);
+        UiInputState state;
+        passed &= expect(hit == child && ui_draggable_parent_from_hit(dragRegistry, hit) == panel &&
+            dragScene.draggable_parent_at(point) == panel && ui_hit_blocks_window_action(dragScene, state, point, hit),
+            "a child hit must preserve draggable ancestry and block the surrounding native window action");
+        dragRegistry.emplace<DragHandle2DComponent>(child, DragHandle2DComponent { target, true });
+        passed &= expect(ui_draggable_parent_from_hit(dragRegistry, hit) == target &&
+            dragScene.draggable_parent_at(point) == target,
+            "an explicit drag-handle target must retain priority over a draggable parent");
+        dragScene.destroy_entity(target);
+        passed &= expect(ui_draggable_parent_from_hit(dragRegistry, hit) == entt::null &&
+            dragScene.draggable_parent_at(point) == entt::null,
+            "a removed drag target must not silently fall back to an ancestor");
+        dragRegistry.get<DragHandle2DComponent>(child).enabled = false;
+        passed &= expect(ui_draggable_parent_from_hit(dragRegistry, hit) == panel,
+            "a disabled drag handle must allow its draggable ancestor to own the hit");
+        dragRegistry.get<RenderLayer2DComponent>(panel).visible = false;
+        passed &= expect(ui_draggable_parent_from_hit(dragRegistry, hit) == entt::null,
+            "hidden draggable ancestry must not claim a supplied child hit");
+        dragRegistry.get<RenderLayer2DComponent>(panel).visible = true;
+        dragRegistry.get<ShapeComponent>(panel).draggable = false;
+        dragRegistry.remove<DragHandle2DComponent>(child);
+        dragRegistry.emplace<ResizablePanelComponent>(panel);
+        const auto hover = ui_update_input_hover_from_hit(dragScene, fontAtlas, state, true, point, hit);
+        passed &= expect(ui_hit_blocks_window_action(dragScene, state, point, hit) &&
+            state.hoveredResizePanel == panel && hover.resizeEdges == ePanelResizeLeft,
+            "a supplied child hit must preserve parent resize edges and window-action blocking");
+        dragScene.destroy_entity(child);
+        dragRegistry.get<ShapeStyleComponent>(panel) = transparentStyle;
+        passed &= expect(dragScene.entity_at(point) == entt::null &&
+            ui_hit_blocks_window_action(dragScene, state, point, entt::null),
+            "transparent resizable panels must retain their edge fallback when the shared hit is empty");
+    }
 
     const UiPointerButtonInput press {
         true,
@@ -729,6 +895,89 @@ int main()
         check(plan.cachedShapes);
         passed &= expect(preserved,
             "exposing the nav lens must preserve full-precision notch contours and cap gradient coordinates");
+    }
+
+    {
+        Renderer2DScene opticalScene;
+        auto& registry = opticalScene.registry();
+        const auto lens = opticalScene.create_shape({ 100.0f, 100.0f }, { 40.0f, 30.0f });
+        registry.emplace<LiquidGlassComponent>(lens, LiquidGlassComponent {
+            GlassMaterial::eLiquid, LiquidGlassBackend::eEngineRenderer,
+            true, 0.7f, 0.15f, 0.6f, 0.35f });
+        const auto generation = opticalScene.frame_generation();
+        const auto cacheGeneration = opticalScene.cache_generation();
+        passed &= expect(opticalScene.requires_continuous_redraw(0.0) &&
+            opticalScene.requires_continuous_redraw(1.0) &&
+            opticalScene.frame_generation() == generation,
+            "direct SDK liquid rims must animate without synthetic scene mutations or a control updater");
+        const auto hasLens = [&](const auto& batches) {
+            return std::any_of(batches.begin(), batches.end(), [&](const auto& batch) {
+                return batch.entity == lens &&
+                    (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
+            });
+        };
+        const auto first = opticalScene.build_render_plan(0.0, 0u);
+        const auto retained = opticalScene.build_render_plan(1.0, cacheGeneration);
+        passed &= expect(hasLens(first.blurs) && !hasLens(first.cachedBlurs) &&
+            hasLens(retained.blurs) && !retained.rebuildCachedLayer &&
+            opticalScene.frame_generation() == generation,
+            "a statically declared liquid rim must stay in dynamic batches while the surrounding cache remains retained");
+        commit_scene_bounds(opticalScene, { { lens, { 80u, 80u, 40u, 30u } } });
+        passed &= expect(scene_damage_pending(opticalScene, lens, 1.0) &&
+            scene_damage_pending(opticalScene, lens, 2.0) &&
+            opticalScene.frame_generation() == generation &&
+            opticalScene.cache_generation() == cacheGeneration,
+            "committing a retained image must leave animated rim pixels damaged without changing scene or text generations");
+
+        auto& style = registry.get<ShapeStyleComponent>(lens);
+        style.opacity = 0.0f;
+        passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&
+            !scene_damage_pending(opticalScene, lens, 1.0),
+            "zero-opacity portable rims must not request continuous rendering");
+        const auto hiddenPlan = opticalScene.build_render_plan(1.0, cacheGeneration);
+        passed &= expect(!hasLens(hiddenPlan.blurs) && !hasLens(hiddenPlan.cachedBlurs),
+            "a zero-opacity lens must emit no optical pixels when another animation draws the scene");
+        style.opacity = 0.4f;
+        const auto translucentPlan = opticalScene.build_render_plan(1.0, cacheGeneration);
+        const auto translucentLens = std::find_if(translucentPlan.blurs.begin(),
+            translucentPlan.blurs.end(), [&](const auto& batch) {
+                return batch.entity == lens &&
+                    (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
+            });
+        passed &= expect(translucentLens != translucentPlan.blurs.end() &&
+            std::abs(translucentLens->effect0.w - 0.4f) < 0.0001f,
+            "portable optical coverage must follow the same surface opacity used to schedule its rim");
+        style.opacity = 1.0f;
+        auto& liquid = registry.get<LiquidGlassComponent>(lens);
+        liquid.rim = 0.0f;
+        passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&
+            !scene_damage_pending(opticalScene, lens, 1.0),
+            "a portable lens with its travelling rim disabled must retain its image");
+        liquid.rim = 0.6f;
+        liquid.sceneBackdrop = false;
+        liquid.backend = LiquidGlassBackend::eWindowsCompositionShader;
+        passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&
+            !scene_damage_pending(opticalScene, lens, 1.0),
+            "native compositor rims must not force portable renderer work");
+        liquid.sceneBackdrop = true;
+        liquid.backend = LiquidGlassBackend::eEngineRenderer;
+        registry.get<Transform2DComponent>(lens).rotation3DRadians.x = 0.1f;
+        passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&
+            !scene_damage_pending(opticalScene, lens, 1.0),
+            "unsupported transformed scene lenses must not request invisible optical work");
+        registry.get<Transform2DComponent>(lens).rotation3DRadians.x = 0.0f;
+        const auto clippingParent = opticalScene.create_shape({ 0.0f, 0.0f }, { 20.0f, 20.0f });
+        registry.emplace<Mask2DComponent>(clippingParent, Mask2DComponent { true, false });
+        registry.emplace<Parent2DComponent>(lens, Parent2DComponent { clippingParent });
+        commit_scene_bounds(opticalScene, {});
+        passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&
+            !scene_damage_pending(opticalScene, lens, 1.0),
+            "a fully clipped liquid rim must let the renderer sleep");
+        registry.remove<Mask2DComponent>(clippingParent);
+        registry.get<RenderLayer2DComponent>(clippingParent).visible = false;
+        passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&
+            !scene_damage_pending(opticalScene, lens, 1.0),
+            "a liquid rim beneath a hidden ancestor must let the renderer sleep");
     }
 
     return passed ? 0 : 1;

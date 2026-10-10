@@ -105,5 +105,41 @@ int main()
     passed &= expect(compactSpectrum.band_count() == 3u, "custom band counts should be supported");
     passed &= expect(compactSpectrum.levels().size() == 3u, "output should match the requested band count");
 
+    // This mixed, pulsed signal was measured against 07df895's Dynamic Island
+    // tuning. Protect the balance of all six bars, rather than only checking
+    // that a full-volume sine wave produces some non-zero output.
+    AudioSpectrumProcessor tunedSpectrum;
+    std::array<double, 6> totals {};
+    for (int block = 0; block < 240; ++block)
+    {
+        for (int sample = 0; sample < 512; ++sample)
+        {
+            const float time = float(block * 512 + sample) / 44100.0f;
+            const float kick = block % 20 < 3 ? 0.32f : 0.025f;
+            const float presence = block % 32 < 16 ? 0.18f : 0.055f;
+            const float value = kick * std::sin(2.0f * kPi * 80.0f * time)
+                + 0.09f * std::sin(2.0f * kPi * 240.0f * time)
+                + presence * std::sin(2.0f * kPi * 650.0f * time)
+                + 0.12f * std::sin(2.0f * kPi * 1500.0f * time)
+                + 0.07f * std::sin(2.0f * kPi * 3200.0f * time)
+                + 0.04f * std::sin(2.0f * kPi * 5200.0f * time);
+            tunedSpectrum.push_sample(value);
+        }
+        tunedSpectrum.update(512.0 / 44100.0);
+        if (block >= 32)
+        {
+            const auto levels = tunedSpectrum.levels();
+            for (std::size_t band = 0; band < totals.size(); ++band)
+                totals[band] += levels[band];
+        }
+    }
+    constexpr std::array<double, 6> reference {
+        0.247246010, 0.200440706, 0.168757,
+        0.817089, 0.999999940, 0.947458620
+    };
+    for (std::size_t band = 0; band < totals.size(); ++band)
+        passed &= expect(std::abs(totals[band] / 208.0 - reference[band]) < 0.002,
+            "the six-bar response must retain 07df895's musical tuning");
+
     return passed ? 0 : 1;
 }

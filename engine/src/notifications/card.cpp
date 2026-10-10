@@ -8,6 +8,7 @@
 #include <vibranceUI/ui/styles.h>
 #include <vibranceUI/ui/surfaces.h>
 #include <vibranceUI/ui/visuals.h>
+#include "../renderer/common/text_direction.h"
 
 #include <glm/geometric.hpp>
 
@@ -60,8 +61,14 @@ namespace
                 next - offset);
             const unsigned char first = static_cast<unsigned char>(
                 codepoint.front());
+            const auto decoded = renderer2d_decode_utf8(codepoint);
+            const auto scalar = decoded.empty() ? 0u : decoded.front();
+            const bool emojiControl = scalar == 0x200du || scalar == 0x20e3u || scalar == 0xfe0eu || scalar == 0xfe0fu ||
+                (scalar >= 0xe0020u && scalar <= 0xe007fu);
             bool renderedAsQuestionMark = false;
-            if (first >= 0x80u)
+            // Selectors, joiners and flag tags form a cluster with adjacent
+            // emoji; rendering them alone cannot establish font coverage.
+            if (first >= 0x80u && !emojiControl)
             {
                 const Renderer2DTextLayout glyph =
                     fontAtlas.layout_text(codepoint, fontSize);

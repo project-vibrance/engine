@@ -50,6 +50,8 @@ cl.exe ^
     windowsapp.lib ^
     mmdevapi.lib ^
     ole32.lib ^
+    oleaut32.lib ^
+    uiautomationcore.lib ^
     shell32.lib ^
     gdi32.lib ^
     user32.lib ^

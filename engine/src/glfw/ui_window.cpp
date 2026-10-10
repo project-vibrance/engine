@@ -61,6 +61,11 @@ int UiWindow::run()
     while (is_open())
     {
         tick();
+        if (const double idleWait = Engine::idle_event_wait_seconds();
+            idleWait > 0.0)
+        {
+            wait_glfw_events(idleWait);
+        }
     }
     close();
     terminate_glfw();
@@ -141,6 +146,7 @@ GlfwPanelWindowTemplateOptions UiWindow::make_template_options(
     options.fontDirectory = windowOptions.fontDirectory;
     options.fontProfilePath = windowOptions.fontProfilePath;
     options.fallbackFontPaths = windowOptions.fallbackFontPaths;
+    options.emojiFontPaths = windowOptions.emojiFontPaths;
     options.fontWeight = windowOptions.fontWeight;
     options.useLocalePrimaryFont = windowOptions.useLocalePrimaryFont;
     options.localisationDirectory = windowOptions.localisationDirectory;

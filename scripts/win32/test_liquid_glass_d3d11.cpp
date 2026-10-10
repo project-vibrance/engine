@@ -4,21 +4,169 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <thread>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
 
+namespace
+{
+bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
+    ID3D11Device* device, ID3D11DeviceContext* context)
+{
+    constexpr UINT width = 1920u;
+    constexpr UINT height = 1080u;
+    std::vector<std::uint32_t> pixels(width * height);
+    for (UINT y = 0u; y < height; ++y)
+        for (UINT x = 0u; x < width; ++x)
+            pixels[y * width + x] = ((x / 8u + y / 8u) & 1u) ?
+                0xffff6040u : 0xff1848e0u;
+    D3D11_TEXTURE2D_DESC desc {};
+    desc.Width = width;
+    desc.Height = height;
+    desc.MipLevels = 1u;
+    desc.ArraySize = 1u;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1u;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA data { pixels.data(), width * sizeof(std::uint32_t), 0u };
+    ComPtr<ID3D11Texture2D> source;
+    ComPtr<ID3D11Texture2D> output;
+    ComPtr<ID3D11RenderTargetView> target;
+    if (FAILED(device->CreateTexture2D(&desc, &data, &source)) ||
+        FAILED(device->CreateTexture2D(&desc, nullptr, &output)) ||
+        FAILED(device->CreateRenderTargetView(output.Get(), nullptr, &target)))
+        return false;
+    D3D11_QUERY_DESC queryDesc { D3D11_QUERY_TIMESTAMP_DISJOINT, 0u };
+    ComPtr<ID3D11Query> disjoint;
+    ComPtr<ID3D11Query> start;
+    ComPtr<ID3D11Query> end;
+    if (FAILED(device->CreateQuery(&queryDesc, &disjoint))) return false;
+    queryDesc.Query = D3D11_QUERY_TIMESTAMP;
+    if (FAILED(device->CreateQuery(&queryDesc, &start)) ||
+        FAILED(device->CreateQuery(&queryDesc, &end))) return false;
+
+    for (const float radius : { 0.0f, 7.0f, 30.0f })
+    {
+        vibrance::win32::LiquidGlassRenderRegion region;
+        region.x = 480;
+        region.y = 270;
+        region.width = 960u;
+        region.height = 540u;
+        region.blurRadius = radius;
+        for (UINT warm = 0u; warm < 8u; ++warm)
+            if (!lens.render(context, source.Get(), target.Get(), region)) return false;
+        std::vector<double> gpuMilliseconds;
+        std::vector<double> cpuMilliseconds;
+        for (UINT sample = 0u; sample < 31u; ++sample)
+        {
+            context->Begin(disjoint.Get());
+            context->End(start.Get());
+            const auto cpuStart = std::chrono::steady_clock::now();
+            if (!lens.render(context, source.Get(), target.Get(), region)) return false;
+            const auto cpuEnd = std::chrono::steady_clock::now();
+            context->End(end.Get());
+            context->End(disjoint.Get());
+            context->Flush();
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing {};
+            const auto deadline = std::chrono::steady_clock::now() +
+                std::chrono::seconds(10);
+            HRESULT status = S_FALSE;
+            while ((status = context->GetData(disjoint.Get(), &timing,
+                    sizeof(timing), D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE)
+            {
+                if (std::chrono::steady_clock::now() >= deadline) return false;
+                std::this_thread::yield();
+            }
+            if (FAILED(status)) return false;
+            UINT64 first = 0u;
+            UINT64 last = 0u;
+            if (context->GetData(start.Get(), &first, sizeof(first), 0u) != S_OK ||
+                context->GetData(end.Get(), &last, sizeof(last), 0u) != S_OK)
+                return false;
+            if (timing.Disjoint || !timing.Frequency) continue;
+            gpuMilliseconds.push_back(static_cast<double>(last - first) * 1000.0 /
+                static_cast<double>(timing.Frequency));
+            cpuMilliseconds.push_back(std::chrono::duration<double, std::milli>(
+                cpuEnd - cpuStart).count());
+        }
+        if (gpuMilliseconds.empty()) return false;
+        std::sort(gpuMilliseconds.begin(), gpuMilliseconds.end());
+        std::sort(cpuMilliseconds.begin(), cpuMilliseconds.end());
+        std::cout << std::fixed << std::setprecision(3)
+                  << "Benchmark 960x540, radius " << radius
+                  << ": GPU median " << gpuMilliseconds[gpuMilliseconds.size() / 2u]
+                  << " ms, CPU submission median "
+                  << cpuMilliseconds[cpuMilliseconds.size() / 2u] << " ms\n";
+    }
+    return true;
+}
+}
+
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc < 2 || argc > 3)
+    bool runBenchmark = false;
+    const wchar_t* previewPath = nullptr;
+    const wchar_t* capturePath = nullptr;
+    const wchar_t* comparisonPath = nullptr;
+    bool validArguments = argc >= 2;
+    for (int argument = 2; argument < argc && validArguments; ++argument)
     {
-        std::wcerr << L"Usage: test_liquid_glass_d3d11 shader-directory [preview.ppm]\n";
+        const std::wstring option(argv[argument]);
+        if (option == L"--benchmark") runBenchmark = true;
+        else if ((option == L"--capture" || option == L"--compare") && argument + 1 < argc)
+        {
+            if (option == L"--capture") capturePath = argv[++argument];
+            else comparisonPath = argv[++argument];
+        }
+        else if (!previewPath && !option.starts_with(L"--")) previewPath = argv[argument];
+        else validArguments = false;
+    }
+    if (!validArguments || (capturePath && comparisonPath))
+    {
+        std::wcerr << L"Usage: test_liquid_glass_d3d11 shader-directory [preview.ppm] "
+            L"[--benchmark] [--capture file | --compare file]\n";
         return 2;
     }
+    std::ofstream capture;
+    std::ifstream comparison;
+    if (capturePath) capture.open(capturePath, std::ios::binary);
+    if (comparisonPath) comparison.open(comparisonPath, std::ios::binary);
+    if ((capturePath && !capture) || (comparisonPath && !comparison)) return 55;
+    std::size_t comparedFrames = 0u;
+    std::size_t differingChannels = 0u;
+    int maximumChannelDifference = 0;
+    bool referenceFinished = false;
+    const auto checkReference = [&](const std::vector<std::uint32_t>& actual) {
+        if (referenceFinished) return true;
+        const auto byteCount = static_cast<std::streamsize>(
+            actual.size() * sizeof(std::uint32_t));
+        if (capturePath)
+        {
+            capture.write(reinterpret_cast<const char*>(actual.data()), byteCount);
+            return static_cast<bool>(capture);
+        }
+        if (!comparisonPath) return true;
+        std::vector<std::uint32_t> expected(actual.size());
+        if (!comparison.read(reinterpret_cast<char*>(expected.data()), byteCount)) return false;
+        ++comparedFrames;
+        for (std::size_t pixel = 0u; pixel < actual.size(); ++pixel)
+            for (UINT channel = 0u; channel < 4u; ++channel)
+            {
+                const int difference = std::abs(static_cast<int>(
+                    (actual[pixel] >> (channel * 8u)) & 0xffu) -
+                    static_cast<int>((expected[pixel] >> (channel * 8u)) & 0xffu));
+                maximumChannelDifference = std::max(maximumChannelDifference, difference);
+                if (difference != 0) ++differingChannels;
+            }
+        return maximumChannelDifference <= 1;
+    };
     constexpr UINT width = 512;
     constexpr UINT height = 256;
     std::vector<std::uint32_t> pixels(width * height);
@@ -133,9 +281,9 @@ int wmain(int argc, wchar_t** argv)
     std::size_t outsideChanged = 0;
     std::vector<std::uint32_t> opticalPixels(width * height);
     std::ofstream preview;
-    if (argc == 3)
+    if (previewPath)
     {
-        preview.open(argv[2], std::ios::binary);
+        preview.open(previewPath, std::ios::binary);
         preview << "P6\n" << width << ' ' << height << "\n255\n";
     }
     for (UINT y = 0; y < height; ++y)
@@ -166,6 +314,7 @@ int wmain(int argc, wchar_t** argv)
         }
     }
     context->Unmap(readback.Get(), 0);
+    if (!checkReference(opticalPixels)) return 56;
     std::cout << "Changed inside: " << insideChanged
               << ", outside: " << outsideChanged << '\n';
     if (insideChanged <= 1000 || outsideChanged != 0) return 10;
@@ -497,7 +646,7 @@ int wmain(int argc, wchar_t** argv)
             std::copy_n(row, width, samplePixels.begin() + y * width);
         }
         context->Unmap(readback.Get(), 0);
-        return true;
+        return checkReference(samplePixels);
     };
 
     // Blur must affect the centre, where the edge's refraction band is zero.
@@ -858,7 +1007,44 @@ int wmain(int argc, wchar_t** argv)
     const auto near_channel = [](std::uint32_t actual, int expected) {
         return std::abs(static_cast<int>(actual) - expected) <= 2;
     };
-    return near_channel(centre & 0xffu, 77) &&
+    if (!(near_channel(centre & 0xffu, 77) &&
         near_channel((centre >> 8u) & 0xffu, 102) &&
-        near_channel((centre >> 16u) & 0xffu, 128) ? 0 : 15;
+        near_channel((centre >> 16u) & 0xffu, 128))) return 15;
+    if (comparisonPath)
+    {
+        if (comparison.peek() != std::char_traits<char>::eof()) return 57;
+        std::cout << "Reference frames: " << comparedFrames
+                  << ", differing channels: " << differingChannels
+                  << ", maximum channel difference: " << maximumChannelDifference << '\n';
+    }
+    referenceFinished = true;
+    // Reinitialisation creates a fresh GPU constant buffer. Rendering exactly
+    // the same kernel and extent must upload it again and retain the image.
+    frostedRegion.blurRadius = 7.0f;
+    if (!renderSample(stripedBackdrop.Get(), frostedRegion)) return 58;
+    const auto beforeReinitialisation = samplePixels;
+    if (!lens.initialise(device.Get(), argv[1]) ||
+        !renderSample(stripedBackdrop.Get(), frostedRegion) ||
+        samplePixels != beforeReinitialisation) return 59;
+    std::cout << "Reinitialised blur kernel reference: pass\n";
+
+    // A compositor frame can alternate islands of several sizes. Retired
+    // scratch sets must be overwritten with each island's current backdrop.
+    std::array<std::vector<std::uint32_t>, 9> pooledReferences;
+    for (UINT cycle = 0u; cycle < 3u; ++cycle)
+    {
+        for (UINT size = 0u; size < pooledReferences.size(); ++size)
+        {
+            auto pooledRegion = frostedRegion;
+            pooledRegion.width -= size * 24u;
+            pooledRegion.height -= size * 8u;
+            ID3D11Texture2D* currentSource = cycle == 1u ?
+                whiteBackdrop.Get() : stripedBackdrop.Get();
+            if (!renderSample(currentSource, pooledRegion)) return 60;
+            if (cycle == 0u) pooledReferences[size] = samplePixels;
+            if (cycle == 2u && samplePixels != pooledReferences[size]) return 61;
+        }
+    }
+    std::cout << "Alternating scratch sizes and live sources: pass\n";
+    return runBenchmark && !benchmark(lens, device.Get(), context.Get()) ? 54 : 0;
 }

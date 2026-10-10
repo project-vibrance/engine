@@ -1861,6 +1861,44 @@ namespace
         }
     }
 
+    void trim_transparent_borders(DecodedMediaFrame& frame)
+    {
+        if (!frame.valid()) return;
+        uint32_t left = frame.width;
+        uint32_t top = frame.height;
+        uint32_t right = 0u;
+        uint32_t bottom = 0u;
+        for (uint32_t y = 0; y < frame.height; ++y)
+        for (uint32_t x = 0; x < frame.width; ++x)
+        {
+            if (frame.rgba[(static_cast<std::size_t>(y) * frame.width + x) * 4u + 3u] == 0u) continue;
+            left = std::min(left, x);
+            top = std::min(top, y);
+            right = std::max(right, x + 1u);
+            bottom = std::max(bottom, y + 1u);
+        }
+        if (left >= right || top >= bottom) return;
+        // Retain a filtering gutter without discarding any antialiased pixels.
+        left -= left > 0u ? 1u : 0u;
+        top -= top > 0u ? 1u : 0u;
+        right = std::min(right + 1u, frame.width);
+        bottom = std::min(bottom + 1u, frame.height);
+        const uint32_t width = right - left;
+        const uint32_t height = bottom - top;
+        if (width == frame.width && height == frame.height) return;
+        std::vector<unsigned char> cropped(static_cast<std::size_t>(width) * height * 4u);
+        for (uint32_t y = 0; y < height; ++y)
+        {
+            const auto source = frame.rgba.begin() +
+                (static_cast<std::size_t>(top + y) * frame.width + left) * 4u;
+            std::copy_n(source, static_cast<std::size_t>(width) * 4u,
+                cropped.begin() + static_cast<std::size_t>(y) * width * 4u);
+        }
+        frame.width = width;
+        frame.height = height;
+        frame.rgba = std::move(cropped);
+    }
+
     void bleed_transparent_rgb(std::vector<unsigned char>& rgba, uint32_t width, uint32_t height)
     {
         if (rgba.empty() || width == 0u || height == 0u)
@@ -2911,6 +2949,7 @@ Media2DHandle load_media_2d_asset(
         }
     }
 
+    if (options.trimTransparentBorders && !animation.valid()) trim_transparent_borders(frame);
     const DecodedMediaFrame& firstFrame = animation.valid() ? animation.frames.front() : frame;
     outAsset.pixelSize = { firstFrame.width, firstFrame.height };
     outAsset.hasBlackBackground = media_frame_has_black_background(firstFrame);

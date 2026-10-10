@@ -19,6 +19,7 @@
 #include <vibranceUI/renderer/present_mode.h>
 #include <vibranceUI/renderer/renderer2d_components.h>
 #include <vibranceUI/ui/builder.h>
+#include <vibranceUI/ui/content_sizing.h>
 #include <vibranceUI/ui/glass.h>
 #include <vibranceUI/ui/input.h>
 #include <vibranceUI/ui/resources.h>
@@ -155,6 +156,9 @@ struct UiButtonOptions
     Media2DHandle leadingIcon {};
     Media2DHandle trailingIcon {};
     glm::vec4 padding { 12.0f, 4.0f, 12.0f, 4.0f };
+    // The requested width becomes a minimum. Measured text and optional
+    // icons determine the width, including after locale or label changes.
+    bool fitContentWidth = false;
     float cornerRadius = 10.0f;
     float fontSize = 13.0f;
     float iconSize = 14.0f;
@@ -1329,6 +1333,13 @@ inline ButtonVisualComponent ui_button_visual_from_options(
     return visual;
 }
 
+inline ButtonVisualComponent ui_fixed_colour_button_visual(const ShapeStyleComponent& style)
+{
+    // Coloured controls provide feedback through their icons or geometry.
+    // Generic button hover paint must not replace their authored colour.
+    return { style, style, style, style, true };
+}
+
 inline ButtonVisualComponent ui_transparent_button_visual()
 {
     // Preserve the hit area without painting hover, press, or disabled states
@@ -2026,6 +2037,13 @@ inline UiControlHandle ui_create_text_button(
         layer + 1,
         order + 2u,
         labelOffset);
+    if (options.fitContentWidth)
+    {
+        auto padding = options.padding;
+        if (options.leadingIcon.valid()) padding.x += leadingIconSize + iconGap;
+        if (options.trailingIcon.valid()) padding.z += trailingIconSize + iconGap;
+        ui_fit_content_size(ui, handle.root, handle.label, size, padding);
+    }
     ui_update_button_visual(scene, handle.root);
     return handle;
 }

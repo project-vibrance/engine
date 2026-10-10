@@ -6,6 +6,8 @@
 
 using namespace metal;
 
+static constexpr uint kStyleBlurForegroundGroupSource = 1u << 26;
+
 template<typename T, size_t Num>
 struct spvUnsafeArray
 {
@@ -61,6 +63,8 @@ struct Renderer2DConstants
 
 constant spvUnsafeArray<float, 21> _1429 = spvUnsafeArray<float, 21>({ -1.0, -0.89999997615814208984375, -0.800000011920928955078125, -0.699999988079071044921875, -0.60000002384185791015625, -0.5, -0.4000000059604644775390625, -0.300000011920928955078125, -0.20000000298023223876953125, -0.100000001490116119384765625, 0.0, 0.100000001490116119384765625, 0.20000000298023223876953125, 0.300000011920928955078125, 0.4000000059604644775390625, 0.5, 0.60000002384185791015625, 0.699999988079071044921875, 0.800000011920928955078125, 0.89999997615814208984375, 1.0 });
 constant spvUnsafeArray<float, 21> _1455 = spvUnsafeArray<float, 21>({ 0.0199999995529651641845703125, 0.0390000008046627044677734375, 0.07400000095367431640625, 0.13500000536441802978515625, 0.236000001430511474609375, 0.3860000073909759521484375, 0.60699999332427978515625, 0.800000011920928955078125, 0.94599997997283935546875, 0.986000001430511474609375, 1.0, 0.986000001430511474609375, 0.94599997997283935546875, 0.800000011920928955078125, 0.60699999332427978515625, 0.3860000073909759521484375, 0.236000001430511474609375, 0.13500000536441802978515625, 0.07400000095367431640625, 0.0390000008046627044677734375, 0.0199999995529651641845703125 });
+constant spvUnsafeArray<float, 41> foregroundOffsets = spvUnsafeArray<float, 41>({ -1.0, -0.95, -0.9, -0.85, -0.8, -0.75, -0.7, -0.65, -0.6, -0.55, -0.5, -0.45, -0.4, -0.35, -0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0 });
+constant spvUnsafeArray<float, 41> foregroundWeights = spvUnsafeArray<float, 41>({ 0.018, 0.027, 0.039, 0.056, 0.077, 0.105, 0.141, 0.185, 0.237, 0.298, 0.368, 0.445, 0.527, 0.613, 0.698, 0.779, 0.852, 0.914, 0.961, 0.99, 1.0, 0.99, 0.961, 0.914, 0.852, 0.779, 0.698, 0.613, 0.527, 0.445, 0.368, 0.298, 0.237, 0.185, 0.141, 0.105, 0.077, 0.056, 0.039, 0.027, 0.018 });
 
 static inline __attribute__((always_inline))
 int2 dispatch_origin(constant Renderer2DConstants& pc)
@@ -501,6 +505,8 @@ float2 blur_axis(thread const uint& passIndex, thread const bool& perpendicular)
 static inline __attribute__((always_inline))
 float4 source_color(thread const int2& pixel, constant Renderer2DConstants& pc, texture2d<float, access::read_write> sceneColorBuffer, texture2d<float> uiStaticSurface, texture2d<float> uiExternalBackdropSurface)
 {
+    if ((pc.data.y & kStyleBlurForegroundGroupSource) != 0u)
+        return uiStaticSurface.read(uint2(pixel));
     spvImageFence(sceneColorBuffer);
     float4 source = sceneColorBuffer.read(uint2(pixel));
     if ((pc.data.z & 2147483648u) != 0u)
@@ -581,13 +587,16 @@ float4 sample_axis_blur_at(thread const float2& pixelCoord, thread const float2&
     float3 weightedRgb = float3(0.0);
     float alphaSum = 0.0;
     float weightSum = 0.0;
-    for (int i = 0; i < 21; i++)
+    bool highQualityForeground = (pc.data.y & kStyleBlurForegroundGroupSource) != 0u;
+    int sampleCount = highQualityForeground ? 41 : 21;
+    for (int i = 0; i < sampleCount; i++)
     {
-        float2 sampleCoord = pixelCoord + ((axis * _1429[i]) * radius);
+        float offset = highQualityForeground ? foregroundOffsets[i] : _1429[i];
+        float sampleWeight = highQualityForeground ? foregroundWeights[i] : _1455[i];
+        float2 sampleCoord = pixelCoord + ((axis * offset) * radius);
         float2 param_2 = sampleCoord;
         bool param_3 = readScratch;
         float4 sampleColor = blur_input_color_at(param_2, param_3, pc, sceneColorBuffer, uiStaticSurface, uiExternalBackdropSurface, tempSurface, uiBlurSurface);
-        float sampleWeight = _1455[i];
         weightedRgb += ((sampleColor.xyz * sampleColor.w) * sampleWeight);
         alphaSum += (sampleColor.w * sampleWeight);
         weightSum += sampleWeight;
@@ -737,6 +746,18 @@ kernel void blur_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture
     }
     if ((pc.data.y & 262144u) == 0u)
     {
+        return;
+    }
+    if ((pc.data.y & kStyleBlurForegroundGroupSource) != 0u)
+    {
+        uint param_13 = passIndex;
+        bool param_14 = true;
+        int2 param_15 = pixel;
+        float2 param_16 = blur_axis(param_13, param_14);
+        float param_17 = radius;
+        bool param_18 = true;
+        float4 blurred = sample_axis_blur(param_15, param_16, param_17, param_18, pc, sceneColorBuffer, uiStaticSurface, uiExternalBackdropSurface, tempSurface, uiBlurSurface);
+        uiBlurSurface.write(float4(blurred.xyz, fast::clamp(blurred.w * pc.effect0.w, 0.0, 1.0)), uint2(pixel));
         return;
     }
     float2 p_1 = float2(pixel) + float2(0.5);

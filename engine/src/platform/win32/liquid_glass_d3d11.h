@@ -90,8 +90,19 @@ public:
                       std::uint32_t width, std::uint32_t height);
 
 private:
+    struct ScratchSurfaces
+    {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> snapshot, blurX, blurY;
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> snapshotView, blurXView, blurYView;
+        Microsoft::WRL::ComPtr<ID3D11RenderTargetView> blurXTarget, blurYTarget;
+        DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+        std::uint32_t width = 0u;
+        std::uint32_t height = 0u;
+    };
     bool resize_scratch(DXGI_FORMAT format, std::uint32_t width,
                         std::uint32_t height);
+    void swap_scratch(ScratchSurfaces& surfaces) noexcept;
+    void trim_scratch_cache() noexcept;
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> fullscreenVertex_;
@@ -119,6 +130,12 @@ private:
     DXGI_FORMAT scratchFormat_ = DXGI_FORMAT_UNKNOWN;
     std::uint32_t scratchWidth_ = 0;
     std::uint32_t scratchHeight_ = 0;
+    std::array<ScratchSurfaces, 8> scratchCache_ {};
+    std::size_t scratchCacheInsertion_ = 0u;
+    LiquidGlassBlurParameters blurKernel_ {};
+    float cachedBlurRadius_ = -1.0f;
+    std::uint32_t cachedBlurWidth_ = 0u;
+    std::uint32_t cachedBlurHeight_ = 0u;
     int initialisationStage_ = 0;
 };
 }

@@ -235,6 +235,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_COMPOSITION_SOURCE}"
                 "${VIBRANCE_COMPOSITION_ABI_HEADER}"
                 "${VIBRANCE_COMPOSITION_PRIVATE_HEADER}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/system_backdrop_policy.h"
                 "${VIBRANCE_LIQUID_SHADER_ABI_HEADER}"
                 "${VIBRANCE_LIQUID_D3D_SOURCE}"
                 "${VIBRANCE_LIQUID_D3D_HEADER}"
@@ -473,6 +474,9 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
             DEPENDS
                 "${VIBRANCE_WIN32_INTEROP_SOURCE}"
                 "${VIBRANCE_WIN32_INTEROP_ABI_HEADER}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/playback_quality_probe.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/media/playback_quality_detection.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/media/playback_quality.h"
                 "${VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT}"
             BYPRODUCTS
                 "${VIBRANCE_WIN32_INTEROP_DIRECTORY}/vibrance_win32_interop.exp"
@@ -584,6 +588,7 @@ if(SOLOUD_FOUND AND NOT TARGET soloud)
 endif()
 
 target_link_libraries(vibrance_engine PRIVATE
+    vibrance_harfbuzz
     $<$<NOT:$<PLATFORM_ID:Darwin>>:Vulkan::Vulkan>
     ${FREETYPE_LIBRARIES}
     ${GLFW_LIBRARIES})

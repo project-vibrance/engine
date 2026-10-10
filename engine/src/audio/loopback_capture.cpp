@@ -687,6 +687,11 @@ struct AudioLoopbackCapture::Impl
             }
             if (SUCCEEDED(result))
             {
+                // A capture stream must not share the host's default playback
+                // session: its mixer volume can otherwise attenuate the input
+                // before spectrum analysis even when the source is at 100%.
+                GUID captureSession {};
+                result = CoCreateGuid(&captureSession);
                 DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK |
                     AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
                 if (processOnly)
@@ -694,13 +699,16 @@ struct AudioLoopbackCapture::Impl
                     streamFlags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
                         AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
                 }
-                result = audioClient->Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    streamFlags,
-                    0,
-                    0,
-                    mixFormat,
-                    nullptr);
+                if (SUCCEEDED(result))
+                {
+                    result = audioClient->Initialize(
+                        AUDCLNT_SHAREMODE_SHARED,
+                        streamFlags,
+                        0,
+                        0,
+                        mixFormat,
+                        &captureSession);
+                }
             }
             if (SUCCEEDED(result))
             {

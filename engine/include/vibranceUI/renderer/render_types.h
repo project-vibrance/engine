@@ -26,7 +26,8 @@ enum class DescriptorScope
     eMediaTexture,
     ePost,
     eUICache,
-    eUICachePost
+    eUICachePost,
+    eForegroundBlur
 };
 
 struct RasterPushConstants

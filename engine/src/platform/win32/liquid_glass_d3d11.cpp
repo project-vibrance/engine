@@ -91,6 +91,44 @@ struct ContextRestore
         }
     }
 };
+
+void prepare_blur_kernel(float radius, LiquidGlassBlurParameters& kernel)
+{
+    kernel = {};
+    const double sigma = std::clamp(static_cast<double>(radius) / 3.0, 0.35, 10.0);
+    const double inverseVariance = 0.5 / (sigma * sigma);
+    std::array<double, 15> weights {};
+    std::array<double, 15> offsets {};
+    double totalWeight = 1.0;
+    for (std::size_t pair = 0u; pair < weights.size(); ++pair)
+    {
+        const double firstOffset = static_cast<double>(pair * 2u + 1u);
+        const double secondOffset = firstOffset + 1.0;
+        const double firstWeight = std::exp(-firstOffset * firstOffset * inverseVariance);
+        const double secondWeight = std::exp(-secondOffset * secondOffset * inverseVariance);
+        weights[pair] = firstWeight + secondWeight;
+        offsets[pair] = firstOffset + secondWeight / std::max(weights[pair], 1e-30);
+        totalWeight += 2.0 * weights[pair];
+    }
+    // Bound the complete omitted mass, rather than each individual tap.
+    // Retaining and renormalising the remainder changes a unit-range channel
+    // by at most 1e-7 per axis, well below one UNORM8 quantisation step.
+    std::size_t count = weights.size();
+    double omittedWeight = 0.0;
+    while (count > 0u &&
+        (omittedWeight + 2.0 * weights[count - 1u]) <= totalWeight * 1e-7)
+    {
+        omittedWeight += 2.0 * weights[--count];
+    }
+    const double retainedWeight = totalWeight - omittedWeight;
+    kernel.centreWeight = static_cast<float>(1.0 / retainedWeight);
+    kernel.pairCount = static_cast<std::uint32_t>(count);
+    for (std::size_t pair = 0u; pair < count; ++pair)
+    {
+        kernel.pairs[pair][0] = static_cast<float>(offsets[pair]);
+        kernel.pairs[pair][1] = static_cast<float>(weights[pair] / retainedWeight);
+    }
+}
 }
 
 bool LiquidGlassD3D11::initialise(ID3D11Device* device,
@@ -102,10 +140,19 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
         return false;
     }
     device_ = device;
+    // A recreated constant buffer has no kernel contents, even when the next
+    // lens has the same radius and dimensions as the previous device's lens.
+    cachedBlurRadius_ = -1.0f;
+    cachedBlurWidth_ = 0u;
+    cachedBlurHeight_ = 0u;
+    ScratchSurfaces previousScratch;
+    swap_scratch(previousScratch);
+    scratchCache_ = {};
+    scratchCacheInsertion_ = 0u;
     std::vector<std::uint8_t> bytecode;
     if (!load_shader(shaderDirectory, L"liquid_glass_fullscreen.cso", bytecode) ||
         FAILED(device->CreateVertexShader(bytecode.data(), bytecode.size(),
-                                          nullptr, fullscreenVertex_.GetAddressOf())))
+                                          nullptr, fullscreenVertex_.ReleaseAndGetAddressOf())))
     {
         return false;
     }
@@ -121,7 +168,7 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
     {
         if (!load_shader(shaderDirectory, filename, bytecode) ||
             FAILED(device->CreatePixelShader(bytecode.data(), bytecode.size(),
-                                             nullptr, shader->GetAddressOf())))
+                                             nullptr, shader->ReleaseAndGetAddressOf())))
         {
             return false;
         }
@@ -134,7 +181,7 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
     sampler.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sampler.MaxLOD = D3D11_FLOAT32_MAX;
-    if (FAILED(device->CreateSamplerState(&sampler, sampler_.GetAddressOf())))
+    if (FAILED(device->CreateSamplerState(&sampler, sampler_.ReleaseAndGetAddressOf())))
     {
         return false;
     }
@@ -149,13 +196,13 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
     blend.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
     blend.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     blend.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-    if (FAILED(device->CreateBlendState(&blend, blend_.GetAddressOf())))
+    if (FAILED(device->CreateBlendState(&blend, blend_.ReleaseAndGetAddressOf())))
     {
         return false;
     }
     initialisationStage_ = 7;
     blend.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
-    if (FAILED(device->CreateBlendState(&blend, uiBlend_.GetAddressOf())))
+    if (FAILED(device->CreateBlendState(&blend, uiBlend_.ReleaseAndGetAddressOf())))
     {
         return false;
     }
@@ -166,18 +213,18 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
     rasteriser.CullMode = D3D11_CULL_NONE;
     rasteriser.DepthClipEnable = TRUE;
     if (FAILED(device->CreateRasterizerState(&rasteriser,
-                                             rasteriser_.GetAddressOf())))
+                                             rasteriser_.ReleaseAndGetAddressOf())))
     {
         return false;
     }
     initialisationStage_ = 9;
     rasteriser.ScissorEnable = TRUE;
     if (FAILED(device->CreateRasterizerState(&rasteriser,
-            clippedRasteriser_.GetAddressOf()))) return false;
+            clippedRasteriser_.ReleaseAndGetAddressOf()))) return false;
     D3D11_DEPTH_STENCIL_DESC depth {};
     depth.DepthEnable = FALSE;
     depth.StencilEnable = FALSE;
-    if (FAILED(device->CreateDepthStencilState(&depth, depthState_.GetAddressOf())))
+    if (FAILED(device->CreateDepthStencilState(&depth, depthState_.ReleaseAndGetAddressOf())))
     {
         return false;
     }
@@ -188,14 +235,14 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
     constantBuffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     constantBuffer.ByteWidth = sizeof(LiquidGlassBlurParameters);
     if (FAILED(device->CreateBuffer(&constantBuffer, nullptr,
-                                    blurParameters_.GetAddressOf())))
+                                    blurParameters_.ReleaseAndGetAddressOf())))
     {
         return false;
     }
     initialisationStage_ = 11;
     constantBuffer.ByteWidth = sizeof(LiquidGlassShaderParameters);
     if (FAILED(device->CreateBuffer(&constantBuffer, nullptr,
-                                    opticalParameters_.GetAddressOf())))
+                                    opticalParameters_.ReleaseAndGetAddressOf())))
     {
         return false;
     }
@@ -214,7 +261,7 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
     const bool ready = SUCCEEDED(device1->CreateDeviceContextState(
         contextFlags, levels, 1u, D3D11_SDK_VERSION,
         __uuidof(ID3D11Device1), nullptr,
-        contextState_.GetAddressOf()));
+        contextState_.ReleaseAndGetAddressOf()));
     if (ready) initialisationStage_ = 14;
     return ready;
 }
@@ -228,28 +275,91 @@ bool LiquidGlassD3D11::resize_scratch(DXGI_FORMAT format,
     {
         return true;
     }
-    snapshot_.Reset();
-    blurX_.Reset();
-    blurY_.Reset();
-    snapshotView_.Reset();
-    blurXView_.Reset();
-    blurYView_.Reset();
-    blurXTarget_.Reset();
-    blurYTarget_.Reset();
-    scratchFormat_ = DXGI_FORMAT_UNKNOWN;
+    for (auto& cached : scratchCache_)
+    {
+        if (cached.snapshot && cached.format == format &&
+            cached.width == width && cached.height == height)
+        {
+            swap_scratch(cached);
+            trim_scratch_cache();
+            return true;
+        }
+    }
+    ScratchSurfaces next;
     if (!make_surface(device_.Get(), format, width, height,
-                      snapshot_, snapshotView_, nullptr) ||
+                      next.snapshot, next.snapshotView, nullptr) ||
         !make_surface(device_.Get(), format, width, height,
-                      blurX_, blurXView_, &blurXTarget_) ||
+                      next.blurX, next.blurXView, &next.blurXTarget) ||
         !make_surface(device_.Get(), format, width, height,
-                      blurY_, blurYView_, &blurYTarget_))
+                      next.blurY, next.blurYView, &next.blurYTarget))
     {
         return false;
     }
-    scratchFormat_ = format;
-    scratchWidth_ = width;
-    scratchHeight_ = height;
+    next.format = format;
+    next.width = width;
+    next.height = height;
+    swap_scratch(next);
+    if (next.snapshot)
+    {
+        scratchCache_[scratchCacheInsertion_] = std::move(next);
+        scratchCacheInsertion_ = (scratchCacheInsertion_ + 1u) % scratchCache_.size();
+        trim_scratch_cache();
+    }
     return true;
+}
+
+void LiquidGlassD3D11::swap_scratch(ScratchSurfaces& surfaces) noexcept
+{
+    snapshot_.Swap(surfaces.snapshot);
+    blurX_.Swap(surfaces.blurX);
+    blurY_.Swap(surfaces.blurY);
+    snapshotView_.Swap(surfaces.snapshotView);
+    blurXView_.Swap(surfaces.blurXView);
+    blurYView_.Swap(surfaces.blurYView);
+    blurXTarget_.Swap(surfaces.blurXTarget);
+    blurYTarget_.Swap(surfaces.blurYTarget);
+    std::swap(scratchFormat_, surfaces.format);
+    std::swap(scratchWidth_, surfaces.width);
+    std::swap(scratchHeight_, surfaces.height);
+}
+
+void LiquidGlassD3D11::trim_scratch_cache() noexcept
+{
+    // Reserve at most 16 MiB for retired sets. Account for the common DWM
+    // formats exactly; sixteen bytes conservatively covers all other formats.
+    const auto bytes = [](const ScratchSurfaces& surfaces) {
+        std::uint32_t texelBytes = 16u;
+        switch (surfaces.format)
+        {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        case DXGI_FORMAT_R10G10B10A2_UNORM:
+        case DXGI_FORMAT_R11G11B10_FLOAT:
+            texelBytes = 4u;
+            break;
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_UNORM:
+            texelBytes = 8u;
+            break;
+        default:
+            break;
+        }
+        return static_cast<std::uint64_t>(surfaces.width) * surfaces.height * texelBytes * 3u;
+    };
+    std::uint64_t retainedBytes = 0u;
+    for (const auto& surfaces : scratchCache_) retainedBytes += bytes(surfaces);
+    constexpr std::uint64_t maximumRetainedBytes = 16u * 1024u * 1024u;
+    for (std::size_t age = 0u;
+        retainedBytes > maximumRetainedBytes && age < scratchCache_.size(); ++age)
+    {
+        auto& oldest = scratchCache_[(scratchCacheInsertion_ + age) % scratchCache_.size()];
+        retainedBytes -= bytes(oldest);
+        oldest = {};
+    }
 }
 
 bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
@@ -414,30 +524,45 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     viewport.MaxDepth = 1.0f;
     context->RSSetViewports(1, &viewport);
 
-    LiquidGlassBlurParameters blur {};
-    blur.texelSize[0] = 1.0f / width;
-    blur.texelSize[1] = 1.0f / height;
-    blur.blurRadius = std::clamp(region.blurRadius, 0.0f, 30.0f);
-    context->UpdateSubresource(blurParameters_.Get(), 0, nullptr, &blur, 0, 0);
-    context->PSSetConstantBuffers(0, 1, blurParameters_.GetAddressOf());
-    context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
-    ID3D11RenderTargetView* passTarget = blurXTarget_.Get();
-    context->OMSetRenderTargets(1, &passTarget, nullptr);
-    ID3D11ShaderResourceView* passInput = snapshotView_.Get();
-    context->PSSetShaderResources(0, 1, &passInput);
-    context->PSSetShader(blurHorizontal_.Get(), nullptr, 0);
-    context->Draw(3, 0);
+    const float blurRadius = std::clamp(region.blurRadius, 0.0f, 30.0f);
+    ID3D11ShaderResourceView* blurredView = snapshotView_.Get();
+    if (blurRadius > 0.0f)
+    {
+        if (cachedBlurRadius_ != blurRadius)
+        {
+            prepare_blur_kernel(blurRadius, blurKernel_);
+            cachedBlurRadius_ = blurRadius;
+            cachedBlurWidth_ = 0u;
+        }
+        if (cachedBlurWidth_ != width || cachedBlurHeight_ != height)
+        {
+            blurKernel_.texelSize[0] = 1.0f / width;
+            blurKernel_.texelSize[1] = 1.0f / height;
+            context->UpdateSubresource(blurParameters_.Get(), 0, nullptr, &blurKernel_, 0, 0);
+            cachedBlurWidth_ = width;
+            cachedBlurHeight_ = height;
+        }
+        context->PSSetConstantBuffers(0, 1, blurParameters_.GetAddressOf());
+        context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
+        ID3D11RenderTargetView* passTarget = blurXTarget_.Get();
+        context->OMSetRenderTargets(1, &passTarget, nullptr);
+        ID3D11ShaderResourceView* passInput = snapshotView_.Get();
+        context->PSSetShaderResources(0, 1, &passInput);
+        context->PSSetShader(blurHorizontal_.Get(), nullptr, 0);
+        context->Draw(3, 0);
 
-    passInput = nullptr;
-    context->PSSetShaderResources(0, 1, &passInput);
-    passTarget = blurYTarget_.Get();
-    context->OMSetRenderTargets(1, &passTarget, nullptr);
-    passInput = blurXView_.Get();
-    context->PSSetShaderResources(0, 1, &passInput);
-    context->PSSetShader(blurVertical_.Get(), nullptr, 0);
-    context->Draw(3, 0);
+        passInput = nullptr;
+        context->PSSetShaderResources(0, 1, &passInput);
+        passTarget = blurYTarget_.Get();
+        context->OMSetRenderTargets(1, &passTarget, nullptr);
+        passInput = blurXView_.Get();
+        context->PSSetShaderResources(0, 1, &passInput);
+        context->PSSetShader(blurVertical_.Get(), nullptr, 0);
+        context->Draw(3, 0);
+        blurredView = blurYView_.Get();
+    }
 
-    passInput = nullptr;
+    ID3D11ShaderResourceView* passInput = nullptr;
     context->PSSetShaderResources(0, 1, &passInput);
     context->OMSetRenderTargets(1, &target, nullptr);
     context->OMSetBlendState(blend_.Get(), blendFactor, 0xffffffffu);
@@ -520,7 +645,7 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
                                &optical, 0, 0);
     context->PSSetConstantBuffers(0, 1, opticalParameters_.GetAddressOf());
     ID3D11ShaderResourceView* sources[2] = {
-        snapshotView_.Get(), blurYView_.Get()
+        snapshotView_.Get(), blurredView
     };
     context->PSSetShaderResources(0, 2, sources);
     context->PSSetShader(optical_.Get(), nullptr, 0);

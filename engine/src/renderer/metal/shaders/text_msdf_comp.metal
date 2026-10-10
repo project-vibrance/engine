@@ -549,8 +549,35 @@ float text_edge_fade_alpha(thread const float2& samplePoint, constant Renderer2D
 }
 
 static inline __attribute__((always_inline))
+float4 sample_colour_glyph(float2 localUv, constant Renderer2DConstants& pc, texture2d<float> fontAtlas)
+{
+    if (any(localUv < float2(0.0)) || any(localUv > float2(1.0))) return float4(0.0);
+    int2 dimensions = int2(fontAtlas.get_width(), fontAtlas.get_height());
+    float2 texel = mix(pc.uvRect.xy, pc.uvRect.zw, localUv) * float2(dimensions) - float2(0.5);
+    int2 base = int2(floor(texel));
+    float2 weight = fract(texel);
+    int2 maximum = dimensions - int2(1);
+    float4 top = mix(fontAtlas.read(uint2(clamp(base, int2(0), maximum))),
+        fontAtlas.read(uint2(clamp(base + int2(1, 0), int2(0), maximum))), weight.x);
+    float4 bottom = mix(fontAtlas.read(uint2(clamp(base + int2(0, 1), int2(0), maximum))),
+        fontAtlas.read(uint2(clamp(base + int2(1, 1), int2(0), maximum))), weight.x);
+    float4 colour = mix(top, bottom, weight.y);
+    if (colour.a > 0.0001) colour.rgb /= colour.a;
+    return colour;
+}
+
+static inline __attribute__((always_inline))
 float4 shade_text_sample(thread const float2& samplePoint, thread const bool& atlasText, thread const bool& renderUnderlay, thread const bool& renderForeground, thread const bool& renderGlow, constant Renderer2DConstants& pc, texture2d<float> fontAtlas)
 {
+    if ((pc.data.y & (1u << 10)) != 0u)
+    {
+        if (!renderForeground) return float4(0.0);
+        float2 uv = (samplePoint - pc.rect.xy) / max(pc.rect.zw, float2(1.0));
+        float4 colour = sample_colour_glyph(uv, pc, fontAtlas);
+        colour.a *= pc.color0.a * pc.effect0.w * inherited_shape_mask_alpha(samplePoint, pc) * text_edge_fade_alpha(samplePoint, pc);
+        return colour;
+    }
+
     float2 uv = (samplePoint - pc.rect.xy) / fast::max(pc.rect.zw, float2(1.0));
     float fillAlpha = 0.0;
     float outlineAlpha = 0.0;

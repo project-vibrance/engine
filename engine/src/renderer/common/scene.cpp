@@ -1,4 +1,29 @@
 #include "scene_helpers.h"
+
+namespace
+{
+    bool portable_liquid_rim_animates(const entt::registry& registry, entt::entity entity)
+    {
+        const auto* liquid = registry.try_get<LiquidGlassComponent>(entity);
+        const auto* transform = registry.try_get<Transform2DComponent>(entity);
+        return liquid && liquid->material == GlassMaterial::eLiquid &&
+            liquid->sceneBackdrop && liquid->rim > 0.0f && transform &&
+            transform2_5d_flags(*transform) == 0u;
+    }
+
+    bool portable_liquid_rim_visible(const Renderer2DScene& scene,
+        entt::entity entity, double currentTimeSeconds)
+    {
+        const auto& registry = scene.registry();
+        if (!registry.valid(entity) || !portable_liquid_rim_animates(registry, entity))
+            return false;
+        const auto visual = scene.resolved_shape_visual_state(entity, currentTimeSeconds);
+        return visual && visual->opacity > 0.001f && !rect_empty(
+            expand_and_clip_rect(visual->rect, 0.0f,
+                inherited_mask_clip_rect(registry, entity)));
+    }
+}
+
 bool Renderer2DRenderPlan::empty() const
 {
     return panelBlurs.empty() && shadows.empty() && blurs.empty() && shapes.empty() && media.empty() && texts.empty() &&
@@ -8,6 +33,7 @@ bool Renderer2DRenderPlan::empty() const
 
 void Renderer2DRenderPlan::clear()
 {
+    dynamicEntities.clear();
     panelBlurs.clear();
     shadows.clear();
     blurs.clear();
@@ -33,6 +59,7 @@ void Renderer2DRenderPlan::reserve(
     std::size_t textCount,
     std::size_t modelCount)
 {
+    dynamicEntities.reserve(shapeCount + mediaCount + textCount + modelCount);
     panelBlurs.reserve(blurCount);
     shadows.reserve(shadowCount);
     blurs.reserve(blurCount);
@@ -389,6 +416,12 @@ bool Renderer2DScene::damage_pending(
             registry_.try_get<Parent2DComponent>(current);
         current = parent ? parent->parent : entt::null;
     }
+    if (portable_liquid_rim_visible(*this, entity, currentTimeSeconds))
+    {
+        // A travelling rim changes pixels even while its authored recipe and
+        // scene generation remain retained. Publish its new optical pixels.
+        return true;
+    }
     if (const Media2DComponent* media = registry_.try_get<Media2DComponent>(entity))
     {
         return media->animated && media->playing && media_visible(*media) &&
@@ -434,6 +467,17 @@ bool Renderer2DScene::requires_continuous_redraw(
         if (media.animated && media.playing && media_visible(media) &&
             is_visible(registry_, entity))
         {
+            return true;
+        }
+    }
+
+    const auto liquidView = registry_.view<const LiquidGlassComponent, const ShapeComponent>();
+    for (const entt::entity entity : liquidView)
+    {
+        if (portable_liquid_rim_visible(*this, entity, currentTimeSeconds))
+        {
+            // Optical motion follows the renderer clock. Unchanged recipes
+            // retain their scene/text generations while visible rims animate.
             return true;
         }
     }
@@ -966,6 +1010,19 @@ void Renderer2DScene::build_render_plan(
     auto mediaView = registry_.view<const Transform2DComponent, Media2DComponent>();
     auto modelView = registry_.view<const Transform2DComponent, const Model3DComponent>();
 
+    // Set playback ownership before hierarchy classification memoises it.
+    // A clipped or transparent player retains the same cache policy as its
+    // visible frames, and entities with several drawable components agree.
+    mediaView.each([&](entt::entity entity, const Transform2DComponent&, Media2DComponent& media) {
+        update_media_playback(media, currentTimeSeconds);
+        if (media.animated && media.playing)
+        {
+            Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
+            cache.mode = Renderer2DCacheMode::eDynamic;
+            cache.restoreStaticWhenIdle = false;
+        }
+    });
+
     auto update_entity_cache_state = [&](entt::entity entity, Renderer2DCacheComponent& cache) {
         if (update_cache_activity(cache, currentTimeSeconds) ||
             should_refresh_idle_cache(cache, currentTimeSeconds))
@@ -988,7 +1045,7 @@ void Renderer2DScene::build_render_plan(
             registry_,
             entity,
             make_model_viewport(registry_, entity, transform, model));
-        const glm::vec4 clipRect = make_model_clip_rect(registry_, entity, viewport, model);
+        const glm::vec4 clipRect = make_model_clip_rect(registry_, entity, viewport, model, currentTimeSeconds);
         if (model.visible && is_visible(registry_, entity) && !rect_empty(intersect_rect(viewport, clipRect)))
         {
             hasVisibleHostedModels = true;
@@ -1005,13 +1062,22 @@ void Renderer2DScene::build_render_plan(
         textView.size_hint(),
         modelView.size_hint());
 
-    std::unordered_map<uint32_t, EntityDynamicState> dynamicMemo;
+    // Animation classification visits the hierarchy once. Keep its memo
+    // contiguous rather than allocating a hash node for each visited entity.
+    entt::dense_map<uint32_t, EntityDynamicState> dynamicMemo;
     dynamicMemo.reserve(shapeView.size_hint() + textView.size_hint() + mediaView.size_hint() + modelView.size_hint());
     std::vector<entt::entity> dynamicStack;
     dynamicStack.reserve(8);
 
     shapeView.each([&](entt::entity entity, const Transform2DComponent& transform, const ShapeComponent& shape)
     {
+        const bool dynamicBatch = is_entity_dynamic_by_hierarchy(
+            registry_, entity, currentTimeSeconds, dynamicMemo, dynamicStack) ||
+            portable_liquid_rim_animates(registry_, entity);
+        if (dynamicBatch)
+        {
+            plan.dynamicEntities.push_back(entity_key(entity));
+        }
         if (!is_visible(registry_, entity))
         {
             return;
@@ -1019,12 +1085,6 @@ void Renderer2DScene::build_render_plan(
 
         Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
         const RenderLayer2DKey layer = render_layer_key(registry_, entity);
-        const bool dynamicBatch = is_entity_dynamic_by_hierarchy(
-            registry_,
-            entity,
-            currentTimeSeconds,
-            dynamicMemo,
-            dynamicStack);
         const bool cachedBatch = !dynamicBatch && cache.mode != Renderer2DCacheMode::eDynamic && plan.rebuildCachedLayer;
 
         if (!dynamicBatch && !cachedBatch)
@@ -1051,6 +1111,7 @@ void Renderer2DScene::build_render_plan(
 
         Renderer2DBatch batch = {};
         batch.entity = entity;
+        batch.foregroundBlurGroup = foreground_blur_group_for(registry_, entity);
         batch.stackLayer = layer.stackLayer;
         batch.stackOrder = layer.stackOrder;
         batch.layer = layer.layer;
@@ -1063,7 +1124,7 @@ void Renderer2DScene::build_render_plan(
                 entity,
                 make_bounds(transform, shape.size)),
             displayTransition);
-        batch.clipRect = inherited_mask_clip_rect(registry_, entity);
+        batch.clipRect = inherited_mask_clip_rect(registry_, entity, currentTimeSeconds);
         batch.uvRect = shape.primitive == Renderer2DPrimitive::eCircularProgress ?
             circular_progress_parameters(shape) :
             (shape.primitive == Renderer2DPrimitive::eLiquidBridge ?
@@ -1200,7 +1261,8 @@ void Renderer2DScene::build_render_plan(
         const BlurComponent* blur = registry_.try_get<BlurComponent>(entity);
         const auto* liquid = registry_.try_get<LiquidGlassComponent>(entity);
         const bool sceneLiquid = liquid && liquid->material == GlassMaterial::eLiquid &&
-            liquid->sceneBackdrop && transformFlags == 0u;
+            liquid->sceneBackdrop && transformFlags == 0u &&
+            alpha_visible(style.opacity * visualOpacity);
         // Display-transition blur is a foreground primitive effect handled by
         // the shape pipeline above. Only explicit backdrop blur belongs here;
         // otherwise transparent layout roots create temporary rectangular panes.
@@ -1278,7 +1340,7 @@ void Renderer2DScene::build_render_plan(
                     eRenderer2DStyleBlurFollowsFillAlpha);
                 blurBatch.effect0.y = blurCornerRadius;
                 blurBatch.effect0.z = 1.0f;
-                blurBatch.effect0.w = visualOpacity;
+                blurBatch.effect0.w = style.opacity * visualOpacity;
                 blurBatch.uvRect = shape_sdf_parameters(shape);
                 if ((blurBatch.flags & eRenderer2DStyleBlurInheritedShapeMask) == 0u)
                     blurBatch.effect1.z = 0.0f;
@@ -1337,7 +1399,12 @@ void Renderer2DScene::build_render_plan(
 
     mediaView.each([&](entt::entity entity, const Transform2DComponent& transform, Media2DComponent& media)
     {
-        update_media_playback(media, currentTimeSeconds);
+        const bool dynamicBatch = is_entity_dynamic_by_hierarchy(
+            registry_, entity, currentTimeSeconds, dynamicMemo, dynamicStack);
+        if (dynamicBatch)
+        {
+            plan.dynamicEntities.push_back(entity_key(entity));
+        }
         if (!media_visible(media) || !is_visible(registry_, entity))
         {
             return;
@@ -1365,19 +1432,8 @@ void Renderer2DScene::build_render_plan(
         }
 
         Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
-        if (media.animated && media.playing)
-        {
-            cache.mode = Renderer2DCacheMode::eDynamic;
-            cache.restoreStaticWhenIdle = false;
-        }
 
         const RenderLayer2DKey layer = render_layer_key(registry_, entity);
-        const bool dynamicBatch = is_entity_dynamic_by_hierarchy(
-            registry_,
-            entity,
-            currentTimeSeconds,
-            dynamicMemo,
-            dynamicStack);
         const bool cachedBatch = !dynamicBatch && cache.mode != Renderer2DCacheMode::eDynamic && plan.rebuildCachedLayer;
 
         if (!dynamicBatch && !cachedBatch)
@@ -1392,6 +1448,7 @@ void Renderer2DScene::build_render_plan(
 
         Renderer2DBatch batch = {};
         batch.entity = entity;
+        batch.foregroundBlurGroup = foreground_blur_group_for(registry_, entity);
         batch.stackLayer = layer.stackLayer;
         batch.stackOrder = layer.stackOrder;
         batch.layer = layer.layer;
@@ -1404,7 +1461,7 @@ void Renderer2DScene::build_render_plan(
         batch.mediaId = media.mediaId;
         batch.frameIndex = media.currentFrame;
         batch.rect = rect;
-        batch.clipRect = inherited_mask_clip_rect(registry_, entity);
+        batch.clipRect = inherited_mask_clip_rect(registry_, entity, currentTimeSeconds);
         batch.uvRect = media_uv_rect_from_component(media, rect);
         batch.color0 = media.tint;
         batch.color1 = media.tintFill == Renderer2DFill::eSolid ? media.tint : media.tintEnd;
@@ -1478,7 +1535,7 @@ void Renderer2DScene::build_render_plan(
         {
             batch.flags |= eRenderer2DStyleBlur;
         }
-        if (const ShapeMaskClip mask = inherited_shape_mask_clip(registry_, entity);
+        if (const ShapeMaskClip mask = inherited_shape_mask_clip(registry_, entity, currentTimeSeconds);
             mask.enabled &&
             media.primitive != Renderer2DPrimitive::eBarVisualiser &&
             (batch.flags & eRenderer2DStyleTransform2_5D) == 0u &&
@@ -1494,6 +1551,12 @@ void Renderer2DScene::build_render_plan(
 
     textView.each([&](entt::entity entity, const Transform2DComponent& transform, const TextComponent& text)
     {
+        const bool dynamicBatch = is_entity_dynamic_by_hierarchy(
+            registry_, entity, currentTimeSeconds, dynamicMemo, dynamicStack);
+        if (dynamicBatch)
+        {
+            plan.dynamicEntities.push_back(entity_key(entity));
+        }
         if (!is_visible(registry_, entity))
         {
             return;
@@ -1508,12 +1571,6 @@ void Renderer2DScene::build_render_plan(
 
         Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
         const RenderLayer2DKey layer = render_layer_key(registry_, entity);
-        const bool dynamicBatch = is_entity_dynamic_by_hierarchy(
-            registry_,
-            entity,
-            currentTimeSeconds,
-            dynamicMemo,
-            dynamicStack);
         const bool cachedBatch = !dynamicBatch && cache.mode != Renderer2DCacheMode::eDynamic && plan.rebuildCachedLayer;
 
         if (!dynamicBatch && !cachedBatch)
@@ -1592,13 +1649,14 @@ void Renderer2DScene::build_render_plan(
         auto make_text_batch = [&]() {
             Renderer2DBatch batch = {};
             batch.entity = entity;
+            batch.foregroundBlurGroup = foreground_blur_group_for(registry_, entity);
             batch.stackLayer = layer.stackLayer;
             batch.stackOrder = layer.stackOrder;
             batch.layer = layer.layer;
             batch.order = layer.order;
             batch.alwaysOnTop = layer.alwaysOnTop;
             batch.primitive = Renderer2DPrimitive::eGlyphRun;
-            batch.clipRect = inherited_mask_clip_rect(registry_, entity);
+            batch.clipRect = inherited_mask_clip_rect(registry_, entity, currentTimeSeconds);
             batch.color0 = style.color0;
             batch.color1 = style.color1;
             batch.color2 = style.effectColor;
@@ -1623,7 +1681,7 @@ void Renderer2DScene::build_render_plan(
             {
                 batch.flags |= eRenderer2DStyleBlur;
             }
-            if (const ShapeMaskClip mask = inherited_shape_mask_clip(registry_, entity);
+            if (const ShapeMaskClip mask = inherited_shape_mask_clip(registry_, entity, currentTimeSeconds);
                 mask.enabled &&
                 (batch.flags & (eRenderer2DStyleOutline | eRenderer2DStyleShadow | eRenderer2DStyleGlow | eRenderer2DStyleBlur)) == 0u)
             {
@@ -1634,6 +1692,8 @@ void Renderer2DScene::build_render_plan(
             return batch;
         };
 
+        // Clip, mask and style are shared by every glyph in this entity.
+        const Renderer2DBatch baseBatch = make_text_batch();
         if (!text.glyphs.empty())
         {
             for (const MSDFGlyph& glyph : text.glyphs)
@@ -1643,7 +1703,7 @@ void Renderer2DScene::build_render_plan(
                     continue;
                 }
 
-                Renderer2DBatch batch = make_text_batch();
+                Renderer2DBatch batch = baseBatch;
                 batch.rect = {
                     textBounds.x + glyph.position.x * transform.scale.x,
                     textBounds.y + glyph.position.y * transform.scale.y,
@@ -1658,13 +1718,23 @@ void Renderer2DScene::build_render_plan(
                     displayTransition);
                 batch.uvRect = { glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y };
                 batch.flags |= eRenderer2DStyleAtlasText;
+                if (glyph.coloured)
+                    batch.flags |= eRenderer2DStyleColourGlyph;
                 apply_text_edge_fade(batch);
+                // Preserve the complete foreground, blur, shadow and glow
+                // envelope at viewport edges, then omit wholly clipped glyphs
+                // before later sorting, replay and damage passes visit them.
+                if (rect_empty(expand_and_clip_rect(batch.rect,
+                    dispatch_padding(batch, DispatchBoundsMode::eText), batch.clipRect)))
+                {
+                    continue;
+                }
                 targetTexts.push_back(batch);
             }
             return;
         }
 
-        Renderer2DBatch batch = make_text_batch();
+        Renderer2DBatch batch = baseBatch;
         batch.rect = apply_display_transition_scale(
             renderer2d_apply_interactive_visual_rect(
                 registry_,
@@ -1673,11 +1743,18 @@ void Renderer2DScene::build_render_plan(
             displayTransition);
         batch.uvRect = { style.gradientStart.x, style.gradientStart.y, style.gradientEnd.x, style.gradientEnd.y };
         apply_text_edge_fade(batch);
+        if (rect_empty(expand_and_clip_rect(batch.rect,
+            dispatch_padding(batch, DispatchBoundsMode::eText), batch.clipRect)))
+        {
+            return;
+        }
         targetTexts.push_back(batch);
     });
 
     modelView.each([&](entt::entity entity, const Transform2DComponent& transform, const Model3DComponent& model)
     {
+        // Hosted models always render into the dynamic surface.
+        plan.dynamicEntities.push_back(entity_key(entity));
         if (!model.visible || !is_visible(registry_, entity))
         {
             return;
@@ -1687,7 +1764,7 @@ void Renderer2DScene::build_render_plan(
             registry_,
             entity,
             make_model_viewport(registry_, entity, transform, model));
-        const glm::vec4 clipRect = make_model_clip_rect(registry_, entity, viewport, model);
+        const glm::vec4 clipRect = make_model_clip_rect(registry_, entity, viewport, model, currentTimeSeconds);
         if (rect_empty(viewport) || rect_empty(clipRect))
         {
             return;
@@ -1704,6 +1781,7 @@ void Renderer2DScene::build_render_plan(
 
         Renderer3DModelBatch batch = {};
         batch.entity = entity;
+        batch.foregroundBlurGroup = foreground_blur_group_for(registry_, entity);
         batch.modelId = model.modelId;
         batch.firstTriangle = model.firstTriangle;
         batch.triangleCount = model.triangleCount;
@@ -1729,6 +1807,10 @@ void Renderer2DScene::build_render_plan(
         plan.models.push_back(batch);
     });
 
+    std::sort(plan.dynamicEntities.begin(), plan.dynamicEntities.end());
+    plan.dynamicEntities.erase(
+        std::unique(plan.dynamicEntities.begin(), plan.dynamicEntities.end()),
+        plan.dynamicEntities.end());
     sort_batches(plan.panelBlurs);
     sort_batches(plan.shadows);
     sort_batches(plan.blurs);
@@ -1742,4 +1824,3 @@ void Renderer2DScene::build_render_plan(
     sort_batches(plan.cachedMedia);
     sort_batches(plan.cachedTexts);
 }
-

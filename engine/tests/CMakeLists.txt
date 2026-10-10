@@ -17,8 +17,53 @@ function(vibrance_add_engine_test test_name source_file)
         add_dependencies(${test_name} vibrance_engine_test_runtime)
     endif()
 
-    add_test(NAME ${test_name} COMMAND ${test_name})
+    add_test(NAME ${test_name} COMMAND ${test_name} ${ARGN})
 endfunction()
+
+set(VIBRANCE_EMOJI_TEST_FONT "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/AppleColorEmoji.ttf"
+    CACHE FILEPATH "Colour emoji font used by the shaping and bitmap regression test")
+vibrance_add_engine_test(vibrance_emoji_font_tests emoji_font_tests.cpp "${VIBRANCE_EMOJI_TEST_FONT}")
+target_link_libraries(vibrance_emoji_font_tests PRIVATE vibrance_harfbuzz)
+target_include_directories(vibrance_emoji_font_tests PRIVATE "${STB_INCLUDE_DIR}")
+target_sources(vibrance_emoji_font_tests PRIVATE ../src/renderer/common/text_direction.cpp)
+set_tests_properties(vibrance_emoji_font_tests PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME vibrance_emoji_renderer_tests COMMAND vibrance_emoji_font_tests
+    "${VIBRANCE_EMOJI_TEST_FONT}" --renderer)
+set_tests_properties(vibrance_emoji_renderer_tests PROPERTIES SKIP_RETURN_CODE 77)
+
+vibrance_add_engine_test(vibrance_system_backdrop_policy_tests system_backdrop_policy_tests.cpp)
+vibrance_add_engine_test(vibrance_playback_quality_tests playback_quality_tests.cpp)
+if(VIBRANCE_WIN32_INTEROP_AVAILABLE)
+    # Exercise the native cached UIA worker with a controlled playback window,
+    # without relying on installed players or changing the user's audio.
+    set(_vibrance_quality_test "${CMAKE_CURRENT_BINARY_DIR}/vibrance_playback_quality_win32_tests.exe")
+    add_custom_command(OUTPUT "${_vibrance_quality_test}"
+        COMMAND "${PROJECT_SOURCE_DIR}/scripts/win32/build_native_test.bat"
+            "${VIBRANCE_VCVARSALL}" "${VIBRANCE_WIN32_INTEROP_ARCH}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/playback_quality_win32_tests.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+            "${_vibrance_quality_test}" "${CMAKE_CURRENT_BINARY_DIR}/quality-probe-obj"
+        DEPENDS playback_quality_win32_tests.cpp
+            ../src/platform/win32/playback_quality_probe.h
+            ../src/media/playback_quality_detection.h
+            ../include/vibranceUI/media/playback_quality.h
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_native_test.bat"
+        VERBATIM)
+    add_custom_target(vibrance_playback_quality_win32_fixture ALL DEPENDS "${_vibrance_quality_test}")
+    add_test(NAME vibrance_playback_quality_win32_tests COMMAND "${_vibrance_quality_test}")
+endif()
+vibrance_add_engine_test(vibrance_animated_control_masks_tests animated_control_masks_tests.cpp)
+vibrance_add_engine_test(vibrance_horizontal_scroll_fade_tests horizontal_scroll_fade_tests.cpp)
+vibrance_add_engine_test(vibrance_digit_spacing_tests digit_spacing_tests.cpp
+    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/Inter.ttc"
+    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/NotoSans-Variable.ttf")
+set_tests_properties(vibrance_digit_spacing_tests PROPERTIES SKIP_RETURN_CODE 77)
+vibrance_add_engine_test(vibrance_text_baseline_tests text_baseline_tests.cpp
+    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/Inter.ttc"
+    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/NotoSans-Variable.ttf"
+    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/svg/static/icons/player/dolby_atmos.svg"
+    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/svg/static/icons/player/lossless.svg")
+set_tests_properties(vibrance_text_baseline_tests PROPERTIES SKIP_RETURN_CODE 77)
 
 vibrance_add_engine_test(
     vibrance_countdown_timer_tests
@@ -29,6 +74,16 @@ vibrance_add_engine_test(
 vibrance_add_engine_test(
     vibrance_simple_ui_builder_tests
     simple_ui_builder_tests.cpp)
+vibrance_add_engine_test(
+    vibrance_dynamic_coverage_tests
+    dynamic_coverage_tests.cpp)
+vibrance_add_engine_test(
+    vibrance_entity_bounds_tests
+    entity_bounds_tests.cpp)
+
+vibrance_add_engine_test(
+    vibrance_liquid_output_bounds_tests
+    liquid_output_bounds_tests.cpp)
 vibrance_add_engine_test(
     vibrance_control_interaction_tests
     control_interaction_tests.cpp)
@@ -59,6 +114,15 @@ vibrance_add_engine_test(
 vibrance_add_engine_test(
     vibrance_media_presentation_tests
     media_presentation_tests.cpp)
+
+# Timestamp arithmetic is independent of the renderer and GPU. Keep this target
+# standalone so counter wrap and clock support checks need no engine runtime.
+add_executable(
+    vibrance_timestamp_diagnostics_tests
+    timestamp_diagnostics_tests.cpp)
+add_test(
+    NAME vibrance_timestamp_diagnostics_tests
+    COMMAND vibrance_timestamp_diagnostics_tests)
 
 # Lottie parsing is intentionally renderer-independent. Compile the private
 # importer directly so its generated SVG frames can be checked without a GPU.
