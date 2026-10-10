@@ -14,6 +14,16 @@
 class Renderer3D;
 class StorageImage;
 
+// The frame slot owns and flushes this mapped, 128-byte-per-glyph storage buffer.
+// Recording falls back to ordinary text dispatches when it is unavailable or full.
+struct Renderer2DTextBatchResources
+{
+    vk::DescriptorSet descriptorSet {};
+    std::byte* glyphConstants = nullptr;
+    uint32_t capacity = 0u;
+    uint32_t writtenGlyphs = 0u;
+};
+
 class ShapePipeline
 {
 public:
@@ -199,6 +209,10 @@ public:
         uint32_t cacheRebuilds = 0u;
         uint32_t cachedBatchReplays = 0u;
         uint32_t dynamicBatchReplays = 0u;
+        uint32_t textGlyphs = 0u;
+        uint32_t textDispatches = 0u;
+        uint32_t textBatchDispatches = 0u;
+        uint32_t layeredBarriers = 0u;
     };
 
     // Records the full 2D pass order: blur, shadow, shape, media, text, hosted 3D, composite
@@ -220,7 +234,8 @@ public:
         vk::Framebuffer hosted3DFramebuffer = nullptr,
         bool hosted3DUsesResolveAttachment = false,
         bool externalBackdropAvailable = false,
-        StorageImage* foregroundBlurRenderTarget = nullptr
+        StorageImage* foregroundBlurRenderTarget = nullptr,
+        Renderer2DTextBatchResources* textBatchResources = nullptr
     ) const;
 
     void record_composite(

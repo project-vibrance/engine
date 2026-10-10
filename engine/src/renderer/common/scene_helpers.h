@@ -642,6 +642,13 @@ namespace
         DispatchBoundsMode mode,
         bool coverWorkgroups = true)
     {
+        if (mode == DispatchBoundsMode::eTextForeground &&
+            batch.textForegroundRect.z > 0.0f && batch.textForegroundRect.w > 0.0f)
+        {
+            return make_dispatch_bounds(swapchain,
+                expand_and_clip_rect(batch.textForegroundRect, 0.0f, batch.clipRect),
+                0.0f, coverWorkgroups);
+        }
         return make_dispatch_bounds(
             swapchain,
             expand_and_clip_rect(batch.rect, dispatch_padding(batch, mode), batch.clipRect),
@@ -763,6 +770,61 @@ namespace
                 swapchain, expand_and_clip_rect(model.viewportRect, 0.0f, model.clipRect), 2.0f));
         }
         return align_dispatch_bounds_to_workgroups(swapchain, coverage);
+    }
+
+    DispatchBounds collect_rendered_bounds(
+        const auto& swapchain,
+        const Renderer2DRenderPlan& dynamicPlan,
+        const Renderer2DRenderPlan& cachedPlan,
+        const Renderer2DBatch* foregroundBlur,
+        std::vector<std::pair<entt::entity, glm::uvec4>>& entityBounds)
+    {
+        entityBounds.clear();
+        DispatchBounds visibleBounds {};
+        const auto include_bounds = [&](entt::entity entity, const DispatchBounds& bounds) {
+            visibleBounds = union_dispatch_bounds(visibleBounds, bounds);
+            if (entity != entt::null && !bounds.empty())
+            {
+                entityBounds.emplace_back(entity,
+                    glm::uvec4 { bounds.x, bounds.y, bounds.width, bounds.height });
+            }
+        };
+        const auto include_batches = [&](const std::vector<Renderer2DBatch>& batches,
+            DispatchBoundsMode mode, bool blurBounds = false) {
+            for (const Renderer2DBatch& batch : batches)
+            {
+                include_bounds(batch.entity, blurBounds ?
+                    make_blur_dispatch_bounds(swapchain, batch) :
+                    make_dispatch_bounds(swapchain, batch, mode));
+            }
+        };
+        include_batches(dynamicPlan.panelBlurs, DispatchBoundsMode::eExact, true);
+        include_batches(dynamicPlan.shadows, DispatchBoundsMode::eShadow);
+        include_batches(dynamicPlan.blurs, DispatchBoundsMode::eExact, true);
+        include_batches(dynamicPlan.shapes, DispatchBoundsMode::eShape);
+        include_batches(dynamicPlan.media, DispatchBoundsMode::eExact);
+        include_batches(dynamicPlan.texts, DispatchBoundsMode::eText);
+        for (const Renderer3DModelBatch& model : dynamicPlan.models)
+        {
+            include_bounds(model.entity, make_dispatch_bounds(swapchain,
+                expand_and_clip_rect(model.viewportRect, 0.0f, model.clipRect), 2.0f));
+        }
+        // The retained plan contains static paint between cache rebuilds.
+        // Include it when tracking complete content and per-slot damage.
+        include_batches(cachedPlan.cachedPanelBlurs, DispatchBoundsMode::eExact, true);
+        include_batches(cachedPlan.cachedShadows, DispatchBoundsMode::eShadow);
+        include_batches(cachedPlan.cachedBlurs, DispatchBoundsMode::eExact, true);
+        include_batches(cachedPlan.cachedShapes, DispatchBoundsMode::eShape);
+        include_batches(cachedPlan.cachedMedia, DispatchBoundsMode::eExact);
+        include_batches(cachedPlan.cachedTexts, DispatchBoundsMode::eText);
+        // Group filtering writes beyond its children's sharp envelopes. Keep
+        // that halo in both content bounds and damage after resetting the list.
+        if (foregroundBlur)
+        {
+            include_bounds(foregroundBlur->entity,
+                make_blur_dispatch_bounds(swapchain, *foregroundBlur));
+        }
+        return visibleBounds;
     }
 
     DispatchBounds expand_cached_replay_bounds(

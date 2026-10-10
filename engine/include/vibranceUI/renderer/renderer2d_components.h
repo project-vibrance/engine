@@ -1319,6 +1319,11 @@ struct MSDFGlyph
     glm::vec2 uvMax { 1.0f };
     float advance = 0.0f;
     bool coloured = false;
+    // Trusted empty padding around the source bitmap, in scalar atlas pixels.
+    // Only the engine's monochrome SDF bake sets this; custom glyphs retain 0.
+    float sdfPadding = 0.0f;
+    glm::vec2 sdfAtlasSize { 0.0f };
+    glm::vec4 sdfUvRect { 0.0f };
 };
 
 struct MSDFGlyphAtlasComponent
@@ -1507,6 +1512,9 @@ struct Renderer2DBatch
     uint32_t backdropCapColour = 0u; // RGB8, used only by optical blur batches.
     uint32_t mediaId = 0;
     uint32_t frameIndex = 0;
+    // Empty by default: only validated generated SDF glyphs narrow foreground
+    // writes. Underlays, replay dependencies and damage keep their full bounds.
+    glm::vec4 textForegroundRect { 0.0f };
 };
 
 struct Renderer2DShapeVisualState

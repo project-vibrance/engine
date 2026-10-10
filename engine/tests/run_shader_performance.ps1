@@ -1,14 +1,15 @@
 param(
     [Parameter(Mandatory = $true)] [string] $BaselineSpirv,
     [Parameter(Mandatory = $true)] [string] $CandidateSpirv,
-    [ValidateSet('blur', 'shape', 'text', 'text-batch', 'liquid-cycle', 'foreground-group')] [string] $Shader = 'blur',
+    [ValidateSet('blur', 'shape', 'text', 'text-batch', 'text-crop', 'render-order', 'liquid-cycle', 'foreground-group')] [string] $Shader = 'blur',
     [string] $Compiler = 'clang++',
     [switch] $Validation,
     [switch] $EquivalenceOnly,
     [switch] $BuildOnly,
     [string] $FreeTypeIncludeDirectory,
     [string] $FreeTypeLibrary,
-    [string] $FontPath
+    [string] $FontPath,
+    [string] $ShapeSpirv
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,9 +25,9 @@ $taskCompileArguments = @(
     (Join-Path $PSScriptRoot 'blur_shader_performance.cpp'),
     (Join-Path $env:VULKAN_SDK 'Lib/vulkan-1.lib'), '-o', $taskExecutable
 )
-if ($FreeTypeIncludeDirectory -or $FreeTypeLibrary -or $FontPath) {
-    if ($Shader -notin @('text', 'text-batch') -or -not $FreeTypeIncludeDirectory -or -not $FreeTypeLibrary -or -not $FontPath) {
-        throw 'FreeType font fixtures require -Shader text or text-batch, -FreeTypeIncludeDirectory, -FreeTypeLibrary and -FontPath.'
+if ($Shader -in @('text-crop', 'render-order') -or $FreeTypeIncludeDirectory -or $FreeTypeLibrary -or $FontPath) {
+    if ($Shader -notin @('text', 'text-batch', 'text-crop', 'render-order') -or -not $FreeTypeIncludeDirectory -or -not $FreeTypeLibrary -or -not $FontPath) {
+        throw 'FreeType font fixtures require -Shader text, text-batch, text-crop or render-order, -FreeTypeIncludeDirectory, -FreeTypeLibrary and -FontPath.'
     }
     $taskCompileArguments += @(
         '-DVIBRANCE_TEXT_FREETYPE=1',
@@ -43,6 +44,10 @@ $taskRunArguments = @(
     (Resolve-Path -LiteralPath $CandidateSpirv).Path
 )
 if ($Shader -ne 'blur') { $taskRunArguments += $Shader }
+if ($Shader -eq 'render-order') {
+    if (-not $ShapeSpirv) { throw 'Mixed rendering fixtures require -ShapeSpirv.' }
+    $taskRunArguments += (Resolve-Path -LiteralPath $ShapeSpirv).Path
+}
 $taskPreviousValidation = $env:VIBRANCE_SHADER_HARNESS_VALIDATION
 $taskPreviousEquivalenceOnly = $env:VIBRANCE_SHADER_HARNESS_EQUIVALENCE_ONLY
 $taskPreviousFont = $env:VIBRANCE_SHADER_HARNESS_FONT

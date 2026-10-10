@@ -1,4 +1,5 @@
 #include "../src/renderer/common/scene_helpers.h"
+#include "../src/renderer/common/entity_bounds.h"
 
 #include <iostream>
 
@@ -194,6 +195,49 @@ int main()
         ungroupedShape->foregroundBlurGroup == entt::null,
         "unrelated shapes must not be assigned to a foreground blur group");
 
+    Renderer2DRenderPlan groupContent;
+    auto sharpChild = shape({ 100.0f, 100.0f, 32.0f, 24.0f }, 1);
+    sharpChild.entity = foregroundChild;
+    groupContent.shapes.push_back(sharpChild);
+    Renderer2DRenderPlan retainedChrome;
+    auto fixedChrome = shape({ 400.0f, 100.0f, 16.0f, 16.0f }, 2);
+    fixedChrome.entity = unrelatedShape;
+    retainedChrome.cachedShapes.push_back(fixedChrome);
+    auto groupOutput = sharpChild;
+    groupOutput.entity = foregroundRoot;
+    groupOutput.effect0.x = 8.0f;
+    std::vector<vibrance::renderer::EntityBounds> groupBounds {
+        { foregroundRoot, { 800u, 600u, 100u, 100u } } };
+    const auto groupVisible = collect_rendered_bounds(surface, groupContent,
+        retainedChrome, &groupOutput, groupBounds);
+    vibrance::renderer::coalesce_entity_bounds(groupBounds);
+    passed &= expect(same_bounds(groupVisible, { 92u, 92u, 324u, 40u }) &&
+        groupBounds.size() == 3u,
+        "foreground blur halos and retained chrome must survive rebuilding current content bounds without stale entries");
+
+    const auto previousGroupBounds = groupBounds;
+    groupOutput.effect0.x = 2.0f;
+    collect_rendered_bounds(surface, groupContent, retainedChrome, &groupOutput, groupBounds);
+    vibrance::renderer::coalesce_entity_bounds(groupBounds);
+    glm::uvec4 groupDamage { 0u };
+    vibrance::renderer::collect_entity_damage(groupBounds, previousGroupBounds,
+        [&](const vibrance::renderer::EntityBounds& entry) {
+            groupDamage = vibrance::renderer::union_entity_rect(groupDamage, entry.second);
+        }, [](entt::entity) { return false; });
+    passed &= expect(groupDamage == glm::uvec4(92u, 92u, 48u, 40u),
+        "changing only a foreground group's radius must damage its complete old halo while children and chrome remain unchanged");
+
+    const auto lastGroupBounds = groupBounds;
+    collect_rendered_bounds(surface, groupContent, retainedChrome, nullptr, groupBounds);
+    vibrance::renderer::coalesce_entity_bounds(groupBounds);
+    groupDamage = glm::uvec4(0u);
+    vibrance::renderer::collect_entity_damage(groupBounds, lastGroupBounds,
+        [&](const vibrance::renderer::EntityBounds& entry) {
+            groupDamage = vibrance::renderer::union_entity_rect(groupDamage, entry.second);
+        }, [](entt::entity) { return false; });
+    passed &= expect(groupDamage == glm::uvec4(98u, 98u, 40u, 32u) && groupBounds.size() == 2u,
+        "finishing group blur must clear its final halo without repainting unchanged sharp content");
+
     Renderer2DRenderPlan dynamicGlass;
     dynamicGlass.blurs.push_back(clippedLens);
     Renderer2DRenderPlan haloOverlays;
@@ -345,6 +389,64 @@ int main()
         passed &= expect(glowEdge.texts.size() == 1u &&
             glowEdge.dynamicEntities == visible.dynamicEntities,
             "a clipped glyph whose glow reaches the viewport must retain paint and stable ownership");
+    }
+    {
+        Renderer2DScene glyphScene;
+        const auto label = glyphScene.create_text("A", { 200.0f, 180.0f }, 18.0f);
+        auto& registry = glyphScene.registry();
+        auto& text = registry.get<TextComponent>(label);
+        text.msdfPixelRange = 24.0f;
+        MSDFGlyph glyph;
+        glyph.size = { 24.0f, 27.0f };
+        glyph.uvMin = { 0.125f, 0.25f };
+        glyph.uvMax = { 0.375f, 0.5f };
+        glyph.sdfPadding = 24.0f;
+        glyph.sdfAtlasSize = { 96.0f, 108.0f };
+        glyph.sdfUvRect = { glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y };
+        text.glyphs = { glyph };
+        const auto batchFor = [&] {
+            const auto glyphPlan = glyphScene.build_render_plan(0.0, 0u);
+            return glyphPlan.cachedTexts.front();
+        };
+        const auto cropped = batchFor();
+        const auto foreground = make_dispatch_bounds(surface, cropped,
+            DispatchBoundsMode::eTextForeground, false);
+        const auto full = make_dispatch_bounds(surface, cropped, DispatchBoundsMode::eText, false);
+        passed &= expect(!rect_empty(cropped.textForegroundRect) &&
+            foreground.width < full.width && foreground.height < full.height,
+            "generated SDF padding must reduce foreground dispatch while retaining full replay and damage bounds");
+
+        text.glyphs.front().uvMin.x += 0.01f;
+        passed &= expect(rect_empty(batchFor().textForegroundRect),
+            "direct UV edits must invalidate trusted SDF padding automatically");
+        text.glyphs = { glyph };
+        text.glyphs.front().coloured = true;
+        passed &= expect(rect_empty(batchFor().textForegroundRect),
+            "colour glyphs must retain their complete bitmap sampling bounds");
+        text.glyphs = { glyph };
+        text.glyphs.front().sdfPadding = 0.0f;
+        passed &= expect(rect_empty(batchFor().textForegroundRect),
+            "custom glyphs without generated padding metadata must keep the original bounds");
+
+        text.glyphs = { glyph };
+        auto& style = registry.get<TextStyleComponent>(label);
+        style.blurRadius = 4.0f;
+        passed &= expect(rect_empty(batchFor().textForegroundRect),
+            "foreground filtering must keep all source samples and its original effect envelope");
+        style.blurRadius = 0.0f;
+        style.fontWeightExpansion = 7.0f;
+        text.msdfPixelRange = 1.0f;
+        passed &= expect(rect_empty(batchFor().textForegroundRect),
+            "a public range or heavy weight that saturates the outer SDF must fall back to full drawing");
+        style.fontWeightExpansion = 0.0f;
+        text.msdfPixelRange = 24.0f;
+        style.shadowColor.a = 1.0f;
+        style.shadowBlur = 12.0f;
+        const auto shadowed = batchFor();
+        passed &= expect(!rect_empty(shadowed.textForegroundRect) &&
+            make_dispatch_bounds(surface, shadowed, DispatchBoundsMode::eTextUnderlay, false).width >
+                make_dispatch_bounds(surface, shadowed, DispatchBoundsMode::eTextForeground, false).width,
+            "cropping the sharp foreground must preserve a separate shadow underlay's complete footprint");
     }
     return passed ? 0 : 1;
 }

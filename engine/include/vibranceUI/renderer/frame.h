@@ -136,6 +136,10 @@ class Frame
     bool uiCacheImagesReady = false;
 
 private:
+    void prepare_text_batch_resources();
+    StorageBuffer textBatchBuffer;
+    Renderer2DTextBatchResources textBatchResources;
+    bool textBatchAllocationAttempted = false;
     vk::QueryPool gpuTimestampQueryPool;
     uint32_t gpuTimestampValidBits = 0u;
     double gpuTimestampPeriodNanoseconds = 0.0;

@@ -115,6 +115,12 @@ vibrance_add_engine_test(
     vibrance_media_presentation_tests
     media_presentation_tests.cpp)
 
+# Text dependency planning needs neither a GPU nor the engine runtime.
+add_executable(vibrance_text_batch_tests text_batch_tests.cpp)
+add_test(NAME vibrance_text_batch_tests COMMAND vibrance_text_batch_tests)
+add_executable(vibrance_render_op_order_tests render_op_order_tests.cpp)
+add_test(NAME vibrance_render_op_order_tests COMMAND vibrance_render_op_order_tests)
+
 # Timestamp arithmetic is independent of the renderer and GPU. Keep this target
 # standalone so counter wrap and clock support checks need no engine runtime.
 add_executable(

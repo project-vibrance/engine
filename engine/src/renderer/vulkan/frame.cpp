@@ -7,6 +7,7 @@
 #include <vibranceUI/renderer/renderer3d.h>
 #include "timestamp_diagnostics.h"
 #include <array>
+#include <cstddef>
 #include <vector>
 
 namespace
@@ -191,6 +192,61 @@ Frame::Frame(
 	update_frame_descriptor_sets(*this);
 }
 
+void Frame::prepare_text_batch_resources()
+{
+    if (textBatchAllocationAttempted || scene2D.registry().view<TextComponent>().empty())
+        return;
+    const auto pipeline = pipelines.find(PipelineType::eTextMSDFBatch);
+    const auto descriptor = descriptorSets.find(DescriptorScope::eTextBatch);
+    if (pipeline == pipelines.end() || !pipeline->second ||
+        descriptor == descriptorSets.end() || !descriptor->second)
+        return;
+    textBatchAllocationAttempted = true;
+
+    // Reuse each slot only after its existing fence completes. Bound this
+    // persistent upload to 512 KiB; larger scenes keep the serial fallback.
+    constexpr uint32_t capacity = 4096u;
+    static_assert(sizeof(Renderer2DPushConstants) == 128u);
+    VkBufferCreateInfo bufferInfo { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bufferInfo.size = capacity * sizeof(Renderer2DPushConstants);
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo allocationInfo {};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VmaAllocationInfo allocated {};
+    const VkResult result = vmaCreateBuffer(allocator, &bufferInfo, &allocationInfo,
+        &buffer, &allocation, &allocated);
+    if (result != VK_SUCCESS || !allocated.pMappedData)
+    {
+        if (buffer) vmaDestroyBuffer(allocator, buffer, allocation);
+        Logger::fetch_logger()->vulkan("Text batching could not allocate its upload; retaining serial text drawing.");
+        return;
+    }
+    textBatchBuffer.buffer = buffer;
+    textBatchBuffer.allocation = allocation;
+    textBatchBuffer.descriptor.buffer = buffer;
+    textBatchBuffer.descriptor.offset = 0u;
+    textBatchBuffer.descriptor.range = bufferInfo.size;
+    vmaSetAllocationName(allocator, allocation, "Text batch constants");
+    vmaDeletionQueue.push_back([buffer, allocation](VmaAllocator owner) {
+        vmaDestroyBuffer(owner, buffer, allocation);
+    });
+    vk::WriteDescriptorSet write {};
+    write.dstSet = descriptor->second;
+    write.dstBinding = 0u;
+    write.descriptorCount = 1u;
+    write.descriptorType = vk::DescriptorType::eStorageBuffer;
+    write.pBufferInfo = &textBatchBuffer.descriptor;
+    logicalDevice.updateDescriptorSets(1u, &write, 0u, nullptr);
+    textBatchResources.descriptorSet = descriptor->second;
+    textBatchResources.glyphConstants = static_cast<std::byte*>(allocated.pMappedData);
+    textBatchResources.capacity = capacity;
+}
+
 void Frame::record_command_buffer(
 	uint32_t imageIndex,
 	double currentTimeSeconds,
@@ -208,6 +264,7 @@ void Frame::record_command_buffer(
 	gpuTimestampsRecorded = false;
 	const bool recordGpuTimestamps = gpuTimestampQueryPool && gpuTimestampSampleEnabled;
 	Logger* logger = Logger::fetch_logger();
+	prepare_text_batch_resources();
 	Swapchain renderTarget;
 	renderTarget.extent = renderExtent;
 
@@ -344,7 +401,18 @@ void Frame::record_command_buffer(
 		hosted3DFramebuffer,
 		hosted3DSamples != vk::SampleCountFlagBits::e1,
 		externalBackdropAvailable,
-		foregroundBlurSurface);
+		foregroundBlurSurface,
+		&textBatchResources);
+	if (textBatchResources.writtenGlyphs > 0u)
+	{
+		// VMA aligns this range for non-coherent memory; coherent allocations need
+		// no flush. Queue submission makes these completed host writes available.
+		const VkResult flushResult = vmaFlushAllocation(allocator,
+			textBatchBuffer.allocation, 0u,
+			textBatchResources.writtenGlyphs * sizeof(Renderer2DPushConstants));
+		if (flushResult != VK_SUCCESS)
+			logger->vulkan("Failed to flush text batch constants.");
+	}
 	if (recordGpuTimestamps)
 	{
 		commandBuffer.writeTimestamp(
@@ -799,6 +867,9 @@ void Frame::free_resources()
 		vmaDeletionQueue.back()(allocator);
 		vmaDeletionQueue.pop_back();
 	}
+	textBatchBuffer = {};
+	textBatchResources = {};
+	textBatchAllocationAttempted = false;
 
 	delete_storage_image(depthBuffer);
 	delete_storage_image(colorBuffer);

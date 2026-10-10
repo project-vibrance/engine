@@ -1,4 +1,5 @@
 #include "scene_helpers.h"
+#include "text_foreground_bounds.h"
 
 namespace
 {
@@ -1721,6 +1722,20 @@ void Renderer2DScene::build_render_plan(
                 if (glyph.coloured)
                     batch.flags |= eRenderer2DStyleColourGlyph;
                 apply_text_edge_fade(batch);
+                if (glyph.sdfPadding > 0.0f && !glyph.coloured &&
+                    (batch.flags & eRenderer2DStyleBlur) == 0u &&
+                    batch.uvRect == glyph.sdfUvRect)
+                {
+                    const auto foreground = vibrance::renderer::sdf_foreground_bounds(
+                        { batch.rect.x, batch.rect.y, batch.rect.z, batch.rect.w },
+                        { glyph.sdfAtlasSize.x, glyph.sdfAtlasSize.y },
+                        glyph.sdfPadding, batch.effect0.x,
+                        unpack_text_weight_expansion(batch.packedData),
+                        (batch.flags & eRenderer2DStyleOutline) != 0u ? batch.effect0.y : 0.0f);
+                    if (foreground)
+                        batch.textForegroundRect = { (*foreground)[0], (*foreground)[1],
+                            (*foreground)[2], (*foreground)[3] };
+                }
                 // Preserve the complete foreground, blur, shadow and glow
                 // envelope at viewport edges, then omit wholly clipped glyphs
                 // before later sorting, replay and damage passes visit them.

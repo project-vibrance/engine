@@ -37,7 +37,11 @@ layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout (set = 0, binding = 1, rgba8) uniform image2D colorBuffer;
 layout (set = 1, binding = 3, rgba8) readonly uniform image2D fontAtlas;
 
+#ifdef VIBRANCE_TEXT_BATCH
+struct Renderer2DConstants {
+#else
 layout (push_constant) uniform Renderer2DConstants {
+#endif
     vec4 rect;
     vec4 uvRect;
     vec4 color0;
@@ -46,7 +50,18 @@ layout (push_constant) uniform Renderer2DConstants {
     vec4 effect0;
     vec4 effect1;
     uvec4 data;
+#ifdef VIBRANCE_TEXT_BATCH
+};
+layout (set = 2, binding = 0, std430) readonly buffer TextGlyphConstants {
+    Renderer2DConstants glyphs[];
+} textGlyphs;
+layout (push_constant) uniform TextBatchDispatch {
+    uvec4 data;
+} textBatch;
+Renderer2DConstants pc;
+#else
 } pc;
+#endif
 
 // Atlas geometry stays fixed across every coverage sample in this invocation.
 ivec2 atlasDimensions;
@@ -562,6 +577,9 @@ vec4 resolve_blurred_text(
 }
 
 void main() {
+#ifdef VIBRANCE_TEXT_BATCH
+    pc = textGlyphs.glyphs[textBatch.data.x + gl_GlobalInvocationID.z];
+#endif
     ivec2 localPixel = ivec2(gl_GlobalInvocationID.xy);
     ivec2 exactExtent = dispatch_extent();
     if (localPixel.x >= exactExtent.x || localPixel.y >= exactExtent.y) {

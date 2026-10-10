@@ -110,11 +110,29 @@ int main(int argc, char** argv)
         auto& engine = *host.engine();
         auto& atlas = engine.renderer2d_font_atlas();
         expect(atlas.loaded(), "Strict mixed text and emoji preload must create a usable GPU atlas");
+        const auto verifySdfMetadata = [&](const Renderer2DTextLayout& layout) {
+            expect(!layout.glyphs.empty(), "SDF metadata regression needs visible ordinary glyphs");
+            for (const auto& glyph : layout.glyphs)
+            {
+                expect(!glyph.coloured && glyph.sdfPadding == 24.0f &&
+                    glyph.sdfAtlasSize.x > 48.0f && glyph.sdfAtlasSize.y > 48.0f &&
+                    glyph.sdfUvRect == glm::vec4(glyph.uvMin.x, glyph.uvMin.y, glyph.uvMax.x, glyph.uvMax.y),
+                    "Generated SDF layout must retain its unscaled padding, source dimensions and UV provenance");
+            }
+        };
+        verifySdfMetadata(atlas.layout_text("AMW", 18.0f));
+        TextLayout2DOptions ordinaryFlow;
+        ordinaryFlow.maximumWidth = 60.0f;
+        ordinaryFlow.wrapMode = TextWrapMode2D::eCharacter;
+        verifySdfMetadata(atlas.layout_text("AMW", 18.0f, ordinaryFlow));
         for (const auto& sequence : sequences)
         {
             auto layout = atlas.layout_text(sequence, 18.0f);
             expect(layout.glyphs.size() == 1 && layout.glyphs.front().coloured,
                 "Renderer layout must emit one coloured glyph for each emoji cluster");
+            expect(layout.glyphs.size() == 1 && layout.glyphs.front().sdfPadding == 0.0f &&
+                layout.glyphs.front().sdfAtlasSize == glm::vec2(0.0f),
+                "Colour bitmap glyphs must retain complete sampling bounds without SDF padding metadata");
             expect(ui_supported_notification_text(atlas, sequence, 18.0f) == sequence,
                 "Notification filtering must preserve emoji selectors and joiners");
             TextLayout2DOptions flow;

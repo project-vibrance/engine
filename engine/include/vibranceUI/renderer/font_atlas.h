@@ -177,6 +177,8 @@ private:
         bool valid = false;
         bool drawable = false;
         bool coloured = false;
+        float sdfPadding = 0.0f;
+        glm::vec2 sdfAtlasSize { 0.0f };
     };
 
     const GlyphRecord* glyph_for(uint32_t codepoint) const;

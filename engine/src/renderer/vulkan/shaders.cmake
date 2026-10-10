@@ -34,6 +34,19 @@ foreach(SHADER_SOURCE IN LISTS ENGINE_SHADER_SOURCES)
     list(APPEND EMBEDDED_SHADER_BINARIES "${SHADER_BINARY}")
     string(APPEND EMBEDDED_SHADER_MANIFEST_CONTENT "${SHADER_NAME}|${SHADER_BINARY}\n")
 endforeach()
+# Reuse the complete text shader, including colour glyphs, for disjoint glyph
+# batches. Only the source of its 128-byte constants changes.
+set(TEXT_BATCH_SHADER_BINARY "${EMBEDDED_SHADER_DIR}/spirv/text_msdf_batch.comp.spv")
+add_custom_command(
+    OUTPUT "${TEXT_BATCH_SHADER_BINARY}"
+    COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.3 -O
+        -DVIBRANCE_TEXT_BATCH=1 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_msdf.comp"
+        -o "${TEXT_BATCH_SHADER_BINARY}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_msdf.comp"
+    COMMENT "Compiling batched text to SPIR-V"
+    VERBATIM)
+list(APPEND EMBEDDED_SHADER_BINARIES "${TEXT_BATCH_SHADER_BINARY}")
+string(APPEND EMBEDDED_SHADER_MANIFEST_CONTENT "text_msdf_batch.comp|${TEXT_BATCH_SHADER_BINARY}\n")
 file(CONFIGURE
     OUTPUT "${EMBEDDED_SHADER_MANIFEST}"
     CONTENT "${EMBEDDED_SHADER_MANIFEST_CONTENT}")

@@ -2,6 +2,9 @@
 #include <vibranceUI/renderer/renderer3d.h>
 #include "../common/scene_helpers.h"
 #include "../common/entity_bounds.h"
+#include "text_batch.h"
+#include "render_op_order.h"
+#include <cstring>
 namespace {
     void insert_compute_memory_barrier(vk::CommandBuffer commandBuffer)
     {
@@ -773,8 +776,13 @@ void Renderer2D::record(
     vk::Framebuffer hosted3DFramebuffer,
     bool hosted3DUsesResolveAttachment,
     bool externalBackdropAvailable,
-    StorageImage* foregroundBlurRenderTarget) const
+    StorageImage* foregroundBlurRenderTarget,
+    Renderer2DTextBatchResources* textBatchResources) const
 {
+    if (textBatchResources != nullptr)
+    {
+        textBatchResources->writtenGlyphs = 0u;
+    }
     scene.build_render_plan(renderPlanCache, currentTimeSeconds, cachedLayerGeneration);
     recordDiagnostics = {};
 
@@ -906,6 +914,7 @@ void Renderer2D::record(
                 return;
             }
             insert_compute_memory_barrier(commandBuffer);
+            ++recordDiagnostics.layeredBarriers;
             pendingWrites.clear();
         };
 
@@ -935,9 +944,191 @@ void Renderer2D::record(
             return true;
         };
 
-        uint32_t modelOrdinal = 0;
-        for (const Renderer2DRenderOp& op : ops)
+        std::vector<DispatchBounds> textBounds;
+        std::vector<DispatchBounds> textWriteBounds;
+        std::vector<const Renderer2DBatch*> textBatches;
+        vibrance::vulkan::TextBatchPlan textBatchPlan;
+        const auto batchPipeline = pipelines.find(PipelineType::eTextMSDFBatch);
+        const auto batchLayout = pipelineLayouts.find(PipelineType::eTextMSDFBatch);
+        const bool canBatchText = frameScope == DescriptorScope::eFrame &&
+            textBatchResources != nullptr && textBatchResources->descriptorSet &&
+            textBatchResources->glyphConstants != nullptr &&
+            batchPipeline != pipelines.end() && batchPipeline->second &&
+            batchLayout != pipelineLayouts.end() && batchLayout->second;
+
+        if (canBatchText && textBatchResources->writtenGlyphs < textBatchResources->capacity &&
+            textBatchResources->capacity - textBatchResources->writtenGlyphs >= 2u)
         {
+            // Multi-pass filters and models retain their position: they may
+            // read neighbouring scene pixels. Ordinary primitives access only
+            // their destination rectangle and stable source textures.
+            const auto simple_mode = [](const Renderer2DRenderOp& op) -> std::optional<DispatchBoundsMode> {
+                DispatchBoundsMode mode;
+                switch (op.type)
+                {
+                case Renderer2DRenderOpType::eShape: mode = DispatchBoundsMode::eShape; break;
+                case Renderer2DRenderOpType::eShadow: mode = DispatchBoundsMode::eShadow; break;
+                case Renderer2DRenderOpType::eMedia:
+                    // Filtered media can use shared horizontal scratch. Keep
+                    // it outside reordering even if its output is disjoint.
+                    if (op.batch && op.batch->effect0.z >= 0.5f) return std::nullopt;
+                    mode = DispatchBoundsMode::eExact;
+                    break;
+                case Renderer2DRenderOpType::eText: mode = DispatchBoundsMode::eTextForeground; break;
+                default: return std::nullopt;
+                }
+                return mode;
+            };
+            std::vector<Renderer2DRenderOp> orderedOps;
+            std::vector<DispatchBounds> simpleBounds;
+            std::vector<uint8_t> foregroundText;
+            vibrance::vulkan::SimpleRenderOrder simpleOrder;
+            orderedOps.reserve(ops.size());
+            for (std::size_t first = 0u; first < ops.size();)
+            {
+                simpleBounds.clear();
+                foregroundText.clear();
+                uint32_t foregroundCount = 0u;
+                std::size_t end = first;
+                for (; end < ops.size() && end - first < vibrance::vulkan::kTextBatchPlanningGlyphLimit; ++end)
+                {
+                    if (!simple_mode(ops[end])) break;
+                    foregroundText.push_back(ops[end].type == Renderer2DRenderOpType::eText ? 1u : 0u);
+                    foregroundCount += foregroundText.back();
+                }
+                if (end == first)
+                {
+                    orderedOps.push_back(ops[first++]);
+                    continue;
+                }
+                // Pure text already has its bounded dependency planner, and
+                // chunks without two glyphs cannot benefit from batching.
+                if (foregroundCount < 2u || foregroundCount == end - first)
+                {
+                    orderedOps.insert(orderedOps.end(), ops.begin() + first, ops.begin() + end);
+                    first = end;
+                    continue;
+                }
+                // Calculate geometry only for chunks that can combine text
+                // across ordinary primitives. The serial path needs no copy.
+                for (std::size_t index = first; index < end; ++index)
+                {
+                    const auto& op = ops[index];
+                    simpleBounds.push_back(op.batch ? make_dispatch_bounds(swapchain, *op.batch,
+                        *simple_mode(op), op.type != Renderer2DRenderOpType::eText) : DispatchBounds {});
+                }
+                vibrance::vulkan::build_simple_render_order(
+                    std::span<const DispatchBounds>(simpleBounds),
+                    std::span<const uint8_t>(foregroundText), simpleOrder);
+                for (const uint32_t index : simpleOrder.indices)
+                    orderedOps.push_back(ops[first + index]);
+                first = end;
+            }
+            ops.swap(orderedOps);
+        }
+
+        uint32_t modelOrdinal = 0;
+        for (std::size_t opIndex = 0u; opIndex < ops.size(); ++opIndex)
+        {
+            const Renderer2DRenderOp& op = ops[opIndex];
+            if (canBatchText && op.type == Renderer2DRenderOpType::eText &&
+                textBatchResources->writtenGlyphs < textBatchResources->capacity &&
+                textBatchResources->capacity - textBatchResources->writtenGlyphs >= 2u)
+            {
+                textBounds.clear();
+                textWriteBounds.clear();
+                textBatches.clear();
+                std::size_t runEnd = opIndex;
+                for (; runEnd < ops.size() &&
+                    runEnd - opIndex < vibrance::vulkan::kTextBatchPlanningGlyphLimit &&
+                    ops[runEnd].type == Renderer2DRenderOpType::eText; ++runEnd)
+                {
+                    if (ops[runEnd].batch == nullptr)
+                    {
+                        continue;
+                    }
+                    const auto& batch = *ops[runEnd].batch;
+                    textBounds.push_back(make_dispatch_bounds(
+                        swapchain, batch, DispatchBoundsMode::eTextForeground, false));
+                    textWriteBounds.push_back(make_dispatch_bounds(
+                        swapchain, batch, DispatchBoundsMode::eTextForeground));
+                    textBatches.push_back(&batch);
+                }
+                vibrance::vulkan::build_text_batch_plan(
+                    std::span<const DispatchBounds>(textBounds), textBatchPlan,
+                    std::span<const DispatchBounds>(pendingWrites));
+                for (const auto& group : textBatchPlan.groups)
+                {
+                    recordDiagnostics.textGlyphs += group.count;
+                    const bool hasCapacity =
+                        textBatchResources->writtenGlyphs <= textBatchResources->capacity &&
+                        group.count <= textBatchResources->capacity - textBatchResources->writtenGlyphs;
+                    if (group.count == 1u || !hasCapacity)
+                    {
+                        for (uint32_t offset = 0u; offset < group.count; ++offset)
+                        {
+                            const uint32_t index = textBatchPlan.glyphIndices[group.first + offset];
+                            if (prepare_simple_write(textBounds[index]))
+                            {
+                                include_dynamic_surface_bounds(textWriteBounds[index]);
+                                textPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets,
+                                    pipelineLayouts, *textBatches[index], frameScope, textPostScope,
+                                    kTextPassForeground, false);
+                                ++recordDiagnostics.textDispatches;
+                            }
+                        }
+                        continue;
+                    }
+
+                    // All actual writes within this group are disjoint. Check
+                    // its complete set against previously dispatched writes
+                    // before recording any member, then retain the existing
+                    // overlap-aware dependencies across waves and other ops.
+                    const bool overlapsPendingWrite = std::any_of(
+                        textBatchPlan.glyphIndices.begin() + group.first,
+                        textBatchPlan.glyphIndices.begin() + group.first + group.count,
+                        [&](uint32_t index) {
+                            return std::any_of(pendingWrites.begin(), pendingWrites.end(),
+                                [&](const DispatchBounds& pending) {
+                                    return dispatch_bounds_overlap(pending, textBounds[index]);
+                                });
+                        });
+                    if (overlapsPendingWrite)
+                    {
+                        flush_pending_writes();
+                    }
+                    const uint32_t firstGlyph = textBatchResources->writtenGlyphs;
+                    for (uint32_t offset = 0u; offset < group.count; ++offset)
+                    {
+                        const uint32_t index = textBatchPlan.glyphIndices[group.first + offset];
+                        const auto& bounds = textBounds[index];
+                        Renderer2DPushConstants constants = make_push_constants(
+                            *textBatches[index], kTextPassForeground, bounds.x, bounds.y);
+                        constants.data.x = pack_dispatch_extent(bounds.width, bounds.height);
+                        std::memcpy(textBatchResources->glyphConstants +
+                            static_cast<std::size_t>(firstGlyph + offset) * sizeof(constants),
+                            &constants, sizeof(constants));
+                        pendingWrites.push_back(textBounds[index]);
+                        include_dynamic_surface_bounds(textWriteBounds[index]);
+                    }
+                    textBatchResources->writtenGlyphs += group.count;
+                    commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, batchPipeline->second);
+                    bind_frame_set(commandBuffer, PipelineType::eTextMSDFBatch, descriptorSets,
+                        pipelineLayouts, frameScope);
+                    bind_post_set(commandBuffer, PipelineType::eTextMSDFBatch, descriptorSets,
+                        pipelineLayouts, textPostScope);
+                    commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, batchLayout->second,
+                        2u, 1u, &textBatchResources->descriptorSet, 0u, nullptr);
+                    const glm::uvec4 dispatchConstants { firstGlyph, 0u, 0u, 0u };
+                    commandBuffer.pushConstants(batchLayout->second, vk::ShaderStageFlagBits::eCompute,
+                        0u, sizeof(dispatchConstants), &dispatchConstants);
+                    commandBuffer.dispatch(workgroup_count(group.width), workgroup_count(group.height), group.count);
+                    ++recordDiagnostics.textDispatches;
+                    ++recordDiagnostics.textBatchDispatches;
+                }
+                opIndex = runEnd - 1u;
+                continue;
+            }
             if (op.type == Renderer2DRenderOpType::eModel3D)
             {
                 flush_pending_writes();
@@ -1124,15 +1315,18 @@ void Renderer2D::record(
             case Renderer2DRenderOpType::eText:
             {
                 const DispatchBounds bounds = make_dispatch_bounds(
-                    swapchain, *op.batch, DispatchBoundsMode::eTextForeground);
+                    swapchain, *op.batch, DispatchBoundsMode::eTextForeground, false);
                 if (prepare_simple_write(bounds))
                 {
                     if (frameScope == DescriptorScope::eFrame)
                     {
-                        include_dynamic_surface_bounds(bounds);
+                        include_dynamic_surface_bounds(make_dispatch_bounds(
+                            swapchain, *op.batch, DispatchBoundsMode::eTextForeground));
                     }
                     textPipeline.record_batch(commandBuffer, swapchain, pipelines, descriptorSets, pipelineLayouts,
                         *op.batch, frameScope, textPostScope, kTextPassForeground, false);
+                    ++recordDiagnostics.textGlyphs;
+                    ++recordDiagnostics.textDispatches;
                 }
                 break;
             }
@@ -1169,40 +1363,35 @@ void Renderer2D::record(
                 .push_back(batch);
         }
     };
-    std::vector<Renderer2DBatch> regularPanelBlurs, regularShadows, regularBlurs;
-    std::vector<Renderer2DBatch> regularShapes, regularMedia, regularTexts;
-    std::vector<Renderer2DBatch> groupedPanelBlurs, groupedShadows, groupedBlurs;
-    std::vector<Renderer2DBatch> groupedShapes, groupedMedia, groupedTexts;
-    std::vector<Renderer3DModelBatch> regularModels, groupedModels;
-    split_foreground_group(renderPlanCache.panelBlurs, regularPanelBlurs, groupedPanelBlurs);
-    split_foreground_group(renderPlanCache.shadows, regularShadows, groupedShadows);
-    split_foreground_group(renderPlanCache.blurs, regularBlurs, groupedBlurs);
-    split_foreground_group(renderPlanCache.shapes, regularShapes, groupedShapes);
-    split_foreground_group(renderPlanCache.media, regularMedia, groupedMedia);
-    split_foreground_group(renderPlanCache.texts, regularTexts, groupedTexts);
-    regularModels.reserve(renderPlanCache.models.size());
-    groupedModels.reserve(renderPlanCache.models.size());
-    for (const Renderer3DModelBatch& model : renderPlanCache.models)
+    Renderer2DRenderPlan regularForegroundPlan {};
+    Renderer2DRenderPlan groupedForegroundPlan {};
+    if (foregroundBlurRoot != entt::null)
     {
-        (foregroundBlurRoot != entt::null &&
-            model.foregroundBlurGroup == foregroundBlurRoot ? groupedModels : regularModels)
-            .push_back(model);
+        split_foreground_group(renderPlanCache.panelBlurs, regularForegroundPlan.panelBlurs, groupedForegroundPlan.panelBlurs);
+        split_foreground_group(renderPlanCache.shadows, regularForegroundPlan.shadows, groupedForegroundPlan.shadows);
+        split_foreground_group(renderPlanCache.blurs, regularForegroundPlan.blurs, groupedForegroundPlan.blurs);
+        split_foreground_group(renderPlanCache.shapes, regularForegroundPlan.shapes, groupedForegroundPlan.shapes);
+        split_foreground_group(renderPlanCache.media, regularForegroundPlan.media, groupedForegroundPlan.media);
+        split_foreground_group(renderPlanCache.texts, regularForegroundPlan.texts, groupedForegroundPlan.texts);
+        regularForegroundPlan.models.reserve(renderPlanCache.models.size());
+        groupedForegroundPlan.models.reserve(renderPlanCache.models.size());
+        for (const Renderer3DModelBatch& model : renderPlanCache.models)
+        {
+            (model.foregroundBlurGroup == foregroundBlurRoot ?
+                groupedForegroundPlan.models : regularForegroundPlan.models).push_back(model);
+        }
     }
+    // Ordinary scrolling and optical frames use the retained plan directly.
+    // Partitioning only needs storage while a foreground group is active.
+    const Renderer2DRenderPlan& regularPlan = foregroundBlurRoot == entt::null ?
+        renderPlanCache : regularForegroundPlan;
 
     Renderer2DBatch foregroundBlurBatch {};
     DispatchBounds foregroundBlurContentBounds {};
     if (foregroundBlurRoot != entt::null)
     {
-        Renderer2DRenderPlan foregroundPlan {};
-        foregroundPlan.panelBlurs = groupedPanelBlurs;
-        foregroundPlan.shadows = groupedShadows;
-        foregroundPlan.blurs = groupedBlurs;
-        foregroundPlan.shapes = groupedShapes;
-        foregroundPlan.media = groupedMedia;
-        foregroundPlan.texts = groupedTexts;
-        foregroundPlan.models = groupedModels;
         foregroundBlurContentBounds =
-            make_dynamic_coverage_bounds(swapchain, foregroundPlan);
+            make_dynamic_coverage_bounds(swapchain, groupedForegroundPlan);
         if (!foregroundBlurContentBounds.empty())
         {
             foregroundBlurBatch.entity = foregroundBlurRoot;
@@ -1234,8 +1423,10 @@ void Renderer2D::record(
                 { sourceClearBounds.x, sourceClearBounds.y,
                     sourceClearBounds.width, sourceClearBounds.height });
             record_layered_ops(
-                groupedPanelBlurs, groupedShadows, groupedBlurs, groupedShapes,
-                groupedMedia, groupedTexts, groupedModels,
+                groupedForegroundPlan.panelBlurs, groupedForegroundPlan.shadows,
+                groupedForegroundPlan.blurs, groupedForegroundPlan.shapes,
+                groupedForegroundPlan.media, groupedForegroundPlan.texts,
+                groupedForegroundPlan.models,
                 DescriptorScope::eForegroundBlur, DescriptorScope::ePost,
                 DescriptorScope::ePost, false, false);
         }
@@ -1390,12 +1581,12 @@ void Renderer2D::record(
     if (hasDynamicLayer)
     {
         // Cached chrome above moving content is replayed so static cache does not flatten z-order
-        std::vector<Renderer2DBatch> panelBlurs = regularPanelBlurs;
-        std::vector<Renderer2DBatch> shadows = regularShadows;
-        std::vector<Renderer2DBatch> blurs = regularBlurs;
-        std::vector<Renderer2DBatch> shapes = regularShapes;
-        std::vector<Renderer2DBatch> media = regularMedia;
-        std::vector<Renderer2DBatch> texts = regularTexts;
+        std::vector<Renderer2DBatch> panelBlurs = regularPlan.panelBlurs;
+        std::vector<Renderer2DBatch> shadows = regularPlan.shadows;
+        std::vector<Renderer2DBatch> blurs = regularPlan.blurs;
+        std::vector<Renderer2DBatch> shapes = regularPlan.shapes;
+        std::vector<Renderer2DBatch> media = regularPlan.media;
+        std::vector<Renderer2DBatch> texts = regularPlan.texts;
 
         append_cached_overlays(
             panelBlurs,
@@ -1429,7 +1620,7 @@ void Renderer2D::record(
             shapes,
             media,
             texts,
-            regularModels,
+            regularPlan.models,
             DescriptorScope::eFrame,
             DescriptorScope::ePost,
             DescriptorScope::ePost,
@@ -1439,13 +1630,13 @@ void Renderer2D::record(
     else
     {
         record_layered_ops(
-            regularPanelBlurs,
-            regularShadows,
-            regularBlurs,
-            regularShapes,
-            regularMedia,
-            regularTexts,
-            regularModels,
+            regularPlan.panelBlurs,
+            regularPlan.shadows,
+            regularPlan.blurs,
+            regularPlan.shapes,
+            regularPlan.media,
+            regularPlan.texts,
+            regularPlan.models,
             DescriptorScope::eFrame,
             DescriptorScope::ePost,
             DescriptorScope::ePost,
@@ -1461,13 +1652,12 @@ void Renderer2D::record(
         blurPipeline.record_foreground_group(
             commandBuffer, swapchain, pipelines, descriptorSets,
             pipelineLayouts, foregroundBlurBatch);
-        currentEntityBounds.emplace_back(
-            foregroundBlurRoot,
-            glm::uvec4 {
-                blurBounds.x, blurBounds.y, blurBounds.width, blurBounds.height });
     }
 
-    DispatchBounds visibleBounds = {};
+    const DispatchBounds visibleBounds = collect_rendered_bounds(
+        swapchain, renderPlanCache, cachedLayerPlanCache,
+        foregroundBlurContentBounds.empty() ? nullptr : &foregroundBlurBatch,
+        currentEntityBounds);
     auto include_bounds = [&](DispatchBounds& target, const DispatchBounds& bounds) {
         if (bounds.empty())
         {
@@ -1488,105 +1678,12 @@ void Renderer2D::record(
             bounds.y + bounds.height);
         target = { left, top, right - left, bottom - top };
     };
-    auto include_batches = [&](DispatchBounds& target,
-                               const std::vector<Renderer2DBatch>& batches,
-                               DispatchBoundsMode mode) {
-        for (const Renderer2DBatch& batch : batches)
-        {
-            include_bounds(target, make_dispatch_bounds(swapchain, batch, mode));
-        }
-    };
-    auto include_blurs = [&](DispatchBounds& target,
-                             const std::vector<Renderer2DBatch>& batches) {
-        for (const Renderer2DBatch& batch : batches)
-        {
-            include_bounds(target, make_blur_dispatch_bounds(swapchain, batch));
-        }
-    };
-    auto include_plan = [&](DispatchBounds& target, const Renderer2DRenderPlan& plan) {
-        include_blurs(target, plan.panelBlurs);
-        include_batches(target, plan.shadows, DispatchBoundsMode::eShadow);
-        include_blurs(target, plan.blurs);
-        include_batches(target, plan.shapes, DispatchBoundsMode::eShape);
-        include_batches(target, plan.media, DispatchBoundsMode::eExact);
-        include_batches(target, plan.texts, DispatchBoundsMode::eText);
-        for (const Renderer3DModelBatch& model : plan.models)
-        {
-            include_bounds(target, make_dispatch_bounds(
-                swapchain,
-                intersect_rect(model.viewportRect, model.clipRect),
-                2.0f));
-        }
-    };
-
-    include_plan(visibleBounds, renderPlanCache);
-    // renderPlanCache only carries static batches on a cache rebuild. The
-    // retained plan is the authoritative visible static layer on later frames
-    // and must remain part of the content bounds. Otherwise a newly acquired
-    // Composition buffer can be cleared and populated with only the dynamic
-    // right-hand page, leaving fixed navigation/search chrome transparent.
-    include_blurs(visibleBounds, cachedLayerPlanCache.cachedPanelBlurs);
-    include_batches(visibleBounds, cachedLayerPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
-    include_blurs(visibleBounds, cachedLayerPlanCache.cachedBlurs);
-    include_batches(visibleBounds, cachedLayerPlanCache.cachedShapes, DispatchBoundsMode::eShape);
-    include_batches(visibleBounds, cachedLayerPlanCache.cachedMedia, DispatchBoundsMode::eExact);
-    include_batches(visibleBounds, cachedLayerPlanCache.cachedTexts, DispatchBoundsMode::eText);
     contentBounds = {
         visibleBounds.x,
         visibleBounds.y,
         visibleBounds.width,
         visibleBounds.height
     };
-    currentEntityBounds.clear();
-    auto include_entity_bounds = [&](entt::entity entity, const DispatchBounds& bounds) {
-        if (entity == entt::null || bounds.empty())
-        {
-            return;
-        }
-        currentEntityBounds.emplace_back(
-            entity, glm::uvec4 { bounds.x, bounds.y, bounds.width, bounds.height });
-    };
-    auto record_batch_bounds = [&](const std::vector<Renderer2DBatch>& batches,
-                                   DispatchBoundsMode mode) {
-        for (const Renderer2DBatch& batch : batches)
-        {
-            include_entity_bounds(
-                batch.entity,
-                make_dispatch_bounds(swapchain, batch, mode));
-        }
-    };
-    auto record_blur_bounds = [&](const std::vector<Renderer2DBatch>& batches) {
-        for (const Renderer2DBatch& batch : batches)
-        {
-            include_entity_bounds(
-                batch.entity,
-                make_blur_dispatch_bounds(swapchain, batch));
-        }
-    };
-    auto record_plan_bounds = [&](const Renderer2DRenderPlan& plan) {
-        record_blur_bounds(plan.panelBlurs);
-        record_batch_bounds(plan.shadows, DispatchBoundsMode::eShadow);
-        record_blur_bounds(plan.blurs);
-        record_batch_bounds(plan.shapes, DispatchBoundsMode::eShape);
-        record_batch_bounds(plan.media, DispatchBoundsMode::eExact);
-        record_batch_bounds(plan.texts, DispatchBoundsMode::eText);
-        for (const Renderer3DModelBatch& model : plan.models)
-        {
-            include_entity_bounds(
-                model.entity,
-                make_dispatch_bounds(
-                    swapchain,
-                    intersect_rect(model.viewportRect, model.clipRect),
-                    2.0f));
-        }
-    };
-    record_plan_bounds(renderPlanCache);
-    record_blur_bounds(cachedLayerPlanCache.cachedPanelBlurs);
-    record_batch_bounds(cachedLayerPlanCache.cachedShadows, DispatchBoundsMode::eShadow);
-    record_blur_bounds(cachedLayerPlanCache.cachedBlurs);
-    record_batch_bounds(cachedLayerPlanCache.cachedShapes, DispatchBoundsMode::eShape);
-    record_batch_bounds(cachedLayerPlanCache.cachedMedia, DispatchBoundsMode::eExact);
-    record_batch_bounds(cachedLayerPlanCache.cachedTexts, DispatchBoundsMode::eText);
     vibrance::renderer::coalesce_entity_bounds(currentEntityBounds);
 
     DispatchBounds trackedDamage = {};

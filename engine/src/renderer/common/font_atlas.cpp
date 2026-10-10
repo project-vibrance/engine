@@ -1654,6 +1654,12 @@ bool Renderer2DFontAtlas::load_from_file(
                     }
                 }
                 const int padding = glyph.coloured ? 2 : kSdfPadding;
+                // The monochrome bake starts from a bitmap surrounded by
+                // exactly this many zero-alpha source pixels. Keep the atlas
+                // measure unscaled so dispatch bounds can retain its SDF edge.
+                record.sdfPadding = glyph.coloured ? 0.0f : static_cast<float>(kSdfPadding);
+                record.sdfAtlasSize = glyph.coloured ? glm::vec2(0.0f) :
+                    glm::vec2(static_cast<float>(glyph.width), static_cast<float>(glyph.height));
                 record.offset = {
                     static_cast<float>(glyph.bitmapLeft - padding) * glyph.scale,
                     static_cast<float>(-glyph.bitmapTop - padding) * glyph.scale
@@ -1920,6 +1926,9 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, flo
             outGlyph.uvMax = glyph->uvMax;
             outGlyph.advance = advance * scale;
             outGlyph.coloured = glyph->coloured;
+            outGlyph.sdfPadding = glyph->sdfPadding;
+            outGlyph.sdfAtlasSize = glyph->sdfAtlasSize;
+            outGlyph.sdfUvRect = { glyph->uvMin.x, glyph->uvMin.y, glyph->uvMax.x, glyph->uvMax.y };
             // Align by visible ink, not the padded SDF atlas rect, so mixed font sizes share the same edge
             const float inkInset = std::min(
                 (glyph->coloured ? 2.0f : sdfPixelRange) * scale,
@@ -2279,6 +2288,9 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
                 out.glyph.uvMax = glyph->uvMax;
                 out.glyph.advance = advance * scale;
                 out.glyph.coloured = glyph->coloured;
+                out.glyph.sdfPadding = glyph->sdfPadding;
+                out.glyph.sdfAtlasSize = glyph->sdfAtlasSize;
+                out.glyph.sdfUvRect = { glyph->uvMin.x, glyph->uvMin.y, glyph->uvMax.x, glyph->uvMax.y };
                 out.inkInset = std::min(
                     (glyph->coloured ? 2.0f : sdfPixelRange) * scale,
                     std::max(

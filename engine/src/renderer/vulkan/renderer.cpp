@@ -1072,6 +1072,10 @@ private:
 	uint64_t diagnosticCacheRebuilds = 0u;
 	uint64_t diagnosticCachedBatchReplays = 0u;
 	uint64_t diagnosticDynamicBatchReplays = 0u;
+	uint64_t diagnosticTextGlyphs = 0u;
+	uint64_t diagnosticTextDispatches = 0u;
+	uint64_t diagnosticTextBatchDispatches = 0u;
+	uint64_t diagnosticLayeredBarriers = 0u;
 	std::array<RendererCpuWallTiming,
 		static_cast<std::size_t>(RendererCpuPhase::eCount)> diagnosticCpuTimings {};
 
@@ -1575,6 +1579,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	descriptorPools[DescriptorScope::eForegroundBlur] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 	descriptorTypes[0] = vk::DescriptorType::eStorageBuffer;
 	descriptorPools[DescriptorScope::eDrawCall] = make_descriptor_pool(logicalDevice, frameCount, 1, descriptorTypes.data(), deviceDeletionQueue);
+	descriptorPools[DescriptorScope::eTextBatch] = make_descriptor_pool(logicalDevice, frameCount, 1, descriptorTypes.data(), deviceDeletionQueue);
 	descriptorTypes = {
 		vk::DescriptorType::eCombinedImageSampler,
 		vk::DescriptorType::eCombinedImageSampler,
@@ -1638,7 +1643,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	for (uint32_t i = 0; i < frameCount; ++i) 
 	{
 		vk::CommandBuffer commandBuffer = allocate_command_buffer(logicalDevice, commandPool);
-		constexpr int scopeCount = 7;
+		constexpr int scopeCount = 8;
 		DescriptorScope scopes[scopeCount] = {
 			DescriptorScope::eFrame,
 			DescriptorScope::eModelFrame,
@@ -1646,7 +1651,8 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 			DescriptorScope::ePost,
 			DescriptorScope::eUICache,
 			DescriptorScope::eUICachePost,
-			DescriptorScope::eForegroundBlur
+			DescriptorScope::eForegroundBlur,
+			DescriptorScope::eTextBatch
 		};
 		for (int j = 0; j < scopeCount; ++j) 
 		{
@@ -1690,6 +1696,8 @@ void Engine::Impl::make_descriptor_sets()
 	descriptorSetLayouts[DescriptorScope::eModelFrame] = builder.build(deviceDeletionQueue);
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageBuffer);
 	descriptorSetLayouts[DescriptorScope::eDrawCall] = builder.build(deviceDeletionQueue);
+	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageBuffer);
+	descriptorSetLayouts[DescriptorScope::eTextBatch] = builder.build(deviceDeletionQueue);
 	builder.add_entry(vk::ShaderStageFlagBits::eFragment, vk::DescriptorType::eCombinedImageSampler);
 	builder.add_entry(vk::ShaderStageFlagBits::eFragment, vk::DescriptorType::eCombinedImageSampler);
 	builder.add_entry(vk::ShaderStageFlagBits::eFragment, vk::DescriptorType::eCombinedImageSampler);
@@ -1737,6 +1745,11 @@ void Engine::Impl::make_pipeline_layouts()
 	builder.add(descriptorSetLayouts[DescriptorScope::ePost]);
 	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(Renderer2DPushConstants));
 	pipelineLayouts[PipelineType::eTextMSDF] = builder.build(deviceDeletionQueue);
+	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
+	builder.add(descriptorSetLayouts[DescriptorScope::ePost]);
+	builder.add(descriptorSetLayouts[DescriptorScope::eTextBatch]);
+	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(glm::uvec4));
+	pipelineLayouts[PipelineType::eTextMSDFBatch] = builder.build(deviceDeletionQueue);
 
 	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
 	builder.add(descriptorSetLayouts[DescriptorScope::eMediaTexture]);
@@ -1782,6 +1795,11 @@ void Engine::Impl::make_pipelines()
 	);
 	pipelines[PipelineType::eTextMSDF] = make_compute_pipeline(
 		logicalDevice, "text_msdf", pipelineLayouts[PipelineType::eTextMSDF], deviceDeletionQueue
+	);
+	// Batching is optional. The ordinary text pipeline remains available if a
+	// driver cannot create this variant or its bounded upload cannot be allocated.
+	pipelines[PipelineType::eTextMSDFBatch] = make_compute_pipeline(
+		logicalDevice, "text_msdf_batch", pipelineLayouts[PipelineType::eTextMSDFBatch], deviceDeletionQueue
 	);
 	pipelines[PipelineType::eMedia2D] = make_compute_pipeline(
 		logicalDevice, "media_2d", pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue
@@ -2416,6 +2434,11 @@ void Engine::Impl::draw()
 					std::to_string(diagnosticCachedBatchReplays) +
 					", dynamic batch replays: " +
 					std::to_string(diagnosticDynamicBatchReplays) + ".";
+				gpuDiagnostics += " Text glyphs/dispatches/batched dispatches: " +
+					std::to_string(diagnosticTextGlyphs) + "/" +
+					std::to_string(diagnosticTextDispatches) + "/" +
+					std::to_string(diagnosticTextBatchDispatches) +
+					"; layered barriers: " + std::to_string(diagnosticLayeredBarriers) + ".";
 			}
 			static constexpr std::array<const char*,
 				static_cast<std::size_t>(RendererCpuPhase::eCount)> cpuPhaseNames {
@@ -2478,6 +2501,10 @@ void Engine::Impl::draw()
 			diagnosticCacheRebuilds = 0u;
 			diagnosticCachedBatchReplays = 0u;
 			diagnosticDynamicBatchReplays = 0u;
+			diagnosticTextGlyphs = 0u;
+			diagnosticTextDispatches = 0u;
+			diagnosticTextBatchDispatches = 0u;
+			diagnosticLayeredBarriers = 0u;
 			diagnosticCpuTimings = {};
 		}
 		++diagnosticDrawCalls;
@@ -3002,6 +3029,10 @@ void Engine::Impl::draw()
 		diagnosticCacheRebuilds += diagnostics.cacheRebuilds;
 		diagnosticCachedBatchReplays += diagnostics.cachedBatchReplays;
 		diagnosticDynamicBatchReplays += diagnostics.dynamicBatchReplays;
+		diagnosticTextGlyphs += diagnostics.textGlyphs;
+		diagnosticTextDispatches += diagnostics.textDispatches;
+		diagnosticTextBatchDispatches += diagnostics.textBatchDispatches;
+		diagnosticLayeredBarriers += diagnostics.layeredBarriers;
 	}
 	hasSubmittedFrame = true;
 	lastSubmittedFrameGeneration = sceneFrameGeneration;

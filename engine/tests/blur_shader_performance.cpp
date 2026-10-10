@@ -2,6 +2,9 @@
 // pass baseline/candidate SPIR-V paths, plus "shape" or "text" for those fixtures.
 #include <vulkan/vulkan.h>
 #include "../src/renderer/vulkan/timestamp_diagnostics.h"
+#include "../src/renderer/common/text_foreground_bounds.h"
+#include "../src/renderer/vulkan/render_op_order.h"
+#include "../include/vibranceUI/renderer/dispatch_bounds.h"
 #include "shape_shader_fixtures.h"
 #include "text_shader_fixtures.h"
 
@@ -107,6 +110,30 @@ namespace
         PushConstants constants;
         uint32_t originX = 0u, originY = 0u, dispatchWidth = 0u, dispatchHeight = 0u;
     };
+    constexpr uint32_t textGlyphCapacity = 384u;
+    constexpr uint32_t maximumTextBatchSize = 64u;
+    using TextWaves = std::vector<std::vector<uint32_t>>;
+
+    bool glyphs_overlap(const Case& left, const Case& right)
+    {
+        return left.originX < right.originX + right.dispatchWidth &&
+            right.originX < left.originX + left.dispatchWidth &&
+            left.originY < right.originY + right.dispatchHeight &&
+            right.originY < left.originY + left.dispatchHeight;
+    }
+
+    struct TextDispatch
+    {
+        uint32_t firstGlyph, count, width, height;
+    };
+    struct MixedBounds { uint32_t x, y, width, height; };
+    struct MixedOperation { Case draw; bool foregroundText; };
+    struct MixedCommand
+    {
+        const MixedOperation* operation = nullptr;
+        TextDispatch glyphs {};
+        bool barrierBefore = false;
+    };
     struct Result
     {
         std::vector<uint8_t> bytes;
@@ -118,7 +145,8 @@ namespace
     public:
         Harness(uint32_t imageWidth, uint32_t imageHeight,
             const std::vector<uint32_t>& baseline, const std::vector<uint32_t>& candidate,
-            const TextAtlasFixture* textAtlas = nullptr, bool batchText = false) :
+            const TextAtlasFixture* textAtlas = nullptr, bool batchText = false,
+            const std::vector<uint32_t>* shapeShader = nullptr) :
             width(imageWidth), height(imageHeight), imageBytes(static_cast<VkDeviceSize>(width) * height * 4u),
             atlas(textAtlas), batchMode(batchText)
         {
@@ -214,8 +242,8 @@ namespace
             readback = create_buffer(imageBytes * 3u, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             if (batchMode)
             {
-                glyphUpload = create_buffer(sizeof(PushConstants) * 320u, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-                glyphRecords = create_buffer(sizeof(PushConstants) * 320u,
+                glyphUpload = create_buffer(sizeof(PushConstants) * textGlyphCapacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+                glyphRecords = create_buffer(sizeof(PushConstants) * textGlyphCapacity,
                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
             }
@@ -225,6 +253,7 @@ namespace
             uint32_t disabled = 0u, enabled = 1u;
             candidateOrdinary = create_pipeline(candidate, &disabled);
             candidateShared = create_pipeline(candidate, &enabled);
+            if (shapeShader) shapePipeline = create_pipeline(*shapeShader, nullptr);
             std::cout << "Device: " << properties.deviceName << ", " << width << 'x' << height
                 << ", shared-memory limit " << properties.limits.maxComputeSharedMemorySize << " bytes\n";
         }
@@ -234,7 +263,7 @@ namespace
             if (device)
             {
                 vkDeviceWaitIdle(device);
-                for (VkPipeline pipeline : { baselinePipeline, candidateOrdinary, candidateShared })
+                for (VkPipeline pipeline : { baselinePipeline, candidateOrdinary, candidateShared, shapePipeline })
                     if (pipeline) vkDestroyPipeline(device, pipeline, nullptr);
                 if (layout) vkDestroyPipelineLayout(device, layout, nullptr);
                 if (descriptorPool) vkDestroyDescriptorPool(device, descriptorPool, nullptr);
@@ -271,23 +300,168 @@ namespace
 
         Result run(const Case& testCase, bool candidate, uint32_t repetitions = 1u,
             bool horizontalOnly = false, bool ordinaryHorizontal = false, bool shape = false, bool text = false,
-            const std::vector<Case>* glyphs = nullptr, bool interDrawBarriers = true)
+            const std::vector<Case>* glyphs = nullptr, bool interDrawBarriers = true,
+            uint32_t glyphOffset = 0u, const TextWaves* waves = nullptr,
+            const std::vector<MixedOperation>* mixed = nullptr)
         {
-            uint32_t maximumWidth = 0u, maximumHeight = 0u;
+            std::vector<TextDispatch> textDispatches;
+            std::vector<MixedCommand> mixedCommands;
+            uint32_t mixedRecordCount = 0u;
+            if (mixed)
+            {
+                if (!batchMode || !shapePipeline || glyphs)
+                    throw std::runtime_error("Mixed operation fixtures require shape and text pipelines");
+                std::vector<MixedBounds> bounds;
+                std::vector<uint8_t> foregroundText;
+                for (const auto& operation : *mixed)
+                {
+                    const auto& draw = operation.draw;
+                    bounds.push_back({ draw.originX, draw.originY, draw.dispatchWidth, draw.dispatchHeight });
+                    foregroundText.push_back(operation.foregroundText ? 1u : 0u);
+                }
+                std::vector<uint32_t> indices;
+                if (candidate)
+                {
+                    vibrance::vulkan::SimpleRenderOrder order;
+                    for (std::size_t first = 0u; first < mixed->size();
+                        first += vibrance::vulkan::kTextBatchPlanningGlyphLimit)
+                    {
+                        const auto count = std::min<std::size_t>(mixed->size() - first,
+                            vibrance::vulkan::kTextBatchPlanningGlyphLimit);
+                        const auto textCount = static_cast<std::size_t>(std::count(
+                            foregroundText.begin() + first, foregroundText.begin() + first + count, uint8_t(1)));
+                        if (textCount < 2u || textCount == count)
+                        {
+                            for (std::size_t index = first; index < first + count; ++index)
+                                indices.push_back(static_cast<uint32_t>(index));
+                            continue;
+                        }
+                        vibrance::vulkan::build_simple_render_order(
+                            std::span<const MixedBounds>(bounds).subspan(first, count),
+                            std::span<const uint8_t>(foregroundText).subspan(first, count), order);
+                        for (const uint32_t index : order.indices)
+                            indices.push_back(static_cast<uint32_t>(first) + index);
+                    }
+                }
+                else
+                {
+                    for (uint32_t index = 0u; index < mixed->size(); ++index) indices.push_back(index);
+                }
+                std::vector<MixedBounds> pending;
+                const auto overlaps_pending = [&](const MixedBounds& drawBounds) {
+                    return std::any_of(pending.begin(), pending.end(), [&](const auto& previous) {
+                        return vibrance::vulkan::text_batch_bounds_overlap(previous, drawBounds);
+                    });
+                };
+                const auto ordinary = [&](uint32_t index) {
+                    if (bounds[index].width == 0u || bounds[index].height == 0u) return;
+                    const bool barrier = !candidate || overlaps_pending(bounds[index]);
+                    if (barrier) pending.clear();
+                    mixedCommands.push_back({ &(*mixed)[index], {}, barrier });
+                    pending.push_back(bounds[index]);
+                };
+                auto* records = static_cast<PushConstants*>(glyphUpload.mapped);
+                std::fill_n(records, textGlyphCapacity, PushConstants {});
+                uint32_t nextRecord = 17u;
+                for (std::size_t position = 0u; position < indices.size();)
+                {
+                    if (!candidate || !(*mixed)[indices[position]].foregroundText)
+                    {
+                        ordinary(indices[position++]);
+                        continue;
+                    }
+                    std::vector<MixedBounds> textBounds;
+                    std::size_t end = position;
+                    for (; end < indices.size() && end - position <
+                        vibrance::vulkan::kTextBatchPlanningGlyphLimit &&
+                        (*mixed)[indices[end]].foregroundText; ++end)
+                        textBounds.push_back(bounds[indices[end]]);
+                    vibrance::vulkan::TextBatchPlan textPlan;
+                    vibrance::vulkan::build_text_batch_plan(std::span<const MixedBounds>(textBounds),
+                        textPlan, std::span<const MixedBounds>(pending));
+                    for (const auto& group : textPlan.groups)
+                    {
+                        if (group.count == 1u || group.count > textGlyphCapacity - nextRecord)
+                        {
+                            for (uint32_t offset = 0u; offset < group.count; ++offset)
+                                ordinary(indices[position + textPlan.glyphIndices[group.first + offset]]);
+                            continue;
+                        }
+                        bool barrier = false;
+                        for (uint32_t offset = 0u; offset < group.count; ++offset)
+                            barrier |= overlaps_pending(textBounds[textPlan.glyphIndices[group.first + offset]]);
+                        if (barrier) pending.clear();
+                        mixedCommands.push_back({ nullptr,
+                            { nextRecord, group.count, group.width, group.height }, barrier });
+                        for (uint32_t offset = 0u; offset < group.count; ++offset)
+                        {
+                            const uint32_t local = textPlan.glyphIndices[group.first + offset];
+                            const uint32_t index = indices[position + local];
+                            const auto& draw = (*mixed)[index].draw;
+                            auto& record = records[nextRecord++];
+                            record = draw.constants;
+                            record.data[0] = draw.dispatchWidth | (draw.dispatchHeight << 16u);
+                            record.data[3] = draw.originX | (draw.originY << 16u);
+                            pending.push_back(bounds[index]);
+                        }
+                    }
+                    position = end;
+                }
+                if (candidate) mixedRecordCount = nextRecord;
+            }
             if (glyphs)
             {
-                if (!batchMode || glyphs->empty() || glyphs->size() > 320u)
+                if (!batchMode || glyphs->empty() || glyphOffset >= textGlyphCapacity ||
+                    glyphs->size() > textGlyphCapacity - glyphOffset)
                     throw std::runtime_error("Invalid batched text fixture count");
                 auto* records = static_cast<PushConstants*>(glyphUpload.mapped);
-                for (std::size_t index = 0u; index < glyphs->size(); ++index)
+                std::fill_n(records, glyphOffset + glyphs->size(), PushConstants {});
+                TextWaves defaultWaves(1u);
+                if (!waves)
                 {
-                    const auto& glyph = (*glyphs)[index];
-                    records[index] = glyph.constants;
-                    records[index].data[0] = glyph.dispatchWidth | (glyph.dispatchHeight << 16u);
-                    records[index].data[3] = glyph.originX | (glyph.originY << 16u);
-                    maximumWidth = std::max(maximumWidth, glyph.dispatchWidth);
-                    maximumHeight = std::max(maximumHeight, glyph.dispatchHeight);
+                    for (uint32_t index = 0u; index < glyphs->size(); ++index)
+                        defaultWaves.front().push_back(index);
+                    waves = &defaultWaves;
                 }
+                std::vector<uint32_t> glyphWave(glyphs->size(), UINT32_MAX);
+                uint32_t nextRecord = glyphOffset;
+                for (uint32_t waveIndex = 0u; waveIndex < waves->size(); ++waveIndex)
+                {
+                    const auto& wave = (*waves)[waveIndex];
+                    if (wave.empty()) throw std::runtime_error("Empty text dependency wave");
+                    for (std::size_t left = 0u; left < wave.size(); ++left)
+                    {
+                        if (wave[left] >= glyphs->size() || glyphWave[wave[left]] != UINT32_MAX)
+                            throw std::runtime_error("Invalid text dependency wave index");
+                        glyphWave[wave[left]] = waveIndex;
+                        for (std::size_t right = 0u; right < left; ++right)
+                            if (glyphs_overlap((*glyphs)[wave[left]], (*glyphs)[wave[right]]))
+                                throw std::runtime_error("Text dependency wave contains overlapping glyphs");
+                    }
+                    for (std::size_t start = 0u; start < wave.size(); start += maximumTextBatchSize)
+                    {
+                        TextDispatch dispatch { nextRecord, 0u, 0u, 0u };
+                        for (std::size_t index = start;
+                            index < std::min(start + maximumTextBatchSize, wave.size()); ++index)
+                        {
+                            const auto& glyph = (*glyphs)[wave[index]];
+                            auto& record = records[nextRecord++];
+                            record = glyph.constants;
+                            record.data[0] = glyph.dispatchWidth | (glyph.dispatchHeight << 16u);
+                            record.data[3] = glyph.originX | (glyph.originY << 16u);
+                            dispatch.width = std::max(dispatch.width, glyph.dispatchWidth);
+                            dispatch.height = std::max(dispatch.height, glyph.dispatchHeight);
+                            ++dispatch.count;
+                        }
+                        textDispatches.push_back(dispatch);
+                    }
+                }
+                if (nextRecord != glyphOffset + glyphs->size())
+                    throw std::runtime_error("Text dependency waves omitted a glyph");
+                for (std::size_t left = 0u; left < glyphs->size(); ++left)
+                    for (std::size_t right = left + 1u; right < glyphs->size(); ++right)
+                        if (glyphs_overlap((*glyphs)[left], (*glyphs)[right]) && glyphWave[left] >= glyphWave[right])
+                            throw std::runtime_error("Text dependency waves changed painter order");
             }
             check(vkResetCommandBuffer(command, 0u), "Reset command buffer");
             VkCommandBufferBeginInfo begin { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -333,9 +507,10 @@ namespace
             }
             vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 0u, 0u, nullptr, 0u, nullptr, barrierCount, barriers.data());
-            if (glyphs)
+            if (glyphs || mixedRecordCount != 0u)
             {
-                VkBufferCopy copy { 0u, 0u, sizeof(PushConstants) * glyphs->size() };
+                const auto recordCount = glyphs ? glyphOffset + glyphs->size() : mixedRecordCount;
+                VkBufferCopy copy { 0u, 0u, sizeof(PushConstants) * recordCount };
                 vkCmdCopyBuffer(command, glyphUpload.handle, glyphRecords.handle, 1u, &copy);
                 VkBufferMemoryBarrier glyphBarrier { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
                 glyphBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -360,16 +535,38 @@ namespace
             vkCmdWriteTimestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries, 0u);
             for (uint32_t repeat = 0u; repeat < repetitions; ++repeat)
             {
+                if (mixed)
+                {
+                    for (const auto& draw : mixedCommands)
+                    {
+                        if (draw.barrierBefore) compute_barrier();
+                        if (draw.operation)
+                            dispatch(draw.operation->foregroundText ? baselinePipeline : shapePipeline,
+                                draw.operation->draw, 0u, true, false);
+                        else
+                        {
+                            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, candidateOrdinary);
+                            vkCmdPushConstants(command, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
+                                sizeof(draw.glyphs.firstGlyph), &draw.glyphs.firstGlyph);
+                            vkCmdDispatch(command, (draw.glyphs.width + 7u) / 8u,
+                                (draw.glyphs.height + 7u) / 8u, draw.glyphs.count);
+                        }
+                    }
+                    compute_barrier();
+                    continue;
+                }
                 if (glyphs)
                 {
                     if (candidate)
                     {
-                        const uint32_t firstGlyph = 0u;
-                        vkCmdPushConstants(command, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
-                            sizeof(firstGlyph), &firstGlyph);
-                        vkCmdDispatch(command, (maximumWidth + 7u) / 8u, (maximumHeight + 7u) / 8u,
-                            static_cast<uint32_t>(glyphs->size()));
-                        compute_barrier();
+                        for (const auto& dispatch : textDispatches)
+                        {
+                            vkCmdPushConstants(command, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
+                                sizeof(dispatch.firstGlyph), &dispatch.firstGlyph);
+                            vkCmdDispatch(command, (dispatch.width + 7u) / 8u,
+                                (dispatch.height + 7u) / 8u, dispatch.count);
+                            compute_barrier();
+                        }
                     }
                     else
                     {
@@ -681,6 +878,7 @@ namespace
         VkPipeline baselinePipeline = VK_NULL_HANDLE;
         VkPipeline candidateOrdinary = VK_NULL_HANDLE;
         VkPipeline candidateShared = VK_NULL_HANDLE;
+        VkPipeline shapePipeline = VK_NULL_HANDLE;
         bool initialised = false;
     };
 
@@ -767,11 +965,13 @@ int main(int argc, char** argv)
     const bool shape = argc == 4 && std::string(argv[3]) == "shape";
     const bool text = argc == 4 && std::string(argv[3]) == "text";
     const bool textBatch = argc == 4 && std::string(argv[3]) == "text-batch";
+    const bool textCrop = argc == 4 && std::string(argv[3]) == "text-crop";
+    const bool renderOrder = argc == 5 && std::string(argv[3]) == "render-order";
     const bool liquidCycle = argc == 4 && std::string_view(argv[3]) == "liquid-cycle";
     const bool foregroundGroup = argc == 4 && std::string_view(argv[3]) == "foreground-group";
-    if (argc != 3 && !shape && !text && !textBatch && !liquidCycle && !foregroundGroup)
+    if (argc != 3 && !shape && !text && !textBatch && !textCrop && !renderOrder && !liquidCycle && !foregroundGroup)
     {
-        std::cerr << "Usage: blur_shader_performance baseline.spv candidate.spv [shape|text|text-batch|liquid-cycle|foreground-group]\n";
+        std::cerr << "Usage: blur_shader_performance baseline.spv candidate.spv [shape|text|text-batch|text-crop|render-order shape.spv|liquid-cycle|foreground-group]\n";
         return 2;
     }
     try
@@ -780,6 +980,246 @@ int main(int argc, char** argv)
         const auto candidate = load_spirv(argv[2]);
         bool passed = true;
         uint32_t cases = 0u;
+        if (renderOrder)
+        {
+#if !defined(VIBRANCE_TEXT_FREETYPE)
+            throw std::runtime_error("Mixed rendering comparison requires real FreeType font fixtures");
+#endif
+            const auto shapeSpirv = load_spirv(argv[4]);
+            const auto atlas = text_atlas_fixture(std::getenv("VIBRANCE_SHADER_HARNESS_FONT"), false);
+            const auto textFixtures = text_fixtures(atlas);
+            const auto shapeFixtures = shape_fixtures();
+            const auto colourFixture = std::find_if(textFixtures.begin(), textFixtures.end(), [](const auto& fixture) {
+                return (fixture.constants.data[1] & (1u << 10u)) != 0u;
+            });
+            if (colourFixture == textFixtures.end()) throw std::runtime_error("Missing colour bitmap fixture");
+            uint64_t operationCount = 0u;
+            std::cout << "Font atlas: " << atlas.source << "; current shape and ordinary/batched text shaders\n";
+            for (const auto extent : { std::array { 257u, 193u }, std::array { 641u, 389u } })
+            {
+                const uint32_t width = extent[0], height = extent[1];
+                Harness harness(width, height, baseline, candidate, &atlas, true, &shapeSpirv);
+                uint32_t randomState = 0x714529cbu;
+                const auto random_unit = [&]() {
+                    randomState ^= randomState << 13u;
+                    randomState ^= randomState >> 17u;
+                    randomState ^= randomState << 5u;
+                    return static_cast<float>(randomState & 65535u) / 65535.0f;
+                };
+                for (uint32_t fixture = 0u; fixture < 76u; ++fixture)
+                {
+                    const bool grid = fixture < 12u;
+                    const uint32_t count = grid ?
+                        std::array { 2u, 4u, 14u, 64u, 65u, 255u, 256u, 257u, 300u, 511u, 512u, 768u }[fixture] :
+                        17u + (fixture * 37u) % 287u;
+                    const uint32_t columns = width / 32u, cells = columns * (height / 32u);
+                    std::vector<MixedOperation> operations;
+                    for (uint32_t index = 0u; index < count; ++index)
+                    {
+                        const bool foregroundText = grid ? index % 2u != 0u : random_unit() >= 0.37f;
+                        const uint32_t cell = (index / 2u) % cells;
+                        const float x = grid ? (cell % columns) * 32.0f + 3.137f :
+                            random_unit() * (width + 23.0f) - 17.731f;
+                        const float y = grid ? (cell / columns) * 32.0f + 2.793f :
+                            random_unit() * (height + 19.0f) - 13.137f;
+                        MixedOperation operation;
+                        operation.foregroundText = foregroundText;
+                        auto& draw = operation.draw;
+                        draw.name = "mixed_" + std::to_string(fixture) + "_op_" + std::to_string(index);
+                        float padding = 0.0f;
+                        auto dispatchRect = std::array<float, 4> {};
+                        if (foregroundText)
+                        {
+                            const auto& region = atlas.glyphs[index % atlas.glyphs.size()];
+                            std::memcpy(&draw.constants, &textFixtures.front().constants, sizeof(PushConstants));
+                            auto& value = draw.constants;
+                            value.rect = { x, y, grid ? 22.731f : 3.173f + random_unit() * 49.0f,
+                                grid ? 24.137f : 5.731f + random_unit() * 53.0f };
+                            value.uvRect = { region.x / 512.0f, region.y / 512.0f,
+                                (region.x + region.width) / 512.0f, (region.y + region.height) / 512.0f };
+                            const int weight = static_cast<int>(index % 7u) * 137 - 411;
+                            value.data[2] = (static_cast<uint32_t>(2048 + weight) << 2u) | 2u;
+                            if (index % 11u == 0u)
+                            {
+                                value.data[1] |= 1u << 10u;
+                                value.uvRect = colourFixture->constants.uvRect;
+                            }
+                            if (index % 5u == 0u) value.data[1] |= 1u;
+                            if (index % 5u == 1u)
+                            {
+                                value.data[1] |= 1u << 1u;
+                                value.effect0[1] = 1.731f;
+                            }
+                            if (index % 5u == 2u)
+                            {
+                                value.data[1] |= 1u << 15u;
+                                value.color2 = { 6.0f, 5.73f, 0.83f, 4.13f };
+                                value.effect1 = { x + 2.173f, y + 1.137f,
+                                    value.rect[2] - 3.731f, value.rect[3] - 2.137f };
+                            }
+                            if (index % 5u == 3u)
+                            {
+                                value.data[1] |= 1u << 25u;
+                                value.data[2] |= (137u << 14u) | (225u << 22u) | (2u << 30u);
+                            }
+                            if (index % 5u == 4u)
+                            {
+                                value.data[1] |= 1u << 5u;
+                                value.effect1[3] = 2.137f;
+                            }
+                            const float outline = (value.data[1] & (1u << 1u)) != 0u ? value.effect0[1] : 0.0f;
+                            padding = std::max({ std::max(weight / 256.0f, 0.0f), outline,
+                                (value.data[1] & (1u << 5u)) != 0u ? value.effect1[3] : 0.0f }) + 2.0f;
+                            dispatchRect = value.rect;
+                            if ((value.data[1] & ((1u << 10u) | (1u << 5u))) == 0u)
+                                if (const auto cropped = vibrance::renderer::sdf_foreground_bounds(value.rect,
+                                    { static_cast<float>(region.width), static_cast<float>(region.height) },
+                                    24.0f, value.effect0[0], weight / 256.0f, outline))
+                                {
+                                    dispatchRect = *cropped;
+                                    padding = 0.0f;
+                                }
+                        }
+                        else
+                        {
+                            std::memcpy(&draw.constants, &shapeFixtures[index % shapeFixtures.size()].constants,
+                                sizeof(PushConstants));
+                            auto& value = draw.constants;
+                            value.rect = { x - 1.173f, y - 0.731f,
+                                grid ? 26.137f : 5.731f + random_unit() * 59.0f,
+                                grid ? 27.173f : 7.137f + random_unit() * 57.0f };
+                            value.effect0 = { 5.137f, 0.731f, 0.793f, 0.73f };
+                            // Retain all scalar/gradient/mask/transform paths,
+                            // including partial workgroups beyond clip edges.
+                            if ((value.data[1] & (1u << 15u)) != 0u)
+                                value.effect1 = { x + 1.137f, y + 2.173f, value.rect[2] * 0.83f, value.rect[3] * 0.79f };
+                            if ((value.data[1] & (1u << 5u)) != 0u) value.effect0[2] = 3.137f;
+                            padding = value.effect0[1] + value.effect0[2];
+                            if ((value.data[1] & (1u << 12u)) != 0u)
+                                padding += std::sqrt(value.rect[2] * value.rect[2] + value.rect[3] * value.rect[3]) * 0.5f;
+                            if (value.data[0] == 7u) padding += 32.0f;
+                            dispatchRect = value.rect;
+                        }
+                        auto& value = draw.constants;
+                        value.color0 = { (index % 19u + 0.5f) / 19.0f, 0.381372549f,
+                            index % 3u == 0u ? 1.0f : 0.173f, 0.31f + index % 7u * 0.091f };
+                        if (fixture % 7u == 0u) value.effect0[3] = 0.00137f;
+                        const auto clipped = [](float coordinate, uint32_t limit, bool end) {
+                            return static_cast<uint32_t>(std::clamp(end ? std::ceil(coordinate) : std::floor(coordinate),
+                                0.0f, static_cast<float>(limit)));
+                        };
+                        draw.originX = clipped(dispatchRect[0] - padding, width, false);
+                        draw.originY = clipped(dispatchRect[1] - padding, height, false);
+                        const auto exactWidth = clipped(dispatchRect[0] + dispatchRect[2] + padding, width, true) - draw.originX;
+                        const auto exactHeight = clipped(dispatchRect[1] + dispatchRect[3] + padding, height, true) - draw.originY;
+                        draw.dispatchWidth = foregroundText ? exactWidth :
+                            renderer2d_dispatch_axis_coverage(draw.originX, exactWidth, width);
+                        draw.dispatchHeight = foregroundText ? exactHeight :
+                            renderer2d_dispatch_axis_coverage(draw.originY, exactHeight, height);
+                        if (foregroundText) value.data[0] = draw.dispatchWidth | (draw.dispatchHeight << 16u);
+                        operations.push_back(operation);
+                    }
+                    Case group;
+                    group.name = "mixed_render_order_" + std::to_string(width) + "x" + std::to_string(height) +
+                        "_fixture_" + std::to_string(fixture) + "_ops_" + std::to_string(count);
+                    const auto original = harness.run(group, false, 1u, false, false, false, false,
+                        nullptr, true, 0u, nullptr, &operations);
+                    const auto changed = harness.run(group, true, 1u, false, false, false, false,
+                        nullptr, true, 0u, nullptr, &operations);
+                    passed &= compare(group, original, changed, width, height);
+                    operationCount += operations.size();
+                    ++cases;
+                }
+            }
+            std::cout << "Mixed render order pixel equivalence: " << cases << " traces, " << operationCount
+                << " shape/text operations, 256-op chunks, complete RGBA8 scene/scratch/blur images, "
+                << (passed ? "PASS" : "FAIL") << '\n';
+            if (validation_requested()) std::cout << "Validation errors: " << validationErrors.load() << '\n';
+            return passed && validationErrors.load() == 0u ? 0 : 1;
+        }
+        if (textCrop)
+        {
+#if !defined(VIBRANCE_TEXT_FREETYPE)
+            throw std::runtime_error("Text crop comparison requires real FreeType font fixtures");
+#endif
+            const auto atlas = text_atlas_fixture(std::getenv("VIBRANCE_SHADER_HARNESS_FONT"), false);
+            const auto fixtures = text_crop_fixtures(atlas);
+            const auto make_case = [](const TextCropFixture& fixture, uint32_t width, uint32_t height,
+                bool crop, bool& trimmed) {
+                Case testCase;
+                testCase.name = fixture.fixture.name;
+                std::memcpy(&testCase.constants, &fixture.fixture.constants, sizeof(PushConstants));
+                auto& value = testCase.constants;
+                const uint32_t flags = value.data[1];
+                const float weight = (static_cast<int>((value.data[2] >> 2u) & 4095u) - 2048) / 256.0f;
+                const float outline = (flags & (1u << 1u)) != 0u ? std::max(value.effect0[1], 0.0f) : 0.0f;
+                const float blur = (flags & (1u << 5u)) != 0u && (flags & (1u << 15u)) == 0u ?
+                    std::max(value.effect1[3], 0.0f) : 0.0f;
+                float padding = std::max({ std::max(weight, 0.0f), outline, blur }) + 2.0f;
+                if ((value.data[2] & 3u) != 2u)
+                {
+                    const float shadow = (flags & (1u << 15u)) == 0u ?
+                        std::max(std::abs(value.effect1[0]), std::abs(value.effect1[1])) +
+                            std::max(value.effect1[2], 0.0f) : 0.0f;
+                    padding = std::max({ std::max(weight, 0.0f), outline, blur,
+                        std::max(value.effect0[2], 0.0f), shadow }) + 2.0f;
+                }
+                auto rect = value.rect;
+                trimmed = false;
+                if (crop && fixture.trustedUv && (value.data[2] & 3u) == 2u && (flags & (1u << 8u)) != 0u &&
+                    (flags & ((1u << 10u) | (1u << 5u))) == 0u)
+                {
+                    if (const auto bounds = vibrance::renderer::sdf_foreground_bounds(rect,
+                        fixture.atlasGlyphSize, fixture.sdfPadding, value.effect0[0], weight, outline))
+                    {
+                        rect = *bounds;
+                        padding = 0.0f;
+                        trimmed = true;
+                    }
+                }
+                const auto origin = [](float coordinate, uint32_t limit) {
+                    return static_cast<uint32_t>(std::clamp(std::floor(coordinate), 0.0f,
+                        static_cast<float>(limit)));
+                };
+                const auto end = [](float coordinate, uint32_t limit) {
+                    return static_cast<uint32_t>(std::clamp(std::ceil(coordinate), 0.0f,
+                        static_cast<float>(limit)));
+                };
+                testCase.originX = origin(rect[0] - padding, width);
+                testCase.originY = origin(rect[1] - padding, height);
+                testCase.dispatchWidth = end(rect[0] + rect[2] + padding, width) - testCase.originX;
+                testCase.dispatchHeight = end(rect[1] + rect[3] + padding, height) - testCase.originY;
+                value.data[0] = testCase.dispatchWidth | (testCase.dispatchHeight << 16u);
+                return testCase;
+            };
+            std::cout << "Font atlas: " << atlas.source << "; current sixteen-sample foreground shader\n";
+            uint32_t trimmedCases = 0u;
+            uint64_t fullPixels = 0u, croppedPixels = 0u;
+            for (const auto extent : { std::array { 208u, 152u }, std::array { 317u, 193u } })
+            {
+                Harness harness(extent[0], extent[1], baseline, candidate, &atlas);
+                for (const auto& fixture : fixtures)
+                {
+                    bool ignored = false, trimmed = false;
+                    const auto fullCase = make_case(fixture, extent[0], extent[1], false, ignored);
+                    const auto croppedCase = make_case(fixture, extent[0], extent[1], true, trimmed);
+                    const auto original = harness.run(fullCase, false, 1u, false, false, false, true);
+                    const auto changed = harness.run(croppedCase, true, 1u, false, false, false, true);
+                    passed &= compare(fullCase, original, changed, extent[0], extent[1]);
+                    fullPixels += static_cast<uint64_t>(fullCase.dispatchWidth) * fullCase.dispatchHeight;
+                    croppedPixels += static_cast<uint64_t>(croppedCase.dispatchWidth) * croppedCase.dispatchHeight;
+                    trimmedCases += trimmed ? 1u : 0u;
+                    ++cases;
+                }
+            }
+            std::cout << "Text foreground crop pixel equivalence: " << cases << " FreeType glyph and fallback fixtures, "
+                << trimmedCases << " cropped, complete RGBA8 scene/scratch/blur images, "
+                << (passed ? "PASS" : "FAIL") << '\n';
+            std::cout << "Foreground dispatch pixels: full=" << fullPixels << ", cropped=" << croppedPixels
+                << ", reduction=" << (1.0 - static_cast<double>(croppedPixels) / fullPixels) * 100.0 << "%\n";
+            if (validation_requested()) std::cout << "Validation errors: " << validationErrors.load() << '\n';
+            return passed && validationErrors.load() == 0u ? 0 : 1;
+        }
         if (foregroundGroup)
         {
             for (const auto extent : { std::array { 160u, 60u }, std::array { 67u, 39u } })
@@ -839,10 +1279,7 @@ int main(int argc, char** argv)
             const auto ensure_disjoint = [](const std::vector<Case>& glyphs) {
                 for (std::size_t left = 0u; left < glyphs.size(); ++left)
                     for (std::size_t right = left + 1u; right < glyphs.size(); ++right)
-                        if (glyphs[left].originX < glyphs[right].originX + glyphs[right].dispatchWidth &&
-                            glyphs[right].originX < glyphs[left].originX + glyphs[left].dispatchWidth &&
-                            glyphs[left].originY < glyphs[right].originY + glyphs[right].dispatchHeight &&
-                            glyphs[right].originY < glyphs[left].originY + glyphs[left].dispatchHeight)
+                        if (glyphs_overlap(glyphs[left], glyphs[right]))
                             throw std::runtime_error("Batched text fixtures overlap");
             };
             std::cout << "Font atlas: " << atlas.source << "; device-local 128-byte glyph SSBO\n";
@@ -881,23 +1318,82 @@ int main(int argc, char** argv)
                     Case group;
                     group.name = "batch_extent_" + std::to_string(extent[0]) + "_fixtures_" +
                         std::to_string(start) + ".." + std::to_string(start + glyphs.size() - 1u);
-                    const auto original = harness.run(group, false, 1u, false, false, false, true, &glyphs, false);
-                    const auto changed = harness.run(group, true, 1u, false, false, false, true, &glyphs, false);
+                    const uint32_t glyphOffset = (start / blockSize) % 2u == 0u ? 5u : 19u;
+                    const auto original = harness.run(group, false, 1u, false, false, false, true,
+                        &glyphs, false, glyphOffset);
+                    const auto changed = harness.run(group, true, 1u, false, false, false, true,
+                        &glyphs, false, glyphOffset);
                     passed &= compare(group, original, changed, columns * cellWidth, 8u * cellHeight);
                     cases += static_cast<uint32_t>(glyphs.size());
                 }
             }
             std::cout << "Batched text pixel equivalence: " << cases << " translated disjoint fixtures, "
                 << (passed ? "PASS" : "FAIL") << '\n';
-            if (!passed || equivalence_only_requested())
+            const auto colourFixture = std::find_if(fixtures.begin(), fixtures.end(), [](const auto& fixture) {
+                return (fixture.constants.data[1] & (1u << 10u)) != 0u;
+            });
+            if (colourFixture == fixtures.end()) throw std::runtime_error("Missing colour bitmap fixture");
+            for (uint32_t variant = 0u; variant < 4u; ++variant)
+            {
+                constexpr uint32_t width = 128u, height = 64u;
+                Harness harness(width, height, baseline, candidate, &atlas, true);
+                std::vector<Case> glyphs;
+                const std::array<std::array<uint32_t, 4>, 5> bounds {{
+                    { 8u, 8u, 32u, 32u }, { 21u, 9u, 34u, 32u },
+                    { 64u, 9u, 32u, 32u }, { 77u, 10u, 34u, 32u },
+                    { 35u, 12u, 55u, 26u }
+                }};
+                for (uint32_t index = 0u; index < bounds.size(); ++index)
+                {
+                    Case glyph;
+                    glyph.name = "overlap_glyph_" + std::to_string(index);
+                    const auto& fixture = (index + variant) % 2u == 0u ? fixtures.front() : *colourFixture;
+                    std::memcpy(&glyph.constants, &fixture.constants, sizeof(PushConstants));
+                    const auto& box = bounds[index];
+                    glyph.originX = box[0];
+                    glyph.originY = box[1];
+                    glyph.dispatchWidth = box[2];
+                    glyph.dispatchHeight = box[3];
+                    glyph.constants.data[0] = glyph.dispatchWidth | (glyph.dispatchHeight << 16u);
+                    glyph.constants.rect = { box[0] + 0.137f, box[1] + 0.793f,
+                        box[2] - 1.317f, box[3] - 1.731f };
+                    glyph.constants.color0 = { (index + 1.5f) / 7.0f, 0.381372549f,
+                        (5.5f - index) / 7.0f, 0.31f + index * 0.113f };
+                    glyph.constants.data[2] |= 2u;
+                    if (variant == 2u)
+                    {
+                        glyph.constants.data[1] |= 1u << 15u;
+                        glyph.constants.color2 = { 6.0f, 5.73f, 0.83f, 4.13f };
+                        glyph.constants.effect1 = { box[0] + 2.173f, box[1] + 1.137f,
+                            box[2] - 3.731f, box[3] - 2.137f };
+                    }
+                    if (variant == 3u)
+                    {
+                        glyph.constants.data[1] |= 1u << 25u;
+                        glyph.constants.data[2] |= (128u << 14u) | (205u << 22u) | (2u << 30u);
+                    }
+                    glyphs.push_back(glyph);
+                }
+                const TextWaves waves { { 0u, 2u }, { 1u, 3u }, { 4u } };
+                Case group;
+                group.name = "overlap_dependency_waves_" + std::to_string(variant);
+                const auto original = harness.run(group, false, 1u, false, false, false, true,
+                    &glyphs, true, 23u, &waves);
+                const auto changed = harness.run(group, true, 1u, false, false, false, true,
+                    &glyphs, true, 23u, &waves);
+                passed &= compare(group, original, changed, width, height);
+            }
+            std::cout << "Overlapping text: 4 mixed SDF/colour glyph chains, 3 ordered waves, "
+                << (passed ? "PASS" : "FAIL") << '\n';
+            if (!passed)
             {
                 if (validation_requested()) std::cout << "Validation errors: " << validationErrors.load() << '\n';
                 return passed && validationErrors.load() == 0u ? 0 : 1;
             }
             constexpr uint32_t repetitions = 32u, measurements = 15u;
-            for (uint32_t glyphCount : { 2u, 4u, 8u, 14u, 100u, 300u })
+            for (uint32_t glyphCount : { 2u, 4u, 8u, 14u, 65u, 100u, 129u, 300u })
             {
-                const uint32_t gridColumns = glyphCount >= 100u ? (glyphCount == 300u ? 20u : 10u) : glyphCount;
+                const uint32_t gridColumns = glyphCount >= 65u ? (glyphCount == 300u ? 20u : 10u) : glyphCount;
                 const uint32_t rows = (glyphCount + gridColumns - 1u) / gridColumns;
                 const uint32_t width = gridColumns * 48u, height = rows * 48u;
                 Harness harness(width, height, baseline, candidate, &atlas, true);
@@ -917,6 +1413,11 @@ int main(int argc, char** argv)
                         index % 5u == 0u ? 7.731f : 16.17f + index % 5u * 3.13f };
                     value.uvRect = { region.x / 512.0f, region.y / 512.0f,
                         (region.x + region.width) / 512.0f, (region.y + region.height) / 512.0f };
+                    if (index % 7u == 0u)
+                    {
+                        value.uvRect = colourFixture->constants.uvRect;
+                        value.data[1] |= 1u << 10u;
+                    }
                     value.color0 = { (index % 19u + 0.5f) / 19.0f, 0.381372549f,
                         index % 3u == 0u ? 1.0f : 0.173f, 0.37f + index % 7u * 0.073f };
                     value.data[2] = ((1920u + index % 7u * 43u) << 2u) | 2u;
@@ -955,7 +1456,28 @@ int main(int argc, char** argv)
                 ensure_disjoint(glyphs);
                 Case group;
                 group.name = "dense_glyphs_" + std::to_string(glyphCount);
-                const uint32_t batchedWorkgroups = (maximumWidth + 7u) / 8u * ((maximumHeight + 7u) / 8u) * glyphCount;
+                const auto original = harness.run(group, false, 1u, false, false, false, true,
+                    &glyphs, true, 17u);
+                const auto changed = harness.run(group, true, 1u, false, false, false, true,
+                    &glyphs, true, 17u);
+                passed &= compare(group, original, changed, width, height);
+                std::cout << "Batch split equivalence " << glyphCount << " glyphs, "
+                    << (glyphCount + maximumTextBatchSize - 1u) / maximumTextBatchSize
+                    << " dispatches, firstGlyph=17: " << (passed ? "PASS" : "FAIL") << '\n';
+                if (equivalence_only_requested()) continue;
+                uint32_t batchedWorkgroups = 0u;
+                for (std::size_t start = 0u; start < glyphs.size(); start += maximumTextBatchSize)
+                {
+                    uint32_t chunkWidth = 0u, chunkHeight = 0u;
+                    const auto end = std::min(start + maximumTextBatchSize, glyphs.size());
+                    for (std::size_t index = start; index < end; ++index)
+                    {
+                        chunkWidth = std::max(chunkWidth, glyphs[index].dispatchWidth);
+                        chunkHeight = std::max(chunkHeight, glyphs[index].dispatchHeight);
+                    }
+                    batchedWorkgroups += (chunkWidth + 7u) / 8u * ((chunkHeight + 7u) / 8u) *
+                        static_cast<uint32_t>(end - start);
+                }
                 std::cout << "Batch geometry " << glyphCount << " glyphs: ordinary=" << ordinaryWorkgroups
                     << " workgroups, batched=" << batchedWorkgroups << ", padding overhead="
                     << (static_cast<double>(batchedWorkgroups) / ordinaryWorkgroups - 1.0) * 100.0 << "%\n";

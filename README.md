@@ -600,7 +600,9 @@ clips can be preloaded without starting CoreAudio; the output device opens on
 first playback or an explicit `AudioEngine::available()` probe.
 
 Set `VIBRANCE_RENDER_DIAGNOSTICS=2` for one-second Vulkan submission and scene
-activity logging, renderer CPU wall timings and panel UI phase timings. Renderer
+activity logging, renderer CPU wall timings and panel UI phase timings. The log
+also counts foreground glyphs, text dispatches, batched dispatches and layered
+memory barriers. Renderer
 timings exclude frame pacing; panel draw timing includes pacing and is reported
 separately from input and other UI work. On Windows,
 `VIBRANCE_RENDER_DIAGNOSTICS=1` additionally samples
@@ -610,6 +612,16 @@ and output-copy checkpoint means. Samples use the existing completed frame
 fences; unsupported timestamp clocks are skipped. The GPU maximum covers sampled
 frames. Use `2` for CPU phase diagnosis without timestamp-query overhead. Leave
 the variable unset for normal process resource comparisons.
+
+Windows foreground text batches disjoint glyphs through a bounded mapped upload
+of 512 KiB per frame slot. Each glyph retains its original shader and sixteen
+coverage samples; overlapping glyphs keep their paint order. Missing resources
+or exhausted upload capacity use ordinary text dispatches. Generated monochrome
+SDF layouts retain source-padding metadata so sharp foreground drawing can omit
+proven empty padding. Colour glyphs, customised UVs and filtered foreground text
+retain their original bounds; shadows, glow, retained replay and damage retain
+their complete envelopes. These layout additions require rebuilding SDK users
+with the matching engine headers and runtime.
 
 For shader maintainers, `python3 scripts/generate_metal_shaders.py` regenerates
 `engine/src/renderer/metal/shaders/*.metal` from the shared GLSL maths. This

@@ -13,7 +13,8 @@ enum class PipelineType
     eMedia2D,
     eCompositeHosted3D,
     eComposite2D,
-    eModel3D
+    eModel3D,
+    eTextMSDFBatch
 };
 
 enum class DescriptorScope
@@ -27,7 +28,8 @@ enum class DescriptorScope
     ePost,
     eUICache,
     eUICachePost,
-    eForegroundBlur
+    eForegroundBlur,
+    eTextBatch
 };
 
 struct RasterPushConstants
