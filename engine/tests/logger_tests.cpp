@@ -78,9 +78,52 @@ int main(int argc, char* argv[])
         caughtException |= line.find("UNHANDLED EXCEPTION: session exception fixture") != std::string::npos;
         operationException |= line.find("EXCEPTION throwing operation") != std::string::npos;
     }
-    const bool passed = messages == 400 && rendererError && caughtException && operationException;
+    bool passed = messages == 400 && rendererError && caughtException && operationException;
+    logger->info("repetition fixture");
+    for (int index = 0; index < 10; ++index) logger->info("repetition fixture");
+    logger->info("flush repetition summary");
+    std::ifstream repeated(path);
+    const std::string repeatedText { std::istreambuf_iterator<char>(repeated), std::istreambuf_iterator<char>() };
+    passed &= repeatedText.find("[repeated 10 times]") != std::string::npos;
+    options.directory /= "rotation";
+    Logger::configure_output(options);
+    const auto rotatedPath = logger->output_path();
+    crash_diagnostics::initialise(rotatedPath);
+    // Exercise the real logger writer across enough data to replace all parts.
+    const std::string block(5u * 1024u * 1024u, 'x');
+    for (int index = 0; index < 7; ++index) logger->write_file_output(block);
+    logger->write_file_output("newest diagnostic\n");
+    logger->flush_file_output();
+    crash_diagnostics::write("emergency report after rotation\n");
+    unsigned parts = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(options.directory))
+    {
+        passed &= entry.file_size() <= 5u * 1024u * 1024u;
+        if (entry.path().filename().string().find(".crash.txt") == std::string::npos) ++parts;
+    }
+    passed &= parts == 5 && logger->output_path() == rotatedPath;
+    std::ifstream newest(rotatedPath);
+    std::string newestLine;
+    std::getline(newest, newestLine);
+    passed &= newestLine == "newest diagnostic";
+    auto emergencyPath = rotatedPath;
+    emergencyPath += ".crash.txt";
+    std::ifstream emergency(emergencyPath);
+    const std::string emergencyText { std::istreambuf_iterator<char>(emergency), std::istreambuf_iterator<char>() };
+    passed &= emergencyText.find("emergency report after rotation") != std::string::npos;
     logger->get_file_stream().close();
+    input.close();
+    repeated.close();
+    newest.close();
+    emergency.close();
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
+    auto firstEmergency = path;
+    firstEmergency += ".crash.txt";
+    std::filesystem::remove(firstEmergency, ignored);
+    for (const auto& entry : std::filesystem::directory_iterator(options.directory))
+        std::filesystem::remove(entry.path(), ignored);
+    std::filesystem::remove(options.directory, ignored);
+    std::filesystem::remove(options.directory.parent_path(), ignored);
     return passed ? 0 : 6;
 }

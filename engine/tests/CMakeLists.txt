@@ -21,6 +21,9 @@ function(vibrance_add_engine_test test_name source_file)
 endfunction()
 
 vibrance_add_engine_test(vibrance_logger_tests logger_tests.cpp)
+add_executable(vibrance_runtime_log_storage_tests runtime_log_storage_tests.cpp)
+target_include_directories(vibrance_runtime_log_storage_tests PRIVATE ../include)
+add_test(NAME vibrance_runtime_log_storage_tests COMMAND vibrance_runtime_log_storage_tests)
 if(WIN32)
     add_test(NAME vibrance_crash_diagnostics_tests COMMAND ${CMAKE_COMMAND}
         "-DLOGGER_TEST=$<TARGET_FILE:vibrance_logger_tests>"

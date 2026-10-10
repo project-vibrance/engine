@@ -11,6 +11,7 @@
 #include <vector>
 #include <atomic>
 #include <exception>
+#include <string_view>
 #if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
@@ -68,6 +69,9 @@ class VIBRANCE_ENGINE_API Logger
 
     bool is_file_open() const { return logFile.is_open(); }
     std::ofstream& get_file_stream() { return logFile; }
+    // Used by both ordinary records and legacy renderer diagnostics.
+    void write_file_output(std::string_view text);
+    void flush_file_output();
     const std::filesystem::path& output_path() const { return logPath; }
 
     ~Logger();
@@ -135,6 +139,12 @@ class VIBRANCE_ENGINE_API Logger
     LoggerOutputOptions outputOptions {};
     std::filesystem::path logPath {};
     std::chrono::steady_clock::time_point startTime;
+    std::chrono::steady_clock::time_point nextRetentionCheck {};
+    std::chrono::steady_clock::time_point nextRotationAttempt {};
+    std::string lastMessage;
+    LogLevel lastMessageLevel = LogLevel::eTrace;
+    unsigned repeatedMessages = 0;
+    std::chrono::steady_clock::time_point lastMessageTime {};
 
     Logger();
     void reopen_file();

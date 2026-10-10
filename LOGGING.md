@@ -34,6 +34,27 @@ to `Documents/vibrance-dev/runtime/engine`, and may choose a path with
 `Logger::configure_output`. Engine messages from the app/installer share that
 process's runtime log.
 
+Runtime text logs rotate at **5 MiB per file**, with **four older parts** beside
+the current file (`.1` is the newest archive). Rotation keeps the current
+filename stable so crash reports continue to belong to the same session.
+Retention runs at startup, rotation and at most once a minute during logging:
+it removes the oldest closed runtime artefacts to target **50 MiB per runtime
+folder**, expires closed files after **seven days**, and retains at most
+**100 artefacts**, including at most **three minidumps**. Files belonging to live
+sessions are protected, so simultaneous processes can temporarily exceed the
+folder budget; each process's rotating text logs are bounded to 25 MiB. Cleanup
+only recognises Vibrance runtime filenames and never includes unrelated files or
+compilation transcripts. Cleanup failures do not permit an active text log to
+grow past its size limit: file output pauses until rotation can be retried.
+
+Identical consecutive messages are summarised once every five seconds, with a
+repeat count when the next record is emitted. Fatal records are always emitted.
+Individual text messages are truncated at 64 KiB; emergency reports have a
+1 MiB write budget per reporting module. Windows minidumps are limited to 5 MiB;
+an oversized dump is discarded while the exception details remain in the text
+report. Compilation logs retain their complete output independently of these
+runtime limits.
+
 Runtime records include UTC and elapsed timestamps, severity, thread identifiers,
 startup and exit, operation boundaries and durations, renderer readiness,
 resource loading, settings, authentication outcomes, update state transitions,

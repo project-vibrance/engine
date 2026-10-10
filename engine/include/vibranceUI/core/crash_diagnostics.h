@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <cstdlib>
 #include <initializer_list>
+#include <atomic>
+#include "runtime_log_storage.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -22,6 +24,8 @@
 
 namespace crash_diagnostics
 {
+inline std::atomic<unsigned> emergencyBytes { 0 };
+static_assert(std::atomic<unsigned>::is_always_lock_free);
 #if defined(_WIN32)
 inline HANDLE emergencyFile = INVALID_HANDLE_VALUE;
 inline std::filesystem::path dumpPath;
@@ -35,24 +39,51 @@ inline int emergencyFile = -1;
 
 inline void write(const char* text) noexcept
 {
+    unsigned length = 0;
+    while (length < 4096 && text[length]) ++length;
+    constexpr unsigned limit = 1024u * 1024u;
+    unsigned previous = emergencyBytes.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (previous >= limit) return;
+        const unsigned bytes = std::min(length, limit - previous);
+        if (emergencyBytes.compare_exchange_weak(previous, previous + bytes, std::memory_order_relaxed))
+        {
+            length = bytes;
+            break;
+        }
+    }
 #if defined(_WIN32)
     if (emergencyFile != INVALID_HANDLE_VALUE)
     {
         DWORD written = 0;
-        WriteFile(emergencyFile, text, static_cast<DWORD>(std::strlen(text)), &written, nullptr);
+        WriteFile(emergencyFile, text, length, &written, nullptr);
         FlushFileBuffers(emergencyFile);
     }
     OutputDebugStringA(text);
 #else
     if (emergencyFile >= 0)
     {
-        const auto ignored = ::write(emergencyFile, text, std::strlen(text));
+        const auto ignored = ::write(emergencyFile, text, length);
         (void)ignored;
     }
 #endif
 }
 
 #if defined(_WIN32)
+inline BOOL CALLBACK dump_callback(PVOID context, PMINIDUMP_CALLBACK_INPUT input,
+    MINIDUMP_CALLBACK_OUTPUT* output) noexcept
+{
+    if (input->CallbackType == CancelCallback)
+    {
+        LARGE_INTEGER size {};
+        output->CheckCancel = TRUE;
+        output->Cancel = GetFileSizeEx(static_cast<HANDLE>(context), &size) &&
+            static_cast<std::uintmax_t>(size.QuadPart) > runtime_log_storage::fileLimit;
+    }
+    return TRUE;
+}
+
 inline LONG WINAPI unhandled(EXCEPTION_POINTERS* exception) noexcept
 {
     char message[256] {};
@@ -68,11 +99,17 @@ inline LONG WINAPI unhandled(EXCEPTION_POINTERS* exception) noexcept
         if (dump != INVALID_HANDLE_VALUE)
         {
             MINIDUMP_EXCEPTION_INFORMATION info { GetCurrentThreadId(), exception, FALSE };
+            MINIDUMP_CALLBACK_INFORMATION callback { dump_callback, dump };
             const BOOL saved = writeDump(GetCurrentProcess(), GetCurrentProcessId(), dump,
-                MiniDumpNormal, &info, nullptr, nullptr);
+                MiniDumpNormal, &info, nullptr, &callback);
+            LARGE_INTEGER size {};
+            const bool withinLimit = GetFileSizeEx(dump, &size) &&
+                static_cast<std::uintmax_t>(size.QuadPart) <= runtime_log_storage::fileLimit;
             FlushFileBuffers(dump);
             CloseHandle(dump);
-            write(saved ? "Crash minidump saved beside this report.\n" : "Crash minidump could not be written.\n");
+            if (!saved || !withinLimit) DeleteFileW(dumpPath.c_str());
+            write(saved && withinLimit ? "Crash minidump saved beside this report.\n" :
+                "Crash minidump unavailable or exceeded the 5 MiB limit; exception details are in this report.\n");
         }
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -108,6 +145,7 @@ inline void terminate_handler() noexcept
 
 inline void initialise(const std::filesystem::path& logPath)
 {
+    emergencyBytes.store(0, std::memory_order_relaxed);
     auto report = logPath;
     report += ".crash.txt";
 #if defined(_WIN32)

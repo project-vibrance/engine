@@ -13,6 +13,7 @@
 #include <thread>
 #include <exception>
 #include <vibranceUI/core/crash_diagnostics.h>
+#include <vibranceUI/core/runtime_log_storage.h>
 #if defined(_WIN32)
 #include <shlobj.h>
 #endif
@@ -71,7 +72,9 @@ namespace
             std::cout << val;
             Logger* l = Logger::fetch_logger();
             if (l && l->is_file_open()) {
-                l->get_file_stream() << val;
+                std::ostringstream fragment;
+                fragment << val;
+                l->write_file_output(fragment.str());
             }
             return *this;
         }
@@ -81,7 +84,10 @@ namespace
             manip(std::cout);
             Logger* l = Logger::fetch_logger();
             if (l && l->is_file_open()) {
-                manip(l->get_file_stream());
+                std::ostringstream fragment;
+                manip(fragment);
+                l->write_file_output(fragment.str());
+                l->flush_file_output();
             }
             return *this;
         }
@@ -174,6 +180,8 @@ void Logger::reopen_file()
         logFile.open(logPath, std::ios::out | std::ios::trunc);
         if (!logFile) throw std::runtime_error("Could not open log file: " + logPath.string());
         crash_diagnostics::initialise(logPath);
+        runtime_log_storage::prune(docsPath, logPath, prefix);
+        nextRetentionCheck = std::chrono::steady_clock::now() + std::chrono::minutes(1);
     } 
 	catch (const std::exception& e) 
 	{
@@ -267,6 +275,9 @@ void Logger::configure_output(LoggerOutputOptions options)
     }
 
     logger->outputOptions = pending_logger_output_options();
+    logger->lastMessage.clear();
+    logger->repeatedMessages = 0;
+    logger->nextRotationAttempt = {};
     logger->reopen_file();
 }
 
@@ -274,6 +285,28 @@ void Logger::log(LogLevel level, std::string message)
 {
     const std::lock_guard lock(logger_mutex());
     if (!enabled || static_cast<uint8_t>(level) < static_cast<uint8_t>(minLevel.load())) return;
+
+    constexpr std::size_t maximumMessageBytes = 64u * 1024u;
+    if (message.size() > maximumMessageBytes)
+    {
+        message.resize(maximumMessageBytes);
+        message += " [message truncated]";
+    }
+    const auto recordTime = std::chrono::steady_clock::now();
+    if (level != LogLevel::eFatal && message == lastMessage && level == lastMessageLevel &&
+        recordTime - lastMessageTime < std::chrono::seconds(5))
+    {
+        ++repeatedMessages;
+        return;
+    }
+    if (repeatedMessages)
+    {
+        logOut << "[repeated " << repeatedMessages << " times] " << lastMessage << std::endl;
+        repeatedMessages = 0;
+    }
+    lastMessage = message;
+    lastMessageLevel = level;
+    lastMessageTime = recordTime;
 
     // Prefix messages with elapsed process time for comparing multi-window events
     auto now = std::chrono::steady_clock::now();
@@ -305,6 +338,51 @@ void Logger::log(LogLevel level, std::string message)
         << std::setfill(' ') << std::left << std::setw(5) << level_name(level) << "] ";
     line << "[thread " << std::this_thread::get_id() << "] " << message;
     logOut << line.str() << std::endl;
+}
+
+void Logger::write_file_output(std::string_view text)
+{
+    const std::lock_guard lock(logger_mutex());
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= nextRetentionCheck)
+    {
+        runtime_log_storage::prune(logPath.parent_path(), logPath, outputOptions.filePrefix);
+        nextRetentionCheck = now + std::chrono::minutes(1);
+    }
+    while (!text.empty() && logFile.is_open())
+    {
+        const auto position = logFile.tellp();
+        if (position < 0) return;
+        const auto size = static_cast<std::uintmax_t>(position);
+        if (size >= runtime_log_storage::fileLimit ||
+            (text.size() <= runtime_log_storage::fileLimit &&
+             text.size() > runtime_log_storage::fileLimit - size))
+        {
+            if (now < nextRotationAttempt) return;
+            logFile.close();
+            if (!runtime_log_storage::rotate(logPath))
+            {
+                logFile.open(logPath, std::ios::out | std::ios::app);
+                nextRotationAttempt = now + std::chrono::minutes(1);
+                std::cerr << "Runtime log rotation failed; file output is paused to preserve its size limit.\n";
+                return;
+            }
+            logFile.clear();
+            logFile.open(logPath, std::ios::out | std::ios::trunc);
+            runtime_log_storage::prune(logPath.parent_path(), logPath, outputOptions.filePrefix);
+            if (!logFile) return;
+            continue;
+        }
+        const auto bytes = std::min<std::uintmax_t>(text.size(), runtime_log_storage::fileLimit - size);
+        logFile.write(text.data(), static_cast<std::streamsize>(bytes));
+        text.remove_prefix(static_cast<std::size_t>(bytes));
+    }
+}
+
+void Logger::flush_file_output()
+{
+    const std::lock_guard lock(logger_mutex());
+    logFile.flush();
 }
 
 void Logger::trace(std::string message) { log(LogLevel::eTrace, std::move(message)); }
