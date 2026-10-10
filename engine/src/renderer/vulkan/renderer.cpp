@@ -1092,11 +1092,14 @@ private:
 
 Engine::Engine(const EngineCreateInfo& createInfo) : impl(std::make_unique<Impl>(createInfo))
 {
+    Logger::fetch_logger()->log(ready() ? LogLevel::eInfo : LogLevel::eError,
+        ready() ? "Engine renderer ready: vulkan." : "Engine renderer initialisation failed: vulkan.");
 	register_live_engine(this);
 }
 
 Engine::~Engine()
 {
+    Logger::fetch_logger()->info("Engine instance shutting down: vulkan.");
 	unregister_live_engine(this);
 }
 
@@ -1112,6 +1115,7 @@ int Engine::update_timing(double currentTimeSeconds)
 
 bool Engine::set_present_mode(RendererPresentMode mode)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::set_present_mode");
 	return impl->set_present_mode(mode);
 }
 
@@ -1164,11 +1168,13 @@ void Engine::resize(uint32_t framebufferWidth, uint32_t framebufferHeight)
 
 Model3DHandle Engine::load_model_3d(const std::filesystem::path& path)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_model_3d");
 	return impl->load_model_3d(path);
 }
 
 Media2DHandle Engine::load_media_2d(const std::filesystem::path& path, const Media2DLoadOptions& options)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_media_2d");
 	return impl->load_media_2d(path, options);
 }
 
@@ -1189,16 +1195,19 @@ const AudioEngine& Engine::audio() const
 
 bool Engine::load_renderer2d_font(const std::filesystem::path& path)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_renderer2d_font");
 	return impl->load_renderer2d_font(path);
 }
 
 bool Engine::load_renderer2d_font(const std::filesystem::path& path, const Renderer2DFontAtlasLoadOptions& options)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_renderer2d_font");
 	return impl->load_renderer2d_font(path, options);
 }
 
 bool Engine::load_localisation_directory(const std::filesystem::path& directory)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_localisation_directory");
 	const bool loaded = impl->load_localisation_directory(directory);
 	if (loaded)
 	{
@@ -1210,6 +1219,7 @@ bool Engine::load_localisation_directory(const std::filesystem::path& directory)
 bool Engine::load_localisation_directories(
 	const std::vector<std::filesystem::path>& directories)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_localisation_directories");
 	const bool loaded = impl->load_localisation_directories(directories);
 	if (loaded)
 	{
@@ -1221,11 +1231,13 @@ bool Engine::load_localisation_directories(
 
 bool Engine::set_locale(const std::string& locale)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::set_locale");
 	return impl->set_locale(locale);
 }
 
 bool Engine::set_shared_locale(const std::string& locale)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::set_shared_locale");
 	{
 		std::lock_guard<std::mutex> lock(live_engine_mutex());
 		shared_locale_value() = locale;

@@ -1,3 +1,4 @@
+#include <vibranceUI/core/logger.h>
 #include <vibranceUI/core/file.h>
 #include <fstream>
 #include <atomic>
@@ -16,9 +17,11 @@
 
 std::vector<unsigned char> read_binary_file(const std::filesystem::path& path)
 {
+    const LogOperation diagnosticOperation("file: read_binary_file");
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file)
     {
+        Logger::fetch_logger()->warning("Could not open binary resource: " + path.string());
         return {};
     }
 
@@ -32,6 +35,7 @@ std::vector<unsigned char> read_binary_file(const std::filesystem::path& path)
     file.seekg(0, std::ios::beg);
     if (!file.read(reinterpret_cast<char*>(bytes.data()), size))
     {
+        Logger::fetch_logger()->error("Could not read complete binary resource: " + path.string());
         return {};
     }
     return bytes;
@@ -45,6 +49,7 @@ std::string read_text_file(const std::filesystem::path& path)
 
 bool write_file_atomically(const std::filesystem::path& path, std::string_view bytes)
 {
+    const LogOperation diagnosticOperation("file: write_file_atomically");
     if (path.empty() || path.filename().empty() ||
         bytes.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
         return false;

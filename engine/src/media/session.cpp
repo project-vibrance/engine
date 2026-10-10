@@ -21,6 +21,24 @@
 #include "session_macos.h"
 #endif
 
+
+#if !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+#include <vibranceUI/core/logger.h>
+#endif
+namespace
+{
+void provider_diagnostic(bool failure, const std::string& message)
+{
+#if !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+    Logger::fetch_logger()->log(failure ? LogLevel::eWarning : LogLevel::eInfo,
+        "GlobalMediaSession: " + message);
+#else
+    (void)failure;
+    (void)message;
+#endif
+}
+}
+
 struct GlobalMediaSession::Impl
 {
     MediaSessionSnapshot snapshot;
@@ -302,6 +320,8 @@ struct GlobalMediaSession::Impl
 GlobalMediaSession::GlobalMediaSession() :
     impl(std::make_unique<Impl>())
 {
+    provider_diagnostic(!impl->snapshot.bridgeLoaded, impl->snapshot.diagnostic.empty() ?
+        "Provider initialised." : impl->snapshot.diagnostic);
 }
 
 GlobalMediaSession::~GlobalMediaSession() = default;
@@ -325,17 +345,27 @@ bool GlobalMediaSession::bridge_loaded() const
 
 bool GlobalMediaSession::refresh()
 {
-    return impl && impl->refresh();
+    if (!impl) return false;
+    const auto previousDiagnostic = impl->snapshot.diagnostic;
+    const bool changed = impl->refresh();
+    if (previousDiagnostic != impl->snapshot.diagnostic)
+        provider_diagnostic(!impl->snapshot.diagnostic.empty(), impl->snapshot.diagnostic.empty() ?
+            "Provider recovered." : impl->snapshot.diagnostic);
+    return changed;
 }
 
 bool GlobalMediaSession::send(MediaSessionCommand command)
 {
-    return impl && impl->send(command);
+    const bool succeeded = impl && impl->send(command);
+    provider_diagnostic(!succeeded, "send: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 bool GlobalMediaSession::seek(std::int64_t positionMilliseconds)
 {
-    return impl && impl->seek(positionMilliseconds);
+    const bool succeeded = impl && impl->seek(positionMilliseconds);
+    provider_diagnostic(!succeeded, "seek: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 const MediaSessionSnapshot& GlobalMediaSession::snapshot() const

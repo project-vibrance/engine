@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/scripts/build-logging.sh"
+vibrance_logged_build engine "${BASH_SOURCE[0]}" "$@"
+# Show exact commands for configuration, dependency builds and packaging.
+set -x
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -80,6 +84,6 @@ for TARGET_ARCH in "${ARCHITECTURES[@]}"; do
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
     ${CONFIGURE_ARGS[@]+"${CONFIGURE_ARGS[@]}"}
-  cmake --build "${TARGET_DIR}" --config "${BUILD_TYPE}" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+  cmake --build "${TARGET_DIR}" --config "${BUILD_TYPE}" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" --verbose
   cmake --install "${TARGET_DIR}" --prefix "${PREFIX}" --config "${BUILD_TYPE}"
 done

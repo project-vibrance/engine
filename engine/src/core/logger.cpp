@@ -9,6 +9,13 @@
 #include <filesystem>
 #include <cstdlib>
 #include <utility>
+#include <mutex>
+#include <thread>
+#include <exception>
+#include <vibranceUI/core/crash_diagnostics.h>
+#if defined(_WIN32)
+#include <shlobj.h>
+#endif
 #if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
 #endif
@@ -34,6 +41,12 @@ Logger* Logger::logger;
 
 namespace 
 {
+    std::recursive_mutex& logger_mutex()
+    {
+        static auto* mutex = new std::recursive_mutex;
+        return *mutex;
+    }
+
     // Normal logs stay enabled in release, while Vulkan chatter is compile-time gated
     constexpr const char* level_name(LogLevel level)
     {
@@ -90,6 +103,13 @@ namespace
         }
 
 #ifdef _WIN32
+        PWSTR documents = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents)))
+        {
+            const auto directory = std::filesystem::path(documents) / options.directoryName;
+            CoTaskMemFree(documents);
+            return directory;
+        }
         const char* userProfile = std::getenv("USERPROFILE");
         if (userProfile)
         {
@@ -136,7 +156,14 @@ void Logger::reopen_file()
     gmtime_r(&time, &utc);
 #endif
     std::ostringstream filename;
-    filename << prefix << '_' << std::put_time(&utc, "%Y-%m-%d_%H-%M-%S") << ".txt";
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now - nowSeconds).count();
+#if defined(_WIN32)
+    const auto processId = GetCurrentProcessId();
+#else
+    const auto processId = getpid();
+#endif
+    static std::atomic<unsigned> sequence { 0 };
+    filename << prefix << '_' << std::put_time(&utc, "%Y-%m-%d_%H-%M-%S") << '_' << milliseconds << '_' << processId << '_' << sequence.fetch_add(1) << ".txt";
     const std::string fileName = filename.str();
     const std::filesystem::path docsPath = default_log_directory(outputOptions);
 
@@ -145,10 +172,12 @@ void Logger::reopen_file()
         std::filesystem::create_directories(docsPath);
         logPath = docsPath / fileName;
         logFile.open(logPath, std::ios::out | std::ios::trunc);
+        if (!logFile) throw std::runtime_error("Could not open log file: " + logPath.string());
+        crash_diagnostics::initialise(logPath);
     } 
 	catch (const std::exception& e) 
 	{
-        std::cerr << "\e[0;31m[Logger Error] Failed to create log directory/file: " << e.what() << "\033[0m" << std::endl;
+        std::cerr << "\033[0;31m[Logger Error] Failed to create log directory/file: " << e.what() << "\033[0m" << std::endl;
     }
 }
 
@@ -220,13 +249,17 @@ bool Logger::is_vulkan_validation_enabled() const
 
 Logger* Logger::fetch_logger()
 {
+    const std::lock_guard lock(logger_mutex());
     if (!logger) logger = new Logger();
-
     return logger;
 }
 
 void Logger::configure_output(LoggerOutputOptions options)
 {
+    const std::lock_guard lock(logger_mutex());
+    const auto& previous = pending_logger_output_options();
+    if (logger && previous.directory == options.directory &&
+        previous.directoryName == options.directoryName && previous.filePrefix == options.filePrefix) return;
     pending_logger_output_options() = std::move(options);
     if (!logger)
     {
@@ -239,7 +272,8 @@ void Logger::configure_output(LoggerOutputOptions options)
 
 void Logger::log(LogLevel level, std::string message)
 {
-    if (!enabled || static_cast<uint8_t>(level) < static_cast<uint8_t>(minLevel)) return;
+    const std::lock_guard lock(logger_mutex());
+    if (!enabled || static_cast<uint8_t>(level) < static_cast<uint8_t>(minLevel.load())) return;
 
     // Prefix messages with elapsed process time for comparing multi-window events
     auto now = std::chrono::steady_clock::now();
@@ -257,11 +291,20 @@ void Logger::log(LogLevel level, std::string message)
     auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
 
     std::ostringstream line;
+    const auto wallTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm utc {};
+#if defined(_WIN32)
+    gmtime_s(&utc, &wallTime);
+#else
+    gmtime_r(&wallTime, &utc);
+#endif
+    line << '[' << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ") << "] ";
     line << '[' << std::setfill('0') << std::setw(2) << hours.count() << ':'
         << std::setw(2) << minutes.count() << ':' << std::setw(2) << seconds.count()
         << '.' << std::setw(9) << nanoseconds.count() << "] ["
         << std::setfill(' ') << std::left << std::setw(5) << level_name(level) << "] ";
-    logOut << line.str() << message << std::endl;
+    line << "[thread " << std::this_thread::get_id() << "] " << message;
+    logOut << line.str() << std::endl;
 }
 
 void Logger::trace(std::string message) { log(LogLevel::eTrace, std::move(message)); }
@@ -280,15 +323,21 @@ void Logger::print(std::string message) { info(std::move(message)); }
 
 void Logger::vulkan(LogLevel level, std::string message)
 {
-    if (!is_vulkan_renderer_logging_enabled()) return;
+    if (level < LogLevel::eWarning && !is_vulkan_renderer_logging_enabled()) return;
     log(level, std::string("Vulkan: ") + message);
 }
 
-void Logger::vulkan(std::string message) { vulkan(LogLevel::eDebug, std::move(message)); }
+void Logger::vulkan(std::string message)
+{
+    const bool failure = message.starts_with("Failed") || message.starts_with("Cannot") ||
+        message.starts_with("No suitable") || message.starts_with("Swapchain creation produced no");
+    vulkan(failure ? LogLevel::eError : LogLevel::eDebug, std::move(message));
+}
 
 #if !defined(__APPLE__)
 void Logger::report_version_number(uint32_t version)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     vulkan(std::format("System supports the following Vulkan specifications:\n\tVariant: {}\n\tMajor: {}\n\tMinor: {}\n\tPatch: {}", vk::apiVersionVariant(version), vk::apiVersionMajor(version), vk::apiVersionMinor(version), vk::apiVersionPatch(version)));
@@ -296,6 +345,7 @@ void Logger::report_version_number(uint32_t version)
 
 void Logger::print_list(const char** list, uint32_t count)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     for (uint32_t i = 0; i < count; i++) logOut << "\t\"" << list[i] << "\"" << std::endl;
@@ -303,6 +353,7 @@ void Logger::print_list(const char** list, uint32_t count)
 
 void Logger::print_extensions(std::vector<vk::ExtensionProperties>& extensions)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     for (vk::ExtensionProperties extension : extensions) logOut << "\t\'" << extension.extensionName << "\'" << std::endl;
@@ -310,6 +361,7 @@ void Logger::print_extensions(std::vector<vk::ExtensionProperties>& extensions)
 
 void Logger::print_layers(std::vector<vk::LayerProperties>& layers)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     for (vk::LayerProperties layer : layers) logOut << "\t\'" << layer.layerName << "\'" << std::endl;
@@ -339,6 +391,7 @@ vk::DebugUtilsMessengerEXT Logger::make_debug_messenger(vk::Instance& instance, 
 
 void Logger::log(const vk::PhysicalDevice& device)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     vk::PhysicalDeviceProperties properties = device.getProperties();
@@ -520,6 +573,7 @@ void Logger::log(const std::vector<vk::PresentModeKHR>& modes) {
 
 void Logger::log(const VmaAllocationInfo& info)
 {
+    const std::lock_guard lock(logger_mutex());
 	if (!is_vulkan_renderer_logging_enabled()) return;
 
 	logOut << "---- " << info.pName << " ----" << std::endl;
@@ -633,3 +687,49 @@ suitable for use as a fragment shading rate attachment or shading rate image");
 }
 
 #endif
+
+int Logger::run_session(std::string component, const std::function<int()>& action)
+{
+    auto* log = fetch_logger();
+    log->info(component + ": SESSION START; log=" + log->output_path().string());
+    try
+    {
+        const int code = action();
+        log->log(code == 0 ? LogLevel::eInfo : LogLevel::eError,
+            component + ": SESSION END; exit code=" + std::to_string(code));
+        return code;
+    }
+    catch (const std::exception& error)
+    {
+        crash_diagnostics::write("FATAL: unhandled application exception: ");
+        crash_diagnostics::write(error.what());
+        crash_diagnostics::write("\n");
+        log->fatal(component + ": UNHANDLED EXCEPTION: " + error.what());
+    }
+    catch (...)
+    {
+        crash_diagnostics::write("FATAL: unhandled non-standard application exception.\n");
+        log->fatal(component + ": UNHANDLED NON-STANDARD EXCEPTION");
+    }
+    return EXIT_FAILURE;
+}
+
+LogOperation::LogOperation(std::string operation, int activeExceptions) : name(std::move(operation)),
+    exceptions(activeExceptions), started(std::chrono::steady_clock::now())
+{
+    Logger::fetch_logger()->debug("BEGIN " + name);
+}
+
+void LogOperation::finish(int activeExceptions) noexcept
+{
+    try
+    {
+        const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        const bool failed = activeExceptions > exceptions;
+        Logger::fetch_logger()->log(failed ? LogLevel::eError : LogLevel::eDebug,
+            std::string(failed ? "EXCEPTION " : "END ") + name + " (" +
+            std::to_string(milliseconds) + " ms)");
+    }
+    catch (...) {} // Diagnostics must never interrupt unwinding.
+}

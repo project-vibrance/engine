@@ -1,6 +1,13 @@
 @echo off
+if defined VIBRANCE_BUILD_LOG_ENGINE goto :logged_build
+setlocal DisableDelayedExpansion
+set "VIBRANCE_LOGGED_BUILD_ARGUMENTS=%*"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Invoke-LoggedBuild.ps1" -Component engine -BuildScript "%~f0" -ArgumentsFromEnvironment
+endlocal & exit /b %errorlevel%
+:logged_build
 setlocal
 pushd "%~dp0"
+@echo on
 
 REM Usage: mingwBuild.bat [Debug|Release] [SDK install prefix] [x64|arm64|all]
 REM Shortcut: mingwBuild.bat [Debug|Release] [x64|arm64|all]
@@ -72,9 +79,11 @@ if /I "%TARGET_ARCH%"=="arm64" (
 )
 if errorlevel 1 goto :fail
 
-cmake --build "%TARGET_DIR%" --config %BUILD_TYPE%
+echo ================ COMPILATION ================
+cmake --build "%TARGET_DIR%" --config %BUILD_TYPE% --verbose
 if errorlevel 1 goto :fail
 
+echo ================ INSTALLATION AND PACKAGING ================
 cmake --install "%TARGET_DIR%" --prefix "%INSTALL_DIR%" --config %BUILD_TYPE%
 if errorlevel 1 goto :fail
 

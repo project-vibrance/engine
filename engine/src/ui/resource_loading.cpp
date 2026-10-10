@@ -13,6 +13,7 @@ Media2DHandle ui_load_layered_media(
     const Media2DLoadOptions& options,
     Logger* logger)
 {
+    const LogOperation diagnosticOperation("resources: ui_load_layered_media");
     const std::vector<std::filesystem::path> candidates =
         resources.asset_candidates(relativePath);
     for (std::size_t index = 0; index < candidates.size(); ++index)
@@ -28,8 +29,10 @@ Media2DHandle ui_load_layered_media(
                 "Using packaged fallback after an override failed to decode: " +
                 candidates[index].string());
         }
+        if (logger) logger->debug("Resource loaded: " + candidates[index].string());
         return handle;
     }
+    if (logger) logger->error("No resource candidate could be loaded: " + relativePath.string());
     return {};
 }
 
@@ -39,6 +42,7 @@ AudioClipHandle ui_load_layered_audio(
     const std::filesystem::path& relativePath,
     Logger* logger)
 {
+    const LogOperation diagnosticOperation("resources: ui_load_layered_audio");
     const std::vector<std::filesystem::path> candidates =
         resources.asset_candidates(relativePath);
     for (std::size_t index = 0; index < candidates.size(); ++index)
@@ -54,7 +58,9 @@ AudioClipHandle ui_load_layered_audio(
                 "Using packaged audio fallback after an override failed to decode: " +
                 candidates[index].string());
         }
+        if (logger) logger->debug("Resource loaded: " + candidates[index].string());
         return handle;
     }
+    if (logger) logger->error("No resource candidate could be loaded: " + relativePath.string());
     return {};
 }

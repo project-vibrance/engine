@@ -20,6 +20,14 @@ function(vibrance_add_engine_test test_name source_file)
     add_test(NAME ${test_name} COMMAND ${test_name} ${ARGN})
 endfunction()
 
+vibrance_add_engine_test(vibrance_logger_tests logger_tests.cpp)
+if(WIN32)
+    add_test(NAME vibrance_crash_diagnostics_tests COMMAND ${CMAKE_COMMAND}
+        "-DLOGGER_TEST=$<TARGET_FILE:vibrance_logger_tests>"
+        "-DOUTPUT_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/crash-diagnostics"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/check_crash_diagnostics.cmake")
+endif()
+
 set(VIBRANCE_EMOJI_TEST_FONT "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/AppleColorEmoji.ttf"
     CACHE FILEPATH "Colour emoji font used by the shaping and bitmap regression test")
 vibrance_add_engine_test(vibrance_emoji_font_tests emoji_font_tests.cpp "${VIBRANCE_EMOJI_TEST_FONT}")

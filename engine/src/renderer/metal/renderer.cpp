@@ -778,6 +778,8 @@ struct Engine::Impl
 
 Engine::Engine(const EngineCreateInfo &info) : impl(std::make_unique<Impl>(info))
 {
+    Logger::fetch_logger()->log(ready() ? LogLevel::eInfo : LogLevel::eError,
+        ready() ? "Engine renderer ready: metal." : "Engine renderer initialisation failed: metal.");
     if (!info.defaultRenderer2DFontPath.empty())
         load_renderer2d_font(info.defaultRenderer2DFontPath, info.defaultRenderer2DFontOptions);
     else
@@ -791,6 +793,7 @@ Engine::Engine(const EngineCreateInfo &info) : impl(std::make_unique<Impl>(info)
 }
 Engine::~Engine()
 {
+    Logger::fetch_logger()->info("Engine instance shutting down: metal.");
     std::lock_guard lock(liveMutex);
     std::erase(liveEngines, this);
 }
@@ -876,6 +879,7 @@ int Engine::update_timing(double time)
 }
 bool Engine::set_present_mode(RendererPresentMode mode)
 {
+    const LogOperation diagnosticOperation("metal: Engine::set_present_mode");
     if (mode != RendererPresentMode::eAuto && mode != RendererPresentMode::eFifo &&
         mode != RendererPresentMode::eImmediate)
         return false;
@@ -917,6 +921,7 @@ void Engine::resize(uint32_t width, uint32_t height)
 }
 Model3DHandle Engine::load_model_3d(const std::filesystem::path &path)
 {
+    const LogOperation diagnosticOperation("metal: Engine::load_model_3d");
     const auto key =
         std::filesystem::absolute(path).lexically_normal().string() + "|" + resource_file_cache_version(path);
     if (auto it = impl->modelCache.find(key); it != impl->modelCache.end())
@@ -931,6 +936,7 @@ Model3DHandle Engine::load_model_3d(const std::filesystem::path &path)
 }
 Media2DHandle Engine::load_media_2d(const std::filesystem::path &path, const Media2DLoadOptions &options)
 {
+    const LogOperation diagnosticOperation("metal: Engine::load_media_2d");
     std::ostringstream key;
     key << std::filesystem::absolute(path).lexically_normal().string() << '|'
         << resource_file_cache_version(path) << '|' << options.rasterWidth << '|' << options.rasterHeight
@@ -965,11 +971,13 @@ const AudioEngine &Engine::audio() const
 }
 bool Engine::load_renderer2d_font(const std::filesystem::path &path)
 {
+    const LogOperation diagnosticOperation("metal: Engine::load_renderer2d_font");
     return load_renderer2d_font(path, {});
 }
 bool Engine::load_renderer2d_font(const std::filesystem::path &path,
                                   const Renderer2DFontAtlasLoadOptions &options)
 {
+    const LogOperation diagnosticOperation("metal: Engine::load_renderer2d_font");
     if (!impl->font.load_from_file(path, options, impl->upload))
         return false;
     impl->fontPath = path;
@@ -987,6 +995,7 @@ bool Engine::load_renderer2d_font(const std::filesystem::path &path,
 }
 bool Engine::load_localisation_directory(const std::filesystem::path &path)
 {
+    const LogOperation diagnosticOperation("metal: Engine::load_localisation_directory");
     const bool result = impl->localisation.load_directory(path);
     if (result)
         set_locale(shared_locale());
@@ -994,6 +1003,7 @@ bool Engine::load_localisation_directory(const std::filesystem::path &path)
 }
 bool Engine::load_localisation_directories(const std::vector<std::filesystem::path> &paths)
 {
+    const LogOperation diagnosticOperation("metal: Engine::load_localisation_directories");
     impl->localisation.clear();
     bool loaded = false;
     for (const auto &path : paths)
@@ -1004,12 +1014,14 @@ bool Engine::load_localisation_directories(const std::vector<std::filesystem::pa
 }
 bool Engine::set_locale(const std::string &locale)
 {
+    const LogOperation diagnosticOperation("metal: Engine::set_locale");
     const bool result = impl->localisation.set_locale(locale);
     refresh_localised_texts();
     return result;
 }
 bool Engine::set_shared_locale(const std::string &locale)
 {
+    const LogOperation diagnosticOperation("metal: Engine::set_shared_locale");
     std::lock_guard lock(liveMutex);
     sharedLocale = locale;
     bool changed = false;

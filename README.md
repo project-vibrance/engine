@@ -627,3 +627,5 @@ For shader maintainers, `python3 scripts/generate_metal_shaders.py` regenerates
 `engine/src/renderer/metal/shaders/*.metal` from the shared GLSL maths. This
 optional authoring step requires `glslc` and `spirv-cross`; generated MSL belongs
 in source control. Run the Metal GPU tests after changing shader bindings.
+
+Runtime and full compilation diagnostics are documented in [LOGGING.md](LOGGING.md).

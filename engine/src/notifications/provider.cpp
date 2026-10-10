@@ -15,6 +15,24 @@
 #include <array>
 #endif
 
+
+#if !defined(VIBRANCE_FORCE_PORTABLE_NOTIFICATION_PROVIDER)
+#include <vibranceUI/core/logger.h>
+#endif
+namespace
+{
+void provider_diagnostic(bool failure, const std::string& message)
+{
+#if !defined(VIBRANCE_FORCE_PORTABLE_NOTIFICATION_PROVIDER)
+    Logger::fetch_logger()->log(failure ? LogLevel::eWarning : LogLevel::eInfo,
+        "SystemNotificationProvider: " + message);
+#else
+    (void)failure;
+    (void)message;
+#endif
+}
+}
+
 struct SystemNotificationProvider::Impl
 {
     SystemNotificationSnapshot current;
@@ -295,6 +313,8 @@ struct SystemNotificationProvider::Impl
 SystemNotificationProvider::SystemNotificationProvider() :
     impl(std::make_unique<Impl>())
 {
+    provider_diagnostic(!impl->current.bridgeLoaded, impl->current.diagnostic.empty() ?
+        "Provider initialised." : impl->current.diagnostic);
 }
 
 SystemNotificationProvider::~SystemNotificationProvider() = default;
@@ -319,23 +339,35 @@ bool SystemNotificationProvider::bridge_loaded() const
 
 bool SystemNotificationProvider::request_access()
 {
-    return impl && impl->request_access();
+    const bool succeeded = impl && impl->request_access();
+    provider_diagnostic(!succeeded, "request_access: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 bool SystemNotificationProvider::refresh()
 {
-    return impl && impl->refresh();
+    if (!impl) return false;
+    const auto previousDiagnostic = impl->current.diagnostic;
+    const bool changed = impl->refresh();
+    if (previousDiagnostic != impl->current.diagnostic)
+        provider_diagnostic(!impl->current.diagnostic.empty(), impl->current.diagnostic.empty() ?
+            "Provider recovered." : impl->current.diagnostic);
+    return changed;
 }
 
 bool SystemNotificationProvider::dismiss(std::uint32_t providerId)
 {
-    return impl && impl->dismiss(providerId);
+    const bool succeeded = impl && impl->dismiss(providerId);
+    provider_diagnostic(!succeeded, "dismiss: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 bool SystemNotificationProvider::activate_source(
     std::string_view activationTarget)
 {
-    return impl && impl->activate_source(activationTarget);
+    const bool succeeded = impl && impl->activate_source(activationTarget);
+    provider_diagnostic(!succeeded, "activate_source: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 SystemApplicationIcon SystemNotificationProvider::resolve_application_icon(

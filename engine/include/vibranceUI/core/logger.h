@@ -9,6 +9,8 @@
 #include <fstream>
 #include <chrono>
 #include <vector>
+#include <atomic>
+#include <exception>
 #if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
@@ -29,7 +31,7 @@ struct LoggerOutputOptions
 {
     // Keeps the timestamped filename format while letting apps brand the path
     std::filesystem::path directory {};
-    std::string directoryName = "vibranceUI";
+    std::string directoryName = "vibrance-dev/runtime/engine";
     std::string filePrefix = "vibrance_log";
 };
 
@@ -42,6 +44,9 @@ class VIBRANCE_ENGINE_API Logger
     static Logger* fetch_logger();
 
     static void configure_output(LoggerOutputOptions options);
+
+    // Starts diagnostics before any application work and records every exit.
+    static int run_session(std::string component, const std::function<int()>& action);
 
     // Master switch for app logs outside renderer validation
     void set_mode(bool mode);
@@ -122,10 +127,10 @@ class VIBRANCE_ENGINE_API Logger
 
 #endif
     private:
-    bool enabled;
-    bool vulkanRendererLoggingEnabled;
-    bool vulkanValidationEnabled;
-    LogLevel minLevel;
+    std::atomic<bool> enabled;
+    std::atomic<bool> vulkanRendererLoggingEnabled;
+    std::atomic<bool> vulkanValidationEnabled;
+    std::atomic<LogLevel> minLevel;
     std::ofstream logFile;
     LoggerOutputOptions outputOptions {};
     std::filesystem::path logPath {};
@@ -141,6 +146,22 @@ class VIBRANCE_ENGINE_API Logger
 
     std::vector<std::string> parse_image_usage_bits(vk::ImageUsageFlags bits);
 #endif
+};
+
+// Use around infrequent operations, never around frame or audio sample loops.
+// END means control returned; callers still record semantic success/failure.
+class VIBRANCE_ENGINE_API LogOperation
+{
+public:
+    explicit LogOperation(std::string name, int exceptions = std::uncaught_exceptions());
+    ~LogOperation() noexcept { finish(std::uncaught_exceptions()); }
+    LogOperation(const LogOperation&) = delete;
+    LogOperation& operator=(const LogOperation&) = delete;
+private:
+    std::string name;
+    int exceptions;
+    std::chrono::steady_clock::time_point started;
+    void finish(int activeExceptions) noexcept;
 };
 
 #if !defined(__APPLE__)

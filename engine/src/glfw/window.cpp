@@ -222,10 +222,14 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
 {
     Logger* logger = Logger::fetch_logger();
 
+    glfwSetErrorCallback([](int code, const char* description) {
+        Logger::fetch_logger()->error("GLFW error " + std::to_string(code) + ": " +
+            (description ? description : "No description"));
+    });
     // GLFW stays inside this backend layer so the engine can remain platform-agnostic
     if (glfwInit() != GLFW_TRUE)
     {
-        logger->print("Failed to initialise GLFW.");
+        logger->error("Failed to initialise GLFW.");
         return nullptr;
     }
 
