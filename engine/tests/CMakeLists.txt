@@ -31,7 +31,16 @@ if(WIN32)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/check_crash_diagnostics.cmake")
 endif()
 
-set(VIBRANCE_EMOJI_TEST_FONT "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/AppleColorEmoji.ttf"
+set(_vibrance_test_fonts "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts")
+if(EXISTS "${CMAKE_SOURCE_DIR}/../app-private/app/assets/fonts/Inter.ttc")
+    set(_vibrance_test_fonts "${CMAKE_SOURCE_DIR}/../app-private/app/assets/fonts")
+endif()
+# Migrate the previous sibling default while preserving custom test fonts.
+if(VIBRANCE_EMOJI_TEST_FONT STREQUAL "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/AppleColorEmoji.ttf" AND
+   NOT EXISTS "${VIBRANCE_EMOJI_TEST_FONT}")
+    unset(VIBRANCE_EMOJI_TEST_FONT CACHE)
+endif()
+set(VIBRANCE_EMOJI_TEST_FONT "${_vibrance_test_fonts}/AppleColorEmoji.ttf"
     CACHE FILEPATH "Colour emoji font used by the shaping and bitmap regression test")
 vibrance_add_engine_test(vibrance_emoji_font_tests emoji_font_tests.cpp "${VIBRANCE_EMOJI_TEST_FONT}")
 target_link_libraries(vibrance_emoji_font_tests PRIVATE vibrance_harfbuzz)
@@ -64,16 +73,17 @@ if(VIBRANCE_WIN32_INTEROP_AVAILABLE)
     add_test(NAME vibrance_playback_quality_win32_tests COMMAND "${_vibrance_quality_test}")
 endif()
 vibrance_add_engine_test(vibrance_animated_control_masks_tests animated_control_masks_tests.cpp)
+vibrance_add_engine_test(vibrance_scene_cache_ownership_tests scene_cache_ownership_tests.cpp)
 vibrance_add_engine_test(vibrance_horizontal_scroll_fade_tests horizontal_scroll_fade_tests.cpp)
 vibrance_add_engine_test(vibrance_digit_spacing_tests digit_spacing_tests.cpp
-    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/Inter.ttc"
-    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/NotoSans-Variable.ttf")
+    "${_vibrance_test_fonts}/Inter.ttc"
+    "${_vibrance_test_fonts}/NotoSans-Variable.ttf")
 set_tests_properties(vibrance_digit_spacing_tests PROPERTIES SKIP_RETURN_CODE 77)
 vibrance_add_engine_test(vibrance_text_baseline_tests text_baseline_tests.cpp
-    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/Inter.ttc"
-    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/fonts/NotoSans-Variable.ttf"
-    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/svg/static/icons/player/dolby_atmos.svg"
-    "${CMAKE_SOURCE_DIR}/../vibrance-app/app/assets/svg/static/icons/player/lossless.svg")
+    "${_vibrance_test_fonts}/Inter.ttc"
+    "${_vibrance_test_fonts}/NotoSans-Variable.ttf"
+    "${_vibrance_test_fonts}/../svg/static/icons/player/dolby_atmos.svg"
+    "${_vibrance_test_fonts}/../svg/static/icons/player/lossless.svg")
 set_tests_properties(vibrance_text_baseline_tests PROPERTIES SKIP_RETURN_CODE 77)
 
 vibrance_add_engine_test(
@@ -269,6 +279,10 @@ endif()
 
 if(APPLE)
     vibrance_add_engine_test(vibrance_metal_window_tests metal_window_tests.cpp)
+    vibrance_add_engine_test(vibrance_native_glass_controls_tests native_glass_controls_tests.mm)
+    target_compile_options(vibrance_native_glass_controls_tests PRIVATE -fobjc-arc)
+    target_link_libraries(vibrance_native_glass_controls_tests PRIVATE "-framework AppKit" "-framework QuartzCore")
+    set_tests_properties(vibrance_native_glass_controls_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     set_tests_properties(vibrance_metal_window_tests PROPERTIES SKIP_RETURN_CODE 77)
     vibrance_add_engine_test(vibrance_metal_frame_damage_tests metal_frame_damage_tests.cpp)
 endif()
@@ -277,7 +291,8 @@ if(APPLE)
     add_executable(vibrance_media_session_macos_tests media_session_macos_tests.mm)
     target_include_directories(vibrance_media_session_macos_tests PRIVATE ../include)
     target_compile_options(vibrance_media_session_macos_tests PRIVATE -fobjc-arc)
-    target_link_libraries(vibrance_media_session_macos_tests PRIVATE "-framework Foundation")
+    target_link_libraries(vibrance_media_session_macos_tests PRIVATE
+        "-framework Cocoa" "-framework ApplicationServices")
     add_test(NAME vibrance_media_session_macos_tests COMMAND vibrance_media_session_macos_tests)
 endif()
 
@@ -290,7 +305,8 @@ if(APPLE)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/media-session-fixture")
     target_include_directories(vibrance_media_session_macos_provider_tests PRIVATE ../include)
     target_compile_options(vibrance_media_session_macos_provider_tests PRIVATE -fobjc-arc)
-    target_link_libraries(vibrance_media_session_macos_provider_tests PRIVATE "-framework Foundation")
+    target_link_libraries(vibrance_media_session_macos_provider_tests PRIVATE
+        "-framework Cocoa" "-framework ApplicationServices")
     add_test(NAME vibrance_media_session_macos_provider_tests
         COMMAND vibrance_media_session_macos_provider_tests)
 endif()

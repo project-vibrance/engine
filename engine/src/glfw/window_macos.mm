@@ -31,6 +31,12 @@ namespace
     }
 }
 
+bool glfw_macos_mouse_button_pressed(int button)
+{
+    if (button < 0 || button > GLFW_MOUSE_BUTTON_LAST) return false;
+    return ([NSEvent pressedMouseButtons] & (NSUInteger(1) << button)) != 0;
+}
+
 std::string glfw_monitor_identifier(GLFWmonitor* monitor)
 {
     if (!monitor)

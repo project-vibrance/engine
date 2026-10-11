@@ -1696,6 +1696,11 @@ public:
 
     Renderer2DRenderPlan build_render_plan(double currentTimeSeconds, uint64_t rendererCacheGeneration);
     void build_render_plan(Renderer2DRenderPlan& plan, double currentTimeSeconds, uint64_t rendererCacheGeneration);
+    // Rendering can defer hidden-page layout until it becomes visible. Cache
+    // ownership still includes hidden entities, while the authoring method
+    // above continues to resolve the complete scene's geometry.
+    void build_visible_render_plan(Renderer2DRenderPlan& plan,
+        double currentTimeSeconds, uint64_t rendererCacheGeneration);
     std::optional<Renderer2DShapeVisualState> resolved_shape_visual_state(
         entt::entity entity,
         double currentTimeSeconds) const;
@@ -1705,6 +1710,9 @@ private:
     bool damage_pending(entt::entity entity, double currentTimeSeconds) const;
     void commit_presented_bounds(
         std::vector<std::pair<entt::entity, glm::uvec4>> bounds);
+    void build_render_plan_impl(Renderer2DRenderPlan& plan,
+        double currentTimeSeconds, uint64_t rendererCacheGeneration,
+        bool visibleLayoutsOnly);
 
     entt::registry registry_;
     uint64_t cacheGeneration_ = 1;

@@ -545,7 +545,7 @@ uint32_t Renderer2DScene::active_frame_rate_limit(
 
 entt::entity Renderer2DScene::entity_at(glm::vec2 point)
 {
-    resolve_layouts(registry_);
+    resolve_layouts(registry_, true);
 
     const ShapeStyleComponent defaultShapeStyle {};
     const TextStyleComponent defaultTextStyle {};
@@ -666,6 +666,15 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
         bool hit = false;
         if (!text.glyphs.empty())
         {
+            const auto envelope = text_glyph_hit_bounds(transform, text, textBounds);
+            // Reject distant labels before walking their ancestors separately
+            // for every glyph. Use actual ink bounds to retain font overhangs.
+            if (!envelope || !point_in_rect(expand_rect(
+                renderer2d_apply_interactive_visual_rect(registry_, entity, *envelope),
+                padding), point))
+            {
+                continue;
+            }
             for (const MSDFGlyph& glyph : text.glyphs)
             {
                 if (glyph.size.x <= 0.0f || glyph.size.y <= 0.0f)
@@ -713,7 +722,7 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
 
 bool Renderer2DScene::hit_test(glm::vec2 point)
 {
-    resolve_layouts(registry_);
+    resolve_layouts(registry_, true);
 
     const ShapeStyleComponent defaultShapeStyle {};
     const TextStyleComponent defaultTextStyle {};
@@ -806,6 +815,13 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
         const float padding = text_hit_padding(style);
         if (!text.glyphs.empty())
         {
+            const auto envelope = text_glyph_hit_bounds(transform, text, textBounds);
+            if (!envelope || !point_in_rect(expand_rect(
+                renderer2d_apply_interactive_visual_rect(registry_, entity, *envelope),
+                padding), point))
+            {
+                continue;
+            }
             for (const MSDFGlyph& glyph : text.glyphs)
             {
                 if (glyph.size.x <= 0.0f || glyph.size.y <= 0.0f)
@@ -996,12 +1012,29 @@ void Renderer2DScene::build_render_plan(
     double currentTimeSeconds,
     uint64_t rendererCacheGeneration)
 {
+    build_render_plan_impl(plan, currentTimeSeconds, rendererCacheGeneration, false);
+}
+
+void Renderer2DScene::build_visible_render_plan(
+    Renderer2DRenderPlan& plan,
+    double currentTimeSeconds,
+    uint64_t rendererCacheGeneration)
+{
+    build_render_plan_impl(plan, currentTimeSeconds, rendererCacheGeneration, true);
+}
+
+void Renderer2DScene::build_render_plan_impl(
+    Renderer2DRenderPlan& plan,
+    double currentTimeSeconds,
+    uint64_t rendererCacheGeneration,
+    bool visibleLayoutsOnly)
+{
     plan.clear();
     if (update_display_transition_activity(registry_, currentTimeSeconds))
     {
         mark_dirty();
     }
-    resolve_layouts(registry_);
+    resolve_layouts(registry_, visibleLayoutsOnly);
 
     const ShapeStyleComponent defaultShapeStyle {};
     const TextStyleComponent defaultTextStyle {};
@@ -1019,8 +1052,14 @@ void Renderer2DScene::build_render_plan(
         if (media.animated && media.playing)
         {
             Renderer2DCacheComponent& cache = cache_or_default(registry_, entity);
+            const bool ownershipChanged = cache.mode != Renderer2DCacheMode::eDynamic &&
+                affects_static_cache(registry_, entity);
             cache.mode = Renderer2DCacheMode::eDynamic;
             cache.restoreStaticWhenIdle = false;
+            if (ownershipChanged)
+            {
+                mark_dirty();
+            }
         }
     });
 
@@ -1392,7 +1431,11 @@ void Renderer2DScene::build_render_plan(
             (cachedBatch ? plan.cachedBlurs : plan.blurs).push_back(blurBatch);
         }
 
-        if (foregroundVisible)
+        // Retain a paint-order marker even when AppKit owns the visible lens.
+        const bool nativeLiquid = liquid && liquid->material == GlassMaterial::eLiquid &&
+            liquid->backend == LiquidGlassBackend::eMacOSNative &&
+            alpha_visible(style.opacity * visualOpacity);
+        if (foregroundVisible || nativeLiquid)
         {
             (cachedBatch ? plan.cachedShapes : plan.shapes).push_back(batch);
         }

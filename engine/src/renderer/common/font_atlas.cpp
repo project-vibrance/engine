@@ -26,6 +26,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace
@@ -953,6 +958,32 @@ namespace
                 }
             }
             CloseHandle(file);
+        }
+#elif defined(__APPLE__)
+        // Multilingual and emoji collections can be hundreds of megabytes.
+        // Let FreeType fault in the tables it uses, and let the emoji shaper
+        // retain the mapping instead of copying the complete file per window.
+        const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (descriptor >= 0)
+        {
+            struct stat status {};
+            if (::fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) &&
+                status.st_size > 0 && static_cast<uint64_t>(status.st_size) <=
+                    static_cast<uint64_t>(std::numeric_limits<FT_Long>::max()))
+            {
+                const auto size = static_cast<size_t>(status.st_size);
+                void* mapping = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, descriptor, 0);
+                if (mapping != MAP_FAILED)
+                {
+                    const auto* bytes = static_cast<const unsigned char*>(mapping);
+                    out.mappedData = std::shared_ptr<const unsigned char>(bytes,
+                        [size](const unsigned char* view) {
+                            ::munmap(const_cast<unsigned char*>(view), size);
+                        });
+                    fontData = {bytes, size};
+                }
+            }
+            ::close(descriptor);
         }
 #endif
         if (fontData.empty())

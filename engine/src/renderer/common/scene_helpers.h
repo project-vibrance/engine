@@ -5,6 +5,7 @@
 #include <vibranceUI/renderer/content_size.h>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <optional>
 #include <unordered_set>
 namespace
@@ -936,7 +937,7 @@ namespace
             (cache.mode == Renderer2DCacheMode::eTimed && cache.detachedFromStaticLayer);
     }
 
-    bool affects_static_cache(const entt::registry& registry, entt::entity entity)
+    bool has_static_cache_ownership(const entt::registry& registry, entt::entity entity)
     {
         entt::entity current = entity;
         for (uint32_t depth = 0; depth < 64u && current != entt::null && registry.valid(current); ++depth)
@@ -955,6 +956,47 @@ namespace
             current = parent->parent;
         }
         return true;
+    }
+
+    bool affects_static_cache(const entt::registry& registry, entt::entity entity)
+    {
+        if (has_static_cache_ownership(registry, entity))
+            return true;
+        const auto* ownCache = registry.try_get<Renderer2DCacheComponent>(entity);
+        if (!ownCache || ownCache->propagateToChildren)
+            return false;
+
+        // A live parent can leave its children static. Its layout, visibility
+        // and masks still affect those children, so retain neither their old
+        // positions nor their old paint when that parent changes.
+        const auto parents = registry.view<const Parent2DComponent>();
+        bool hasChildren = false;
+        for (const auto child : parents)
+        {
+            if (parents.get<const Parent2DComponent>(child).parent != entity)
+                continue;
+            hasChildren = true;
+            if (has_static_cache_ownership(registry, child))
+                return true;
+        }
+        if (!hasChildren)
+            return false;
+        for (const auto child : parents)
+        {
+            if (!has_static_cache_ownership(registry, child))
+                continue;
+            auto ancestor = parents.get<const Parent2DComponent>(child).parent;
+            for (unsigned depth = 0; depth < 64 && registry.valid(ancestor); ++depth)
+            {
+                if (ancestor == entity)
+                    return true;
+                const auto* parent = registry.try_get<Parent2DComponent>(ancestor);
+                if (!parent || parent->parent == ancestor)
+                    break;
+                ancestor = parent->parent;
+            }
+        }
+        return false;
     }
 
     bool update_cache_activity(Renderer2DCacheComponent& cache, double currentTimeSeconds)
@@ -2092,6 +2134,28 @@ namespace
         return make_bounds(transform, text_layout_size(text));
     }
 
+    std::optional<glm::vec4> text_glyph_hit_bounds(
+        const Transform2DComponent& transform, const TextComponent& text,
+        glm::vec4 textBounds)
+    {
+        glm::vec2 minimum(std::numeric_limits<float>::max());
+        glm::vec2 maximum(std::numeric_limits<float>::lowest());
+        bool hasGlyph = false;
+        for (const MSDFGlyph& glyph : text.glyphs)
+        {
+            if (glyph.size.x <= 0.0f || glyph.size.y <= 0.0f)
+                continue;
+            const glm::vec2 position = glm::vec2(textBounds) +
+                glyph.position * transform.scale;
+            minimum = glm::min(minimum, position);
+            maximum = glm::max(maximum, position + glyph.size * transform.scale);
+            hasGlyph = true;
+        }
+        if (!hasGlyph)
+            return std::nullopt;
+        return glm::vec4 { minimum, maximum - minimum };
+    }
+
     float text_hit_padding(const TextStyleComponent& style)
     {
         const float foregroundPad = std::max(
@@ -2723,7 +2787,7 @@ namespace
         resolved.insert(key);
     }
 
-    void resolve_layouts(entt::registry& registry)
+    void resolve_layouts(entt::registry& registry, bool visibleOnly = false)
     {
         auto layoutView = registry.view<Transform2DComponent, const Parent2DComponent, const Layout2DComponent>();
         std::vector<entt::entity> stack;
@@ -2733,6 +2797,8 @@ namespace
         entt::dense_set<uint32_t> resolved;
         resolved.reserve(layoutView.size_hint());
         layoutView.each([&](entt::entity entity, Transform2DComponent&, const Parent2DComponent&, const Layout2DComponent&) {
+            if (visibleOnly && !is_visible(registry, entity))
+                return;
             resolve_entity_layout(registry, entity, stack, resolved);
         });
 
@@ -2745,6 +2811,8 @@ namespace
             Transform2DComponent& transform,
             const VisualTransform2DComponent& visual,
             const Layout2DComponent&) {
+            if (visibleOnly && !is_visible(registry, entity))
+                return;
             const glm::vec2 baseSize = entity_layout_size(registry, entity);
             const glm::vec2 baseMin =
                 transform.position - transform.origin * baseSize;

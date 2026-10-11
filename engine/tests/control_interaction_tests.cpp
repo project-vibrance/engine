@@ -49,11 +49,117 @@ namespace
         }
         return condition;
     }
+
+    bool lost_button_releases_recover_capture()
+    {
+        bool passed = true;
+        Renderer2DScene scene;
+        auto& registry = scene.registry();
+        const Renderer2DFontAtlas atlas;
+        UiInputState state;
+        const auto entity = scene.create_shape({ 10.0f, 10.0f }, { 100.0f, 40.0f },
+            make_solid_style({ 0.1f, 0.2f, 0.3f, 1.0f }));
+        int leftReleases = 0;
+        int rightReleases = 0;
+        int clicks = 0;
+        ButtonInputComponent button;
+        button.onRelease = [&](const PointerInputEvent& event) {
+            (event.button == PointerButton::eLeft ? leftReleases : rightReleases)++;
+        };
+        button.onClick = [&](const PointerInputEvent&) { ++clicks; };
+        registry.emplace<ButtonInputComponent>(entity, std::move(button));
+        ButtonVisualComponent visual;
+        visual.idle = registry.get<ShapeStyleComponent>(entity);
+        visual.hovered = visual.idle;
+        visual.pressed = make_solid_style({ 0.8f, 0.2f, 0.3f, 1.0f });
+        registry.emplace<ButtonVisualComponent>(entity, visual);
+        const glm::vec2 point { 30.0f, 25.0f };
+        const auto input = [&](PointerButton selected, UiInputAction action) {
+            ui_handle_pointer_button(scene, atlas, state,
+                UiPointerButtonInput { true, point, selected, 0, action });
+        };
+
+        input(PointerButton::eLeft, UiInputAction::ePress);
+        passed &= expect(state.pressedInputEntity == entity &&
+            state.pointerInputCapture == entity &&
+            !ui_recover_pointer_button_release(scene, state, true, false, point),
+            "a physically held ordinary button must keep capture");
+        passed &= expect(ui_recover_pointer_button_release(scene, state, false, false, point) &&
+            state.pressedInputEntity == entt::null && state.pointerInputCapture == entt::null &&
+            !registry.get<ButtonInputComponent>(entity).leftPressed &&
+            registry.get<ShapeStyleComponent>(entity).color0 == visual.idle.color0 &&
+            leftReleases == 1 && clicks == 0,
+            "a lost ordinary button release must cancel capture and pressed paint without clicking");
+        passed &= expect(!ui_recover_pointer_button_release(scene, state, false, false, point),
+            "a recovered button release must finish exactly once");
+        input(PointerButton::eLeft, UiInputAction::eRelease);
+        passed &= expect(leftReleases == 1 && clicks == 0,
+            "a delayed native release after recovery must not release or click twice");
+        input(PointerButton::eLeft, UiInputAction::ePress);
+        input(PointerButton::eLeft, UiInputAction::eRelease);
+        passed &= expect(leftReleases == 2 && clicks == 1,
+            "an ordinary button must accept a real click immediately after release recovery");
+
+        input(PointerButton::eLeft, UiInputAction::ePress);
+        input(PointerButton::eRight, UiInputAction::ePress);
+        passed &= expect(ui_recover_pointer_button_release(scene, state, true, false, point) &&
+            rightReleases == 1 && state.pressedInputEntity == entity &&
+            state.pointerInputCapture == entity &&
+            registry.get<ButtonInputComponent>(entity).leftPressed,
+            "recovering a right release must preserve a physically held left button");
+        input(PointerButton::eRight, UiInputAction::eRelease);
+        passed &= expect(rightReleases == 1 && state.pressedInputEntity == entity &&
+            state.pointerInputCapture == entity,
+            "a delayed right release must preserve the remaining left capture");
+        ui_recover_pointer_button_release(scene, state, false, false, point);
+        passed &= expect(leftReleases == 3 && clicks == 1 &&
+            state.pressedInputEntity == entt::null && state.pointerInputCapture == entt::null,
+            "the remaining left release must finish independently without a click");
+
+        input(PointerButton::eLeft, UiInputAction::ePress);
+        registry.get<ButtonInputComponent>(entity).onRelease =
+            [&](const PointerInputEvent&) { scene.destroy_entity_tree(entity); };
+        passed &= expect(ui_recover_pointer_button_release(scene, state, false, false, point) &&
+            !registry.valid(entity) && state.pressedInputEntity == entt::null &&
+            state.pointerInputCapture == entt::null,
+            "release recovery must tolerate a callback removing its captured button");
+
+        const auto removed = scene.create_shape({}, { 40.0f, 40.0f }, visual.idle);
+        registry.emplace<ButtonInputComponent>(removed);
+        state.pressedInputEntity = removed;
+        state.pointerInputCapture = removed;
+        scene.destroy_entity_tree(removed);
+        passed &= expect(ui_recover_pointer_button_release(scene, state, false, false, point) &&
+            state.pressedInputEntity == entt::null && state.pointerInputCapture == entt::null,
+            "a removed captured button must not leave stale pointer ownership");
+
+        const auto textInput = scene.create_shape({ 10.0f, 10.0f }, { 100.0f, 40.0f }, visual.idle);
+        registry.emplace<TextInputComponent>(textInput);
+        input(PointerButton::eLeft, UiInputAction::ePress);
+        passed &= expect(state.pressedInputEntity == entt::null &&
+            state.pointerInputCapture == textInput && state.focusedTextInput == textInput &&
+            !ui_recover_pointer_button_release(scene, state, true, false, point),
+            "a held text input must retain left capture without a button press owner");
+        passed &= expect(ui_recover_pointer_button_release(scene, state, false, false, point) &&
+            state.pointerInputCapture == entt::null && state.focusedTextInput == textInput,
+            "a lost text input release must clear capture while preserving keyboard focus");
+        const auto next = scene.create_shape({ 10.0f, 10.0f }, { 100.0f, 40.0f }, visual.idle);
+        registry.get<RenderLayer2DComponent>(next).order = 100;
+        ButtonInputComponent nextButton;
+        nextButton.onClick = [&](const PointerInputEvent&) { ++clicks; };
+        registry.emplace<ButtonInputComponent>(next, std::move(nextButton));
+        input(PointerButton::eLeft, UiInputAction::ePress);
+        input(PointerButton::eLeft, UiInputAction::eRelease);
+        passed &= expect(clicks == 2 && state.pointerInputCapture == entt::null,
+            "the next ordinary click must work immediately after a text input loses its release");
+        return passed;
+    }
 }
 
 int main()
 {
     bool passed = true;
+    passed &= lost_button_releases_recover_capture();
     for (const auto& palette : { ui_light_theme(), ui_dark_theme() })
     {
         const auto slider = ui_slider_options_from_theme(palette);
@@ -95,6 +201,14 @@ int main()
         optics.liquidTint = { 0.0f, 0.0f, 0.0f, 0.25f };
         ui_update_liquid_controls(lightsScene, true, optics);
         const auto glass = registry.get<ShapeStyleComponent>(light).color0;
+#if defined(__APPLE__)
+        const auto lightTint = registry.get<SystemBackdropComponent>(light).region.liquidTint;
+        passed &= expect(glass.a == 0.0f && lightTint.red > lightTint.green * 2.0f &&
+            lightTint.red > lightTint.blue * 2.0f &&
+            !registry.any_of<ShadowComponent>(light) &&
+            registry.get<LiquidGlassComponent>(light).backend == LiquidGlassBackend::eMacOSNative,
+            "native traffic light glass must receive its original colour without duplicate shader paint");
+#else
         passed &= expect(registry.get<LiquidGlassComponent>(light).refraction == 0.85f &&
             glass.r > glass.g * 2.0f && glass.r > glass.b * 2.0f && glass.a < 1.0f,
             "traffic light lenses must follow the optical settings and retain their colour");
@@ -106,6 +220,7 @@ int main()
         const auto& shadow = registry.get<ShadowComponent>(light);
         passed &= expect(shadow.outsideOnly && shadow.spread == 0.0f && shadow.opacity <= 0.06f,
             "shared glass surfaces must have only a faint outside shadow");
+#endif
         lightsScene.build_render_plan(0.0, 0u);
         UiInputState state {};
         const Renderer2DFontAtlas atlas;
@@ -484,10 +599,17 @@ int main()
                 return (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
             });
         };
+#if defined(__APPLE__)
+        passed &= expect(glassRegistry.all_of<LiquidGlassComponent, SystemBackdropComponent>(slider.thumbEntity) &&
+            !containsOptics(plan.blurs) && !containsOptics(plan.cachedBlurs) &&
+            glassRegistry.get<LiquidGlassComponent>(slider.thumbEntity).backend == LiquidGlassBackend::eMacOSNative,
+            "a dragged macOS thumb must use native glass without a shader optical pass");
+#else
         passed &= expect(glassRegistry.any_of<LiquidGlassComponent>(slider.thumbEntity) &&
             (containsOptics(plan.blurs) || containsOptics(plan.cachedBlurs)) &&
             !glassRegistry.any_of<SystemBackdropComponent>(slider.thumbEntity),
             "only a dragged thumb must emit portable optical drawing");
+#endif
         const auto thumbHasLiquidRim = [&](const auto& batches) {
             return std::any_of(batches.begin(), batches.end(), [&](const auto& batch) {
                 return batch.entity == slider.thumbEntity &&
@@ -499,10 +621,14 @@ int main()
         passed &= expect(sliderThumbStyle.outlineWidth == 0.0f &&
             sliderThumbStyle.outlineColor.a == 0.0f &&
             sliderThumbStyle.edgeSoftness == 0.5f &&
+#if defined(__APPLE__)
+            !glassRegistry.any_of<ShadowComponent>(slider.thumbEntity) &&
+#else
             glassRegistry.any_of<ShadowComponent>(slider.thumbEntity) &&
             glassRegistry.get<ShadowComponent>(slider.thumbEntity).blurRadius >= 8.0f &&
             glassRegistry.get<ShadowComponent>(slider.thumbEntity).opacity <= 0.12f &&
             glassRegistry.get<ShadowComponent>(slider.thumbEntity).spread <= 0.75f &&
+#endif
             !thumbHasLiquidRim(plan.shapes) && !thumbHasLiquidRim(plan.cachedShapes),
             "configured slider thumbs must have a soft shadow without gaining an outline in normal or liquid rendering");
         float peakScale = 1.0f;
@@ -524,6 +650,9 @@ int main()
             const auto thumb = ui_entity_framebuffer_rect(glassRegistry, slider.thumbEntity);
             passed &= expect(thumb.x >= track.x - 0.01f && thumb.x + thumb.z <= track.x + track.z + 0.01f,
                 "a bouncing glass thumb must stay inside both slider endpoints");
+            const auto fill = ui_entity_framebuffer_rect(glassRegistry, slider.fillEntity);
+            passed &= expect(std::abs(fill.x + fill.z - (thumb.x + thumb.z * 0.5f)) < 0.01f,
+                "a native thumb's transparent Metal paint must not change the slider fill's inset travel");
         }
         slider.dragging = false;
         slider.hovered = true;
@@ -581,7 +710,12 @@ int main()
         ui_update_text_input_visual(controlsScene, fontAtlas, search.root);
         const auto focused = registry.get<ShapeStyleComponent>(search.root);
         passed &= expect(focused.fill == Renderer2DFill::eSolid &&
-            focused.color0 == glm::vec4(1.0f, 1.0f, 1.0f, 0.04f) && focused.color1 == focused.color0 && focused.outlineWidth == 0.0f &&
+#if defined(__APPLE__)
+            focused.color0 == glm::vec4(0.0f) &&
+#else
+            focused.color0 == glm::vec4(1.0f, 1.0f, 1.0f, 0.04f) &&
+#endif
+            focused.color1 == focused.color0 && focused.outlineWidth == 0.0f &&
             registry.any_of<LiquidGlassComponent>(search.root) &&
             registry.any_of<LiquidGlassComponent>(nav.root) &&
             !registry.any_of<LiquidGlassComponent>(nav.label) &&
@@ -591,11 +725,18 @@ int main()
         optics.liquidBlur = 0.8f;
         optics.liquidTint = { 0.0f, 0.0f, 0.0f, 0.8f };
         ui_update_liquid_controls(controlsScene, true, optics);
+#if defined(__APPLE__)
+        passed &= expect(registry.get<SystemBackdropComponent>(search.root).region.liquidTint.alpha == 0.8f &&
+            registry.get<ShapeStyleComponent>(search.root).color0.a == 0.0f &&
+            !registry.get<LiquidGlassComponent>(search.root).sceneBackdrop,
+            "native controls must pass tint to AppKit while keeping shader lens paint transparent");
+#else
         passed &= expect(registry.get<LiquidGlassComponent>(search.root).blur == 0.8f &&
             registry.get<LiquidGlassComponent>(nav.root).refraction == 0.95f &&
             registry.get<ShapeStyleComponent>(search.root).color1.a >= 0.8f &&
             registry.get<ShapeStyleComponent>(nav.root).color0.r < 0.1f,
             "all shared controls must respond to the live optical and tint preferences");
+#endif
         UiInputState state {};
         const glm::vec2 point { 80.0f, 35.0f };
         ui_handle_pointer_button(controlsScene, fontAtlas, state,
@@ -732,8 +873,15 @@ int main()
         };
         checkCap(plan.blurs);
         checkCap(plan.cachedBlurs);
+#if defined(__APPLE__)
+        passed &= expect(!hasNativeCap && registry.any_of<SystemBackdropComponent>(nav.root) &&
+            registry.get<LiquidGlassComponent>(nav.root).backend == LiquidGlassBackend::eMacOSNative &&
+            !registry.any_of<ShapeCutout2DComponent>(parent),
+            "a macOS lens must use AppKit above the existing cap paint without a shader pass or backdrop hole");
+#else
         passed &= expect(hasNativeCap && !registry.any_of<SystemBackdropComponent>(nav.root),
             "a shared scene lens must sample the island cap without opening a desktop backdrop hole");
+#endif
     }
 
     {

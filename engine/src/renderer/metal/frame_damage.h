@@ -24,7 +24,7 @@ class FrameDamage
             const auto paint = [](const Renderer2DBatch &b) {
                 return std::tie(b.rect, b.clipRect, b.uvRect, b.color0, b.color1, b.color2, b.shadowColor,
                                 b.effect0, b.effect1, b.primitive, b.flags, b.packedData, b.mediaId,
-                                b.frameIndex);
+                                b.frameIndex, b.backdropCapColour);
             };
             return phase == other.phase && backdropEffect == other.backdropEffect &&
                    bounds == other.bounds && paint(batch) == paint(other.batch);
@@ -76,12 +76,22 @@ class FrameDamage
                 const auto top = item.bounds.y > blurReadHalo ? item.bounds.y - blurReadHalo : 0;
                 const auto right = std::min(width, item.bounds.x + item.bounds.z + blurReadHalo);
                 const auto bottom = std::min(height, item.bounds.y + item.bounds.w + blurReadHalo);
+                // An unrelated animation must not repaint every filtered
+                // panel. Only effects reading the damaged source participate.
+                if (damage.x >= right || left >= damage.x + damage.z ||
+                    damage.y >= bottom || top >= damage.y + damage.w)
+                    return;
                 include({left, top, right - left, bottom - top});
             };
-            for (const auto &item : previous)
-                includeBlur(item);
-            for (const auto &item : current)
-                includeBlur(item);
+            glm::uvec4 before;
+            do
+            {
+                before = damage;
+                for (const auto &item : previous)
+                    includeBlur(item);
+                for (const auto &item : current)
+                    includeBlur(item);
+            } while (damage != before);
         }
         if (!valid)
             damage = {0, 0, width, height};

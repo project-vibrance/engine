@@ -47,7 +47,9 @@ if(APPLE)
         src/renderer/metal/renderer.cpp
         src/renderer/metal/device.cpp
         src/renderer/metal/surface.mm
+        src/renderer/metal/native_glass.mm
         src/renderer/metal/mesh.cpp)
+    set_source_files_properties(src/renderer/metal/native_glass.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 else()
     list(APPEND ENGINE_SOURCES src/core/vma_usage.cpp src/factories/mesh_factory.cpp
         src/renderer/vulkan/buffer.cpp
@@ -632,6 +634,7 @@ elseif(APPLE)
         BZip2::BZip2
         "-framework Metal"
         "-framework Cocoa"
+        "-framework ApplicationServices"
         "-framework IOKit"
         "-framework CoreFoundation"
         "-framework CoreAudio"

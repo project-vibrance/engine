@@ -1,5 +1,6 @@
 #import "../src/media/session_macos_snapshot.h"
 #import "../src/media/session_macos_artwork.h"
+#import "../src/media/playback_quality_macos.h"
 #include <iostream>
 
 int main()
@@ -11,6 +12,16 @@ int main()
             if (!value) { std::cerr << message << '\n'; ++failures; }
         };
         auto empty = mac_media_snapshot(NSNull.null);
+        expect(mac_media_quality::wide(@"Björk 🎵") == L"Björk 🎵",
+            "Accessibility matching must preserve non-ASCII names and surrogate pairs");
+        expect(mac_media_quality::role(@"AXStaticText") == media_quality_detection::Role::eText &&
+            mac_media_quality::role(@"AXButton") == media_quality_detection::Role::eButton &&
+            mac_media_quality::role(@"AXTable") == media_quality_detection::Role::eExcluded &&
+            mac_media_quality::role(@"AXWindow") == media_quality_detection::Role::eWindow,
+            "Native roles must exclude catalogue tables and window-wide quality matching");
+        MacPlaybackQualityProbe qualityProbe;
+        expect(qualityProbe.refresh(empty) == MediaPlaybackQuality::eUnknown,
+            "An absent media session must not acquire a playback quality badge");
         expect(empty.bridgeLoaded && empty.serviceReady && !empty.sessionAvailable,
             "No player should clear the session while keeping the service ready");
         auto invalid = mac_media_snapshot(@"invalid");

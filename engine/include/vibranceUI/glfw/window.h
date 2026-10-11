@@ -285,6 +285,9 @@ VIBRANCE_GLFW_API bool glfw_cursor_framebuffer_point(
     int renderHeight,
     glm::vec2& point);
 VIBRANCE_GLFW_API bool glfw_left_mouse_pressed(GLFWwindow* window);
+// Deliver queued releases before a host samples geometry or updates controls.
+VIBRANCE_GLFW_API void glfw_reconcile_ui_mouse_events(
+    GLFWwindow* window, const UiInputState& inputState);
 VIBRANCE_GLFW_API bool glfw_engine_render_size(const Engine* engine, int& width, int& height);
 VIBRANCE_GLFW_API bool glfw_ui_input_has_pointer_capture(const UiInputState& inputState);
 VIBRANCE_GLFW_API GlfwUiPointerSample glfw_ui_pointer_sample(

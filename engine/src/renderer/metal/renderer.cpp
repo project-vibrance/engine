@@ -1,10 +1,14 @@
 #include "device.h"
 #include "mesh.h"
 #include "frame_damage.h"
+#include "foreground_blur.h"
+#include "native_glass.h"
 #include "../common/scene_helpers.h"
+#include "../common/render_op_order.h"
 #include <vibranceUI/renderer/renderer.h>
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/ui/text.h>
+#include <vibranceUI/ui/liquid_controls.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <chrono>
@@ -42,6 +46,27 @@ std::string resource_file_cache_version(const std::filesystem::path &path)
     return std::to_string(safeSize) + "@" + std::to_string(writeTicks);
 }
 
+std::string font_source_key(const std::filesystem::path& path,
+    const Renderer2DFontAtlasLoadOptions& options)
+{
+    std::ostringstream key;
+    key << options.includeBasicLatin << '|' << options.fontWeight;
+    const auto addPath = [&](const std::filesystem::path& candidate) {
+        const auto absolute = std::filesystem::absolute(candidate).lexically_normal();
+        const auto name = absolute.string();
+        key << '|' << name.size() << ':' << name << '@' << resource_file_cache_version(absolute);
+    };
+    addPath(path);
+    key << "|emoji:" << options.emojiFontPaths.size();
+    if (options.emojiFontPaths.empty()) addPath(path.parent_path() / "AppleColorEmoji.ttf");
+    else for (const auto& candidate : options.emojiFontPaths) addPath(candidate);
+    key << "|fallbacks:" << options.fallbackFontPaths.size();
+    for (const auto& candidate : options.fallbackFontPaths) addPath(candidate);
+    key << "|ranges:" << options.ranges.size();
+    for (const auto& range : options.ranges) key << '|' << range.first << ':' << range.last;
+    return key.str();
+}
+
 } // namespace
 struct Engine::Impl
 {
@@ -51,6 +76,9 @@ struct Engine::Impl
     RendererExtent extent;
     Renderer2DScene scene;
     Renderer2DRenderPlan plan;
+    Renderer2DRenderPlan staticPlan;
+    uint64_t preparedCacheGeneration = UINT64_MAX;
+    std::vector<uint32_t> preparedDynamicEntities;
     std::vector<Renderer2DRenderOp> ops;
     FrameDamage frameDamage;
     std::vector<FrameDamage::Item> paintItems;
@@ -58,12 +86,14 @@ struct Engine::Impl
     uint64_t fontTextureId = 0;
     std::vector<Renderer2DPushConstants> textConstants;
     std::vector<DispatchBounds> textBounds;
-    uint32_t textWidth = 0, textHeight = 0;
+    vibrance::renderer::TextBatchPlan textBatchPlan;
     Renderer2DFontAtlas font;
     AudioEngine audio;
     Localisation localisation;
     MetalTextureUpload upload;
     std::filesystem::path fontPath;
+    std::string fontSourceKey;
+    bool strictFontRequirements = false;
     Renderer2DFontAtlasLoadOptions fontOptions;
     std::unordered_set<uint32_t> attemptedGlyphs;
     std::unordered_map<entt::entity, std::string> checkedText;
@@ -86,7 +116,67 @@ struct Engine::Impl
     uint32_t frameCount = 0;
     int fps = 0;
     bool valid = false;
+    std::unique_ptr<NativeGlassSurface> nativeGlass;
+    struct NativeContent
+    {
+        Owned<MTL::Texture> colour, temporary, blur;
+        FrameDamage damage;
+        uint64_t atlas = 0;
+    };
+    std::unordered_map<uint64_t, NativeContent> nativeContents;
     uint64_t presentedGeneration = UINT64_MAX;
+    bool presentationPending = false;
+    unsigned consecutiveSubmissionFailures = 0;
+    uint64_t successfulCompletionsAtFailure = 0;
+    struct CpuTiming
+    {
+        double total = 0, maximum = 0;
+        uint64_t samples = 0;
+        void add(Clock::duration duration)
+        {
+            const double milliseconds = std::chrono::duration<double, std::milli>(duration).count();
+            total += milliseconds;
+            maximum = std::max(maximum, milliseconds);
+            ++samples;
+        }
+    };
+    std::array<CpuTiming, 3> cpuTimings;
+    uint64_t staticPlanBuilds = 0, mainDamagePixels = 0;
+    Clock::time_point diagnosticsStart = Clock::now();
+
+    void log_diagnostics(Clock::time_point now)
+    {
+        if (!device.diagnosticsEnabled || now - diagnosticsStart < std::chrono::seconds(1)) return;
+        std::ostringstream message;
+        message.setf(std::ios::fixed);
+        message.precision(3);
+        message << "Metal renderer diagnostics: " << device.diagnostics.submissions << " submissions, "
+                << device.diagnostics.dispatches << " dispatches, "
+                << device.diagnostics.textGlyphs << " glyphs in " << device.diagnostics.textDispatches
+                << " text dispatches, " << device.diagnostics.dispatchPixels << " dispatched pixels, "
+                << mainDamagePixels << " damaged base pixels, " << staticPlanBuilds
+                << " static plan builds. CPU wall timings (mean/max ms, samples; frame pacing excluded): ";
+        constexpr std::array names {"preparation", "recording", "presentation"};
+        for (size_t index = 0; index < cpuTimings.size(); ++index)
+        {
+            const auto& timing = cpuTimings[index];
+            if (index) message << "; ";
+            message << names[index] << ' ' << (timing.samples ? timing.total / timing.samples : 0)
+                    << '/' << timing.maximum << ", " << timing.samples;
+        }
+        const auto& gpu = device.diagnostics;
+        if (gpu.gpuSamples)
+            message << ". Sampled GPU mean/max ms: " << gpu.gpuMilliseconds / gpu.gpuSamples
+                    << '/' << gpu.gpuMaximumMilliseconds << ", " << gpu.gpuSamples << " samples";
+        else
+            message << ". GPU timings " << (!device.gpuDiagnosticsEnabled ? "disabled" :
+                "awaiting completed samples");
+        Logger::fetch_logger()->info(message.str());
+        cpuTimings = {};
+        staticPlanBuilds = mainDamagePixels = 0;
+        device.diagnostics = {};
+        diagnosticsStart = now;
+    }
 
     explicit Impl(const EngineCreateInfo &info)
         : device(info.preferMetal4), window(info.nativeWindowHandle),
@@ -99,6 +189,7 @@ struct Engine::Impl
         layer = own(attach_surface(window, device.gpu.get(), info.transparentFramebuffer));
         if (!layer)
             throw std::runtime_error("Metal requires a Cocoa window on the main thread");
+        nativeGlass = std::make_unique<NativeGlassSurface>(window, device.gpu.get(), layer.get());
         layer->setDisplaySyncEnabled(preference != RendererPresentMode::eImmediate);
         upload = [this](auto w, auto h, auto bytes, bool srgb, bool mipmaps) {
             return device.upload(w, h, bytes, srgb, mipmaps);
@@ -123,7 +214,17 @@ struct Engine::Impl
     }
     ~Impl()
     {
-        device.flush();
+        try
+        {
+            device.flush();
+        }
+        catch (const std::exception& error)
+        {
+            // Teardown must still detach AppKit surfaces after a failed GPU
+            // frame. Device destruction drains the remaining submitted work.
+            Logger::fetch_logger()->error(error.what());
+        }
+        nativeGlass.reset();
         detach_surface(window, layer.get());
     }
     void resize(uint32_t w, uint32_t h)
@@ -224,7 +325,7 @@ struct Engine::Impl
         {
         case Renderer2DRenderOpType::ePanelBlur:
         case Renderer2DRenderOpType::eBlur:
-            return make_blur_dispatch_bounds(*this, batch);
+            return make_blur_replay_dispatch_bounds(*this, batch);
         case Renderer2DRenderOpType::eShadow:
             return make_dispatch_bounds(*this, batch, DispatchBoundsMode::eShadow);
         case Renderer2DRenderOpType::eTextUnderlay:
@@ -250,19 +351,17 @@ struct Engine::Impl
         if (bounds.empty())
             return;
         auto constants = make_push_constants(batch, pass, bounds.x, bounds.y);
+        if (std::string_view(name) == "blur_2d_comp")
+            constants.data.x |= batch.backdropCapColour << 8u;
         if (std::string_view(name) == "text_msdf_comp")
         {
-            // Compute writes blend with the destination. Only disjoint glyphs
-            // may run together; overlapping edges, shadows and glows stay ordered.
-            if (textConstants.size() == 64 ||
-                std::any_of(textBounds.begin(), textBounds.end(),
-                            [&](const auto &other) { return dispatch_bounds_overlap(other, bounds); }))
+            // Bound dependency planning for long runs. The shared planner keeps
+            // overlapping glyphs ordered and combines independent glyphs.
+            if (textConstants.size() == vibrance::renderer::kTextBatchPlanningGlyphLimit)
                 flush_text();
             constants.data.x = pack_dispatch_extent(bounds.width, bounds.height);
             textConstants.push_back(constants);
             textBounds.push_back(bounds);
-            textWidth = std::max(textWidth, bounds.width);
-            textHeight = std::max(textHeight, bounds.height);
             return;
         }
         flush_text();
@@ -272,13 +371,68 @@ struct Engine::Impl
     {
         if (textConstants.empty())
             return;
-        device.dispatch("text_msdf_batch_comp", textConstants.data(),
-                        textConstants.size() * sizeof(Renderer2DPushConstants), textWidth, textHeight,
-                        {texture(font.image() ? font.image() : fallbackFont.get()), colour.get()},
-                        uint32_t(textConstants.size()));
+        vibrance::renderer::build_text_batch_plan(
+            std::span<const DispatchBounds>(textBounds), textBatchPlan);
+        std::array<Renderer2DPushConstants, vibrance::renderer::kTextBatchGlyphLimit> constants;
+        for (const auto& group : textBatchPlan.groups)
+        {
+            for (uint32_t index = 0; index < group.count; ++index)
+                constants[index] = textConstants[textBatchPlan.glyphIndices[group.first + index]];
+            device.dispatch("text_msdf_batch_comp", constants.data(),
+                            group.count * sizeof(Renderer2DPushConstants), group.width, group.height,
+                            {texture(font.image() ? font.image() : fallbackFont.get()), colour.get()},
+                            group.count);
+        }
         textConstants.clear();
         textBounds.clear();
-        textWidth = textHeight = 0;
+    }
+    void order_simple_ops(std::vector<Renderer2DRenderOp>& renderOps)
+    {
+        const auto simple = [](const Renderer2DRenderOp& op) {
+            return op.batch && (op.type == Renderer2DRenderOpType::eShape ||
+                op.type == Renderer2DRenderOpType::eShadow ||
+                op.type == Renderer2DRenderOpType::eText ||
+                (op.type == Renderer2DRenderOpType::eMedia && op.batch->effect0.z < 0.5f));
+        };
+        std::vector<Renderer2DRenderOp> ordered;
+        std::vector<DispatchBounds> bounds;
+        std::vector<uint8_t> foregroundText;
+        vibrance::renderer::SimpleRenderOrder order;
+        ordered.reserve(renderOps.size());
+        for (size_t first = 0; first < renderOps.size();)
+        {
+            size_t end = first;
+            uint32_t textCount = 0;
+            while (end < renderOps.size() &&
+                   end - first < vibrance::renderer::kTextBatchPlanningGlyphLimit && simple(renderOps[end]))
+            {
+                textCount += renderOps[end].type == Renderer2DRenderOpType::eText;
+                ++end;
+            }
+            if (end == first)
+            {
+                ordered.push_back(renderOps[first++]);
+                continue;
+            }
+            if (textCount < 2 || textCount == end - first)
+                ordered.insert(ordered.end(), renderOps.begin() + first, renderOps.begin() + end);
+            else
+            {
+                bounds.clear();
+                foregroundText.clear();
+                for (size_t index = first; index < end; ++index)
+                {
+                    bounds.push_back(operation_bounds(renderOps[index]));
+                    foregroundText.push_back(renderOps[index].type == Renderer2DRenderOpType::eText);
+                }
+                vibrance::renderer::build_simple_render_order(
+                    std::span<const DispatchBounds>(bounds), std::span<const uint8_t>(foregroundText), order);
+                for (const auto index : order.indices)
+                    ordered.push_back(renderOps[first + index]);
+            }
+            first = end;
+        }
+        renderOps.swap(ordered);
     }
     MTL::SamplerState *model_sampler(const MetalModelSampler &settings)
     {
@@ -449,10 +603,32 @@ struct Engine::Impl
         if (!drawableAvailable)
             return;
         const double now = std::chrono::duration<double>(Clock::now() - start).count();
-        if (presentedGeneration == scene.frame_generation() && !scene.requires_continuous_redraw(now))
+        if (!presentationPending && presentedGeneration == scene.frame_generation() &&
+            !scene.requires_continuous_redraw(now))
             return;
+        // A failed drawable acquisition must be retried even when an animation
+        // settles without advancing the scene generation again.
+        presentationPending = true;
+        const auto preparationStart = device.diagnosticsEnabled ? Clock::now() : Clock::time_point{};
         auto pool = own(NS::AutoreleasePool::alloc()->init());
-        scene.build_render_plan(plan, now, 0); // Replay both layers in their exact shared stacking order.
+        scene.build_visible_render_plan(plan, now, preparedCacheGeneration);
+        if (!plan.rebuildCachedLayer && plan.dynamicEntities != preparedDynamicEntities)
+            scene.build_visible_render_plan(plan, now, 0);
+        preparedDynamicEntities.assign(plan.dynamicEntities.begin(), plan.dynamicEntities.end());
+        if (plan.rebuildCachedLayer)
+        {
+            if (device.diagnosticsEnabled) ++staticPlanBuilds;
+            // Retain the prepared static batches as well as their pixels.
+            // Pointer springs should not rebuild every unchanged text glyph
+            // and hierarchy effect in the panel on each animation frame.
+            staticPlan.cachedPanelBlurs.swap(plan.cachedPanelBlurs);
+            staticPlan.cachedShadows.swap(plan.cachedShadows);
+            staticPlan.cachedBlurs.swap(plan.cachedBlurs);
+            staticPlan.cachedShapes.swap(plan.cachedShapes);
+            staticPlan.cachedMedia.swap(plan.cachedMedia);
+            staticPlan.cachedTexts.swap(plan.cachedTexts);
+            preparedCacheGeneration = scene.cache_generation();
+        }
         ops.clear();
         auto add = [&](const auto &panels, const auto &shadows, const auto &blurs, const auto &shapes,
                        const auto &media, const auto &texts) {
@@ -465,10 +641,182 @@ struct Engine::Impl
             add_render_ops(ops, texts, Renderer2DRenderOpType::eText);
         };
         add(plan.panelBlurs, plan.shadows, plan.blurs, plan.shapes, plan.media, plan.texts);
-        add(plan.cachedPanelBlurs, plan.cachedShadows, plan.cachedBlurs, plan.cachedShapes, plan.cachedMedia,
-            plan.cachedTexts);
+        add(staticPlan.cachedPanelBlurs, staticPlan.cachedShadows, staticPlan.cachedBlurs,
+            staticPlan.cachedShapes, staticPlan.cachedMedia, staticPlan.cachedTexts);
         add_model_ops(ops, plan.models);
+        // Empty underlays must not split otherwise independent shape/text runs.
+        std::erase_if(ops, [](const Renderer2DRenderOp& op) {
+            return op.type == Renderer2DRenderOpType::eTextUnderlay &&
+                !(op.batch->flags & (eRenderer2DStyleShadow | eRenderer2DStyleGlow));
+        });
         sort_render_ops(ops);
+        const auto native_control = [&](const Renderer2DRenderOp& op) {
+            if (op.type != Renderer2DRenderOpType::eShape || !op.batch ||
+                !scene.registry().all_of<UiLiquidControlPaint>(op.batch->entity)) return false;
+            const auto* glass = scene.registry().try_get<LiquidGlassComponent>(op.batch->entity);
+            return glass && glass->backend == LiquidGlassBackend::eMacOSNative &&
+                glass->material == GlassMaterial::eLiquid && !operation_bounds(op).empty();
+        };
+        std::vector<NativeGlassRegion> nativeRegions;
+        std::unordered_map<uint32_t, size_t> nativeOwners;
+        std::vector<size_t> nativePositions;
+        std::vector<bool> nativeTopmost;
+        const auto reserve = [](float needed, uint32_t retained) {
+            // Preserve the drawable pool through spring-driven size changes.
+            return float(needed <= retained ? retained :
+                uint32_t(std::ceil(needed * 1.32f / 16.0f)) * 16u);
+        };
+        for (size_t position = 0; position < ops.size(); ++position)
+        {
+            const auto& op = ops[position];
+            if (native_control(op))
+            {
+                const auto& batch = *op.batch;
+                const auto* backdrop = scene.registry().try_get<SystemBackdropComponent>(batch.entity);
+                const float radius = batch.primitive == Renderer2DPrimitive::eEllipse ?
+                    std::min(batch.rect.z, batch.rect.w) * 0.5f : batch.effect0.x;
+                const float x = std::floor(batch.rect.x), y = std::floor(batch.rect.y);
+                glm::vec4 crop {x, y, std::ceil(batch.rect.x + batch.rect.z) - x,
+                    std::ceil(batch.rect.y + batch.rect.w) - y};
+                const auto cached = nativeContents.find(entity_key(batch.entity));
+                crop.z = reserve(crop.z, cached != nativeContents.end() && cached->second.colour ?
+                    uint32_t(cached->second.colour->width()) : 0u);
+                crop.w = reserve(crop.w, cached != nativeContents.end() && cached->second.colour ?
+                    uint32_t(cached->second.colour->height()) : 0u);
+                nativeOwners.emplace(entity_key(batch.entity), nativeRegions.size());
+                nativePositions.push_back(position);
+                nativeTopmost.push_back(batch.alwaysOnTop);
+                nativeRegions.push_back({entity_key(batch.entity), batch.rect, batch.clipRect, crop, false,
+                    radius, batch.effect0.w, backdrop ? backdrop->region.liquidTint : SystemBackdropColor{}});
+            }
+        }
+        std::vector<std::vector<Renderer2DBatch>> nativeBatches(nativeRegions.size());
+        std::vector<std::vector<Renderer2DRenderOpType>> nativeTypes(nativeRegions.size());
+        std::vector<std::vector<Renderer2DBatch>> overlayBatches(nativeRegions.size());
+        std::vector<std::vector<Renderer2DRenderOpType>> overlayTypes(nativeRegions.size());
+        std::vector<DispatchBounds> overlayBounds(nativeRegions.size());
+        const auto localise_batch = [](Renderer2DBatch batch, glm::vec4 crop) {
+            const glm::vec2 offset(crop);
+            batch.rect.x -= offset.x; batch.rect.y -= offset.y;
+            batch.clipRect.x -= offset.x; batch.clipRect.y -= offset.y;
+            if (batch.textForegroundRect.z > 0 && batch.textForegroundRect.w > 0)
+            {
+                batch.textForegroundRect.x -= offset.x;
+                batch.textForegroundRect.y -= offset.y;
+            }
+            if (batch.flags & (eRenderer2DStyleShapeMask | eRenderer2DStyleBlurInheritedShapeMask))
+            {
+                batch.effect1.x -= offset.x; batch.effect1.y -= offset.y;
+            }
+            return batch;
+        };
+        size_t position = 0;
+        // Native descendants stay with their lens. Independent higher paint
+        // needs a transparent foreground above it, otherwise a popup in the
+        // base framebuffer is hidden behind AppKit's glass regardless of z.
+        std::erase_if(ops, [&](const Renderer2DRenderOp& op) {
+            const auto opPosition = position++;
+            if (native_control(op)) return true;
+            if (!op.batch) return false;
+            auto ancestor = op.batch->entity;
+            for (unsigned depth = 0; depth < 64 && scene.registry().valid(ancestor); ++depth)
+            {
+                if (const auto found = nativeOwners.find(entity_key(ancestor)); found != nativeOwners.end())
+                {
+                    const auto index = found->second;
+                    const auto& region = nativeRegions[index];
+                    // A popup can be parented to its source control while
+                    // deliberately painting above that control's optical clip.
+                    if ((op.batch->alwaysOnTop && !nativeTopmost[index]) ||
+                        rect_empty(intersect_rect(op.batch->rect, region.rect))) break;
+                    auto batch = *op.batch;
+                    batch.clipRect = intersect_rect(batch.clipRect, region.rect);
+                    nativeBatches[index].push_back(localise_batch(batch, region.contentRect));
+                    nativeTypes[index].push_back(op.type);
+                    nativeRegions[index].hasContent = true;
+                    return true;
+                }
+                const auto* parent = scene.registry().try_get<Parent2DComponent>(ancestor);
+                if (!parent || parent->parent == ancestor) break;
+                ancestor = parent->parent;
+            }
+            const auto bounds = operation_bounds(op);
+            size_t lastEarlier = nativeRegions.size();
+            bool foreground = false;
+            for (size_t index = 0; index < nativeRegions.size() && nativePositions[index] < opPosition; ++index)
+            {
+                lastEarlier = index;
+                const auto visibleLens = make_dispatch_bounds(*this,
+                    intersect_rect(nativeRegions[index].rect, nativeRegions[index].clip), 0, false);
+                foreground = foreground || dispatch_bounds_overlap(bounds, visibleLens) ||
+                    dispatch_bounds_overlap(bounds, overlayBounds[index]);
+            }
+            if (foreground && lastEarlier < nativeRegions.size() && !bounds.empty())
+            {
+                overlayBatches[lastEarlier].push_back(*op.batch);
+                overlayTypes[lastEarlier].push_back(op.type);
+                overlayBounds[lastEarlier] = union_dispatch_bounds(overlayBounds[lastEarlier], bounds);
+                return true;
+            }
+            return false;
+        });
+        std::vector<NativeGlassRegion> orderedRegions;
+        std::vector<std::vector<Renderer2DBatch>> orderedBatches;
+        std::vector<std::vector<Renderer2DRenderOpType>> orderedTypes;
+        orderedRegions.reserve(nativeRegions.size() * 2);
+        orderedBatches.reserve(nativeRegions.size() * 2);
+        orderedTypes.reserve(nativeRegions.size() * 2);
+        std::unordered_set<uint64_t> retainedNative;
+        for (size_t index = 0; index < nativeRegions.size(); ++index)
+        {
+            retainedNative.insert(nativeRegions[index].identity);
+            orderedRegions.push_back(nativeRegions[index]);
+            orderedBatches.push_back(std::move(nativeBatches[index]));
+            orderedTypes.push_back(std::move(nativeTypes[index]));
+            if (overlayBounds[index].empty()) continue;
+            const auto bounds = overlayBounds[index];
+            const uint64_t identity = (uint64_t(1) << 32) | nativeRegions[index].identity;
+            const auto cached = nativeContents.find(identity);
+            glm::vec4 crop {bounds.x, bounds.y, bounds.width, bounds.height};
+            crop.z = reserve(crop.z, cached != nativeContents.end() && cached->second.colour ?
+                uint32_t(cached->second.colour->width()) : 0u);
+            crop.w = reserve(crop.w, cached != nativeContents.end() && cached->second.colour ?
+                uint32_t(cached->second.colour->height()) : 0u);
+            for (auto& batch : overlayBatches[index]) batch = localise_batch(batch, crop);
+            retainedNative.insert(identity);
+            orderedRegions.push_back({identity, crop, {0, 0, extent.width, extent.height}, crop,
+                true, 0, 1, {}, false});
+            orderedBatches.push_back(std::move(overlayBatches[index]));
+            orderedTypes.push_back(std::move(overlayTypes[index]));
+        }
+        nativeRegions.swap(orderedRegions);
+        nativeBatches.swap(orderedBatches);
+        nativeTypes.swap(orderedTypes);
+        std::erase_if(nativeContents, [&](const auto& item) {
+            return !retainedNative.contains(item.first);
+        });
+        nativeGlass->begin_frame(nativeRegions, extent.width, extent.height);
+        struct NativeFrameEnd {
+            NativeGlassSurface* surface;
+            ~NativeFrameEnd() { surface->end_frame(); }
+        } nativeFrameEnd {nativeGlass.get()};
+        std::vector<Owned<CA::MetalDrawable>> retainedDrawables;
+        std::vector<CA::MetalDrawable*> drawables;
+        bool presentationComplete = true;
+        const auto encode_presentation = [&](CA::MetalLayer* output, bool externalBackdrop) {
+            const auto acquisitionStart = device.diagnosticsEnabled ? Clock::now() : Clock::time_point{};
+            auto drawable = output->nextDrawable();
+            if (device.diagnosticsEnabled && Clock::now() - acquisitionStart > std::chrono::milliseconds(30))
+                Logger::fetch_logger()->warning("Slow Metal drawable acquisition: " + nativeGlass->describe(output));
+            if (!drawable) { presentationComplete = false; return; }
+            retainedDrawables.push_back(NS::RetainPtr(drawable));
+            drawables.push_back(drawable);
+            if (device.metal4) device.queue4->wait(drawable);
+            glm::uvec4 composite(2u | 8u | (externalBackdrop && backdrop ? 1u : 0u), 0, 0, 0);
+            device.dispatch("composite_2d_comp", &composite, sizeof(composite), extent.width, extent.height,
+                {colour.get(), colour.get(), backdrop ? texture(backdrop.get()) : colour.get(),
+                 temporary ? temporary.get() : colour.get(), drawable->texture()});
+        };
         entt::entity foregroundBlurRoot = entt::null;
         float foregroundBlurRadius = 0.0f;
         const auto foregroundBlurGroups =
@@ -540,12 +888,14 @@ struct Engine::Impl
         }
         if (!foregroundBlurBounds.empty())
         {
+            // A changed member must repaint the complete filtered group and
+            // its source halo, including unchanged members and old extents.
             paintItems.push_back({
                 foregroundBlurBatch,
                 {foregroundBlurBounds.x, foregroundBlurBounds.y,
                  foregroundBlurBounds.width, foregroundBlurBounds.height},
                 uint32_t(Renderer2DRenderOpType::eBlur) + 100u,
-                false});
+                true});
             hasBlur = true;
         }
         // Models have their own camera/material state and cross-queue rendering.
@@ -557,9 +907,12 @@ struct Engine::Impl
         const auto damage = frameDamage.update(
             paintItems, extent.width, extent.height, !plan.models.empty());
         damageBounds = {damage.x, damage.y, damage.z, damage.w};
-        if (damageBounds.empty())
+        if (device.diagnosticsEnabled)
+            mainDamagePixels += uint64_t(damageBounds.width) * damageBounds.height;
+        if (damageBounds.empty() && nativeRegions.empty())
         {
             presentedGeneration = scene.frame_generation();
+            presentationPending = false;
             return;
         }
         std::vector<Renderer2DRenderOp> foregroundBlurOps;
@@ -576,6 +929,8 @@ struct Engine::Impl
         }
         if (!foregroundBlurOps.empty() && !foregroundBlurSource)
             foregroundBlurSource = device.target(extent.width, extent.height);
+        const auto recordingStart = device.diagnosticsEnabled ? Clock::now() : Clock::time_point{};
+        if (device.diagnosticsEnabled) cpuTimings[0].add(recordingStart - preparationStart);
         clear(colour.get(), damageBounds);
         if (!foregroundBlurOps.empty())
         {
@@ -606,14 +961,18 @@ struct Engine::Impl
             clear(temporary.get(), scratch);
             clear(blur.get(), scratch);
         }
+        // Filtered foreground groups keep their authored order, as on Vulkan.
+        if (foregroundBlurRoot == entt::null)
+            order_simple_ops(ops);
         auto render_ops = [&](const std::vector<Renderer2DRenderOp>& renderOps) {
         for (const Renderer2DRenderOp& op : renderOps)
         {
             const auto b = operation_bounds(op);
-            if (clipped_to_damage({b.x, b.y, b.z, b.w}).empty())
+            if (clipped_to_damage(b).empty())
                 continue;
             if (op.model)
             {
+                flush_text();
                 draw_model(*op.model);
                 continue;
             }
@@ -622,18 +981,23 @@ struct Engine::Impl
             {
             case Renderer2DRenderOpType::ePanelBlur:
             case Renderer2DRenderOpType::eBlur: {
-                auto bounds = make_blur_dispatch_bounds(*this, batch);
+                auto bounds = make_blur_replay_dispatch_bounds(*this, batch);
+                const bool liquid = (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
+                const auto outputBounds = liquid ? make_liquid_output_dispatch_bounds(*this, batch) : bounds;
                 // The Metal path never populates a separate static layer.
                 auto bindings = {colour.get(), colour.get(), backdrop ? texture(backdrop.get()) : colour.get(),
                                  temporary.get(), blur.get()};
                 Renderer2DBatch clearBatch;
-                clearBatch.rect = {bounds.x, bounds.y, bounds.width, bounds.height};
+                clearBatch.rect = {outputBounds.x, outputBounds.y, outputBounds.width, outputBounds.height};
                 clearBatch.primitive = Renderer2DPrimitive::eClear;
                 clearBatch.flags = eRenderer2DStyleClear;
-                dispatch("blur_2d_comp", clearBatch, bounds, 0, bindings);
+                dispatch("blur_2d_comp", clearBatch, outputBounds, 0, bindings);
                 auto passBatch = batch;
-                const uint32_t passes = std::max(1u, uint32_t(std::round(std::max(batch.effect0.y, 1.0f))));
-                passBatch.effect0.w =
+                // Liquid optics store corner radius in effect0.y. Preserve
+                // their opacity and packed optics in one separable pass.
+                const uint32_t passes = liquid ? 1u :
+                    std::max(1u, uint32_t(std::round(std::max(batch.effect0.y, 1.0f))));
+                if (!liquid) passBatch.effect0.w =
                     1.0f - std::pow(1.0f - std::clamp(batch.effect0.w, 0.0f, 1.0f), 1.0f / passes);
                 for (uint32_t i = 0; i < passes; ++i)
                 {
@@ -641,11 +1005,11 @@ struct Engine::Impl
                     dispatch("blur_2d_comp", passBatch, bounds, i | (backdrop ? kBlurUseExternalBackdrop : 0),
                              bindings);
                     passBatch.flags = batch.flags | eRenderer2DStyleBlurVertical;
-                    dispatch("blur_2d_comp", passBatch, bounds, i | (backdrop ? kBlurUseExternalBackdrop : 0),
+                    dispatch("blur_2d_comp", passBatch, outputBounds, i | (backdrop ? kBlurUseExternalBackdrop : 0),
                              bindings);
                 }
                 batch.flags |= eRenderer2DStyleBlurComposite;
-                dispatch("blur_2d_comp", batch, bounds, 0, bindings);
+                dispatch("blur_2d_comp", batch, outputBounds, 0, bindings);
                 break;
             }
             case Renderer2DRenderOpType::eShape:
@@ -727,52 +1091,115 @@ struct Engine::Impl
 
         if (!foregroundBlurBounds.empty())
         {
-            Renderer2DBatch clearBatch {};
-            clearBatch.rect = {
-                float(foregroundBlurBounds.x), float(foregroundBlurBounds.y),
-                float(foregroundBlurBounds.width), float(foregroundBlurBounds.height)};
-            clearBatch.primitive = Renderer2DPrimitive::eClear;
-            clearBatch.flags = eRenderer2DStyleClear;
-            const auto groupBindings = {
-                colour.get(), foregroundBlurSource.get(),
-                backdrop ? texture(backdrop.get()) : colour.get(),
-                temporary.get(), blur.get()};
-            dispatch("blur_2d_comp", clearBatch, foregroundBlurBounds, 0, groupBindings);
-
-            auto passBatch = foregroundBlurBatch;
-            passBatch.flags = eRenderer2DStyleBlurHorizontal | eRenderer2DStyleBlurForegroundGroupSource;
-            dispatch("blur_2d_comp", passBatch, foregroundBlurBounds, 0,
-                     groupBindings);
-            passBatch.flags = eRenderer2DStyleBlurVertical | eRenderer2DStyleBlurForegroundGroupSource;
-            dispatch("blur_2d_comp", passBatch, foregroundBlurBounds, 0,
-                     groupBindings);
-            passBatch.flags = eRenderer2DStyleBlurComposite;
-            dispatch("blur_2d_comp", passBatch, foregroundBlurBounds, 0,
-                     groupBindings);
+            const auto bounds = clipped_to_damage(foregroundBlurBounds);
+            auto constants = make_push_constants(foregroundBlurBatch, 0, bounds.x, bounds.y);
+            render_foreground_blur(device, constants, bounds.width, bounds.height,
+                foregroundBlurSource.get(), colour.get(), temporary.get(), blur.get());
         }
 
-        // Acquire the drawable after encoding the offscreen work. The first
-        // dispatch may wait for the previous submission to finish, and holding
-        // a CAMetalLayer drawable through that wait needlessly delays its
-        // return to Core Animation on high-refresh displays.
-        auto drawable = layer->nextDrawable();
-        if (!drawable)
+        const auto mainExtent = extent;
+        const auto mainDamage = damageBounds;
+        struct RestoreRenderState
         {
-            device.submit();
-            frameDamage.invalidate();
-            return;
+            Impl& renderer;
+            RendererExtent extent;
+            DispatchBounds damage;
+            ~RestoreRenderState()
+            {
+                renderer.extent = extent;
+                renderer.damageBounds = damage;
+            }
+        } restoreRenderState {*this, mainExtent, mainDamage};
+        for (size_t index = 0; index < nativeRegions.size(); ++index)
+        {
+            const auto& region = nativeRegions[index];
+            if (!region.hasContent) continue; // A thumb needs no Metal foreground drawable.
+            auto& content = nativeContents[region.identity];
+            if (!nativeGlass->visible(index))
+            {
+                // Hidden or fully clipped layers have no drawable to present.
+                // Keep their repaint pending until AppKit makes them visible.
+                content.damage.invalidate();
+                continue;
+            }
+            const uint32_t width = uint32_t(region.contentRect.z), height = uint32_t(region.contentRect.w);
+            if (!content.colour || content.colour->width() != width || content.colour->height() != height)
+            {
+                content.colour = device.target(width, height);
+                content.temporary.reset();
+                content.blur.reset();
+                content.damage.invalidate();
+            }
+            if (content.atlas != atlasId) { content.atlas = atlasId; content.damage.invalidate(); }
+            extent = {width, height};
+            std::vector<Renderer2DRenderOp> contentOps;
+            std::vector<FrameDamage::Item> contentItems;
+            for (size_t item = 0; item < nativeBatches[index].size(); ++item)
+            {
+                Renderer2DRenderOp op;
+                op.batch = &nativeBatches[index][item]; op.type = nativeTypes[index][item];
+                const auto bounds = operation_bounds(op);
+                contentItems.push_back({*op.batch, {bounds.x, bounds.y, bounds.width, bounds.height},
+                    uint32_t(op.type), op.type == Renderer2DRenderOpType::eBlur ||
+                    op.type == Renderer2DRenderOpType::ePanelBlur});
+                contentOps.push_back(op);
+            }
+            const auto damage = content.damage.update(contentItems, width, height, false);
+            damageBounds = {damage.x, damage.y, damage.z, damage.w};
+            if (!damageBounds.empty())
+            {
+                struct RestoreTargets
+                {
+                    Impl& renderer;
+                    NativeContent& content;
+                    RestoreTargets(Impl& renderer, NativeContent& content)
+                        : renderer(renderer), content(content)
+                    {
+                        std::swap(renderer.colour, content.colour);
+                        std::swap(renderer.temporary, content.temporary);
+                        std::swap(renderer.blur, content.blur);
+                    }
+                    ~RestoreTargets()
+                    {
+                        std::swap(renderer.colour, content.colour);
+                        std::swap(renderer.temporary, content.temporary);
+                        std::swap(renderer.blur, content.blur);
+                    }
+                } restoreTargets {*this, content};
+                clear(colour.get(), damageBounds);
+                if (std::any_of(contentItems.begin(), contentItems.end(), [](const auto& item) {
+                    return item.backdropEffect;
+                }))
+                {
+                    if (!temporary) temporary = device.target(width, height);
+                    if (!blur) blur = device.target(width, height);
+                    clear(temporary.get(), {0, 0, width, height});
+                    clear(blur.get(), {0, 0, width, height});
+                }
+                order_simple_ops(contentOps);
+                render_ops(contentOps);
+                encode_presentation(nativeGlass->layer(index), false);
+                if (!presentationComplete) content.damage.invalidate();
+            }
         }
-        if (device.metal4)
-            device.queue4->wait(drawable);
-        // Core Animation consumes premultiplied colour.
-        glm::uvec4 composite(2u | 8u | (backdrop ? 1u : 0u), 0, 0, 0);
-        device.dispatch("composite_2d_comp", &composite, sizeof(composite), extent.width, extent.height,
-                        {colour.get(), colour.get(), backdrop ? texture(backdrop.get()) : colour.get(),
-                         temporary ? temporary.get() : colour.get(), drawable->texture()});
-        device.submit(drawable, surface_presents_with_transaction(layer.get()));
+        extent = mainExtent;
+        damageBounds = mainDamage;
+        const auto presentationStart = device.diagnosticsEnabled ? Clock::now() : Clock::time_point{};
+        if (device.diagnosticsEnabled) cpuTimings[1].add(presentationStart - recordingStart);
+        if (!damageBounds.empty()) encode_presentation(layer.get(), true);
+        // All native content and the base drawable share one submission. Metal
+        // 4 no longer waits for a complete GPU frame between individual lenses.
+        device.submit(drawables, nativeGlass->active() || surface_presents_with_transaction(layer.get()));
+        if (!presentationComplete) { frameDamage.invalidate(); return; }
         ++frameCount;
         presentedGeneration = scene.frame_generation();
+        presentationPending = false;
         lastPresentation = Clock::now();
+        if (device.diagnosticsEnabled)
+        {
+            cpuTimings[2].add(lastPresentation - presentationStart);
+            log_diagnostics(lastPresentation);
+        }
     }
 };
 
@@ -818,6 +1245,7 @@ double Engine::idle_event_wait_seconds()
         // CPU-driven springs also need the active cadence between rendered
         // frames, even when no time-driven scene component is present.
         if (now - state.lastPresentation < std::chrono::milliseconds(250) ||
+            state.presentationPending ||
             state.presentedGeneration != state.scene.frame_generation() ||
             state.scene.requires_continuous_redraw(std::chrono::duration<double>(now - state.start).count()))
             return 0.0;
@@ -860,6 +1288,24 @@ void Engine::draw()
     try
     {
         impl->render();
+    }
+    catch (const SubmissionError& error)
+    {
+        // A failed GPU frame invalidates every retained surface. Native glass
+        // can continue compositing independently, so retry its foreground and
+        // the base UI together instead of leaving a glass-only window.
+        impl->frameDamage.invalidate();
+        for (auto& [identity, content] : impl->nativeContents)
+            content.damage.invalidate();
+        impl->presentationPending = true;
+        if (impl->device.successfulCompletions != impl->successfulCompletionsAtFailure)
+            impl->consecutiveSubmissionFailures = 0;
+        impl->successfulCompletionsAtFailure = impl->device.successfulCompletions;
+        if (++impl->consecutiveSubmissionFailures >= 3)
+            impl->valid = false;
+        Logger::fetch_logger()->error(std::string(error.what()) +
+            (impl->valid ? "; retrying the complete UI frame." :
+                           "; rendering stopped after three consecutive failures."));
     }
     catch (const std::exception &e)
     {
@@ -978,9 +1424,25 @@ bool Engine::load_renderer2d_font(const std::filesystem::path &path,
                                   const Renderer2DFontAtlasLoadOptions &options)
 {
     const LogOperation diagnosticOperation("metal: Engine::load_renderer2d_font");
+    const auto sourceKey = font_source_key(path, options);
+    if (impl->font.loaded() && impl->fontSourceKey == sourceKey &&
+        (!options.requireRequestedGlyphs || impl->strictFontRequirements) &&
+        ((!options.requireRequestedGlyphs && impl->fontOptions.preloadText == options.preloadText) ||
+         impl->font.missing_codepoints(options.preloadText).empty()))
+    {
+        // Template refreshes often request the same font and locale. Keep an
+        // atlas expanded by live text rather than baking it again or shrinking
+        // it back to the template's preload. Resource stamps preserve reloads.
+        return true;
+    }
     if (!impl->font.load_from_file(path, options, impl->upload))
         return false;
     impl->fontPath = path;
+    // Live glyph expansion relaxes only its new text. Fixed basic/range
+    // requirements already verified with these unchanged fonts stay verified.
+    impl->strictFontRequirements = options.requireRequestedGlyphs ||
+        (impl->fontSourceKey == sourceKey && impl->strictFontRequirements);
+    impl->fontSourceKey = sourceKey;
     impl->frameDamage.invalidate();
     impl->fontOptions = options;
     impl->attemptedGlyphs.clear();

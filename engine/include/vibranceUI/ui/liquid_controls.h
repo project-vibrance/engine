@@ -19,6 +19,8 @@ struct UiLiquidControlParentContour {
 struct UiLiquidControlPaint {
     ShapeStyleComponent shape;
     std::optional<TextInputVisualComponent> textVisual;
+    std::optional<ButtonVisualComponent> buttonVisual;
+    bool nativeHitRegionAdded = false;
     std::optional<ShadowComponent> shadow;
     entt::entity cutoutParent = entt::null;
     std::optional<ShapeCutout2DComponent> parentCutout;
@@ -28,7 +30,11 @@ inline ShapeStyleComponent ui_liquid_control_paint(ShapeStyleComponent paint)
 {
     // Shared controls use the same clear, uniform lens paint as a grabbed
     // thumb. Their background has no dark cap or metallic gradient.
+#if defined(__APPLE__)
+    paint.set_color(glm::vec4(0.0f));
+#else
     paint.set_color(glm::vec4(1.0f, 1.0f, 1.0f, 0.04f));
+#endif
     paint.outlineWidth = 0.0f;
     paint.backdropBlurRadius = 0.0f;
     paint.backdropBlurClipToInheritedMask = true;
@@ -76,6 +82,9 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
                         input->focused ? saved->textVisual->focused : saved->textVisual->idle;
             }
             style.opacity = opacity;
+            if (saved->buttonVisual)
+                registry.emplace_or_replace<ButtonVisualComponent>(entity, *saved->buttonVisual);
+            if (saved->nativeHitRegionAdded) registry.remove<HitRegion2DComponent>(entity);
             if (saved->shadow) registry.emplace_or_replace<ShadowComponent>(entity, *saved->shadow);
             else registry.remove<ShadowComponent>(entity);
             restoreParentPaint(entity, *saved);
@@ -127,6 +136,10 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             if (surface)
                 if (const auto* visual = registry.try_get<TextInputVisualComponent>(entity))
                     original.textVisual = *visual;
+#if defined(__APPLE__)
+            if (const auto* visual = registry.try_get<ButtonVisualComponent>(entity))
+                original.buttonVisual = *visual;
+#endif
             saved = &registry.emplace<UiLiquidControlPaint>(entity, std::move(original));
             if (saved->textVisual)
             {
@@ -135,8 +148,19 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
                 visual.focused = ui_liquid_control_paint(visual.focused);
                 visual.disabled = ui_liquid_control_paint(visual.disabled);
             }
+#if defined(__APPLE__)
+            if (saved->buttonVisual)
+            {
+                auto& visual = registry.get<ButtonVisualComponent>(entity);
+                visual.idle = ui_liquid_control_paint(visual.idle);
+                visual.hovered = ui_liquid_control_paint(visual.hovered);
+                visual.pressed = ui_liquid_control_paint(visual.pressed);
+                visual.disabled = ui_liquid_control_paint(visual.disabled);
+            }
+#endif
             scene.mark_dirty(entity);
         }
+#if !defined(__APPLE__)
         if (surface && !registry.any_of<ShadowComponent>(entity))
         {
             ShadowComponent shadow {};
@@ -148,6 +172,7 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             registry.emplace<ShadowComponent>(entity, shadow);
             scene.mark_dirty(entity);
         }
+#endif
         ShapeStyleComponent desired = saved->shape;
         if (surface)
         {
@@ -185,9 +210,18 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
         bool native = false;
 #if defined(_WIN32)
         native = desktopBackdrop || (surface && surface->desktopBackdrop);
+#elif defined(__APPLE__)
+        native = true;
+        (void)desktopBackdrop;
+        if (!registry.any_of<HitRegion2DComponent>(entity))
+        {
+            registry.emplace<HitRegion2DComponent>(entity);
+            saved->nativeHitRegionAdded = true;
+        }
 #else
         (void)desktopBackdrop;
 #endif
+#if !defined(__APPLE__)
         if (native && surface && surface->cutoutParentPaint)
         {
             const auto* parent = registry.try_get<Parent2DComponent>(entity);
@@ -218,6 +252,7 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
                     scene.mark_dirty(parent->parent);
             }
         }
+#endif
         if (!native)
         {
             restoreParentPaint(entity, *saved);
@@ -235,6 +270,13 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             desired.color0 = tint(desired.color0);
             desired.color1 = tint(desired.color1);
         }
+#if defined(__APPLE__)
+        // AppKit supplies the lens, tint and edge. Keep only foreground labels
+        // and icons in Metal rather than painting a second optical surface.
+        desired.set_color(glm::vec4(0.0f));
+        desired.outlineWidth = 0.0f;
+        if (registry.remove<ShadowComponent>(entity)) scene.mark_dirty(entity);
+#endif
         desired.opacity = style.opacity;
         if (style.color0 != desired.color0 || style.color1 != desired.color1 ||
             style.fill != desired.fill || style.gradientStart != desired.gradientStart ||
@@ -246,7 +288,12 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             scene.mark_dirty(entity);
         }
         auto* liquid = registry.try_get<LiquidGlassComponent>(entity);
-        const auto backend = native ? LiquidGlassBackend::eWindowsCompositionShader :
+        const auto backend = native ?
+#if defined(__APPLE__)
+            LiquidGlassBackend::eMacOSNative :
+#else
+            LiquidGlassBackend::eWindowsCompositionShader :
+#endif
             LiquidGlassBackend::eEngineRenderer;
         if (!liquid || liquid->backend != backend || liquid->sceneBackdrop != !native ||
             liquid->refraction != options.liquidRefraction || liquid->blur != options.liquidBlur ||
@@ -264,7 +311,7 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             {
                 SystemBackdropRegion region {};
                 region.material = GlassMaterial::eLiquid;
-                region.liquidBackend = LiquidGlassBackend::eWindowsCompositionShader;
+                region.liquidBackend = backend;
                 registry.emplace<SystemBackdropComponent>(entity, SystemBackdropComponent { region });
                 backdrop = registry.try_get<SystemBackdropComponent>(entity);
             }
@@ -274,7 +321,16 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             region.liquidBlur = options.liquidBlur;
             region.liquidRim = options.liquidRim;
             region.liquidDispersion = options.liquidDispersion;
-            region.liquidTint = options.liquidTint;
+            auto tint = options.liquidTint;
+#if defined(__APPLE__)
+            if (surface && surface->preserveColour)
+                tint = { saved->shape.color0.r, saved->shape.color0.g,
+                    saved->shape.color0.b, 0.9f };
+            if (region.liquidTint.red != tint.red || region.liquidTint.green != tint.green ||
+                region.liquidTint.blue != tint.blue || region.liquidTint.alpha != tint.alpha)
+                scene.mark_dirty(entity);
+#endif
+            region.liquidTint = tint;
         }
     };
     for (auto entity : registry.view<UiLiquidControlSurface>()) apply(entity);

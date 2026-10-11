@@ -1,6 +1,7 @@
 #include <vibranceUI/glfw/window.h>
 #include <vibranceUI/renderer/metal/capabilities.h>
 #include <vibranceUI/ui/text.h>
+#include <vibranceUI/ui/liquid_controls.h>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -157,6 +158,37 @@ int main(int argc, char **argv)
             if (!engine.ready())
                 throw std::runtime_error("Metal frame failed");
         }
+        const std::filesystem::path fontPath = "/System/Library/Fonts/Helvetica.ttc";
+        const auto retainedAtlas = engine.renderer2d_font_atlas().image()->native;
+        const auto retainedGeneration = scene.frame_generation();
+        const auto fontReuseStart = std::chrono::steady_clock::now();
+        Renderer2DFontAtlasLoadOptions coveredFont;
+        coveredFont.preloadText = "Metal 3 & 4";
+        if (!engine.load_renderer2d_font(fontPath) ||
+            !engine.load_renderer2d_font(fontPath, coveredFont) ||
+            engine.renderer2d_font_atlas().image()->native != retainedAtlas ||
+            scene.frame_generation() != retainedGeneration)
+            throw std::runtime_error("An unchanged panel font rebuilt its atlas or scene");
+        std::cout << "Retained font requests: " <<
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fontReuseStart).count()
+            << " ms\n";
+        auto expandedFont = coveredFont;
+        expandedFont.preloadText += " \u03a9";
+        if (engine.renderer2d_font_atlas().missing_codepoints(expandedFont.preloadText).empty() ||
+            !engine.load_renderer2d_font(fontPath, expandedFont) ||
+            engine.renderer2d_font_atlas().image()->native == retainedAtlas)
+            throw std::runtime_error("A new panel glyph did not expand the font atlas");
+        const auto expandedAtlas = engine.renderer2d_font_atlas().image()->native;
+        if (!engine.load_renderer2d_font(fontPath) ||
+            engine.renderer2d_font_atlas().image()->native != expandedAtlas ||
+            !engine.renderer2d_font_atlas().missing_codepoints("\u03a9").empty())
+            throw std::runtime_error("A panel refresh discarded previously loaded glyphs");
+        auto differentFont = expandedFont;
+        differentFont.fontWeight = 700;
+        if (!engine.load_renderer2d_font(fontPath, differentFont) ||
+            engine.renderer2d_font_atlas().image()->native == expandedAtlas)
+            throw std::runtime_error("A changed font request incorrectly reused its old atlas");
+        engine.draw();
         const auto generation = scene.frame_generation();
         for (int i = 0; i < 10; ++i)
             engine.resize(engine.render_width(), engine.render_height());
@@ -179,6 +211,33 @@ int main(int argc, char **argv)
         engine.draw();
         if (!engine.ready())
             throw std::runtime_error("Metal resize failed");
+        // Settings navigation/search lenses use the shared control material
+        // with native AppKit material on macOS, including live tint.
+        const auto lens = scene.create_shape({20, 20}, {72, 48}, style);
+        scene.registry().get<ShapeComponent>(lens).cornerRadius = 19;
+        scene.registry().emplace<UiLiquidControlSurface>(lens);
+        auto optics = ui_liquid_glass_options();
+        ui_update_liquid_controls(scene, true, optics);
+        const auto* liquid = scene.registry().try_get<LiquidGlassComponent>(lens);
+        if (!liquid || liquid->backend != LiquidGlassBackend::eMacOSNative || liquid->sceneBackdrop)
+            throw std::runtime_error("macOS controls did not select native AppKit glass");
+        const auto glassPlan = scene.build_render_plan(0.0, 0);
+        if (std::any_of(glassPlan.blurs.begin(), glassPlan.blurs.end(), [lens](const auto& batch) {
+            return batch.entity == lens;
+        })) throw std::runtime_error("Native control recorded a shader optical pass");
+        engine.draw();
+        optics.liquidRefraction = 0.85f;
+        optics.liquidBlur = 0.30f;
+        optics.liquidRim = 0.25f;
+        optics.liquidTint = {0.2f, 0.4f, 0.8f, 0.35f};
+        ui_update_liquid_controls(scene, true, optics);
+        engine.draw();
+        if (scene.registry().get<SystemBackdropComponent>(lens).region.liquidTint.alpha != 0.35f)
+            throw std::runtime_error("Live native control tint was not applied");
+        ui_update_liquid_controls(scene, false, optics);
+        engine.draw();
+        if (scene.registry().any_of<LiquidGlassComponent>(lens) || !engine.ready())
+            throw std::runtime_error("Liquid control material did not restore cleanly");
         host.close();
         terminate_glfw();
         std::filesystem::remove(path);

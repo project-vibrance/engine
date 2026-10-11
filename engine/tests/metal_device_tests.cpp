@@ -1,11 +1,17 @@
 #include "../src/renderer/metal/device.h"
 #include "../src/renderer/metal/frame_damage.h"
+#include "../src/renderer/metal/foreground_blur.h"
+#include "../src/renderer/common/text_batch.h"
 #include <vibranceUI/renderer/render_types.h>
 #include <vibranceUI/renderer/renderer2d_components.h>
 #include <array>
 #include <iostream>
 #include <stdexcept>
 #include <cstring>
+#include <future>
+#include <chrono>
+#include <objc/runtime.h>
+#include <objc/message.h>
 using namespace vibrance::metal;
 
 void check_retained_frames(Device &device)
@@ -126,6 +132,126 @@ void check_batched_text(Device &device)
         throw std::runtime_error("Batched text differs from ordered glyph rendering");
 }
 
+void check_text_dependency_waves(Device &device)
+{
+    struct DispatchBounds { uint32_t x, y, width, height; };
+    constexpr uint32_t count = 320, width = 96, height = 32, rowBytes = 512;
+    auto target = device.target(width, height), reference = device.target(width, height);
+    auto depth = device.target(width, height, MTL::PixelFormatR32Uint);
+    auto readback = own(device.gpu->newBuffer(rowBytes * height * 2, MTL::ResourceStorageModeShared));
+    const std::array<unsigned char, 4> rgba{210, 160, 240, 192};
+    auto atlas = device.upload(1, 1, rgba, false, false);
+    for (const bool colourGlyph : {false, true})
+    {
+        glm::uvec4 zero(0);
+        device.dispatch("clear_screen_comp", &zero, sizeof(zero), width, height, {target.get(), depth.get()});
+        device.dispatch("clear_screen_comp", &zero, sizeof(zero), width, height, {reference.get(), depth.get()});
+        std::vector<Renderer2DPushConstants> glyphs(count);
+        std::vector<DispatchBounds> bounds(count);
+        for (uint32_t index = 0; index < count; ++index)
+        {
+            // Alternating distant and overlapping fractional glyphs produces
+            // dependency waves, including dependencies across the chunk limit.
+            const uint32_t x = (index * 17) % 72;
+            const uint32_t y = (index * 7) % 12;
+            auto& glyph = glyphs[index];
+            glyph.rect = {x + 0.25f, y + 0.5f, 12, 12};
+            glyph.uvRect = {0, 0, 1, 1};
+            glyph.color0 = {float(index % 3) / 2, 0.5f, 1, 0.35f};
+            glyph.effect0 = {4, 0, 0, 1};
+            glyph.data = {16 | (16 << 16), eRenderer2DStyleAtlasText |
+                (colourGlyph ? uint32_t(eRenderer2DStyleColourGlyph) : 0u),
+                2u | (2048u << 2), x | (y << 16)};
+            bounds[index] = {x, y, 16, 16};
+            device.dispatch("text_msdf_comp", &glyph, sizeof(glyph), 16, 16,
+                            {texture(atlas.get()), reference.get()});
+        }
+        vibrance::renderer::TextBatchPlan plan;
+        std::array<Renderer2DPushConstants, vibrance::renderer::kTextBatchGlyphLimit> constants;
+        for (uint32_t first = 0; first < count; first += vibrance::renderer::kTextBatchPlanningGlyphLimit)
+        {
+            const uint32_t chunk = std::min(count - first, vibrance::renderer::kTextBatchPlanningGlyphLimit);
+            vibrance::renderer::build_text_batch_plan(std::span<const DispatchBounds>(bounds).subspan(first, chunk), plan);
+            for (const auto& group : plan.groups)
+            {
+                for (uint32_t offset = 0; offset < group.count; ++offset)
+                    constants[offset] = glyphs[first + plan.glyphIndices[group.first + offset]];
+                device.dispatch("text_msdf_batch_comp", constants.data(), group.count * sizeof(constants[0]),
+                    group.width, group.height, {texture(atlas.get()), target.get()}, group.count);
+            }
+        }
+        device.flush();
+        auto command = device.queue->commandBuffer();
+        auto blit = command->blitCommandEncoder();
+        for (unsigned index = 0; index < 2; ++index)
+            blit->copyFromTexture(index ? reference.get() : target.get(), 0, 0, MTL::Origin(0, 0, 0),
+                MTL::Size(width, height, 1), readback.get(), index * rowBytes * height, rowBytes, rowBytes * height);
+        blit->endEncoding();
+        command->commit();
+        command->waitUntilCompleted();
+        if (command->status() == MTL::CommandBufferStatusError)
+            throw std::runtime_error("Text dependency readback failed");
+        const auto pixels = static_cast<const unsigned char*>(readback->contents());
+        for (uint32_t y = 0; y < height; ++y)
+            if (std::memcmp(pixels + y * rowBytes, pixels + (y + height) * rowBytes, width * 4))
+                throw std::runtime_error("Text dependency waves changed overlapping glyph pixels");
+        if (pixels[8 * rowBytes + 8 * 4 + 3] == 0)
+            throw std::runtime_error("Text dependency fixture drew no pixels");
+    }
+}
+
+void check_foreground_blur_transitions(Device &device)
+{
+    constexpr uint32_t width = 128, height = 96, rowBytes = 512;
+    auto source = device.target(width, height), destination = device.target(width, height);
+    auto temporary = device.target(width, height), blurred = device.target(width, height);
+    auto depth = device.target(width, height, MTL::PixelFormatR32Uint);
+    auto readback = own(device.gpu->newBuffer(rowBytes * height, MTL::ResourceStorageModeShared));
+    for (uint32_t frame = 0; frame < 16; ++frame)
+    {
+        glm::uvec4 zero(0);
+        for (auto image : {source.get(), destination.get(), temporary.get(), blurred.get()})
+            device.dispatch("clear_screen_comp", &zero, sizeof(zero), width, height, {image, depth.get()});
+        Renderer2DPushConstants background;
+        background.rect = {0, 0, width, height};
+        background.color0 = {0, 0, 1, 1};
+        background.effect0.w = 1;
+        background.data.x = uint32_t(Renderer2DPrimitive::eRectangle);
+        device.dispatch("shape_2d_comp", &background, sizeof(background), width, height, {destination.get()});
+        // Expand, then shrink while reusing the source and scratch textures.
+        // A blue main scene must never replace the isolated green foreground.
+        const uint32_t step = frame < 8 ? frame : 15 - frame;
+        const uint32_t x = 20 + step, y = 18 + step;
+        const uint32_t sizeX = 24 + step * 8, sizeY = 16 + step * 4;
+        auto foreground = background;
+        foreground.rect = {x, y, sizeX, sizeY};
+        foreground.color0 = {0, 1, 0, 0.75f};
+        device.dispatch("shape_2d_comp", &foreground, sizeof(foreground), width, height, {source.get()});
+        Renderer2DPushConstants blur;
+        blur.rect = foreground.rect;
+        blur.effect0 = {2.0f + step, 1, 0, 1};
+        blur.data.x = uint32_t(Renderer2DPrimitive::eRectangle);
+        render_foreground_blur(device, blur, width, height, source.get(), destination.get(),
+            temporary.get(), blurred.get());
+        device.flush();
+        auto command = device.queue->commandBuffer();
+        auto blit = command->blitCommandEncoder();
+        blit->copyFromTexture(destination.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(width, height, 1),
+            readback.get(), 0, rowBytes, rowBytes * height);
+        blit->endEncoding();
+        command->commit();
+        command->waitUntilCompleted();
+        if (command->status() == MTL::CommandBufferStatusError)
+            throw std::runtime_error("Foreground transition readback failed");
+        const auto pixels = static_cast<const unsigned char*>(readback->contents());
+        const auto centre = pixels + (y + sizeY / 2) * rowBytes + (x + sizeX / 2) * 4;
+        if (centre[0] != 0 || centre[1] < 180 || centre[2] > 75 || centre[3] != 255)
+            throw std::runtime_error("Island foreground blur sampled the main scene during a size transition");
+        if (pixels[0] != 0 || pixels[1] != 0 || pixels[2] != 255 || pixels[3] != 255)
+            throw std::runtime_error("Foreground blur changed pixels outside its sampling halo");
+    }
+}
+
 void check_async_constants(Device &device)
 {
     std::array<Owned<MTL::Texture>, 4> frames;
@@ -170,6 +296,174 @@ void check_async_constants(Device &device)
             pixel[1] > 128 || pixel[3] != 255)
             throw std::runtime_error("Deferred submission reused constants before GPU completion");
     }
+}
+
+void check_two_frames_in_flight(Device &device)
+{
+    auto gate = own(device.gpu->newSharedEvent());
+    if (device.metal4)
+        device.queue4->wait(gate.get(), 1);
+    else
+    {
+        auto command = device.queue->commandBuffer();
+        command->encodeWait(gate.get(), 1);
+        command->commit();
+    }
+    // Release on successful encoding, or after a timeout so a regression in
+    // CPU/GPU overlap reports a failure instead of hanging the test process.
+    std::promise<void> encoded;
+    auto release = std::async(std::launch::async,
+        [gate, ready = encoded.get_future()]() mutable {
+            ready.wait_for(std::chrono::seconds(2));
+            gate->setSignaledValue(1);
+        });
+    auto surface = device.target(8, 8);
+    auto depth = device.target(1, 1, MTL::PixelFormatR32Uint);
+    for (unsigned frame = 0; frame < 2; ++frame)
+    {
+        glm::uvec4 clear(0);
+        device.dispatch("clear_screen_comp", &clear, sizeof(clear), 8, 8,
+                        {surface.get(), depth.get()});
+        Renderer2DPushConstants shape;
+        shape.rect = {0, 0, 8, 8};
+        shape.color0 = {0, 1, 0, 1};
+        shape.effect0.w = 1;
+        shape.data.x = uint32_t(Renderer2DPrimitive::eRectangle);
+        std::array<unsigned char, 8192> constants{};
+        std::memcpy(constants.data(), &shape, sizeof(shape));
+        device.dispatch("shape_2d_comp", constants.data(), constants.size(), 8, 8, {surface.get()});
+        device.submit();
+    }
+    const bool overlapped = gate->signaledValue() == 0;
+    encoded.set_value();
+    release.get();
+    device.flush();
+    if (!overlapped)
+        throw std::runtime_error("Encoding the second frame waited for the first GPU submission");
+}
+
+void check_submission_resource_lifetime(Device &device)
+{
+    constexpr uint32_t width = 16, height = 16, rowBytes = 256;
+    auto retained = device.target(width, height);
+    auto depth = device.target(1, 1, MTL::PixelFormatR32Uint);
+    auto readback = own(device.gpu->newBuffer(rowBytes * height, MTL::ResourceStorageModeShared));
+    glm::uvec4 zero(0);
+    device.dispatch("clear_screen_comp", &zero, sizeof(zero), width, height, {retained.get(), depth.get()});
+    for (unsigned frame = 0; frame < 48; ++frame)
+    {
+        // Scratch owners disappear immediately after submit while their
+        // commands may still be queued. Alternating retained and transient
+        // images exercises residency retirement during texture replacement.
+        auto scratch = device.target(width, height);
+        device.dispatch("clear_screen_comp", &zero, sizeof(zero), width, height, {scratch.get(), depth.get()});
+        Renderer2DPushConstants shape;
+        shape.rect = {0, 0, width, height};
+        shape.color0 = {frame % 2 ? 0.0f : 1.0f, frame % 2 ? 1.0f : 0.0f, 0, 0.5f};
+        shape.effect0.w = 1;
+        shape.data.x = uint32_t(Renderer2DPrimitive::eRectangle);
+        device.dispatch("shape_2d_comp", &shape, sizeof(shape), width, height, {scratch.get()});
+        device.dispatch("shape_2d_comp", &shape, sizeof(shape), width, height, {retained.get()});
+        device.submit();
+    }
+    device.flush();
+    auto command = device.queue->commandBuffer();
+    auto blit = command->blitCommandEncoder();
+    blit->copyFromTexture(retained.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(width, height, 1),
+                          readback.get(), 0, rowBytes, rowBytes * height);
+    blit->endEncoding();
+    command->commit();
+    command->waitUntilCompleted();
+    const auto pixels = static_cast<const unsigned char *>(readback->contents());
+    // Repeated red/green half-opacity blends converge to one-third red,
+    // two-thirds green. Reading only the final frame would remain translucent.
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+        {
+            const auto pixel = pixels + y * rowBytes + x * 4;
+            if (std::abs(int(pixel[0]) - 85) > 1 || std::abs(int(pixel[1]) - 170) > 1 ||
+                pixel[2] != 0 || pixel[3] < 254)
+                throw std::runtime_error("Queued submissions lost resources or reordered shared-target blending");
+        }
+}
+
+void check_failed_submission_retirement(Device &device)
+{
+    if (device.metal4)
+    {
+        auto &frame = device.metal4Frames[device.metal4Frame];
+        const auto completedBeforeFailure = device.successfulCompletions;
+        frame.feedback = std::make_shared<Device::Metal4Feedback>();
+        frame.completionValue = device.serial + 1; // This event deliberately never signals.
+        frame.constantPage = 3;
+        device.inFlight = true;
+        auto feedback = frame.feedback;
+        {
+            auto pool = own(NS::AutoreleasePool::alloc()->init());
+            feedback->finish(NS::Error::error(string("VibranceTestSubmission"),
+                                              MTL4::CommandQueueErrorInternal, nullptr));
+        } // Error transport must own the autoreleased NSError independently.
+        auto target = device.target(8, 8);
+        auto depth = device.target(1, 1, MTL::PixelFormatR32Uint);
+        glm::uvec4 clear(0);
+        bool reported = false;
+        try
+        {
+            device.dispatch("clear_screen_comp", &clear, sizeof(clear), 8, 8, {target.get(), depth.get()});
+        }
+        catch (const SubmissionError &error)
+        {
+            reported = std::string_view(error.what()).find("VibranceTestSubmission") != std::string_view::npos;
+        }
+        if (!reported || frame.feedback || frame.completionValue || frame.constantPage ||
+            device.recording || device.inFlight || device.successfulCompletions != completedBeforeFailure)
+            throw std::runtime_error("Metal 4 failed feedback was not retained, reported and retired");
+        device.dispatch("clear_screen_comp", &clear, sizeof(clear), 8, 8, {target.get(), depth.get()});
+        device.flush();
+        if (device.successfulCompletions != completedBeforeFailure + 1)
+            throw std::runtime_error("Metal 4 feedback recovery did not complete the later frame");
+        return;
+    }
+    // A small Objective-C stand-in covers the terminal error path without
+    // deliberately causing a GPU fault or relying on driver timeout behaviour.
+    const auto type = objc_allocateClassPair(objc_getClass("NSObject"), "VibranceFailedCommandBuffer", 0);
+    if (type)
+    {
+        class_addMethod(type, sel_registerName("status"),
+            reinterpret_cast<IMP>(+[](id, SEL) -> NS::UInteger { return MTL::CommandBufferStatusError; }), "Q@:");
+        class_addMethod(type, sel_registerName("error"),
+            reinterpret_cast<IMP>(+[](id, SEL) -> id { return nullptr; }), "@@:");
+        class_addMethod(type, sel_registerName("waitUntilCompleted"),
+            reinterpret_cast<IMP>(+[](id, SEL) {}), "v@:");
+        objc_registerClassPair(type);
+    }
+    auto &frame = device.metal3Frames[device.metal3Frame];
+    const auto send = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend);
+    auto instance = send(reinterpret_cast<id>(objc_getClass("VibranceFailedCommandBuffer")),
+                         sel_registerName("alloc"));
+    instance = send(instance, sel_registerName("init"));
+    frame.pending = own(reinterpret_cast<MTL::CommandBuffer *>(instance));
+    frame.constantPage = 3;
+    const auto completedBeforeFailure = device.successfulCompletions;
+    auto target = device.target(8, 8);
+    auto depth = device.target(1, 1, MTL::PixelFormatR32Uint);
+    glm::uvec4 clear(0);
+    bool reported = false;
+    try
+    {
+        device.dispatch("clear_screen_comp", &clear, sizeof(clear), 8, 8, {target.get(), depth.get()});
+    }
+    catch (const SubmissionError &)
+    {
+        reported = true;
+    }
+    if (!reported || frame.pending || frame.constantPage != 0 || device.recording ||
+        device.successfulCompletions != completedBeforeFailure)
+        throw std::runtime_error("A failed command buffer was not retired before reporting its error");
+    device.dispatch("clear_screen_comp", &clear, sizeof(clear), 8, 8, {target.get(), depth.get()});
+    device.flush();
+    if (device.successfulCompletions != completedBeforeFailure + 1)
+        throw std::runtime_error("Submission recovery did not record the later successful completion");
 }
 int main()
 {
@@ -256,7 +550,12 @@ int main()
                 throw std::runtime_error("Texture upload validation failed");
             check_retained_frames(device);
             check_batched_text(device);
+            check_text_dependency_waves(device);
+            check_foreground_blur_transitions(device);
             check_async_constants(device);
+            check_two_frames_in_flight(device);
+            check_submission_resource_lifetime(device);
+            check_failed_submission_retirement(device);
             // Consecutive submissions reuse storage only after the GPU completes.
             // Alternate constants to catch stale bindings and premature reuse.
             for (unsigned frame = 0; frame < 12; ++frame)

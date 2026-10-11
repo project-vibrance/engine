@@ -40,19 +40,39 @@ int2 dispatch_origin(constant Renderer2DConstants& pc)
 }
 
 static inline __attribute__((always_inline))
-float notch_flare_size(thread const float2& size, thread const float& amount, thread const float& depth)
+float4 own_shape_parameters(constant Renderer2DConstants& pc)
 {
-    float progress = fast::clamp((fast::clamp(amount, 0.0, 1.0) - 0.85000002384185791015625) / 0.1500000059604644775390625, 0.0, 1.0);
-    float _943;
-    if (depth > 0.5)
+    if ((pc.data.y & 2147483648u) != 0u)
     {
-        _943 = depth;
+        return pc.color2;
+    }
+    bool reserved = (pc.data.y & 36864u) != 0u;
+    float4 _1805;
+    if (reserved)
+    {
+        _1805 = float4(1.0, 4.0, 0.0, 0.0);
     }
     else
     {
-        _943 = fast::clamp(size.y * 0.62000000476837158203125, 0.0, 92.0);
+        _1805 = pc.effect1;
     }
-    float depthTarget = _943;
+    return _1805;
+}
+
+static inline __attribute__((always_inline))
+float notch_flare_size(thread const float2& size, thread const float& amount, thread const float& depth)
+{
+    float progress = fast::clamp((fast::clamp(amount, 0.0, 1.0) - 0.85000002384185791015625) / 0.1500000059604644775390625, 0.0, 1.0);
+    float _1020;
+    if (depth > 0.5)
+    {
+        _1020 = depth;
+    }
+    else
+    {
+        _1020 = fast::clamp(size.y * 0.62000000476837158203125, 0.0, 92.0);
+    }
+    float depthTarget = _1020;
     float flareTarget = fast::clamp(depthTarget * 0.180000007152557373046875, 0.0, size.y * 0.5);
     float sizeRatio = fast::clamp((size.y * 0.5) / fast::max(flareTarget, 0.001000000047497451305389404296875), 0.0, 1.0);
     float flareT = sizeRatio * progress;
@@ -70,6 +90,88 @@ float primitive_bounds_padding(thread const float4& shapeParams, constant Render
     float param_1 = shapeParams.z;
     float param_2 = shapeParams.w;
     return notch_flare_size(param, param_1, param_2) + 6.0;
+}
+
+static inline __attribute__((always_inline))
+bool constant_solid_interior(thread const float2& pixelCenter, constant Renderer2DConstants& pc)
+{
+    bool _2499 = (pc.data.y & 536942625u) != 0u;
+    bool _2518;
+    if (!_2499)
+    {
+        bool _2505 = pc.data.x != 1u;
+        bool _2511;
+        if (_2505)
+        {
+            _2511 = pc.data.x != 2u;
+        }
+        else
+        {
+            _2511 = _2505;
+        }
+        bool _2517;
+        if (_2511)
+        {
+            _2517 = pc.data.x != 6u;
+        }
+        else
+        {
+            _2517 = _2511;
+        }
+        _2518 = _2517;
+    }
+    else
+    {
+        _2518 = _2499;
+    }
+    if (_2518)
+    {
+        return false;
+    }
+    float2 halfSize = fast::max(pc.rect.zw * 0.5, float2(0.5));
+    float _2532;
+    if (pc.data.x == 1u)
+    {
+        _2532 = 0.0;
+    }
+    else
+    {
+        _2532 = fast::clamp(pc.effect0.x, 0.0, fast::min(halfSize.x, halfSize.y));
+    }
+    float radius = _2532;
+    float softness = fast::max(pc.effect0.z, 0.5);
+    float inset = ((radius + fast::max(pc.effect0.y, 0.0)) + softness) + 0.5;
+    float2 distanceFromCentre = abs(pixelCenter - (pc.rect.xy + halfSize));
+    if (any(distanceFromCentre >= (halfSize - float2(inset))))
+    {
+        return false;
+    }
+    if ((pc.data.y & 32768u) != 0u)
+    {
+        uint maskPrimitive = (pc.data.z >> 8u) & 15u;
+        if (((maskPrimitive != 1u) && (maskPrimitive != 2u)) && (maskPrimitive != 6u))
+        {
+            return false;
+        }
+        float2 maskHalfSize = fast::max(pc.effect1.zw * 0.5, float2(0.5));
+        float _2609;
+        if (maskPrimitive == 1u)
+        {
+            _2609 = 0.0;
+        }
+        else
+        {
+            _2609 = fast::clamp(float(pc.data.z & 255u), 0.0, fast::min(maskHalfSize.x, maskHalfSize.y));
+        }
+        float maskRadius = _2609;
+        float maskInset = (maskRadius + fast::max(softness, 0.75)) + 0.5;
+        float2 maskDistance = abs(pixelCenter - (pc.effect1.xy + maskHalfSize));
+        if (any(maskDistance >= (maskHalfSize - float2(maskInset))))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 static inline __attribute__((always_inline))
@@ -124,26 +226,26 @@ float3 barycentric_coords(thread const float2& p, thread const float2& a, thread
 static inline __attribute__((always_inline))
 bool barycentric_inside(thread const float3& bary)
 {
-    bool _518 = bary.x >= (-0.001000000047497451305389404296875);
-    bool _524;
-    if (_518)
+    bool _525 = bary.x >= (-0.001000000047497451305389404296875);
+    bool _531;
+    if (_525)
     {
-        _524 = bary.y >= (-0.001000000047497451305389404296875);
+        _531 = bary.y >= (-0.001000000047497451305389404296875);
     }
     else
     {
-        _524 = _518;
+        _531 = _525;
     }
-    bool _530;
-    if (_524)
+    bool _537;
+    if (_531)
     {
-        _530 = bary.z >= (-0.001000000047497451305389404296875);
+        _537 = bary.z >= (-0.001000000047497451305389404296875);
     }
     else
     {
-        _530 = _524;
+        _537 = _531;
     }
-    return _530;
+    return _537;
 }
 
 static inline __attribute__((always_inline))
@@ -225,18 +327,18 @@ static inline __attribute__((always_inline))
 float circular_progress_relative_angle(thread const float2& p, thread const float4& arcParams)
 {
     float angle = precise::atan2(p.y, p.x);
-    float _1205;
+    float _1282;
     if (arcParams.w >= 0.0)
     {
         float param = angle - arcParams.z;
-        _1205 = positive_angle(param);
+        _1282 = positive_angle(param);
     }
     else
     {
         float param_1 = arcParams.z - angle;
-        _1205 = positive_angle(param_1);
+        _1282 = positive_angle(param_1);
     }
-    return _1205;
+    return _1282;
 }
 
 static inline __attribute__((always_inline))
@@ -279,47 +381,31 @@ float4 unpack_corner_radii(thread const uint& _packed)
 }
 
 static inline __attribute__((always_inline))
-float sd_squircle_box(thread const float2& p, thread const float2& halfSize, thread const float& radius, thread const float& amount, thread const float& power)
-{
-    float safeRadius = fast::clamp(radius, 0.0, fast::min(halfSize.x, halfSize.y));
-    float2 q = abs(p) - fast::max(halfSize - float2(safeRadius), float2(0.0));
-    float2 outside = fast::max(q, float2(0.0));
-    float roundedNorm = length(outside);
-    if (amount <= 0.0)
-        return roundedNorm + fast::min(fast::max(q.x, q.y), 0.0) - safeRadius;
-    float cornerPower = mix(2.0, fast::clamp(power, 2.0, 5.0), fast::clamp(amount, 0.0, 1.0));
-    float squircleNorm = (outside.x == 0.0 || outside.y == 0.0)
-        ? outside.x + outside.y
-        : powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
-    return (mix(roundedNorm, squircleNorm, fast::clamp(amount, 0.0, 1.0)) + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
-}
-
-static inline __attribute__((always_inline))
 float corner_radius_for(thread const float2& p, thread const float4& radii)
 {
     if (p.y < 0.0)
     {
-        float _765;
+        float _772;
         if (p.x < 0.0)
         {
-            _765 = radii.x;
+            _772 = radii.x;
         }
         else
         {
-            _765 = radii.y;
+            _772 = radii.y;
         }
-        return _765;
+        return _772;
     }
-    float _778;
+    float _785;
     if (p.x < 0.0)
     {
-        _778 = radii.w;
+        _785 = radii.w;
     }
     else
     {
-        _778 = radii.z;
+        _785 = radii.z;
     }
-    return _778;
+    return _785;
 }
 
 static inline __attribute__((always_inline))
@@ -332,11 +418,65 @@ float sd_squircle_box_corners(thread const float2& p, thread const float2& halfS
     float2 outside = fast::max(q, float2(0.0));
     float roundedNorm = length(outside);
     if (amount <= 0.0)
-        return roundedNorm + fast::min(fast::max(q.x, q.y), 0.0) - safeRadius;
+    {
+        return (roundedNorm + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
+    }
     float cornerPower = mix(2.0, fast::clamp(power, 2.0, 5.0), fast::clamp(amount, 0.0, 1.0));
-    float squircleNorm = (outside.x == 0.0 || outside.y == 0.0)
-        ? outside.x + outside.y
-        : powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+    bool _963 = outside.x == 0.0;
+    bool _970;
+    if (!_963)
+    {
+        _970 = outside.y == 0.0;
+    }
+    else
+    {
+        _970 = _963;
+    }
+    float _971;
+    if (_970)
+    {
+        _971 = outside.x + outside.y;
+    }
+    else
+    {
+        _971 = powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+    }
+    float squircleNorm = _971;
+    return (mix(roundedNorm, squircleNorm, fast::clamp(amount, 0.0, 1.0)) + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
+}
+
+static inline __attribute__((always_inline))
+float sd_squircle_box(thread const float2& p, thread const float2& halfSize, thread const float& radius, thread const float& amount, thread const float& power)
+{
+    float safeRadius = fast::clamp(radius, 0.0, fast::min(halfSize.x, halfSize.y));
+    float2 q = abs(p) - fast::max(halfSize - float2(safeRadius), float2(0.0));
+    float2 outside = fast::max(q, float2(0.0));
+    float roundedNorm = length(outside);
+    if (amount <= 0.0)
+    {
+        return (roundedNorm + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
+    }
+    float cornerPower = mix(2.0, fast::clamp(power, 2.0, 5.0), fast::clamp(amount, 0.0, 1.0));
+    bool _866 = outside.x == 0.0;
+    bool _873;
+    if (!_866)
+    {
+        _873 = outside.y == 0.0;
+    }
+    else
+    {
+        _873 = _866;
+    }
+    float _874;
+    if (_873)
+    {
+        _874 = outside.x + outside.y;
+    }
+    else
+    {
+        _874 = powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+    }
+    float squircleNorm = _874;
     return (mix(roundedNorm, squircleNorm, fast::clamp(amount, 0.0, 1.0)) + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
 }
 
@@ -413,9 +553,6 @@ float sd_liquid_bridge(thread const float2& p, thread const float2& halfSize, th
 {
     float radius = fast::max(halfSize.y, 0.5);
     float centerOffset = fast::max(halfSize.x - radius, 0.0);
-    // Continue the main island's right cap towards the left. This uses its
-    // existing edge as the liquid source instead of drawing a second circle
-    // that can emerge from behind the shell during separation.
     float2 source = p - float2(-centerOffset, 0.0);
     float left = length(float2(fast::max(source.x, 0.0), source.y)) - radius;
     float right = length(p - float2(centerOffset, 0.0)) - radius;
@@ -462,65 +599,79 @@ float primitive_sdf(thread const float2& pixel, thread const float4& rect, threa
         float2 q = p / halfSize;
         return (length(q) - 1.0) * fast::min(halfSize.x, halfSize.y);
     }
-    float _1580;
+    float _1664;
     if (primitive == 1u)
     {
-        _1580 = 0.0;
+        _1664 = 0.0;
     }
     else
     {
-        _1580 = fast::clamp(cornerRadius, 0.0, fast::min(halfSize.x, halfSize.y));
+        _1664 = fast::clamp(cornerRadius, 0.0, fast::min(halfSize.x, halfSize.y));
     }
-    float radius = _1580;
+    float radius = _1664;
     float squircleAmount = fast::clamp(shapeParams.x, 0.0, 1.0);
-    float _1600;
+    float _1684;
     if (shapeParams.y <= 0.001000000047497451305389404296875)
     {
-        _1600 = 4.0;
+        _1684 = 4.0;
     }
     else
     {
-        _1600 = shapeParams.y;
+        _1684 = shapeParams.y;
     }
-    float squirclePower = fast::clamp(_1600, 2.0, 5.0);
+    float squirclePower = fast::clamp(_1684, 2.0, 5.0);
     if (primitive == 6u)
     {
-        float2 param = p;
-        float2 param_1 = halfSize;
-        float param_2 = radius;
-        float param_3 = squircleAmount;
-        float param_4 = squirclePower;
-        return sd_squircle_box(param, param_1, param_2, param_3, param_4);
+        float _1699;
+        if (useCornerRadii)
+        {
+            float2 param = p;
+            float2 param_1 = halfSize;
+            float4 param_2 = cornerRadii;
+            float param_3 = squircleAmount;
+            float param_4 = squirclePower;
+            _1699 = sd_squircle_box_corners(param, param_1, param_2, param_3, param_4);
+        }
+        else
+        {
+            float2 param_5 = p;
+            float2 param_6 = halfSize;
+            float param_7 = radius;
+            float param_8 = squircleAmount;
+            float param_9 = squirclePower;
+            _1699 = sd_squircle_box(param_5, param_6, param_7, param_8, param_9);
+        }
+        return _1699;
     }
     if (primitive == 7u)
     {
-        float2 param_5 = pixel;
-        float4 param_6 = rect;
-        float param_7 = radius;
-        float param_8 = squircleAmount;
-        float param_9 = squirclePower;
-        float param_10 = shapeParams.z;
-        float param_11 = shapeParams.w;
-        return sd_notched_squircle(param_5, param_6, param_7, param_8, param_9, param_10, param_11);
+        float2 param_10 = pixel;
+        float4 param_11 = rect;
+        float param_12 = radius;
+        float param_13 = squircleAmount;
+        float param_14 = squirclePower;
+        float param_15 = shapeParams.z;
+        float param_16 = shapeParams.w;
+        return sd_notched_squircle(param_10, param_11, param_12, param_13, param_14, param_15, param_16);
     }
     if (primitive == 9u)
     {
-        float2 param_12 = p;
-        float2 param_13 = halfSize;
-        float param_14 = pc.uvRect.x;
-        return sd_liquid_bridge(param_12, param_13, param_14);
+        float2 param_17 = p;
+        float2 param_18 = halfSize;
+        float param_19 = pc.uvRect.x;
+        return sd_liquid_bridge(param_17, param_18, param_19);
     }
     if ((primitive != 1u) && useCornerRadii)
     {
-        float2 param_15 = p;
-        float2 param_16 = halfSize;
-        float4 param_17 = cornerRadii;
-        return sd_rounded_box_corners(param_15, param_16, param_17);
+        float2 param_20 = p;
+        float2 param_21 = halfSize;
+        float4 param_22 = cornerRadii;
+        return sd_rounded_box_corners(param_20, param_21, param_22);
     }
-    float2 param_18 = p;
-    float2 param_19 = halfSize;
-    float param_20 = radius;
-    return sd_rounded_box(param_18, param_19, param_20);
+    float2 param_23 = p;
+    float2 param_24 = halfSize;
+    float param_25 = radius;
+    return sd_rounded_box(param_23, param_24, param_25);
 }
 
 static inline __attribute__((always_inline))
@@ -534,28 +685,33 @@ float shape_sdf(thread const float2& pixel, constant Renderer2DConstants& pc)
         return sd_circular_progress(param, param_1, param_2);
     }
     bool useCornerRadii = (pc.data.y & 65536u) != 0u;
-    float4 _1709;
+    float4 _1838;
     if (useCornerRadii)
     {
         uint param_3 = pc.data.z;
-        _1709 = unpack_corner_radii(param_3);
+        _1838 = unpack_corner_radii(param_3);
     }
     else
     {
-        _1709 = float4(pc.effect0.x);
+        _1838 = float4(pc.effect0.x);
     }
-    float4 cornerRadii = _1709;
+    float4 cornerRadii = _1838;
+    bool _1858;
+    if (useCornerRadii)
+    {
+        _1858 = (pc.data.y & 2147483648u) != 0u;
+    }
+    else
+    {
+        _1858 = useCornerRadii;
+    }
+    if (_1858)
+    {
+        uint corners = (pc.data.z >> 20u) & 15u;
+        cornerRadii = float4(float(corners & 1u), float((corners >> 1u) & 1u), float((corners >> 2u) & 1u), float((corners >> 3u) & 1u)) * pc.effect0.x;
+    }
     bool effect1Reserved = (pc.data.y & 36864u) != 0u;
-    float4 _1730;
-    if (effect1Reserved)
-    {
-        _1730 = float4(1.0, 4.0, 0.0, 0.0);
-    }
-    else
-    {
-        _1730 = pc.effect1;
-    }
-    float4 shapeParams = _1730;
+    float4 shapeParams = own_shape_parameters(pc);
     float2 param_4 = pixel;
     float4 param_5 = pc.rect;
     uint param_6 = pc.data.x;
@@ -600,29 +756,39 @@ static inline __attribute__((always_inline))
 float top_outline_factor_for_notch(thread const float2& pixel, thread const float& outlineWidth, thread const float& softness, constant Renderer2DConstants& pc)
 {
     bool effect1Reserved = (pc.data.y & 36864u) != 0u;
-    bool _2033;
-    if (!effect1Reserved)
+    float4 params = own_shape_parameters(pc);
+    bool _2204;
+    if (effect1Reserved)
     {
-        _2033 = pc.data.x != 7u;
+        _2204 = (pc.data.y & 2147483648u) == 0u;
     }
     else
     {
-        _2033 = effect1Reserved;
+        _2204 = effect1Reserved;
     }
-    bool _2040;
-    if (!_2033)
+    bool _2211;
+    if (!_2204)
     {
-        _2040 = pc.effect1.z <= 0.00999999977648258209228515625;
+        _2211 = pc.data.x != 7u;
     }
     else
     {
-        _2040 = _2033;
+        _2211 = _2204;
     }
-    if (_2040 || (outlineWidth <= 0.001000000047497451305389404296875))
+    bool _2218;
+    if (!_2211)
+    {
+        _2218 = params.z <= 0.00999999977648258209228515625;
+    }
+    else
+    {
+        _2218 = _2211;
+    }
+    if (_2218 || (outlineWidth <= 0.001000000047497451305389404296875))
     {
         return 1.0;
     }
-    float notchSuppression = smoothstep(0.039999999105930328369140625, 0.2199999988079071044921875, fast::clamp(pc.effect1.z, 0.0, 1.0));
+    float notchSuppression = smoothstep(0.039999999105930328369140625, 0.2199999988079071044921875, fast::clamp(params.z, 0.0, 1.0));
     float topDistance = pixel.y - pc.rect.y;
     float topEdgeFactor = smoothstep(outlineWidth + (softness * 0.25), outlineWidth + (softness * 1.75), topDistance);
     return mix(1.0, topEdgeFactor, notchSuppression);
@@ -663,6 +829,10 @@ float4 fill_color(thread const float2& uv, constant Renderer2DConstants& pc)
     if ((pc.data.y & 1u) == 0u)
     {
         return pc.color0;
+    }
+    if (pc.data.x == 9u)
+    {
+        return mix(pc.color0, pc.color1, float4(fast::clamp(uv.y, 0.0, 1.0)));
     }
     if (pc.data.x == 8u)
     {
@@ -720,36 +890,36 @@ float4 shade_shape_sample(thread const float2& samplePoint, constant Renderer2DC
         return float4(0.0);
     }
     bool smoothEdges = (pc.data.y & 4u) != 0u;
-    float _2126;
+    float _2304;
     if (smoothEdges)
     {
-        _2126 = smoothstep(softness, -softness, sdf);
+        _2304 = smoothstep(softness, -softness, sdf);
     }
     else
     {
-        _2126 = float(sdf <= 0.0);
+        _2304 = float(sdf <= 0.0);
     }
-    float fillAlpha = _2126;
+    float fillAlpha = _2304;
     float outlineWidth = fast::max(pc.effect0.y, 0.0);
-    float _2146;
+    float _2324;
     if (outlineWidth > 0.0)
     {
-        float _2150;
+        float _2328;
         if (smoothEdges)
         {
-            _2150 = smoothstep(softness, -softness, sdf + outlineWidth);
+            _2328 = smoothstep(softness, -softness, sdf + outlineWidth);
         }
         else
         {
-            _2150 = float((sdf + outlineWidth) <= 0.0);
+            _2328 = float((sdf + outlineWidth) <= 0.0);
         }
-        _2146 = _2150;
+        _2324 = _2328;
     }
     else
     {
-        _2146 = fillAlpha;
+        _2324 = fillAlpha;
     }
-    float innerAlpha = _2146;
+    float innerAlpha = _2324;
     float outlineAlpha = fast::max(fillAlpha - innerAlpha, 0.0);
     float bodyCoverage = (outlineWidth > 0.0) ? innerAlpha : fillAlpha;
     float2 param_4 = localPixel;
@@ -762,6 +932,17 @@ float4 shade_shape_sample(thread const float2& samplePoint, constant Renderer2DC
     float2 param_7 = uv;
     float4 body = fill_color(param_7, pc);
     float4 outline = pc.color2;
+    if ((pc.data.y & 2147483648u) != 0u)
+    {
+        outline = float4(1.0, 1.0, 1.0, float((pc.data.z >> 12u) & 255u) / 255.0);
+    }
+    if ((pc.data.y & 1073741824u) != 0u)
+    {
+        outline.x = 1.0;
+        outline.y = 1.0;
+        outline.z = 1.0;
+        outline.w = fast::min(outline.w, 0.119999997317790985107421875);
+    }
     float4 param_8 = body;
     float param_9 = bodyCoverage;
     float4 param_10 = outline;
@@ -786,66 +967,72 @@ float4 resolve_accumulated_shape(thread float3& premultiplied, thread float& alp
 {
     alpha /= fast::max(weightSum, 9.9999997473787516355514526367188e-05);
     premultiplied /= float3(fast::max(weightSum, 9.9999997473787516355514526367188e-05));
-    float3 _2267;
+    float3 _2477;
     if (alpha > 9.9999997473787516355514526367188e-05)
     {
-        _2267 = premultiplied / float3(alpha);
+        _2477 = premultiplied / float3(alpha);
     }
     else
     {
-        _2267 = float3(0.0);
+        _2477 = float3(0.0);
     }
-    float3 rgb = _2267;
+    float3 rgb = _2477;
     return float4(rgb, alpha);
 }
 
 static inline __attribute__((always_inline))
 float4 resolve_filtered_shape(thread const float2& pixelCenter, constant Renderer2DConstants& pc)
 {
+    float2 param = pixelCenter;
+    if (constant_solid_interior(param, pc))
+    {
+        float2 param_1 = pixelCenter;
+        return shade_shape_sample(param_1, pc);
+    }
     float3 premultiplied = float3(0.0);
     float alpha = 0.0;
     float weightSum = 0.0;
-    float2 param = pixelCenter + float2(-0.375, -0.125);
-    float param_1 = 0.25;
-    float3 param_2 = premultiplied;
-    float param_3 = alpha;
-    float param_4 = weightSum;
-    accumulate_shape_sample(param, param_1, param_2, param_3, param_4, pc);
-    premultiplied = param_2;
-    alpha = param_3;
-    weightSum = param_4;
-    float2 param_5 = pixelCenter + float2(0.125, -0.375);
-    float param_6 = 0.25;
-    float3 param_7 = premultiplied;
-    float param_8 = alpha;
-    float param_9 = weightSum;
-    accumulate_shape_sample(param_5, param_6, param_7, param_8, param_9, pc);
-    premultiplied = param_7;
-    alpha = param_8;
-    weightSum = param_9;
-    float2 param_10 = pixelCenter + float2(-0.125, 0.375);
-    float param_11 = 0.25;
-    float3 param_12 = premultiplied;
-    float param_13 = alpha;
-    float param_14 = weightSum;
-    accumulate_shape_sample(param_10, param_11, param_12, param_13, param_14, pc);
-    premultiplied = param_12;
-    alpha = param_13;
-    weightSum = param_14;
-    float2 param_15 = pixelCenter + float2(0.375, 0.125);
-    float param_16 = 0.25;
-    float3 param_17 = premultiplied;
-    float param_18 = alpha;
-    float param_19 = weightSum;
-    accumulate_shape_sample(param_15, param_16, param_17, param_18, param_19, pc);
-    premultiplied = param_17;
-    alpha = param_18;
-    weightSum = param_19;
-    float3 param_20 = premultiplied;
-    float param_21 = alpha;
-    float param_22 = weightSum;
-    float4 _2358 = resolve_accumulated_shape(param_20, param_21, param_22);
-    return _2358;
+    float2 param_2 = pixelCenter + float2(-0.375, -0.125);
+    float param_3 = 0.25;
+    float3 param_4 = premultiplied;
+    float param_5 = alpha;
+    float param_6 = weightSum;
+    accumulate_shape_sample(param_2, param_3, param_4, param_5, param_6, pc);
+    premultiplied = param_4;
+    alpha = param_5;
+    weightSum = param_6;
+    float2 param_7 = pixelCenter + float2(0.125, -0.375);
+    float param_8 = 0.25;
+    float3 param_9 = premultiplied;
+    float param_10 = alpha;
+    float param_11 = weightSum;
+    accumulate_shape_sample(param_7, param_8, param_9, param_10, param_11, pc);
+    premultiplied = param_9;
+    alpha = param_10;
+    weightSum = param_11;
+    float2 param_12 = pixelCenter + float2(-0.125, 0.375);
+    float param_13 = 0.25;
+    float3 param_14 = premultiplied;
+    float param_15 = alpha;
+    float param_16 = weightSum;
+    accumulate_shape_sample(param_12, param_13, param_14, param_15, param_16, pc);
+    premultiplied = param_14;
+    alpha = param_15;
+    weightSum = param_16;
+    float2 param_17 = pixelCenter + float2(0.375, 0.125);
+    float param_18 = 0.25;
+    float3 param_19 = premultiplied;
+    float param_20 = alpha;
+    float param_21 = weightSum;
+    accumulate_shape_sample(param_17, param_18, param_19, param_20, param_21, pc);
+    premultiplied = param_19;
+    alpha = param_20;
+    weightSum = param_21;
+    float3 param_22 = premultiplied;
+    float param_23 = alpha;
+    float param_24 = weightSum;
+    float4 _2733 = resolve_accumulated_shape(param_22, param_23, param_24);
+    return _2733;
 }
 
 static inline __attribute__((always_inline))
@@ -990,8 +1177,8 @@ float4 resolve_blurred_shape(thread const float2& pixelCenter, constant Renderer
     float3 param_66 = premultiplied;
     float param_67 = alpha;
     float param_68 = weightSum;
-    float4 _2617 = resolve_accumulated_shape(param_66, param_67, param_68);
-    return _2617;
+    float4 _2992 = resolve_accumulated_shape(param_66, param_67, param_68);
+    return _2992;
 }
 
 static inline __attribute__((always_inline))
@@ -1010,128 +1197,119 @@ kernel void shape_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], textur
 {
     int2 pixel = dispatch_origin(pc) + int2(gl_GlobalInvocationID.xy);
     int2 screenSize = int2(colorBuffer.get_width(), colorBuffer.get_height());
-    bool _2640 = pixel.x < 0;
-    bool _2647;
-    if (!_2640)
+    bool _3015 = pixel.x < 0;
+    bool _3022;
+    if (!_3015)
     {
-        _2647 = pixel.y < 0;
+        _3022 = pixel.y < 0;
     }
     else
     {
-        _2647 = _2640;
+        _3022 = _3015;
     }
-    bool _2656;
-    if (!_2647)
+    bool _3031;
+    if (!_3022)
     {
-        _2656 = pixel.x >= screenSize.x;
+        _3031 = pixel.x >= screenSize.x;
     }
     else
     {
-        _2656 = _2647;
+        _3031 = _3022;
     }
-    bool _2665;
-    if (!_2656)
+    bool _3040;
+    if (!_3031)
     {
-        _2665 = pixel.y >= screenSize.y;
+        _3040 = pixel.y >= screenSize.y;
     }
     else
     {
-        _2665 = _2656;
+        _3040 = _3031;
     }
-    if (_2665)
+    if (_3040)
     {
         return;
     }
     float2 p = float2(pixel) + float2(0.5);
     bool transformed = (pc.data.y & 4096u) != 0u;
     bool effect1Reserved = (pc.data.y & 36864u) != 0u;
-    float4 _2685;
-    if (effect1Reserved)
-    {
-        _2685 = float4(1.0, 4.0, 0.0, 0.0);
-    }
-    else
-    {
-        _2685 = pc.effect1;
-    }
-    float4 shapeParams = _2685;
+    float4 shapeParams = own_shape_parameters(pc);
     float4 param = shapeParams;
     float boundsPad = (pc.effect0.y + pc.effect0.z) + primitive_bounds_padding(param, pc);
-    bool _2703 = !transformed;
-    bool _2752;
-    if (_2703)
+    bool _3071 = !transformed;
+    bool _3120;
+    if (_3071)
     {
-        bool _2712 = p.x < (pc.rect.x - boundsPad);
-        bool _2723;
-        if (!_2712)
+        bool _3080 = p.x < (pc.rect.x - boundsPad);
+        bool _3091;
+        if (!_3080)
         {
-            _2723 = p.y < (pc.rect.y - boundsPad);
+            _3091 = p.y < (pc.rect.y - boundsPad);
         }
         else
         {
-            _2723 = _2712;
+            _3091 = _3080;
         }
-        bool _2737;
-        if (!_2723)
+        bool _3105;
+        if (!_3091)
         {
-            _2737 = p.x > ((pc.rect.x + pc.rect.z) + boundsPad);
+            _3105 = p.x > ((pc.rect.x + pc.rect.z) + boundsPad);
         }
         else
         {
-            _2737 = _2723;
+            _3105 = _3091;
         }
-        bool _2751;
-        if (!_2737)
+        bool _3119;
+        if (!_3105)
         {
-            _2751 = p.y > ((pc.rect.y + pc.rect.w) + boundsPad);
+            _3119 = p.y > ((pc.rect.y + pc.rect.w) + boundsPad);
         }
         else
         {
-            _2751 = _2737;
+            _3119 = _3105;
         }
-        _2752 = _2751;
+        _3120 = _3119;
     }
     else
     {
-        _2752 = _2703;
+        _3120 = _3071;
     }
-    if (_2752)
+    if (_3120)
     {
         return;
     }
-    bool _2761 = (pc.data.y & 32u) != 0u;
-    bool _2767;
-    if (_2761)
+    bool _3129 = (pc.data.y & 32u) != 0u;
+    bool _3135;
+    if (_3129)
     {
-        _2767 = pc.effect0.z > 0.5;
+        _3135 = pc.effect0.z > 0.5;
     }
     else
     {
-        _2767 = _2761;
+        _3135 = _3129;
     }
-    bool foregroundBlur = _2767;
-    float4 _2770;
+    bool foregroundBlur = _3135;
+    float4 _3138;
     if (transformed)
     {
         float2 param_1 = p;
-        _2770 = resolve_transformed_shape(param_1, pc);
+        _3138 = resolve_transformed_shape(param_1, pc);
     }
     else
     {
-        float4 _2778;
+        float4 _3146;
         if (foregroundBlur)
         {
             float2 param_2 = p;
-            _2778 = resolve_blurred_shape(param_2, pc);
+            _3146 = resolve_blurred_shape(param_2, pc);
         }
         else
         {
             float2 param_3 = p;
-            _2778 = resolve_filtered_shape(param_3, pc);
+            _3146 = resolve_filtered_shape(param_3, pc);
         }
-        _2770 = _2778;
+        _3138 = _3146;
     }
-    float4 src = _2770;
+    float4 src = _3138;
     if (src.w <= 0.001000000047497451305389404296875)
     {
         return;

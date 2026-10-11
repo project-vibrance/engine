@@ -19,8 +19,7 @@ enum class LiquidGlassBackend : std::uint32_t
 {
     // Existing Windows Composition approximation. Kept during migration.
     eEngineRenderer = 0u,
-    // Reserved for Apple's native Liquid Glass implementation. The slot is
-    // intentionally present now, but reports unavailable until implemented.
+    // Apple's native AppKit Liquid Glass (macOS 26 and later).
     eMacOSNative = 1u,
     // Windows DWM HLSL path; reports unavailable until its extension is ready.
     eWindowsCompositionShader = 2u

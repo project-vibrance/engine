@@ -392,6 +392,9 @@ void GlfwPanelWindow::tick()
         return;
     }
 
+    glfw_reconcile_ui_mouse_events(window, inputState);
+    if (glfw_window_should_close(window)) return;
+
     PanelUiDiagnostics* diagnostics = panel_ui_diagnostics(this);
     report_panel_ui_diagnostics(diagnostics, logger, options.title);
     double drawMilliseconds = 0.0;
@@ -545,6 +548,16 @@ void GlfwPanelWindow::set_ui_scale(float scale)
 bool GlfwPanelWindow::has_pointer_capture() const
 {
     return glfw_ui_input_has_pointer_capture(inputState);
+}
+
+UiInputState& GlfwPanelWindow::input_state()
+{
+    return inputState;
+}
+
+const UiInputState& GlfwPanelWindow::input_state() const
+{
+    return inputState;
 }
 
 void GlfwPanelWindow::rebuild()

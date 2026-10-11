@@ -159,6 +159,8 @@ public:
     void set_size(int width, int height);
     void set_ui_scale(float scale);
     bool has_pointer_capture() const;
+    UiInputState& input_state();
+    const UiInputState& input_state() const;
     // Forces a full scene rebuild after external state has changed
     void rebuild();
 

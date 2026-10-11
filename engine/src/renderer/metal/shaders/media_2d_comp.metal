@@ -65,7 +65,7 @@ struct Renderer2DConstants
     uint4 data;
 };
 
-constant spvUnsafeArray<float2, 4> _2960 = spvUnsafeArray<float2, 4>({ float2(-0.375, -0.125), float2(0.125, -0.375), float2(-0.125, 0.375), float2(0.375, 0.125) });
+constant spvUnsafeArray<float2, 4> _3030 = spvUnsafeArray<float2, 4>({ float2(-0.375, -0.125), float2(0.125, -0.375), float2(-0.125, 0.375), float2(0.375, 0.125) });
 
 static inline __attribute__((always_inline))
 int2 dispatch_origin(constant Renderer2DConstants& pc)
@@ -100,7 +100,7 @@ static inline __attribute__((always_inline))
 float4 sample_media_blur_horizontal(thread const float2& samplePoint, constant Renderer2DConstants& pc, texture2d<float> mediaTexture, sampler mediaTextureSmplr)
 {
     int radius = clamp(int(round(pc.effect0.z)), 0, 32);
-    int _2253 = max(1, (radius / 6));
+    int _2323 = max(1, (radius / 6));
     float sigma = fast::max(float(radius) * 0.5, 1.0);
     float2 localUv = fast::clamp((samplePoint - pc.rect.xy) / fast::max(pc.rect.zw, float2(1.0)), float2(0.0), float2(1.0));
     float2 uv = mix(pc.uvRect.xy, pc.uvRect.zw, localUv);
@@ -111,9 +111,9 @@ float4 sample_media_blur_horizontal(thread const float2& samplePoint, constant R
     float3 weightedRgb = float3(0.0);
     float weightedAlpha = 0.0;
     float weightSum = 0.0;
-    int _2317 = -radius;
-    float3 _2354;
-    for (int stepSize = _2253, x = _2317; x <= radius; x += stepSize)
+    int _2387 = -radius;
+    float3 _2424;
+    for (int stepSize = _2323, x = _2387; x <= radius; x += stepSize)
     {
         float weight = exp((-float(x * x)) / ((2.0 * sigma) * sigma));
         float2 sampleUv = fast::clamp(uv + (float2(float(x), 0.0) * uvPerScreenPixel), uvMin, uvMax);
@@ -121,13 +121,13 @@ float4 sample_media_blur_horizontal(thread const float2& samplePoint, constant R
         float4 sampleColor = sample_media_texture_linear(param, pc, mediaTexture, mediaTextureSmplr);
         if (premultiplied)
         {
-            _2354 = sampleColor.xyz;
+            _2424 = sampleColor.xyz;
         }
         else
         {
-            _2354 = sampleColor.xyz * sampleColor.w;
+            _2424 = sampleColor.xyz * sampleColor.w;
         }
-        weightedRgb += (_2354 * weight);
+        weightedRgb += (_2424 * weight);
         weightedAlpha += (sampleColor.w * weight);
         weightSum += weight;
     }
@@ -298,11 +298,30 @@ float sd_squircle_box(thread const float2& p, thread const float2& halfSize, thr
     float2 outside = fast::max(q, float2(0.0));
     float roundedNorm = length(outside);
     if (amount <= 0.0)
-        return roundedNorm + fast::min(fast::max(q.x, q.y), 0.0) - safeRadius;
+    {
+        return (roundedNorm + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
+    }
     float cornerPower = mix(2.0, fast::clamp(power, 2.0, 5.0), fast::clamp(amount, 0.0, 1.0));
-    float squircleNorm = (outside.x == 0.0 || outside.y == 0.0)
-        ? outside.x + outside.y
-        : powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+    bool _874 = outside.x == 0.0;
+    bool _881;
+    if (!_874)
+    {
+        _881 = outside.y == 0.0;
+    }
+    else
+    {
+        _881 = _874;
+    }
+    float _882;
+    if (_881)
+    {
+        _882 = outside.x + outside.y;
+    }
+    else
+    {
+        _882 = powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+    }
+    float squircleNorm = _882;
     return (mix(roundedNorm, squircleNorm, fast::clamp(amount, 0.0, 1.0)) + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
 }
 
@@ -346,30 +365,30 @@ float media_primitive_mask(thread const float2& p, constant Renderer2DConstants&
             return 0.0;
         }
         float barLeft = float(barIndex) * stride;
-        bool _977 = localX < barLeft;
-        bool _986;
-        if (!_977)
+        bool _1012 = localX < barLeft;
+        bool _1021;
+        if (!_1012)
         {
-            _986 = localX > (barLeft + barWidth);
+            _1021 = localX > (barLeft + barWidth);
         }
         else
         {
-            _986 = _977;
+            _1021 = _1012;
         }
-        if (_986)
+        if (_1021)
         {
             return 0.0;
         }
-        float _993;
+        float _1028;
         if (barIndex < 4)
         {
-            _993 = pc.color1[barIndex];
+            _1028 = pc.color1[barIndex];
         }
         else
         {
-            _993 = pc.color2[barIndex - 4];
+            _1028 = pc.color2[barIndex - 4];
         }
-        float barHeight = _993;
+        float barHeight = _1028;
         float2 barHalfSize = fast::max(float2(barWidth, barHeight) * 0.5, float2(0.5));
         float2 barCenter = float2((pc.rect.x + barLeft) + (barWidth * 0.5), pc.rect.y + (pc.rect.w * 0.5));
         float2 param = p - barCenter;
@@ -426,16 +445,16 @@ static inline __attribute__((always_inline))
 float notch_flare_size(thread const float2& size, thread const float& amount, thread const float& depth)
 {
     float progress = fast::clamp((fast::clamp(amount, 0.0, 1.0) - 0.85000002384185791015625) / 0.1500000059604644775390625, 0.0, 1.0);
-    float _1230;
+    float _1300;
     if (depth > 0.5)
     {
-        _1230 = depth;
+        _1300 = depth;
     }
     else
     {
-        _1230 = fast::clamp(size.y * 0.62000000476837158203125, 0.0, 92.0);
+        _1300 = fast::clamp(size.y * 0.62000000476837158203125, 0.0, 92.0);
     }
-    float depthTarget = _1230;
+    float depthTarget = _1300;
     float flareTarget = fast::clamp(depthTarget * 0.180000007152557373046875, 0.0, size.y * 0.5);
     float sizeRatio = fast::clamp((size.y * 0.5) / fast::max(flareTarget, 0.001000000047497451305389404296875), 0.0, 1.0);
     float flareT = sizeRatio * progress;
@@ -447,27 +466,27 @@ float corner_radius_for(thread const float2& p, thread const float4& radii)
 {
     if (p.y < 0.0)
     {
-        float _1133;
+        float _1168;
         if (p.x < 0.0)
         {
-            _1133 = radii.x;
+            _1168 = radii.x;
         }
         else
         {
-            _1133 = radii.y;
+            _1168 = radii.y;
         }
-        return _1133;
+        return _1168;
     }
-    float _1146;
+    float _1181;
     if (p.x < 0.0)
     {
-        _1146 = radii.w;
+        _1181 = radii.w;
     }
     else
     {
-        _1146 = radii.z;
+        _1181 = radii.z;
     }
-    return _1146;
+    return _1181;
 }
 
 static inline __attribute__((always_inline))
@@ -480,11 +499,30 @@ float sd_squircle_box_corners(thread const float2& p, thread const float2& halfS
     float2 outside = fast::max(q, float2(0.0));
     float roundedNorm = length(outside);
     if (amount <= 0.0)
-        return roundedNorm + fast::min(fast::max(q.x, q.y), 0.0) - safeRadius;
+    {
+        return (roundedNorm + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
+    }
     float cornerPower = mix(2.0, fast::clamp(power, 2.0, 5.0), fast::clamp(amount, 0.0, 1.0));
-    float squircleNorm = (outside.x == 0.0 || outside.y == 0.0)
-        ? outside.x + outside.y
-        : powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+    bool _1243 = outside.x == 0.0;
+    bool _1250;
+    if (!_1243)
+    {
+        _1250 = outside.y == 0.0;
+    }
+    else
+    {
+        _1250 = _1243;
+    }
+    float _1251;
+    if (_1250)
+    {
+        _1251 = outside.x + outside.y;
+    }
+    else
+    {
+        _1251 = powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+    }
+    float squircleNorm = _1251;
     return (mix(roundedNorm, squircleNorm, fast::clamp(amount, 0.0, 1.0)) + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
 }
 
@@ -632,7 +670,7 @@ static inline __attribute__((always_inline))
 float4 sample_media_blur_vertical(thread const float2& samplePoint, constant Renderer2DConstants& pc, texture2d<float, access::read_write> mediaBlurBuffer)
 {
     int radius = clamp(int(round(pc.effect0.z)), 0, 32);
-    int _2406 = max(1, (radius / 6));
+    int _2476 = max(1, (radius / 6));
     float sigma = fast::max(float(radius) * 0.5, 1.0);
     int2 sourceSize = int2(mediaBlurBuffer.get_width(), mediaBlurBuffer.get_height());
     int2 centerPixel = int2(floor(samplePoint));
@@ -640,8 +678,8 @@ float4 sample_media_blur_vertical(thread const float2& samplePoint, constant Ren
     float3 weightedRgb = float3(0.0);
     float weightedAlpha = 0.0;
     float weightSum = 0.0;
-    int _2430 = -radius;
-    for (int stepSize = _2406, y = _2430; y <= radius; y += stepSize)
+    int _2500 = -radius;
+    for (int stepSize = _2476, y = _2500; y <= radius; y += stepSize)
     {
         float weight = exp((-float(y * y)) / ((2.0 * sigma) * sigma));
         int2 sourcePixel = clamp(centerPixel + int2(0, y), int2(0), sourceSize - int2(1));
@@ -652,25 +690,25 @@ float4 sample_media_blur_vertical(thread const float2& samplePoint, constant Ren
         weightSum += weight;
     }
     float alpha = weightedAlpha / fast::max(weightSum, 9.9999997473787516355514526367188e-05);
-    float3 _2490;
+    float3 _2560;
     if (premultiplied)
     {
-        _2490 = weightedRgb / float3(fast::max(weightSum, 9.9999997473787516355514526367188e-05));
+        _2560 = weightedRgb / float3(fast::max(weightSum, 9.9999997473787516355514526367188e-05));
     }
     else
     {
-        float3 _2501;
+        float3 _2571;
         if (weightedAlpha > 9.9999997473787516355514526367188e-05)
         {
-            _2501 = weightedRgb / float3(weightedAlpha);
+            _2571 = weightedRgb / float3(weightedAlpha);
         }
         else
         {
-            _2501 = float3(0.0);
+            _2571 = float3(0.0);
         }
-        _2490 = _2501;
+        _2560 = _2571;
     }
-    float3 rgb = _2490;
+    float3 rgb = _2560;
     return float4(rgb, alpha);
 }
 
@@ -736,17 +774,17 @@ float4 sample_media_texture(thread const float2& uv, constant Renderer2DConstant
 static inline __attribute__((always_inline))
 float4 sample_media(thread const float2& uv, constant Renderer2DConstants& pc, texture2d<float> mediaTexture, sampler mediaTextureSmplr)
 {
-    bool _2011 = (pc.data.y & 32u) == 0u;
-    bool _2018;
-    if (!_2011)
+    bool _2081 = (pc.data.y & 32u) == 0u;
+    bool _2088;
+    if (!_2081)
     {
-        _2018 = pc.effect0.z <= 0.001000000047497451305389404296875;
+        _2088 = pc.effect0.z <= 0.001000000047497451305389404296875;
     }
     else
     {
-        _2018 = _2011;
+        _2088 = _2081;
     }
-    if (_2018)
+    if (_2088)
     {
         float2 param = uv;
         return sample_media_texture(param, pc, mediaTexture, mediaTextureSmplr);
@@ -767,14 +805,14 @@ float4 sample_media(thread const float2& uv, constant Renderer2DConstants& pc, t
     float weightedAlpha = 0.0;
     float weightSum = 0.0;
     int tapCount = 0;
-    int _2088 = -radius;
+    int _2158 = -radius;
     spvUnsafeArray<float, 65> axisWeights;
-    for (int offset = _2088; offset <= radius; offset += stepSize)
+    for (int offset = _2158; offset <= radius; offset += stepSize)
     {
         axisWeights[tapCount] = exp((-float(offset * offset)) / ((2.0 * sigma) * sigma));
         tapCount++;
     }
-    float3 _2179;
+    float3 _2249;
     for (int yIndex = 0; yIndex < tapCount; yIndex++)
     {
         int y = (-radius) + (yIndex * stepSize);
@@ -788,37 +826,37 @@ float4 sample_media(thread const float2& uv, constant Renderer2DConstants& pc, t
             float4 sampleColor = sample_media_texture_linear(param_2, pc, mediaTexture, mediaTextureSmplr);
             if (premultiplied)
             {
-                _2179 = sampleColor.xyz;
+                _2249 = sampleColor.xyz;
             }
             else
             {
-                _2179 = sampleColor.xyz * sampleColor.w;
+                _2249 = sampleColor.xyz * sampleColor.w;
             }
-            weightedRgb += (_2179 * weight);
+            weightedRgb += (_2249 * weight);
             weightedAlpha += (sampleColor.w * weight);
             weightSum += weight;
         }
     }
     float alpha = weightedAlpha / fast::max(weightSum, 9.9999997473787516355514526367188e-05);
-    float3 _2215;
+    float3 _2285;
     if (premultiplied)
     {
-        _2215 = weightedRgb / float3(fast::max(weightSum, 9.9999997473787516355514526367188e-05));
+        _2285 = weightedRgb / float3(fast::max(weightSum, 9.9999997473787516355514526367188e-05));
     }
     else
     {
-        float3 _2226;
+        float3 _2296;
         if (weightedAlpha > 9.9999997473787516355514526367188e-05)
         {
-            _2226 = weightedRgb / float3(weightedAlpha);
+            _2296 = weightedRgb / float3(weightedAlpha);
         }
         else
         {
-            _2226 = float3(0.0);
+            _2296 = float3(0.0);
         }
-        _2215 = _2226;
+        _2285 = _2296;
     }
-    float3 rgb = _2215;
+    float3 rgb = _2285;
     return float4(rgb, alpha);
 }
 
@@ -829,18 +867,18 @@ float4 unpremultiply_media(thread float4& src, constant Renderer2DConstants& pc)
     {
         return src;
     }
-    float3 _2528;
+    float3 _2598;
     if (src.w > 9.9999997473787516355514526367188e-05)
     {
-        _2528 = src.xyz / float3(src.w);
+        _2598 = src.xyz / float3(src.w);
     }
     else
     {
-        _2528 = float3(0.0);
+        _2598 = float3(0.0);
     }
-    src.x = _2528.x;
-    src.y = _2528.y;
-    src.z = _2528.z;
+    src.x = _2598.x;
+    src.y = _2598.y;
+    src.z = _2598.z;
     return src;
 }
 
@@ -957,21 +995,21 @@ float4 shade_media_surface(thread const SurfacePoint& surface, thread const floa
     }
     float2 localUv = fast::clamp(surface.uv, float2(0.0), float2(1.0));
     float2 uv = mix(pc.uvRect.xy, pc.uvRect.zw, localUv);
-    float4 _2720;
+    float4 _2790;
     if ((pc.data.y & 268435456u) != 0u)
     {
         float2 param = pc.rect.xy + (localUv * pc.rect.zw);
-        _2720 = sample_media_blur_vertical(param, pc, mediaBlurBuffer);
+        _2790 = sample_media_blur_vertical(param, pc, mediaBlurBuffer);
     }
     else
     {
         float2 param_1 = uv;
-        _2720 = sample_media(param_1, pc, mediaTexture, mediaTextureSmplr);
+        _2790 = sample_media(param_1, pc, mediaTexture, mediaTextureSmplr);
     }
-    float4 filtered = _2720;
+    float4 filtered = _2790;
     float4 param_2 = filtered;
-    float4 _2742 = unpremultiply_media(param_2, pc);
-    float4 src = _2742;
+    float4 _2812 = unpremultiply_media(param_2, pc);
+    float4 src = _2812;
     float2 param_3 = localUv;
     float3 tintRgb = media_tint_rgb(param_3, pc);
     if ((pc.data.y & 524288u) != 0u)
@@ -982,24 +1020,24 @@ float4 shade_media_surface(thread const SurfacePoint& surface, thread const floa
     }
     else
     {
-        float4 _2763 = src;
-        float3 _2765 = _2763.xyz * tintRgb;
-        src.x = _2765.x;
-        src.y = _2765.y;
-        src.z = _2765.z;
+        float4 _2833 = src;
+        float3 _2835 = _2833.xyz * tintRgb;
+        src.x = _2835.x;
+        src.y = _2835.y;
+        src.z = _2835.z;
     }
     float3 param_4 = src.xyz;
-    float3 _2775 = apply_media_color_adjustment(param_4, pc);
-    src.x = _2775.x;
-    src.y = _2775.y;
-    src.z = _2775.z;
+    float3 _2845 = apply_media_color_adjustment(param_4, pc);
+    src.x = _2845.x;
+    src.y = _2845.y;
+    src.z = _2845.z;
     float3 param_5 = src.xyz;
     float param_6 = src.w;
     float param_7 = backgroundFactor;
-    float3 _2790 = apply_media_auto_black_lift(param_5, param_6, param_7);
-    src.x = _2790.x;
-    src.y = _2790.y;
-    src.z = _2790.z;
+    float3 _2860 = apply_media_auto_black_lift(param_5, param_6, param_7);
+    src.x = _2860.x;
+    src.y = _2860.y;
+    src.z = _2860.z;
     float2 param_8 = localUv;
     src.w *= (media_alpha_mask(param_8, pc) * pc.effect0.w);
     return (src.w > 0.001000000047497451305389404296875) ? src : float4(0.0);
@@ -1044,16 +1082,16 @@ float4 resolve_transformed_media(thread const float2& pixelCenter, thread const 
     float alpha = ((s0.w + s1.w) + s2.w) + s3.w;
     premultiplied *= 0.25;
     alpha *= 0.25;
-    float3 _3163;
+    float3 _3233;
     if (alpha > 9.9999997473787516355514526367188e-05)
     {
-        _3163 = premultiplied / float3(alpha);
+        _3233 = premultiplied / float3(alpha);
     }
     else
     {
-        _3163 = float3(0.0);
+        _3233 = float3(0.0);
     }
-    float3 rgb = _3163;
+    float3 rgb = _3233;
     return float4(rgb, alpha);
 }
 
@@ -1073,38 +1111,38 @@ float4 resolve_accumulated_media(thread float3& premultiplied, thread float& alp
 {
     alpha /= fast::max(weightSum, 9.9999997473787516355514526367188e-05);
     premultiplied /= float3(fast::max(weightSum, 9.9999997473787516355514526367188e-05));
-    float3 _2909;
+    float3 _2979;
     if (alpha > 9.9999997473787516355514526367188e-05)
     {
-        _2909 = premultiplied / float3(alpha);
+        _2979 = premultiplied / float3(alpha);
     }
     else
     {
-        _2909 = float3(0.0);
+        _2979 = float3(0.0);
     }
-    float3 rgb = _2909;
+    float3 rgb = _2979;
     return float4(rgb, alpha);
 }
 
 static inline __attribute__((always_inline))
 float4 resolve_filtered_media(thread const float2& pixelCenter, thread const float& backgroundFactor, constant Renderer2DConstants& pc, texture2d<float> mediaTexture, sampler mediaTextureSmplr, texture2d<float, access::read_write> mediaBlurBuffer)
 {
-    bool _2930 = (pc.data.y & 67108864u) != 0u;
-    bool _2937;
-    if (_2930)
+    bool _3000 = (pc.data.y & 67108864u) != 0u;
+    bool _3007;
+    if (_3000)
     {
-        _2937 = (pc.data.y & 32u) != 0u;
+        _3007 = (pc.data.y & 32u) != 0u;
     }
     else
     {
-        _2937 = _2930;
+        _3007 = _3000;
     }
-    if (_2937)
+    if (_3007)
     {
         float coverage = 0.0;
         for (int index = 0; index < 4; index++)
         {
-            float2 samplePoint = pixelCenter + _2960[index];
+            float2 samplePoint = pixelCenter + _3030[index];
             float2 param = samplePoint;
             SurfacePoint surface = surface_point_for_pixel(param, pc);
             SurfacePoint param_1 = surface;
@@ -1174,8 +1212,8 @@ float4 resolve_filtered_media(thread const float2& pixelCenter, thread const flo
     float3 param_31 = premultiplied;
     float param_32 = alpha;
     float param_33 = weightSum;
-    float4 _3089 = resolve_accumulated_media(param_31, param_32, param_33);
-    return _3089;
+    float4 _3159 = resolve_accumulated_media(param_31, param_32, param_33);
+    return _3159;
 }
 
 static inline __attribute__((always_inline))
@@ -1194,61 +1232,61 @@ kernel void media_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], textur
 {
     uint dispatchWidth = (pc.data.x >> 4u) & 16383u;
     uint dispatchHeight = (pc.data.x >> 18u) & 16383u;
-    bool _3196 = (dispatchWidth > 0u) && (dispatchHeight > 0u);
-    bool _3215;
-    if (_3196)
+    bool _3266 = (dispatchWidth > 0u) && (dispatchHeight > 0u);
+    bool _3285;
+    if (_3266)
     {
-        bool _3206 = gl_GlobalInvocationID.x >= dispatchWidth;
-        bool _3214;
-        if (!_3206)
+        bool _3276 = gl_GlobalInvocationID.x >= dispatchWidth;
+        bool _3284;
+        if (!_3276)
         {
-            _3214 = gl_GlobalInvocationID.y >= dispatchHeight;
+            _3284 = gl_GlobalInvocationID.y >= dispatchHeight;
         }
         else
         {
-            _3214 = _3206;
+            _3284 = _3276;
         }
-        _3215 = _3214;
+        _3285 = _3284;
     }
     else
     {
-        _3215 = _3196;
+        _3285 = _3266;
     }
-    if (_3215)
+    if (_3285)
     {
         return;
     }
     int2 pixel = dispatch_origin(pc) + int2(gl_GlobalInvocationID.xy);
     int2 screenSize = int2(colorBuffer.get_width(), colorBuffer.get_height());
-    bool _3234 = pixel.x < 0;
-    bool _3241;
-    if (!_3234)
+    bool _3304 = pixel.x < 0;
+    bool _3311;
+    if (!_3304)
     {
-        _3241 = pixel.y < 0;
+        _3311 = pixel.y < 0;
     }
     else
     {
-        _3241 = _3234;
+        _3311 = _3304;
     }
-    bool _3250;
-    if (!_3241)
+    bool _3320;
+    if (!_3311)
     {
-        _3250 = pixel.x >= screenSize.x;
+        _3320 = pixel.x >= screenSize.x;
     }
     else
     {
-        _3250 = _3241;
+        _3320 = _3311;
     }
-    bool _3259;
-    if (!_3250)
+    bool _3329;
+    if (!_3320)
     {
-        _3259 = pixel.y >= screenSize.y;
+        _3329 = pixel.y >= screenSize.y;
     }
     else
     {
-        _3259 = _3250;
+        _3329 = _3320;
     }
-    if (_3259)
+    if (_3329)
     {
         return;
     }
@@ -1261,63 +1299,63 @@ kernel void media_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], textur
     }
     bool transformed = (pc.data.y & 4096u) != 0u;
     float samplePad = 1.0;
-    bool _3287 = !transformed;
-    bool _3336;
-    if (_3287)
+    bool _3357 = !transformed;
+    bool _3406;
+    if (_3357)
     {
-        bool _3296 = p.x < (pc.rect.x - samplePad);
-        bool _3307;
-        if (!_3296)
+        bool _3366 = p.x < (pc.rect.x - samplePad);
+        bool _3377;
+        if (!_3366)
         {
-            _3307 = p.y < (pc.rect.y - samplePad);
+            _3377 = p.y < (pc.rect.y - samplePad);
         }
         else
         {
-            _3307 = _3296;
+            _3377 = _3366;
         }
-        bool _3321;
-        if (!_3307)
+        bool _3391;
+        if (!_3377)
         {
-            _3321 = p.x > ((pc.rect.x + pc.rect.z) + samplePad);
+            _3391 = p.x > ((pc.rect.x + pc.rect.z) + samplePad);
         }
         else
         {
-            _3321 = _3307;
+            _3391 = _3377;
         }
-        bool _3335;
-        if (!_3321)
+        bool _3405;
+        if (!_3391)
         {
-            _3335 = p.y > ((pc.rect.y + pc.rect.w) + samplePad);
+            _3405 = p.y > ((pc.rect.y + pc.rect.w) + samplePad);
         }
         else
         {
-            _3335 = _3321;
+            _3405 = _3391;
         }
-        _3336 = _3335;
+        _3406 = _3405;
     }
     else
     {
-        _3336 = _3287;
+        _3406 = _3357;
     }
-    if (_3336)
+    if (_3406)
     {
         return;
     }
     float backgroundFactor = media_black_background_factor(pc);
-    float4 _3344;
+    float4 _3414;
     if (transformed)
     {
         float2 param_1 = p;
         float param_2 = backgroundFactor;
-        _3344 = resolve_transformed_media(param_1, param_2, pc, mediaTexture, mediaTextureSmplr, mediaBlurBuffer);
+        _3414 = resolve_transformed_media(param_1, param_2, pc, mediaTexture, mediaTextureSmplr, mediaBlurBuffer);
     }
     else
     {
         float2 param_3 = p;
         float param_4 = backgroundFactor;
-        _3344 = resolve_filtered_media(param_3, param_4, pc, mediaTexture, mediaTextureSmplr, mediaBlurBuffer);
+        _3414 = resolve_filtered_media(param_3, param_4, pc, mediaTexture, mediaTextureSmplr, mediaBlurBuffer);
     }
-    float4 src = _3344;
+    float4 src = _3414;
     if (src.w <= 0.001000000047497451305389404296875)
     {
         return;
@@ -1328,4 +1366,3 @@ kernel void media_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], textur
     float4 param_6 = src;
     colorBuffer.write(blend_over(param_5, param_6), uint2(pixel));
 }
-

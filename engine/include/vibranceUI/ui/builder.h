@@ -282,6 +282,10 @@ public:
         float activeSeconds)
     {
         Renderer2DCacheComponent& cache = registry_.get_or_emplace<Renderer2DCacheComponent>(entity);
+        const bool ownershipChanged = cache.mode == Renderer2DCacheMode::eDynamic;
+        const bool policyChanged = cache.mode != Renderer2DCacheMode::eTimed ||
+            cache.idleTickRate != idleTickRate || cache.activeTickRate != activeTickRate ||
+            cache.restoreStaticWhenIdle;
         cache.mode = Renderer2DCacheMode::eTimed;
         cache.idleTickRate = idleTickRate;
         cache.activeTickRate = activeTickRate;
@@ -290,7 +294,14 @@ public:
         {
             scene_.activate_dynamic(entity, activeSeconds);
         }
-        scene_.mark_dirty(entity);
+        if (ownershipChanged)
+        {
+            scene_.mark_dirty();
+        }
+        else if (policyChanged)
+        {
+            scene_.mark_dirty(entity);
+        }
         return cache;
     }
 
@@ -298,14 +309,24 @@ public:
     {
         // Dynamic cache is for controls that animate, scroll, drag, or change every frame
         Renderer2DCacheComponent& cache = registry_.get_or_emplace<Renderer2DCacheComponent>(entity);
+        if (cache.mode == Renderer2DCacheMode::eDynamic &&
+            cache.propagateToChildren == propagateToChildren &&
+            cache.idleTickRate == 0.0f && cache.activeTickRate == 0.0f &&
+            !cache.restoreStaticWhenIdle)
+        {
+            return cache;
+        }
         cache.mode = Renderer2DCacheMode::eDynamic;
         cache.idleTickRate = 0.0f;
         cache.activeTickRate = 0.0f;
         cache.pendingActiveSeconds = 0.0f;
         cache.activeUntilSeconds = 0.0;
-        cache.wasActive = true;
+        cache.wasActive = false;
         cache.propagateToChildren = propagateToChildren;
         cache.restoreStaticWhenIdle = false;
+        // Ownership can change for this entire subtree. The retained plan must
+        // stop replaying its previous static paint before it becomes live.
+        scene_.mark_dirty();
         return cache;
     }
 

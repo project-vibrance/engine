@@ -1,6 +1,7 @@
 #include "session_macos.h"
 #include "session_macos_snapshot.h"
 #include "session_macos_artwork.h"
+#include "playback_quality_macos.h"
 
 #import <Foundation/Foundation.h>
 #include <dlfcn.h>
@@ -28,7 +29,7 @@ namespace
                 s.canTogglePlayPause, s.canSkipNext, s.canSkipPrevious,
                 s.thumbnailRevision, s.positionMilliseconds, s.durationMilliseconds,
                 s.playbackStatus, s.sourceProcessId, s.sourceApp, s.title,
-                s.artist, s.album, s.thumbnailPath, s.diagnostic);
+                s.artist, s.album, s.playbackQuality, s.thumbnailPath, s.diagnostic);
         };
         return fields(a) == fields(b);
     }
@@ -46,6 +47,7 @@ struct MacMediaSession::State
     NSString* script = nil;
     NSString* artworkDirectory = nil;
     MacMediaArtworkCache artworkCache;
+    MacPlaybackQualityProbe qualityProbe;
     std::chrono::steady_clock::time_point missingSince {};
 
     State()
@@ -186,6 +188,7 @@ struct MacMediaSession::State
         artworkCache.update(next,
             [payload isKindOfClass:NSDictionary.class] ? payload : nil,
             artworkDirectory);
+        next.playbackQuality = qualityProbe.refresh(next);
         publish(std::move(next));
     }
 

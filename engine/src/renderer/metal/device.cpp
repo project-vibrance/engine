@@ -6,6 +6,10 @@
 #include <string>
 #include <limits>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
+#include <chrono>
+#include <algorithm>
 std::string_view vibrance_metal_shader(std::string_view name);
 namespace vibrance::metal
 {
@@ -33,8 +37,22 @@ void require(bool success, const char *message, NS::Error *error = nullptr)
             (error ? ": " + std::string(error->localizedDescription()->utf8String()) : ""));
 }
 } // namespace
+void Device::Metal4Feedback::finish(NS::Error *result, double begin, double end)
+{
+    {
+        std::lock_guard lock(mutex);
+        error = NS::RetainPtr(result);
+        gpuStartTime = begin;
+        gpuEndTime = end;
+        ready = true;
+    }
+    available.notify_all();
+}
 Device::Device(bool preferMetal4)
 {
+    const char* mode = std::getenv("VIBRANCE_RENDER_DIAGNOSTICS");
+    diagnosticsEnabled = mode && (std::string_view(mode) == "1" || std::string_view(mode) == "2");
+    gpuDiagnosticsEnabled = mode && std::string_view(mode) == "1";
     auto pool = own(NS::AutoreleasePool::alloc()->init());
     gpu = supported_device();
     require(bool(gpu), "No Metal 3-capable GPU is available");
@@ -54,13 +72,17 @@ Device::Device(bool preferMetal4)
     if (metal4)
     {
         queue4 = own(gpu->newMTL4CommandQueue());
-        allocator4 = own(gpu->newCommandAllocator());
-        commands4 = own(gpu->newCommandBuffer());
         completed = own(gpu->newSharedEvent());
+        for (auto &frame : metal4Frames)
+        {
+            frame.allocator = own(gpu->newCommandAllocator());
+            frame.commands = own(gpu->newCommandBuffer());
+            require(frame.allocator && frame.commands, "Cannot allocate Metal 4 frame storage");
+        }
         auto rd = own(MTL::ResidencySetDescriptor::alloc()->init());
         NS::Error *error = nullptr;
         residency = own(gpu->newResidencySet(rd.get(), &error));
-        require(queue4 && allocator4 && commands4 && completed && residency, "Cannot initialise Metal 4",
+        require(queue4 && completed && residency, "Cannot initialise Metal 4",
                 error);
         queue4->addResidencySet(residency.get());
         auto bindings = own(MTL4::ArgumentTableDescriptor::alloc()->init());
@@ -77,7 +99,18 @@ Device::~Device()
 {
     if (metal4 && inFlight)
     {
-        completed->waitUntilSignaledValue(serial, 60000);
+        bool failed = false;
+        for (auto &frame : metal4Frames)
+            if (frame.feedback)
+            {
+                std::unique_lock lock(frame.feedback->mutex);
+                if (!frame.feedback->available.wait_for(lock, std::chrono::seconds(60), [&] {
+                    return frame.feedback->ready;
+                }) || frame.feedback->error)
+                    failed = true;
+            }
+        if (!failed)
+            completed->waitUntilSignaledValue(serial, 60000);
     }
     if (!metal4)
         for (auto &frame : metal3Frames)
@@ -157,13 +190,13 @@ void Device::use_resource(MTL::Resource *resource)
         residency->addAllocation(resource);
         residencyChanged = true;
     }
-    entry->second.submission = serial;
+    entry->second.submission = serial + 1;
 }
 std::pair<MTL::Buffer *, size_t> Device::write_constants(const void *data, size_t size)
 {
     const size_t alignedSize = (size + 255u) & ~size_t(255u);
-    auto &pages = metal4 ? constantPages : metal3Frames[metal3Frame].constantPages;
-    auto &pageIndex = metal4 ? constantPage : metal3Frames[metal3Frame].constantPage;
+    auto &pages = metal4 ? metal4Frames[metal4Frame].constantPages : metal3Frames[metal3Frame].constantPages;
+    auto &pageIndex = metal4 ? metal4Frames[metal4Frame].constantPage : metal3Frames[metal3Frame].constantPage;
     while (pageIndex < pages.size() &&
            pages[pageIndex].buffer->length() - pages[pageIndex].used < alignedSize)
         ++pageIndex;
@@ -187,14 +220,25 @@ void Device::dispatch(const char *name, const void *data, size_t size, uint32_t 
         return;
     require(textures.size() <= boundTextures.size(), "Too many Metal texture bindings");
     auto state = pipeline(name);
+    if (diagnosticsEnabled)
+    {
+        ++diagnostics.dispatches;
+        diagnostics.dispatchPixels += uint64_t(width) * height * count;
+        if (std::string_view(name) == "text_msdf_comp" || std::string_view(name) == "text_msdf_batch_comp")
+        {
+            ++diagnostics.textDispatches;
+            diagnostics.textGlyphs += count;
+        }
+    }
     if (!recording)
     {
         if (metal4)
         {
-            wait_idle();
-            allocator4->reset();
-            commands4->beginCommandBuffer(allocator4.get());
-            encoder4 = NS::RetainPtr(commands4->computeCommandEncoder());
+            auto &frame = metal4Frames[metal4Frame];
+            retire_metal4_frame(frame);
+            frame.allocator->reset();
+            frame.commands->beginCommandBuffer(frame.allocator.get());
+            encoder4 = NS::RetainPtr(frame.commands->computeCommandEncoder());
             encoder4->setArgumentTable(arguments.get());
             encoder4->barrierAfterQueueStages(MTL::StageAll, MTL::StageDispatch,
                                               MTL4::VisibilityOptionDevice);
@@ -262,16 +306,24 @@ void Device::dispatch(const char *name, const void *data, size_t size, uint32_t 
 }
 void Device::submit(CA::MetalDrawable *drawable, bool presentWithTransaction)
 {
+    submit(drawable ? std::span<CA::MetalDrawable* const>(&drawable, 1) :
+        std::span<CA::MetalDrawable* const>{}, presentWithTransaction);
+}
+void Device::submit(std::span<CA::MetalDrawable* const> drawables, bool presentWithTransaction)
+{
     if (!recording)
         return;
+    if (diagnosticsEnabled) ++diagnostics.submissions;
     if (metal4)
     {
         encoder4->endEncoding();
         encoder4.reset();
-        // Retain stable allocations across frames and retire textures no longer
-        // referenced by this submission, including old drawables and resized targets.
+        // Metal 4 command buffers do not retain resources. An allocation must
+        // stay resident and strongly held until the last submission referencing
+        // it completes, including the previous frame still running on the GPU.
+        const uint64_t completedValue = completed->signaledValue();
         std::erase_if(residentResources, [&](const auto &entry) {
-            if (entry.second.submission == serial)
+            if (entry.second.submission > completedValue)
                 return false;
             residency->removeAllocation(entry.first);
             residencyChanged = true;
@@ -282,34 +334,54 @@ void Device::submit(CA::MetalDrawable *drawable, bool presentWithTransaction)
             residency->commit();
             residencyChanged = false;
         }
-        commands4->endCommandBuffer();
-        auto command = commands4.get();
-        queue4->commit(&command, 1);
-        queue4->signalEvent(completed.get(), ++serial);
-        if (drawable)
-        {
+        auto &frame = metal4Frames[metal4Frame];
+        frame.commands->endCommandBuffer();
+        auto command = frame.commands.get();
+        frame.feedback = std::make_shared<Metal4Feedback>();
+        frame.sampleGpu = gpuDiagnosticsEnabled && (++diagnosticSubmissions % 16u == 0u);
+        auto options = own(MTL4::CommitOptions::alloc()->init());
+        // Metal delivers feedback on its internal dispatch queue. Capture only
+        // separately owned state: the callback may outlive this frame slot or
+        // Device, and must publish the retained error before waking the CPU.
+        options->addFeedbackHandler([feedback = frame.feedback, sample = frame.sampleGpu](MTL4::CommitFeedback *result) {
+            feedback->finish(result->error(), sample ? result->GPUStartTime() : 0,
+                             sample ? result->GPUEndTime() : 0);
+        });
+        queue4->commit(&command, 1, options.get());
+        frame.completionValue = ++serial;
+        queue4->signalEvent(completed.get(), serial);
+        for (auto drawable : drawables)
             queue4->signalDrawable(drawable);
+        metal4Frame = (metal4Frame + 1) % metal4Frames.size();
+        recording = false;
+        inFlight = true;
+        // Core Animation transaction presentation requires GPU work to be
+        // scheduled before present(). Metal 4 exposes completion feedback,
+        // rather than waitUntilScheduled(), so wait once for the complete
+        // group of foreground/base surfaces. Presenting immediately after
+        // commit can expose pixels from an older use of the drawable pool.
+        if (presentWithTransaction && !drawables.empty())
+            retire_metal4_frame(frame);
+        for (auto drawable : drawables)
             drawable->present();
-        }
     }
     else
     {
         encoder->endEncoding();
         encoder.reset();
-        if (drawable && !presentWithTransaction)
-            commands->presentDrawable(drawable);
+        if (!presentWithTransaction)
+            for (auto drawable : drawables) commands->presentDrawable(drawable);
         commands->commit();
-        if (drawable && presentWithTransaction)
+        if (!drawables.empty() && presentWithTransaction)
         {
             commands->waitUntilScheduled();
-            drawable->present();
+            for (auto drawable : drawables) drawable->present();
         }
+        metal3Frames[metal3Frame].sampleGpu = gpuDiagnosticsEnabled && (++diagnosticSubmissions % 16u == 0u);
         metal3Frames[metal3Frame].pending = std::move(commands);
         metal3Frame = (metal3Frame + 1) % metal3Frames.size();
     }
     recording = false;
-    if (metal4)
-        inFlight = true;
 }
 void Device::retire_metal3_frame(Metal3Frame &frame)
 {
@@ -317,12 +389,69 @@ void Device::retire_metal3_frame(Metal3Frame &frame)
         return;
     if (frame.pending->status() != MTL::CommandBufferStatusCompleted)
         frame.pending->waitUntilCompleted();
-    require(frame.pending->status() != MTL::CommandBufferStatusError, "Metal GPU submission failed",
-            frame.pending->error());
+    const auto failed = frame.pending->status() == MTL::CommandBufferStatusError;
+    auto error = failed ? NS::RetainPtr(frame.pending->error()) : Owned<NS::Error>{};
+    if (!failed && frame.sampleGpu)
+        record_gpu_sample(frame.pending->GPUStartTime(), frame.pending->GPUEndTime());
+    frame.sampleGpu = false;
     frame.pending.reset();
     frame.constantPage = 0;
     for (auto &page : frame.constantPages)
         page.used = 0;
+    // Retire the failed command buffer before surfacing its error. Otherwise
+    // every later frame retries this same failure and rendering cannot recover.
+    if (failed)
+        throw SubmissionError(std::string("Metal GPU submission failed") +
+            (error ? ": " + std::string(error->localizedDescription()->utf8String()) : ""));
+    ++successfulCompletions;
+}
+void Device::retire_metal4_frame(Metal4Frame &frame)
+{
+    Owned<NS::Error> error;
+    double gpuStart = 0, gpuEnd = 0;
+    const bool submitted = frame.completionValue != 0;
+    if (frame.feedback)
+    {
+        std::unique_lock lock(frame.feedback->mutex);
+        require(frame.feedback->available.wait_for(lock, std::chrono::seconds(60), [&] {
+            return frame.feedback->ready;
+        }), "Metal 4 GPU submission timed out");
+        error = frame.feedback->error;
+        gpuStart = frame.feedback->gpuStartTime;
+        gpuEnd = frame.feedback->gpuEndTime;
+    }
+    // Feedback reports terminal GPU failures even if the later queue event
+    // does not signal. On success retain the event wait for cross-queue
+    // visibility (for example hosted 3D and test readback).
+    if (!error && frame.completionValue && completed->signaledValue() < frame.completionValue)
+        require(completed->waitUntilSignaledValue(frame.completionValue, 60000),
+                "Metal 4 GPU submission timed out");
+    if (!error && frame.sampleGpu)
+        record_gpu_sample(gpuStart, gpuEnd);
+    frame.sampleGpu = false;
+    frame.feedback.reset();
+    frame.completionValue = 0;
+    inFlight = std::any_of(metal4Frames.begin(), metal4Frames.end(), [](const auto &pending) {
+        return pending.completionValue != 0;
+    });
+    frame.constantPage = 0;
+    for (auto &page : frame.constantPages)
+        page.used = 0;
+    if (error)
+        throw SubmissionError("Metal 4 GPU submission failed: " +
+            std::string(error->localizedDescription()->utf8String()));
+    if (submitted)
+        ++successfulCompletions;
+}
+void Device::record_gpu_sample(double begin, double end)
+{
+    if (begin > 0 && end >= begin && std::isfinite(begin) && std::isfinite(end))
+    {
+        const double elapsed = (end - begin) * 1000.0;
+        diagnostics.gpuMilliseconds += elapsed;
+        diagnostics.gpuMaximumMilliseconds = std::max(diagnostics.gpuMaximumMilliseconds, elapsed);
+        ++diagnostics.gpuSamples;
+    }
 }
 void Device::wait_idle()
 {
@@ -334,14 +463,9 @@ void Device::wait_idle()
     }
     if (!inFlight)
         return;
-    // Read the shared completion value first. Normal frame pacing lets the
-    // GPU finish before reuse, avoiding a blocking IOKit call per frame.
-    if (completed->signaledValue() < serial)
-        require(completed->waitUntilSignaledValue(serial, 60000), "Metal 4 GPU submission timed out");
+    for (auto &frame : metal4Frames)
+        retire_metal4_frame(frame);
     inFlight = false;
-    constantPage = 0;
-    for (auto &page : constantPages)
-        page.used = 0;
 }
 void Device::flush()
 {

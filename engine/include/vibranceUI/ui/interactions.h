@@ -1091,13 +1091,13 @@ inline void ui_handle_pointer_button(
     }
 
     const entt::entity releasedEntity = state.pressedInputEntity;
-    state.pressedInputEntity = entt::null;
     // Release only clicks the same logical owner that received the press
     ButtonInputComponent* button = (releasedEntity != entt::null && registry.valid(releasedEntity)) ?
         registry.try_get<ButtonInputComponent>(releasedEntity) :
         nullptr;
     if (!button)
     {
+        state.pressedInputEntity = entt::null;
         if (input.button == PointerButton::eLeft &&
             state.activeScrollBar != entt::null &&
             registry.valid(state.activeScrollBar))
@@ -1152,11 +1152,23 @@ inline void ui_handle_pointer_button(
 
     if (input.button == PointerButton::eLeft)
     {
+        if (!button->leftPressed)
+        {
+            return;
+        }
         button->leftPressed = false;
     }
     else if (input.button == PointerButton::eRight)
     {
+        if (!button->rightPressed)
+        {
+            return;
+        }
         button->rightPressed = false;
+    }
+    if (!button->leftPressed && !button->rightPressed)
+    {
+        state.pressedInputEntity = entt::null;
     }
 
     PointerInputEvent event { releasedEntity, input.point, input.button, input.platformButton, input.modifiers };
@@ -1177,6 +1189,101 @@ inline void ui_handle_pointer_button(
         }
     }
     ui_update_button_visual(scene, releasedEntity);
+}
+
+inline bool ui_recover_pointer_button_release(
+    Renderer2DScene& scene,
+    UiInputState& state,
+    bool leftButtonPressed,
+    bool rightButtonPressed,
+    glm::vec2 point)
+{
+    const entt::entity entity = state.pressedInputEntity;
+    if (entity == entt::null)
+    {
+        // Text inputs also acquire left-button capture, without a button
+        // press owner. Dragging controls retain their own active state so
+        // their existing polling can still finish and commit the gesture.
+        if (!leftButtonPressed && state.pointerInputCapture != entt::null)
+        {
+            state.pointerInputCapture = entt::null;
+            return true;
+        }
+        return false;
+    }
+
+    entt::registry& registry = scene.registry();
+    ButtonInputComponent* button = registry.valid(entity) ?
+        registry.try_get<ButtonInputComponent>(entity) : nullptr;
+    if (!button)
+    {
+        state.pressedInputEntity = entt::null;
+        if (state.pointerInputCapture == entity)
+        {
+            state.pointerInputCapture = entt::null;
+        }
+        return true;
+    }
+
+    const bool lostLeftRelease = button->leftPressed && !leftButtonPressed;
+    const bool lostRightRelease = button->rightPressed && !rightButtonPressed;
+    if (!lostLeftRelease && !lostRightRelease)
+    {
+        return false;
+    }
+
+    // Native focus changes or an interrupted tracking loop can drop a release
+    // callback. Cancel that press once, without inventing a click from a later
+    // pointer sample. A released right button must preserve a held left press.
+    const auto onRelease = button->onRelease;
+    if (lostLeftRelease)
+    {
+        button->leftPressed = false;
+        if (state.pointerInputCapture == entity)
+        {
+            state.pointerInputCapture = entt::null;
+        }
+    }
+    if (lostRightRelease)
+    {
+        button->rightPressed = false;
+    }
+    if (!button->leftPressed && !button->rightPressed)
+    {
+        state.pressedInputEntity = entt::null;
+    }
+
+    if (lostLeftRelease)
+    {
+        ui_release_stretch_dynamics(scene, state, false, point);
+    }
+    for (const auto released : { PointerButton::eLeft, PointerButton::eRight })
+    {
+        if ((released == PointerButton::eLeft ? lostLeftRelease : lostRightRelease) &&
+            onRelease && registry.valid(entity) &&
+            registry.all_of<ButtonInputComponent>(entity))
+        {
+            onRelease(PointerInputEvent { entity, point, released });
+        }
+    }
+    // Release callbacks may remove or rebuild the control. Never keep its
+    // capture or a component reference alive across that callback.
+    if (!registry.valid(entity) || !registry.all_of<ButtonInputComponent>(entity))
+    {
+        if (state.pressedInputEntity == entity)
+        {
+            state.pressedInputEntity = entt::null;
+        }
+        if (state.pointerInputCapture == entity)
+        {
+            state.pointerInputCapture = entt::null;
+        }
+    }
+    else
+    {
+        ui_update_button_visual(scene, entity);
+    }
+    return true;
 }
 
 inline void ui_handle_scroll(Renderer2DScene& scene, const UiScrollInput& input)

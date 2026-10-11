@@ -1649,6 +1649,13 @@ bool glfw_cursor_framebuffer_point(GLFWwindow* window, int renderWidth, int rend
     double cursorX = 0.0;
     double cursorY = 0.0;
     glfwGetCursorPos(window, &cursorX, &cursorY);
+    if (!std::isfinite(cursorX) || !std::isfinite(cursorY)) return false;
+    // Keep the release position even outside the hit-testable window. A
+    // captured switch or custom button must not finish its gesture at (0, 0).
+    point = {
+        static_cast<float>(cursorX * static_cast<double>(renderWidth) / static_cast<double>(windowWidth)),
+        static_cast<float>(cursorY * static_cast<double>(renderHeight) / static_cast<double>(windowHeight))
+    };
     if (cursorX < 0.0 ||
         cursorY < 0.0 ||
         cursorX >= static_cast<double>(windowWidth) ||
@@ -1657,16 +1664,53 @@ bool glfw_cursor_framebuffer_point(GLFWwindow* window, int renderWidth, int rend
         return false;
     }
 
-    point = {
-        static_cast<float>(cursorX * static_cast<double>(renderWidth) / static_cast<double>(windowWidth)),
-        static_cast<float>(cursorY * static_cast<double>(renderHeight) / static_cast<double>(windowHeight))
-    };
     return true;
+}
+
+#if defined(__APPLE__)
+// Cocoa can route mouse-up outside the GLFW render view. Query the physical
+// buttons as well as GLFW's cached state so a missed release cannot strand
+// a captured control until another click arrives.
+bool glfw_macos_mouse_button_pressed(int button);
+#endif
+
+namespace
+{
+    bool glfw_mouse_button_pressed(GLFWwindow* window, int button)
+    {
+        if (!window || glfwGetMouseButton(window, button) != GLFW_PRESS)
+            return false;
+#if defined(__APPLE__)
+        return glfw_macos_mouse_button_pressed(button);
+#else
+        return true;
+#endif
+    }
 }
 
 bool glfw_left_mouse_pressed(GLFWwindow* window)
 {
-    return window && glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    return glfw_mouse_button_pressed(window, GLFW_MOUSE_BUTTON_LEFT);
+}
+
+void glfw_reconcile_ui_mouse_events(GLFWwindow* window, const UiInputState& inputState)
+{
+#if defined(__APPLE__)
+    if (window && glfw_ui_input_has_pointer_capture(inputState) &&
+        ((!glfw_left_mouse_pressed(window) &&
+          glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) ||
+         (!glfw_mouse_button_pressed(window, GLFW_MOUSE_BUTTON_RIGHT) &&
+          glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)))
+    {
+        // A physical release may still be queued for normal delivery. Drain
+        // it before sampling the host's pointer and geometry so quick clicks
+        // keep their onClick callbacks and resize events cannot stale samples.
+        poll_glfw_events();
+    }
+#else
+    (void)window;
+    (void)inputState;
+#endif
 }
 
 bool glfw_engine_render_size(const Engine* engine, int& width, int& height)
@@ -1716,7 +1760,9 @@ void glfw_update_ui_drag_inputs(
 {
     // Shared drag path for panels and direct-manipulation controls
     const bool leftPressed = glfw_left_mouse_pressed(window);
+    const bool rightPressed = glfw_mouse_button_pressed(window, GLFW_MOUSE_BUTTON_RIGHT);
     Renderer2DScene& scene = engine.renderer2d_scene();
+    ui_recover_pointer_button_release(scene, inputState, leftPressed, rightPressed, pointer.point);
     ui_update_switch_drag(scene, inputState, leftPressed, pointer.hasPoint, pointer.point);
     if (const auto* toggle = scene.registry().try_get<UiSwitchControlComponent>(inputState.pressedInputEntity);
         toggle && toggle->dragging && inputState.activeStretchDynamics != inputState.pressedInputEntity)

@@ -6,6 +6,10 @@
 #include "../platform/win32/liquid_glass_dwm_protocol.h"
 #endif
 
+#if defined(__APPLE__)
+bool vibrance_macos_native_liquid_glass_available();
+#endif
+
 const char* glass_material_name(GlassMaterial material)
 {
     switch (material)
@@ -46,8 +50,6 @@ bool system_backdrop_platform_supported()
 LiquidGlassBackend default_liquid_glass_backend()
 {
 #if defined(__APPLE__)
-    // The selector is stable now so macOS can gain its native implementation
-    // later without changing application material declarations.
     return LiquidGlassBackend::eMacOSNative;
 #elif defined(_WIN32)
     return LiquidGlassBackend::eWindowsCompositionShader;
@@ -76,6 +78,9 @@ bool liquid_glass_backend_supported(LiquidGlassBackend backend)
     const bool ready = WaitForSingleObject(event, 0) == WAIT_OBJECT_0;
     CloseHandle(event);
     return ready;
+#elif defined(__APPLE__)
+    return backend == LiquidGlassBackend::eMacOSNative &&
+        vibrance_macos_native_liquid_glass_available();
 #else
     (void)backend;
     return false;

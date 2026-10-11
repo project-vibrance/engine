@@ -651,8 +651,12 @@ inline void ui_update_slider_visual(
         if (ShapeComponent* trackShape = registry.try_get<ShapeComponent>(entity))
         {
             const auto* thumbPaint = registry.try_get<ShapeStyleComponent>(slider->thumbEntity);
+            const auto* thumbGlass = registry.try_get<LiquidGlassComponent>(slider->thumbEntity);
             const bool visibleThumb = thumbPaint &&
-                std::max(thumbPaint->color0.a, thumbPaint->color1.a) * thumbPaint->opacity > 0.001f;
+                thumbPaint->opacity > 0.001f &&
+                (std::max(thumbPaint->color0.a, thumbPaint->color1.a) > 0.001f ||
+                 (thumbGlass && thumbGlass->material == GlassMaterial::eLiquid &&
+                  thumbGlass->backend == LiquidGlassBackend::eMacOSNative));
             // The fill and knob use the same inset travel. A full-track
             // percentage leaves a dark gap just before low-valued thumbs.
             const float desiredWidth = visibleThumb ?
