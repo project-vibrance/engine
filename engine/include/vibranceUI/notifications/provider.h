@@ -20,6 +20,11 @@ enum class SystemNotificationAccess : std::uint8_t
 
 // One platform notification, independent from any application's inbox IDs,
 // actions, persistence schema, or presentation model.
+enum class SystemNotificationActivationKind : std::uint32_t
+{
+    eApplication, eForeground, eProtocol, eBackground
+};
+
 struct SystemNotificationItem
 {
     std::uint32_t providerId = 0u;
@@ -29,6 +34,8 @@ struct SystemNotificationItem
     std::string title;
     std::string message;
     std::string activationTarget;
+    std::string activationArguments;
+    SystemNotificationActivationKind activationKind = SystemNotificationActivationKind::eApplication;
     std::string iconPath;
 
     bool operator==(const SystemNotificationItem&) const = default;
@@ -85,6 +92,8 @@ public:
     // never claims, dismisses, activates, or persists a notification.
     bool dismiss(std::uint32_t providerId);
     bool activate_source(std::string_view activationTarget);
+    bool activate_notification(std::string_view activationTarget,
+        std::string_view arguments, SystemNotificationActivationKind kind);
     // Accepts a Windows application identity or an absolute executable path.
     SystemApplicationIcon resolve_application_icon(
         std::string_view activationTarget);

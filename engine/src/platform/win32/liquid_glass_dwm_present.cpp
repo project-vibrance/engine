@@ -14,6 +14,10 @@
 #include "liquid_glass_dwm_identity.h"
 #include "liquid_glass_dwm_protocol.h"
 #include "liquid_glass_dwm_security.h"
+#include "liquid_glass_dwm_windows10_layout.h"
+#include "liquid_glass_dwm_windows10_lifecycle_policy.h"
+#include "liquid_glass_dwm_windows10_session.h"
+#include <dxgi1_2.h>
 
 #include <algorithm>
 #include <array>
@@ -74,6 +78,8 @@ DdaTextureFn ddaGetTexture2D = nullptr;
 CapturePresentFn originalCapturePresent = nullptr;
 CaptureBufferFn captureCurrentFrameBuffer = nullptr;
 LiquidDwmHookConfig hookConfig {};
+LiquidDwmWindows10Config windows10Config {};
+bool windows10Adapter = false;
 HANDLE readyEvent = nullptr;
 HANDLE statusMapping = nullptr;
 volatile LONG* statusView = nullptr;
@@ -475,6 +481,8 @@ bool translate_region(const LiquidDwmRegion& published,
     region.rimStrength = published.rimStrength;
     region.opacity = published.opacity;
     region.cornerExponent = published.cornerExponent;
+    std::copy(std::begin(published.viewportRect), std::end(published.viewportRect), region.viewportRect.begin());
+    std::copy(std::begin(published.viewportFade), std::end(published.viewportFade), region.viewportFade.begin());
     region.lightPhase = static_cast<float>(GetTickCount64() % 6000) *
         (6.2831853f / 6000.0f);
     uiRectangle = { origin.x, origin.y,
@@ -900,14 +908,20 @@ bool read_colour_brush(void* content, float (&colour)[4]) noexcept
             hookConfig.colourBrushVtableRva;
         if (*reinterpret_cast<const std::uintptr_t*>(content) != expected)
             return false;
-        std::memcpy(colour, static_cast<const std::uint8_t*>(content) + 0x68,
+        std::memcpy(colour, static_cast<const std::uint8_t*>(content) +
+            (windows10Adapter ? -0x18 : 0x68),
             sizeof(colour));
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+bool windows10_optical_render_ready() noexcept;
+void windows10_suspend_optical_render(HRESULT reason) noexcept;
+bool windows10_device_matches(ID3D11Device* first, ID3D11Device* second) noexcept;
 #include "liquid_glass_dwm_batch.h"
+#include "liquid_glass_dwm_windows10.h"
+#include "liquid_glass_dwm_windows10_lifecycle.h"
 
 struct MarkerContentState
 {
@@ -917,6 +931,7 @@ struct MarkerContentState
     LiquidDwmRegion published {};
 };
 thread_local const MarkerContentState* activeMarkerContent = nullptr;
+thread_local bool inContentDraw = false;
 
 HRESULT scoped_content_draw(ContentDrawFn original, void* self,
     void* drawingContext, const float* size, void* cache)
@@ -933,9 +948,12 @@ HRESULT scoped_content_draw(ContentDrawFn original, void* self,
             state.slot = liquidDwmRegionSlots;
     }
     const auto* previous = activeMarkerContent;
+    const bool previousContentDraw = inContentDraw;
     activeMarkerContent = state.slot != liquidDwmRegionSlots ? &state : nullptr;
+    inContentDraw = true;
     const HRESULT result = original(self, drawingContext, size, cache);
     activeMarkerContent = previous;
+    inContentDraw = previousContentDraw;
     return result;
 }
 
@@ -961,6 +979,12 @@ HRESULT draw_list_entry_render_hook(void* entry, void* drawingContext,
         tag_native_marker_entry(entry, activeMarkerContent->slot,
             activeMarkerContent->width, activeMarkerContent->height,
             activeMarkerContent->published);
+    }
+    else if (windows10Adapter && inContentDraw)
+    {
+        // Reusing an entry for an ordinary brush must clear its old marker,
+        // even when DWM retains the geometry and shared rendering effect.
+        untag_native_marker_entry(entry);
     }
     else (void)preserve_native_marker_entry(entry);
     return originalDrawListEntryRender(entry, drawingContext, matrix, opacity, blendMode);
@@ -1066,6 +1090,73 @@ HRESULT drawing_flush_hook(void* self)
     return result;
 }
 
+bool start_windows10_hooks(const std::uint8_t* base, std::uint32_t imageSize)
+{
+    const HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, liquidDwmWindows10ConfigName);
+    if (!mapping) return false;
+    const auto* view = static_cast<const LiquidDwmWindows10Config*>(MapViewOfFile(
+        mapping, FILE_MAP_READ, 0, 0, sizeof(LiquidDwmWindows10Config)));
+    if (view) { windows10Config = *view; UnmapViewOfFile(view); }
+    CloseHandle(mapping);
+    if (!view || std::memcmp(windows10Config.dwmcoreSha256, hookConfig.dwmcoreSha256, 32u) != 0 ||
+        !validate_liquid_windows10_layout({ base, imageSize }, windows10Config,
+            hookConfig.commonEffectEmitRva, hookConfig.brushDrawRva,
+            hookConfig.drawListEntryRenderRva)) return false;
+    for (auto rva : { hookConfig.brushDrawRva, hookConfig.drawListEntryRenderRva,
+            hookConfig.drawListEntryVtableRva, hookConfig.colourBrushVtableRva,
+            hookConfig.commonEffectEmitRva, hookConfig.brushEffectEmitRva, hookConfig.batchFlushRva })
+        if (!rva || rva >= imageSize) return false;
+    originalBrushDraw = reinterpret_cast<ContentDrawFn>(const_cast<std::uint8_t*>(base) + hookConfig.brushDrawRva);
+    originalDrawListEntryRender = reinterpret_cast<DrawListEntryRenderFn>(const_cast<std::uint8_t*>(base) + hookConfig.drawListEntryRenderRva);
+    originalCommonEffectEmit = reinterpret_cast<EffectEmitFn>(const_cast<std::uint8_t*>(base) + hookConfig.commonEffectEmitRva);
+    originalBrushEffectEmit = reinterpret_cast<EffectEmitFn>(const_cast<std::uint8_t*>(base) + hookConfig.brushEffectEmitRva);
+    nativeBatchFlush = reinterpret_cast<NativeBatchFlushFn>(const_cast<std::uint8_t*>(base) + hookConfig.batchFlushRva);
+    if (!windows10Lifecycle.initialise()) return false;
+    PublicSynchroniseSecurity security;
+    readyEvent = CreateEventW(security.get(), TRUE, FALSE, liquidDwmReadyName);
+    if (!readyEvent || DetourTransactionBegin() != NO_ERROR) return false;
+    if (DetourUpdateThread(GetCurrentThread()) != NO_ERROR) { DetourTransactionAbort(); return false; }
+    std::vector<HANDLE> threads;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    bool synchronised = snapshot != INVALID_HANDLE_VALUE;
+    if (synchronised)
+    {
+        THREADENTRY32 entry { sizeof(entry) };
+        if (Thread32First(snapshot, &entry)) do
+        {
+            if (entry.th32OwnerProcessID != GetCurrentProcessId() ||
+                entry.th32ThreadID == GetCurrentThreadId()) continue;
+            const HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT |
+                THREAD_SUSPEND_RESUME, FALSE, entry.th32ThreadID);
+            if (!thread) { synchronised = false; break; }
+            threads.push_back(thread);
+            if (DetourUpdateThread(thread) != NO_ERROR) { synchronised = false; break; }
+        } while (Thread32Next(snapshot, &entry));
+        else synchronised = false;
+        CloseHandle(snapshot);
+    }
+    LONG result = synchronised ? NO_ERROR : ERROR_ACCESS_DENIED;
+    const auto attach = [&](auto* original, auto hook) {
+        if (result == NO_ERROR) result = DetourAttach(reinterpret_cast<PVOID*>(original), reinterpret_cast<PVOID>(hook));
+    };
+    attach(&originalBrushDraw, &brush_draw_hook);
+    attach(&originalDrawListEntryRender, &draw_list_entry_render_hook);
+    attach(&originalCommonEffectEmit, &windows10_common_emit_hook);
+    attach(&originalBrushEffectEmit, &windows10_brush_emit_hook);
+    if (result == NO_ERROR) result = DetourTransactionCommit();
+    else DetourTransactionAbort();
+    for (HANDLE thread : threads) CloseHandle(thread);
+    if (result != NO_ERROR) { detail(254, result); return false; }
+    HMODULE pinned = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&windows10_common_emit_hook), &pinned);
+    detail(253, 19045);
+    stage(5);
+    windows10Lifecycle.sample();
+    stage(11);
+    return true;
+}
+
 bool start_extension()
 {
     statusMapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE,
@@ -1094,16 +1185,25 @@ bool start_extension()
 #else
     constexpr std::uint32_t machine = IMAGE_FILE_MACHINE_AMD64;
 #endif
-    if (!config || hookConfig.version != liquidDwmProtocolVersion ||
-        hookConfig.moduleMachine != machine ||
-        !hookConfig.presentRva || !hookConfig.displaySwapchainVtableRva ||
+    using GetVersionFn = LONG (WINAPI*)(OSVERSIONINFOW*);
+    const auto getVersion = reinterpret_cast<GetVersionFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    OSVERSIONINFOW version { sizeof(version) };
+    if (!getVersion || getVersion(&version) != 0 ||
+        !liquid_dwm_native_hooks_allowed(version.dwBuildNumber, machine))
+    {
+        stage(23);
+        return false;
+    }
+    windows10Adapter = liquid_dwm_uses_windows10_adapter(version.dwBuildNumber, machine);
+    if (!config || hookConfig.version != liquidDwmProtocolVersion || hookConfig.moduleMachine != machine) return false;
+    if (!windows10Adapter && (!hookConfig.presentRva || !hookConfig.displaySwapchainVtableRva ||
         !hookConfig.displayPhysicalRva || !hookConfig.displayBufferVtableRva ||
         !hookConfig.displayResourceRva || !hookConfig.contentDrawRva ||
         !hookConfig.colourBrushVtableRva || !hookConfig.applyRenderStateRva ||
         !hookConfig.batchCommandEmitRva || !hookConfig.commonEffectEmitRva ||
         !hookConfig.brushEffectEmitRva || !hookConfig.batchFlushRva ||
         !hookConfig.drawListEntryVtableRva || !hookConfig.brushDrawRva ||
-        !hookConfig.drawListEntryRenderRva)
+        !hookConfig.drawListEntryRenderRva))
         return false;
     dwmcoreModule = GetModuleHandleW(L"dwmcore.dll");
     if (!dwmcoreModule) return false;
@@ -1120,6 +1220,7 @@ bool start_extension()
         base + dos->e_lfanew);
     if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
     const auto imageSize = nt->OptionalHeader.SizeOfImage;
+    if (windows10Adapter) return start_windows10_hooks(base, imageSize);
     const std::array<std::uint64_t, 5> mandatory {{
         hookConfig.presentRva,
         hookConfig.displaySwapchainVtableRva + 64 * sizeof(void*),
@@ -1341,7 +1442,8 @@ bool start_extension()
 
 DWORD WINAPI worker(void*)
 {
-    start_extension();
+    if (start_extension() && windows10Adapter) windows10Lifecycle.run();
+    else if (windows10Adapter) windows10Lifecycle.stop();
     return 0;
 }
 }

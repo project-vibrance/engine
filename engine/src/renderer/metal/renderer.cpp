@@ -811,7 +811,10 @@ struct Engine::Impl
             if (!drawable) { presentationComplete = false; return; }
             retainedDrawables.push_back(NS::RetainPtr(drawable));
             drawables.push_back(drawable);
-            glm::uvec4 composite(2u | 8u | (externalBackdrop && backdrop ? 1u : 0u), 0, 0, 0);
+            const auto& fade = plan.viewportFade;
+            const Renderer2DCompositeConstants composite { { 2u | 8u | (externalBackdrop && backdrop ? 1u : 0u) |
+                (fade.enabled ? 16u : 0u), 0u, 0u, 0u }, fade.rect,
+                { fade.topHeight, fade.bottomHeight, fade.minimumOpacity, 0.0f } };
             device.dispatch("composite_2d_comp", &composite, sizeof(composite), extent.width, extent.height,
                 {colour.get(), colour.get(), backdrop ? texture(backdrop.get()) : colour.get(),
                  temporary ? temporary.get() : colour.get(), drawable->texture()});

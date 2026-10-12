@@ -27,6 +27,10 @@ struct UiConfirmationDialogOptions
     std::function<void()> onConfirm {};
     int32_t layer = 20;
     uint32_t order = 0u;
+    // An optional third action uses a vertical action stack so longer
+    // translated labels keep the same comfortable button width.
+    std::string additionalLabel {};
+    std::function<void()> onAdditional {};
 };
 
 struct UiConfirmationDialogHandle
@@ -38,6 +42,9 @@ struct UiConfirmationDialogHandle
     entt::entity confirmButton = entt::null;
     entt::entity cancelLabel = entt::null;
     entt::entity confirmLabel = entt::null;
+    entt::entity additionalButton = entt::null;
+    entt::entity additionalLabel = entt::null;
+    entt::entity messageText = entt::null;
 };
 
 VIBRANCE_ENGINE_API UiConfirmationDialogHandle

@@ -1,4 +1,12 @@
 if(WIN32)
+    if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
+        add_test(NAME vibrance_locked_liquid_runtime_tests
+            COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/locked_liquid_runtime_tests.ps1"
+                -DeployScript "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/VibranceLockedRuntime.cmake"
+                -Broker "${VIBRANCE_LIQUID_DWM_BROKER}"
+                -OutputDirectory "${CMAKE_CURRENT_BINARY_DIR}/locked-runtime-fixture")
+    endif()
     # Refresh the DLL even when the import library did not change and tests do
     # not relink. All engine tests share one runtime directory.
     add_custom_target(vibrance_engine_test_runtime ALL
@@ -52,6 +60,30 @@ add_test(NAME vibrance_emoji_renderer_tests COMMAND vibrance_emoji_font_tests
 set_tests_properties(vibrance_emoji_renderer_tests PROPERTIES SKIP_RETURN_CODE 77)
 
 vibrance_add_engine_test(vibrance_system_backdrop_policy_tests system_backdrop_policy_tests.cpp)
+add_executable(vibrance_liquid_dwm_windows10_layout_tests liquid_dwm_windows10_layout_tests.cpp)
+target_compile_features(vibrance_liquid_dwm_windows10_layout_tests PRIVATE cxx_std_20)
+add_test(NAME vibrance_liquid_dwm_windows10_layout_tests COMMAND vibrance_liquid_dwm_windows10_layout_tests)
+add_executable(vibrance_liquid_dwm_windows10_lifecycle_tests liquid_dwm_windows10_lifecycle_tests.cpp)
+target_compile_features(vibrance_liquid_dwm_windows10_lifecycle_tests PRIVATE cxx_std_20)
+add_test(NAME vibrance_liquid_dwm_windows10_lifecycle_tests COMMAND vibrance_liquid_dwm_windows10_lifecycle_tests)
+if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
+    set(_vibrance_hook_test "${CMAKE_CURRENT_BINARY_DIR}/vibrance_liquid_dwm_hook_tests.exe")
+    add_custom_command(OUTPUT "${_vibrance_hook_test}"
+        COMMAND "${PROJECT_SOURCE_DIR}/scripts/win32/build_dwm_hook_tests.bat"
+            "${VIBRANCE_VCVARSALL}" "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/liquid_dwm_hook_tests.cpp"
+            "${VIBRANCE_COMPOSITION_DIRECTORY}/dwm-extension-obj"
+            "${_vibrance_hook_test}" "${CMAKE_CURRENT_BINARY_DIR}/dwm-hook-test-obj"
+            "${VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT}"
+            "${VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR}"
+            "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
+        DEPENDS liquid_dwm_hook_tests.cpp "${VIBRANCE_LIQUID_DWM_EXTENSION}"
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_dwm_hook_tests.bat"
+        VERBATIM)
+    add_custom_target(vibrance_liquid_dwm_hook_fixture ALL DEPENDS "${_vibrance_hook_test}")
+    add_dependencies(vibrance_liquid_dwm_hook_fixture vibrance_liquid_dwm_extension)
+    add_test(NAME vibrance_liquid_dwm_hook_tests COMMAND "${_vibrance_hook_test}")
+endif()
 vibrance_add_engine_test(vibrance_playback_quality_tests playback_quality_tests.cpp)
 if(VIBRANCE_WIN32_INTEROP_AVAILABLE)
     # Exercise the native cached UIA worker with a controlled playback window,
@@ -75,6 +107,15 @@ endif()
 vibrance_add_engine_test(vibrance_animated_control_masks_tests animated_control_masks_tests.cpp)
 vibrance_add_engine_test(vibrance_scene_cache_ownership_tests scene_cache_ownership_tests.cpp)
 vibrance_add_engine_test(vibrance_horizontal_scroll_fade_tests horizontal_scroll_fade_tests.cpp)
+vibrance_add_engine_test(vibrance_viewport_fade_tests viewport_fade_tests.cpp)
+if(VIBRANCE_RENDER_BACKEND STREQUAL "Vulkan")
+    add_executable(vibrance_viewport_fade_shader_tests viewport_fade_shader_tests.cpp)
+    target_include_directories(vibrance_viewport_fade_shader_tests PRIVATE ../include "${GLM_INCLUDE_DIR}")
+    target_link_libraries(vibrance_viewport_fade_shader_tests PRIVATE Vulkan::Vulkan)
+    add_dependencies(vibrance_viewport_fade_shader_tests vibrance_engine)
+    add_test(NAME vibrance_viewport_fade_shader_tests COMMAND vibrance_viewport_fade_shader_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/../generated/spirv/composite_2d.comp.spv")
+endif()
 vibrance_add_engine_test(vibrance_digit_spacing_tests digit_spacing_tests.cpp
     "${_vibrance_test_fonts}/Inter.ttc"
     "${_vibrance_test_fonts}/NotoSans-Variable.ttf")
@@ -215,6 +256,21 @@ target_compile_definitions(
 add_test(
     NAME vibrance_notification_provider_portable_tests
     COMMAND vibrance_notification_provider_portable_tests)
+
+if(VIBRANCE_WIN32_INTEROP_AVAILABLE AND VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
+    set(_activation_fixture "${CMAKE_CURRENT_BINARY_DIR}/notification_activation_win32_tests.exe")
+    add_custom_command(OUTPUT "${_activation_fixture}"
+        COMMAND "${PROJECT_SOURCE_DIR}/scripts/win32/build_notification_activation_tests.bat"
+            "${VIBRANCE_VCVARSALL}" "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/notification_activation_win32_tests.cpp" "${_activation_fixture}"
+            "${VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT}" "${VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR}"
+            "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
+        DEPENDS notification_activation_win32_tests.cpp
+            "${PROJECT_SOURCE_DIR}/engine/src/platform/win32/notification_activation.h"
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_notification_activation_tests.bat" VERBATIM)
+    add_custom_target(vibrance_notification_activation_fixture ALL DEPENDS "${_activation_fixture}")
+    add_test(NAME vibrance_notification_activation_win32_tests COMMAND "${_activation_fixture}")
+endif()
 
 vibrance_add_engine_test(
     vibrance_notification_provider_runtime_tests

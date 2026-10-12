@@ -670,6 +670,8 @@ bool CompositionPresenter::set_regions(
         // shape, guarded by their fixed-size assertions in the public/POD ABI.
         std::memcpy(native.contours, region.contours.data(), sizeof(native.contours));
         std::memcpy(&native.exclusion, &region.exclusion, sizeof(native.exclusion));
+        std::copy(region.viewportRect.begin(), region.viewportRect.end(), native.viewportRect);
+        std::copy(region.viewportFade.begin(), region.viewportFade.end(), native.viewportFade);
         native.verticalStart = region.verticalStart;
         native.opacity = region.opacity;
         native.blurRadius = region.blurRadius;

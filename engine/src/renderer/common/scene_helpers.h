@@ -1855,6 +1855,43 @@ namespace
         return {};
     }
 
+    Renderer2DViewportFade inherited_window_viewport_fade(
+        const entt::registry& registry, entt::entity entity, double now)
+    {
+        entt::entity current = entity;
+        for (uint32_t depth = 0u; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+        {
+            if (const auto* fade = registry.try_get<ScrollEdgeFade2DComponent>(current);
+                fade && fade->enabled && fade->fadeWindow && !fade->horizontal)
+            {
+                entt::entity ancestor = current;
+                for (uint32_t parentDepth = 0u; parentDepth < 64u; ++parentDepth)
+                {
+                    const auto* parent = registry.try_get<Parent2DComponent>(ancestor);
+                    if (!parent || !registry.valid(parent->parent)) break;
+                    ancestor = parent->parent;
+                    if (const auto* mask = registry.try_get<Mask2DComponent>(ancestor); mask && mask->enabled)
+                    {
+                        Renderer2DViewportFade result;
+                        result.rect = animated_layout_rect(registry, ancestor,
+                            entity_mask_rect(registry, ancestor, *mask), now);
+                        const float scale = fade->relativeExtents ? result.rect.w : 1.0f;
+                        result.topHeight = std::max(fade->topHeight * scale, 0.0f);
+                        result.bottomHeight = std::max(fade->bottomHeight * scale, 0.0f);
+                        result.minimumOpacity = std::clamp(fade->minimumOpacity, 0.0f, 1.0f);
+                        result.enabled = !rect_empty(result.rect);
+                        return result;
+                    }
+                }
+                return {};
+            }
+            const auto* parent = registry.try_get<Parent2DComponent>(current);
+            if (!parent || parent->parent == current) break;
+            current = parent->parent;
+        }
+        return {};
+    }
+
     DisplayTransitionEffect2D inherited_scroll_edge_fade_effect(
         const entt::registry& registry,
         entt::entity entity)
@@ -1866,6 +1903,7 @@ namespace
             if (const ScrollEdgeFade2DComponent* fade = registry.try_get<ScrollEdgeFade2DComponent>(current);
                 fade && fade->enabled)
             {
+                if (fade->fadeWindow) return {};
                 glm::vec4 viewport = unclipped_rect();
                 entt::entity viewportAncestor = current;
                 for (uint32_t parentDepth = 0; parentDepth < 64u; ++parentDepth)

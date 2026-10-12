@@ -1,4 +1,5 @@
 #pragma once
+#include <vibranceUI/renderer/viewport_fade.h>
 #include "vibranceUI/export.h"
 #include <algorithm>
 #include <array>
@@ -1207,6 +1208,9 @@ struct ScrollEdgeFade2DComponent
     // Relative extents are fractions of the resolved viewport dimension, so
     // the fade follows resizing and DPI without rebuilding the content.
     bool relativeExtents = false;
+    // A window containing this scroll viewport applies its gradient once at
+    // presentation, keeping text, media and native glass on the same edges.
+    bool fadeWindow = false;
 };
 
 struct TextEdgeFade2DComponent
@@ -1519,6 +1523,8 @@ struct Renderer2DBatch
 
 struct Renderer2DShapeVisualState
 {
+    glm::vec4 clipRect { -1000000.0f, -1000000.0f, 2000000.0f, 2000000.0f };
+    Renderer2DViewportFade viewportFade {};
     // The exact post-layout, inherited-transition and interactive rectangle
     // used when the renderer emits a shape batch.
     glm::vec4 rect { 0.0f };
@@ -1559,6 +1565,7 @@ struct Renderer3DModelBatch
 
 struct Renderer2DRenderPlan
 {
+    Renderer2DViewportFade viewportFade {};
     // Cache ownership includes invisible and clipped drawable entities. Paint
     // visibility can change without migrating their pixels into the cache.
     std::vector<uint32_t> dynamicEntities;

@@ -43,6 +43,7 @@
 #include <vector>
 #include <memory>
 #include "playback_quality_probe.h"
+#include "notification_activation.h"
 
 namespace
 {
@@ -860,6 +861,21 @@ public:
             activate_application(appUserModelId);
     }
 
+    bool activate_notification(const char* appUserModelId, const char* arguments, std::uint32_t kind)
+    {
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u ||
+            !appUserModelId || !arguments) return false;
+        if (kind == 0u) return activate_notification_source(appUserModelId);
+        if (kind == 1u || kind == 3u)
+        {
+            CLSID activator {};
+            const auto identity = winrt::to_hstring(appUserModelId);
+            if (!vibrance::win32::notification_activator_clsid(identity.c_str(), activator))
+                return activate_notification_source(appUserModelId);
+        }
+        return vibrance::win32::invoke_toast_destination(appUserModelId, arguments, kind);
+    }
+
     bool resolve_application_icon(
         const char* appUserModelId,
         VibranceWin32ApplicationIcon* destination,
@@ -1026,6 +1042,7 @@ private:
             NotificationKinds::Toast).get();
         std::vector<VibranceWin32NotificationItem> items;
         items.reserve(notifications.Size());
+        std::unordered_map<std::string, std::vector<vibrance::win32::ToastDestination>> destinations;
         for (const auto& notification : notifications)
         {
             try
@@ -1131,6 +1148,15 @@ private:
                 {
                     copy_utf8(item.title, notification.AppInfo().
                         DisplayInfo().DisplayName());
+                }
+                const std::string identity = winrt::to_string(appUserModelId);
+                auto destination = destinations.find(identity);
+                if (destination == destinations.end())
+                    destination = destinations.emplace(identity, vibrance::win32::read_toast_destinations(appUserModelId)).first;
+                if (const auto target = vibrance::win32::match_toast_destination(destination->second, item.title, item.message))
+                {
+                    item.activationKind = target->kind;
+                    copy_utf8(item.activationArguments, target->arguments);
                 }
                 items.push_back(item);
             }
@@ -2158,6 +2184,7 @@ private:
 #pragma comment(linker, "/EXPORT:vibrance_win32_interop_get_notifications=_vibrance_win32_interop_get_notifications")
 #pragma comment(linker, "/EXPORT:vibrance_win32_interop_dismiss_notification=_vibrance_win32_interop_dismiss_notification")
 #pragma comment(linker, "/EXPORT:vibrance_win32_interop_activate_notification_source=_vibrance_win32_interop_activate_notification_source")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_activate_notification=_vibrance_win32_interop_activate_notification")
 #pragma comment(linker, "/EXPORT:vibrance_win32_interop_resolve_application_icon=_vibrance_win32_interop_resolve_application_icon")
 #endif
 
@@ -2315,6 +2342,23 @@ vibrance_win32_interop_dismiss_notification(
     {
         return 0u;
     }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_activate_notification(VibranceWin32InteropHandle handle,
+    const char* appUserModelId, const char* arguments, std::uint32_t kind)
+{
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return 0u;
+    std::uint32_t result = 0u;
+    try
+    {
+        auto* bridge = static_cast<Win32InteropBridge*>(handle);
+        result = bridge && bridge->activate_notification(appUserModelId, arguments, kind) ? 1u : 0u;
+    }
+    catch (...) {}
+    if (SUCCEEDED(apartment)) CoUninitialize();
+    return result;
 }
 
 extern "C" __declspec(dllexport) std::uint32_t __cdecl

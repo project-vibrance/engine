@@ -10,6 +10,7 @@
 #include "liquid_glass_d3d11.h"
 #include "liquid_glass_dwm_protocol.h"
 #include "liquid_glass_dwm_security.h"
+#include "liquid_glass_dwm_windows10_layout.h"
 #include "private_composition_19041.h"
 #include "system_backdrop_policy.h"
 
@@ -101,9 +102,28 @@ constexpr HRESULT windowAlreadyComposed =
 std::mutex activeCompositionWindowsMutex;
 std::unordered_set<HWND> activeCompositionWindows;
 std::once_flag liquidExtensionLaunch;
+DWORD windows_build_number() noexcept;
+
+bool liquid_extension_disabled()
+{
+    const auto build = windows_build_number();
+#if defined(_M_ARM64)
+    constexpr std::uint32_t machine = IMAGE_FILE_MACHINE_ARM64;
+#else
+    constexpr std::uint32_t machine = IMAGE_FILE_MACHINE_AMD64;
+#endif
+    if (!vibrance::win32::liquid_dwm_native_hooks_allowed(build, machine)) return true;
+    // Session transitions are guarded by the native observer's readiness
+    // event. A stable RDP session must still be allowed to start the broker.
+    wchar_t value[16] {};
+    GetEnvironmentVariableW(L"VIBRANCE_DISABLE_LIQUID_DWM_EXTENSION", value,
+        ARRAYSIZE(value));
+    return _wcsicmp(value, L"1") == 0 || _wcsicmp(value, L"true") == 0;
+}
 
 void launch_liquid_extension_once()
 {
+    if (liquid_extension_disabled()) return;
     std::call_once(liquidExtensionLaunch, [] {
         std::thread([] {
         wchar_t executable[MAX_PATH] {};
@@ -630,6 +650,7 @@ class CompositionBridge
         composition::CompositionVisualSurface liquidSurface { nullptr };
         std::vector<LiquidTile> liquidTiles;
         composition::SpriteVisual tintVisual { nullptr };
+        composition::CompositionLinearGradientBrush viewportMaskBrush { nullptr };
         bool materialInset = false;
         bool shaderOnly = false;
         bool rimClockRunning = false;
@@ -1161,9 +1182,10 @@ public:
             vibrance::win32::liquidDwmRegionSlots);
         std::unordered_set<std::uint64_t> nativeIdentities;
         bool shaderCandidateSeen = false;
+        const bool extensionDisabled = liquid_extension_disabled();
         for (std::uint32_t index = 0u; index < count; ++index)
         {
-            if (regions[index].material == 2u &&
+            if (!extensionDisabled && regions[index].material == 2u &&
                 regions[index].liquidBackend == 2u &&
                 regions[index].width > 0.0f && regions[index].height > 0.0f)
             {
@@ -1286,7 +1308,12 @@ public:
             }
 
             regions_.Children().RemoveAll();
+            // Scrolling changes which cards intersect the viewport. Retain the
+            // other native graphs instead of rebuilding the whole window's
+            // glass whenever a card crosses an edge.
+            auto retainedVisuals = std::move(regionVisuals_);
             regionVisuals_.clear();
+            regionVisuals_.reserve(count);
             if (windows_build_number() >= 22621u)
             {
                 const DWM_SYSTEMBACKDROP_TYPE disabled = DWMSBT_NONE;
@@ -1295,6 +1322,21 @@ public:
             }
             for (std::uint32_t index = 0u; index < count; ++index)
             {
+                const bool shaderOnly = shaderSlots[index] < vibrance::win32::liquidDwmRegionSlots;
+                const auto retained = std::find_if(retainedVisuals.begin(), retainedVisuals.end(),
+                    [&](const auto& state) {
+                        return state.container && state.descriptor.identity == regions[index].identity &&
+                            state.shaderOnly == shaderOnly && state.shaderSlot == shaderSlots[index] &&
+                            same_region_effect_graph(state.descriptor, regions[index], shaderOnly);
+                    });
+                if (retained != retainedVisuals.end())
+                {
+                    if (std::memcmp(&retained->descriptor, &regions[index], sizeof(regions[index])) != 0)
+                        update_region_geometry(*retained, regions[index]);
+                    regions_.Children().InsertAtTop(retained->container);
+                    regionVisuals_.push_back(std::move(*retained));
+                    continue;
+                }
                 if (!add_region(regions[index],
                         shaderSlots[index] < vibrance::win32::liquidDwmRegionSlots,
                         shaderSlots[index]))
@@ -1750,6 +1792,10 @@ private:
             next.hasExclusion = region->hasExclusion != 0u ? 1u : 0u;
             next.paintCapGradient = region->paintCapGradient;
             std::copy_n(region->capGradient, 4u, next.capGradient);
+            std::copy_n(region->viewportRect, 4u, next.viewportRect);
+            std::copy_n(region->viewportFade, 4u, next.viewportFade);
+            next.viewportRect[0] -= static_cast<float>(next.x);
+            next.viewportRect[1] -= static_cast<float>(next.y);
             std::memcpy(next.contours, region->contours, sizeof(next.contours));
             std::memcpy(&next.exclusion, &region->exclusion, sizeof(next.exclusion));
             // The native marker starts at materialTop. Keep all contour sizes,
@@ -1904,6 +1950,8 @@ private:
             // contour transition must retain its native brush and draw order.
             region.contourCount = 0u;
             region.hasExclusion = 0u;
+            std::fill_n(region.viewportRect, 4u, 0.0f);
+            std::fill_n(region.viewportFade, 3u, 0.0f);
             region.paintCapGradient = 0u;
             region.flags &= 1u;
             std::fill_n(region.capGradient, 4u, 0.0f);
@@ -2077,6 +2125,10 @@ private:
             }
             state.materialContainer.Size({ region.width, materialHeight });
         }
+        const bool viewportChanged = positionChanged || materialGeometryChanged ||
+            std::memcmp(previous.viewportRect, region.viewportRect, sizeof(region.viewportRect)) != 0 ||
+            std::memcmp(previous.viewportFade, region.viewportFade, sizeof(region.viewportFade)) != 0;
+        if (viewportChanged) sync_viewport_mask(state, region);
         if (markerGeometryChanged && state.materialVisual)
         {
             const float padding = state.shaderOnly ?
@@ -2660,11 +2712,77 @@ private:
         state.rawBackdropVisual.Clip(clip);
     }
 
+    void sync_viewport_mask(RegionVisualState& state, const VibranceCompositionRegion& region)
+    {
+        const bool enabled = region.viewportFade[3] != 0.0f;
+        const float materialTop = std::clamp(region.verticalStart, 0.0f, 0.98f) * region.height;
+        const float originY = region.y + (state.shaderOnly ? 0.0f : materialTop);
+        auto clipped = state.shaderOnly ? state.container : state.materialContainer;
+        if (clipped && (state.shaderOnly || state.materialInset))
+        {
+            if (enabled)
+            {
+                clipped.Clip(compositor_.CreateInsetClip(
+                    std::max(region.viewportRect[0] - region.x, 0.0f),
+                    std::max(region.viewportRect[1] - originY, 0.0f),
+                    std::max(region.x + region.width - region.viewportRect[0] - region.viewportRect[2], 0.0f),
+                    std::max(originY + region.height - (state.shaderOnly ? 0.0f : materialTop) -
+                        region.viewportRect[1] - region.viewportRect[3], 0.0f)));
+            }
+            else clipped.Clip(nullptr);
+        }
+        if (!state.viewportMaskBrush) return;
+        auto stops = state.viewportMaskBrush.ColorStops();
+        stops.Clear();
+        const float height = std::max(region.height - materialTop, 1.0f);
+        const auto add = [&](float absoluteY, float alpha) {
+            stops.Append(compositor_.CreateColorGradientStop(
+                std::clamp((absoluteY - originY) / height, 0.0f, 1.0f),
+                color(1.0f, 1.0f, 1.0f, alpha)));
+        };
+        const float top = region.viewportRect[1], bottom = top + region.viewportRect[3];
+        const auto opacity = [&](float y) {
+            if (!enabled) return 1.0f;
+            if (y < top || y >= bottom) return 0.0f;
+            const auto smooth = [](float distance, float extent) {
+                if (extent <= 0.0f) return 1.0f;
+                const float t = std::clamp(distance / extent, 0.0f, 1.0f);
+                return t * t * (3.0f - 2.0f * t);
+            };
+            return region.viewportFade[2] + (1.0f - region.viewportFade[2]) *
+                std::min(smooth(y - top, region.viewportFade[0]), smooth(bottom - y, region.viewportFade[1]));
+        };
+        std::vector<float> positions { originY, originY + height };
+        // Stops outside this lens are omitted, retaining one continuous brush.
+        for (unsigned index = 0; index <= 16; ++index)
+            for (float y : { top + region.viewportFade[0] * index / 16.0f,
+                bottom - region.viewportFade[1] * index / 16.0f })
+                if (y > originY && y < originY + height) positions.push_back(y);
+        std::sort(positions.begin(), positions.end());
+        positions.erase(std::unique(positions.begin(), positions.end()), positions.end());
+        for (float y : positions) add(y, opacity(y));
+    }
+
+    composition::CompositionBrush mask_viewport_brush(RegionVisualState& state,
+        composition::CompositionBrush source)
+    {
+        if (!state.viewportMaskBrush) return source;
+        auto masked = compositor_.CreateMaskBrush();
+        masked.Source(source); masked.Mask(state.viewportMaskBrush);
+        return masked;
+    }
+
     composition::CompositionClip make_clip(
         const VibranceCompositionRegion& region)
     {
         if (region.shape == 0u)
         {
+            if (region.contourCount != 0u)
+            {
+                auto geometry = compositor_.CreateRectangleGeometry();
+                geometry.Size({ region.width, region.height });
+                return compositor_.CreateGeometricClip(geometry);
+            }
             return nullptr;
         }
         if (region.shape == 2u)
@@ -2738,7 +2856,9 @@ private:
     void sync_liquid_rim_clock(RegionVisualState& state,
         const VibranceCompositionRegion& region)
     {
-        const bool animate = state.shaderOnly && state.rawBackdropVisual &&
+        const bool rawDependency = vibrance::win32::liquid_dwm_uses_raw_backdrop_dependency(windows_build_number());
+        auto clockVisual = rawDependency ? state.rawBackdropVisual : state.materialVisual;
+        const bool animate = state.shaderOnly && clockVisual &&
             region.liquidRim > 0.0f && region.opacity > 0.001f;
         if (animate == state.rimClockRunning) return;
         if (animate)
@@ -2754,17 +2874,22 @@ private:
             // At unity opacity DWM can promote the raw backdrop to an opaque
             // draw and discard the native lens dependency until it changes
             // back, making the glass disappear once per clock iteration.
-            clock.InsertKeyFrame(0.0f, 0.99f, linear);
-            clock.InsertKeyFrame(0.5f, 0.98f, linear);
-            clock.InsertKeyFrame(1.0f, 0.99f, linear);
+            // Windows 10 invalidates the translucent marker itself. Its brush
+            // colour remains unchanged, and it has no desktop backdrop brush
+            // that could introduce an opaque intermediate surface.
+            const float high = rawDependency ? 0.99f : 0.9999f;
+            const float low = rawDependency ? 0.98f : 0.9998f;
+            clock.InsertKeyFrame(0.0f, high, linear);
+            clock.InsertKeyFrame(0.5f, low, linear);
+            clock.InsertKeyFrame(1.0f, high, linear);
             clock.Duration(std::chrono::seconds(4));
             clock.IterationBehavior(composition::AnimationIterationBehavior::Forever);
-            state.rawBackdropVisual.StartAnimation(L"Opacity", clock);
+            clockVisual.StartAnimation(L"Opacity", clock);
         }
-        else if (state.rawBackdropVisual)
+        else if (clockVisual)
         {
-            state.rawBackdropVisual.StopAnimation(L"Opacity");
-            state.rawBackdropVisual.Opacity(0.99f);
+            clockVisual.StopAnimation(L"Opacity");
+            clockVisual.Opacity(rawDependency ? 0.99f : 1.0f);
         }
         state.rimClockRunning = animate;
     }
@@ -2792,6 +2917,7 @@ private:
             state.container.Offset({ region.x, region.y, 0.0f });
             state.container.Size({ region.width, region.height });
             state.container.Opacity(std::clamp(region.opacity, 0.0f, 1.0f));
+            sync_viewport_mask(state, region);
             const float top = std::clamp(region.verticalStart, 0.0f, 0.98f) * region.height;
             state.materialContainer = compositor_.CreateContainerVisual();
             state.materialContainer.Offset({ 0.0f, top, 0.0f });
@@ -2801,28 +2927,34 @@ private:
             // lens. The identity effect keeps independently presented desktop
             // layers available to DWM without applying a system glass material.
             // HLSL owns the blur, refraction and rim above this raw source.
-            if (!rawBackdropEffectFactory_)
+            // On Windows 10 this desktop dependency can resolve to an opaque
+            // black intermediate surface, including its padded sampling halo.
+            // The legacy emitter samples the live target directly instead.
+            if (vibrance::win32::liquid_dwm_uses_raw_backdrop_dependency(windows_build_number()))
             {
-                auto rawSource = composition::CompositionEffectSourceParameter(
-                    L"rawBackdrop");
-                auto rawEffect = winrt::make<SaturationEffect>(rawSource, 1.0f);
-                rawBackdropEffectFactory_ = compositor_.CreateEffectFactory(rawEffect);
+                if (!rawBackdropEffectFactory_)
+                {
+                    auto rawSource = composition::CompositionEffectSourceParameter(
+                        L"rawBackdrop");
+                    auto rawEffect = winrt::make<SaturationEffect>(rawSource, 1.0f);
+                    rawBackdropEffectFactory_ = compositor_.CreateEffectFactory(rawEffect);
+                }
+                auto rawBrush = rawBackdropEffectFactory_.CreateBrush();
+                rawBrush.SetSourceParameter(L"rawBackdrop",
+                    compositor_.CreateBackdropBrush());
+                state.rawBackdropVisual = compositor_.CreateSpriteVisual();
+                state.rawBackdropVisual.Opacity(0.99f);
+                const float margin = liquid_source_margin(region);
+                const float horizontalMargin = margin + liquid_marker_padding(region);
+                state.rawBackdropVisual.Offset({ -horizontalMargin, -margin, 0.0f });
+                state.rawBackdropVisual.Size({ region.width + horizontalMargin * 2.0f,
+                    region.height - top + margin * 2.0f });
+                state.rawBackdropVisual.Brush(rawBrush);
+                sync_raw_backdrop_clip(state, region);
+                state.materialContainer.Children().InsertAtBottom(
+                    state.rawBackdropVisual);
             }
-            auto rawBrush = rawBackdropEffectFactory_.CreateBrush();
-            rawBrush.SetSourceParameter(L"rawBackdrop",
-                compositor_.CreateBackdropBrush());
-            state.rawBackdropVisual = compositor_.CreateSpriteVisual();
-            state.rawBackdropVisual.Opacity(0.99f);
             const float markerPadding = liquid_marker_padding(region);
-            const float margin = liquid_source_margin(region);
-            const float horizontalMargin = margin + markerPadding;
-            state.rawBackdropVisual.Offset({ -horizontalMargin, -margin, 0.0f });
-            state.rawBackdropVisual.Size({ region.width + horizontalMargin * 2.0f,
-                region.height - top + margin * 2.0f });
-            state.rawBackdropVisual.Brush(rawBrush);
-            sync_raw_backdrop_clip(state, region);
-            state.materialContainer.Children().InsertAtBottom(
-                state.rawBackdropVisual);
             state.materialVisual = compositor_.CreateSpriteVisual();
             state.materialVisual.Offset({ -markerPadding, 0.0f, 0.0f });
             state.materialVisual.Size({ region.width + markerPadding * 2.0f,
@@ -2894,22 +3026,30 @@ private:
         materialRegion.y += materialTop;
         materialRegion.height = std::max(region.height - materialTop, 1.0f);
         composition::ContainerVisual materialContainer = container;
-        if (materialTop > 0.01f)
+        if (materialTop > 0.01f || region.viewportFade[3] != 0.0f)
         {
             materialContainer = compositor_.CreateContainerVisual();
             materialContainer.Offset({ 0.0f, materialTop, 0.0f });
             materialContainer.Size({ region.width, materialRegion.height });
             container.Children().InsertAtTop(materialContainer);
             state.materialInset = true;
+
         }
         state.materialContainer = materialContainer;
+        if (region.viewportFade[3] != 0.0f)
+        {
+            state.viewportMaskBrush = compositor_.CreateLinearGradientBrush();
+            state.viewportMaskBrush.StartPoint({ 0.0f, 0.0f });
+            state.viewportMaskBrush.EndPoint({ 0.0f, 1.0f });
+        }
+        sync_viewport_mask(state, region);
 
         auto backdrop = compositor_.CreateSpriteVisual();
         backdrop.Size(materialContainer.Size());
-        backdrop.Brush(make_effect_brush(materialRegion));
+        backdrop.Brush(mask_viewport_brush(state, make_effect_brush(materialRegion)));
         materialContainer.Children().InsertAtBottom(backdrop);
         state.materialVisual = backdrop;
-        if (region.material == 2u && region.liquidBackend != 2u)
+        if (region.material == 2u && region.liquidBackend != 2u && region.viewportFade[3] == 0.0f)
         {
             try
             {
@@ -2954,11 +3094,11 @@ private:
         {
             auto tint = compositor_.CreateSpriteVisual();
             tint.Size(materialContainer.Size());
-            tint.Brush(compositor_.CreateColorBrush(color(
+            tint.Brush(mask_viewport_brush(state, compositor_.CreateColorBrush(color(
                 region.tintRed,
                 region.tintGreen,
                 region.tintBlue,
-                region.tintAlpha)));
+                region.tintAlpha))));
             materialContainer.Children().InsertAtTop(tint);
             state.tintVisual = tint;
         }

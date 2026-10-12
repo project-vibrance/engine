@@ -44,6 +44,8 @@ struct alignas(16) LiquidGlassShaderParameters
     float capGradient[4];
     LiquidGlassContourParameters contours[3];
     LiquidGlassContourParameters exclusion;
+    float viewportRect[4];
+    float viewportFade[4];
 };
 
 struct alignas(16) LiquidGlassBlurParameters
@@ -56,7 +58,7 @@ struct alignas(16) LiquidGlassBlurParameters
 };
 
 static_assert(sizeof(LiquidGlassContourParameters) == 64);
-static_assert(sizeof(LiquidGlassShaderParameters) == 416);
+static_assert(sizeof(LiquidGlassShaderParameters) == 448);
 static_assert(offsetof(LiquidGlassShaderParameters, cornerExponent) == 48);
 static_assert(offsetof(LiquidGlassShaderParameters, backdropUvOrigin) == 64);
 static_assert(offsetof(LiquidGlassShaderParameters, cornerRadii) == 80);
@@ -65,5 +67,7 @@ static_assert(offsetof(LiquidGlassShaderParameters, tintStrength) == 128);
 static_assert(offsetof(LiquidGlassShaderParameters, capGradient) == 144);
 static_assert(offsetof(LiquidGlassShaderParameters, contours) == 160);
 static_assert(offsetof(LiquidGlassShaderParameters, exclusion) == 352);
+static_assert(offsetof(LiquidGlassShaderParameters, viewportRect) == 416);
+static_assert(offsetof(LiquidGlassShaderParameters, viewportFade) == 432);
 static_assert(sizeof(LiquidGlassBlurParameters) == 256);
 static_assert(offsetof(LiquidGlassBlurParameters, pairs) == 16);

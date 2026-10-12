@@ -238,6 +238,8 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_COMPOSITION_ABI_HEADER}"
                 "${VIBRANCE_COMPOSITION_PRIVATE_HEADER}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/system_backdrop_policy.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_session.h"
                 "${VIBRANCE_LIQUID_SHADER_ABI_HEADER}"
                 "${VIBRANCE_LIQUID_D3D_SOURCE}"
                 "${VIBRANCE_LIQUID_D3D_HEADER}"
@@ -290,6 +292,11 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
             DEPENDS "${VIBRANCE_LIQUID_DWM_EXTENSION_SOURCE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_batch.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_lifecycle.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_lifecycle_policy.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_session.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
                 "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
                 "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
                 "${VIBRANCE_LIQUID_D3D_SOURCE}"
@@ -314,6 +321,8 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR}"
                 "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
             DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER_SOURCE}"
+                "${PROJECT_SOURCE_DIR}/scripts/win32/liquid_glass_runtime_cache.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
                 "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
                 "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
                 "${VIBRANCE_LIQUID_DWM_BROKER_SCRIPT}"
@@ -477,6 +486,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
                 "${VIBRANCE_WIN32_INTEROP_SOURCE}"
                 "${VIBRANCE_WIN32_INTEROP_ABI_HEADER}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/playback_quality_probe.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/notification_activation.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/media/playback_quality_detection.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/media/playback_quality.h"
                 "${VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT}"
@@ -674,8 +684,9 @@ install(TARGETS vibrance_engine
 if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
     install(FILES "${VIBRANCE_COMPOSITION_DLL}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")
-    install(FILES "${VIBRANCE_LIQUID_DWM_EXTENSION}"
-        DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/VibranceLockedRuntime.cmake")
+    vibrance_install_locked_runtime("${VIBRANCE_LIQUID_DWM_EXTENSION}"
+        "${CMAKE_INSTALL_BINDIR}")
     install(PROGRAMS "${VIBRANCE_LIQUID_DWM_BROKER}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")
     if(VIBRANCE_LIQUID_DBGHELP_RUNTIME AND VIBRANCE_LIQUID_SYMSRV_RUNTIME)
@@ -768,6 +779,7 @@ if(BUILD_TESTING)
 endif()
 
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VibranceApplication.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VibranceLockedRuntime.cmake"
     DESTINATION "${CONFIG_INSTALL_DIR}")
 install(PROGRAMS
     "${PROJECT_SOURCE_DIR}/scripts/create-vibrance-app.sh"

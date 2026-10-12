@@ -6,14 +6,14 @@
 namespace vibrance::win32
 {
 inline constexpr wchar_t liquidDwmRegionName[] =
-    L"Local\\VibranceLiquidGlassDwmRegionV13";
+    L"Local\\VibranceLiquidGlassDwmRegionV14";
 inline constexpr wchar_t liquidDwmReadyName[] =
-    L"Local\\VibranceLiquidGlassDwmReadyV13";
+    L"Local\\VibranceLiquidGlassDwmReadyV14";
 inline constexpr wchar_t liquidDwmConfigName[] =
-    L"Local\\VibranceLiquidGlassDwmConfigV13";
+    L"Local\\VibranceLiquidGlassDwmConfigV14";
 inline constexpr wchar_t liquidDwmStatusName[] =
     L"Local\\VibranceLiquidGlassDwmStatusV16";
-inline constexpr std::uint32_t liquidDwmProtocolVersion = 13;
+inline constexpr std::uint32_t liquidDwmProtocolVersion = 14;
 // Words 0-159 hold hook diagnostics; words 160-223 count each lens's frames.
 inline constexpr std::uint32_t liquidDwmStatusWords = 256;
 inline constexpr std::uint32_t liquidDwmUiBuffers = 2;
@@ -23,7 +23,7 @@ inline constexpr std::uint32_t liquidDwmRegionStatusBase = 160;
 inline std::wstring liquid_dwm_ui_name(std::uint32_t ownerPid,
     std::uint64_t window, std::uint32_t index)
 {
-    return L"Local\\VibranceLiquidGlassUiV13_" +
+    return L"Local\\VibranceLiquidGlassUiV14_" +
         std::to_wstring(ownerPid) + L"_" + std::to_wstring(window) +
         L"_" + std::to_wstring(index);
 }
@@ -31,7 +31,7 @@ inline std::wstring liquid_dwm_ui_name(std::uint32_t ownerPid,
 inline std::wstring liquid_dwm_cpu_ui_name(std::uint32_t ownerPid,
     std::uint64_t window, std::uint32_t width, std::uint32_t height)
 {
-    return L"Local\\VibranceLiquidGlassUiCpuV13_" +
+    return L"Local\\VibranceLiquidGlassUiCpuV14_" +
         std::to_wstring(ownerPid) + L"_" + std::to_wstring(window) +
         L"_" + std::to_wstring(width) + L"_" +
         std::to_wstring(height);
@@ -126,9 +126,12 @@ struct alignas(8) LiquidDwmRegion
     float capGradient[4] { 0.98f, 0.015f, 0.0f, 1.0f };
     LiquidDwmContour contours[3] {};
     LiquidDwmContour exclusion {};
+    // Body-relative clip rectangle; top/bottom fade heights, minimum opacity, enabled.
+    float viewportRect[4] {};
+    float viewportFade[4] {};
 };
 
-static_assert(sizeof(LiquidDwmRegion) == 432);
+static_assert(sizeof(LiquidDwmRegion) == 464);
 
 struct alignas(8) LiquidDwmRegionTable
 {

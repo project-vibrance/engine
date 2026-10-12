@@ -71,5 +71,5 @@ link.exe /DLL /NOLOGO /DEBUG:FULL ^
     "%OBJECT_DIR%\disolia64.obj" ^
     "%OBJECT_DIR%\disolarm.obj" ^
     "%OBJECT_DIR%\disolarm64.obj" ^
-    advapi32.lib bcrypt.lib d3d11.lib user32.lib
+    advapi32.lib bcrypt.lib d3d11.lib dxgi.lib user32.lib wtsapi32.lib
 exit /b %errorlevel%

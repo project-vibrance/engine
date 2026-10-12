@@ -34,6 +34,7 @@ bool Renderer2DRenderPlan::empty() const
 
 void Renderer2DRenderPlan::clear()
 {
+    viewportFade = {};
     dynamicEntities.clear();
     panelBlurs.clear();
     shadows.clear();
@@ -988,6 +989,8 @@ Renderer2DScene::resolved_shape_visual_state(
         std::clamp(style->opacity, 0.0f, 1.0f) : 1.0f;
 
     Renderer2DShapeVisualState state = {};
+    state.clipRect = inherited_mask_clip_rect(registry_, entity, currentTimeSeconds);
+    state.viewportFade = inherited_window_viewport_fade(registry_, entity, currentTimeSeconds);
     const auto paintOrder = render_layer_key(registry_, entity);
     state.stackLayer = paintOrder.stackLayer;
     state.stackOrder = paintOrder.stackOrder;
@@ -1035,6 +1038,12 @@ void Renderer2DScene::build_render_plan_impl(
         mark_dirty();
     }
     resolve_layouts(registry_, visibleLayoutsOnly);
+    for (const auto entity : registry_.view<ScrollEdgeFade2DComponent>())
+    {
+        if (!is_visible(registry_, entity)) continue;
+        plan.viewportFade = inherited_window_viewport_fade(registry_, entity, currentTimeSeconds);
+        if (plan.viewportFade.enabled) break;
+    }
 
     const ShapeStyleComponent defaultShapeStyle {};
     const TextStyleComponent defaultTextStyle {};

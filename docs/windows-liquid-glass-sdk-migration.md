@@ -185,6 +185,136 @@ Graphics Capture; the user reports that the borders and refraction look better.
 ARM64 runtime remains untested; injection and visual output require an ARM64
 Windows machine for verification.
 
+Windows 10 22H2 x64 native hook activation is restored with a separate session
+and device-lifetime guard. Older Windows 10 builds and Windows 10 ARM64 retain
+the fallback. Windows 11 retains its existing activation and rendering path.
+The supplied minidump reports `SYSTEM_THREAD_EXCEPTION_NOT_HANDLED`
+(`0x1000007E`, exception `0xC0000005`) in
+`dxgkrnl!ADAPTER_RENDER::SignalCrossAdapterSyncObjects+0x69`, reading address
+`0x8`. Its stack includes `DXGGLOBAL::NotifyAdapterRemoval` and
+`DpiPowerArbiterThread`; the process is System. The Plug and Play blackbox
+records an in-progress event for an RDP indirect display adapter, problem code
+24. The user confirmed a GPU-P VM and an RDP/Enhanced Session transition at
+the crash. This supports a graphics-adapter transition as the immediate
+trigger; it does not establish whether the native optical pass contributed to
+the failure. This dump does not prove that the new guards prevent that kernel
+fault; live GPU-P session-transition validation remains outstanding. An already
+loaded older extension requires a new Windows session.
+
+The Windows 10 22H2 x64 (OS build 19045) port has a separate native hook adapter.
+It scopes the sentinel through `CBrush::Draw` and `CHWDrawListEntry::Render`,
+reads the first queued primitive's transform, then replaces the marked geometry
+in the common and brush effect callbacks and consumes that primitive. Windows
+10 passes a `CBaseDrawListEntry` to these
+callbacks; Windows 11 passes a rendering command. Each decoder uses its own
+object layout and the common DX11 optical renderer retains native draw order.
+The Windows 11 symbol resolver, callback selection and 296-byte hook
+configuration remain intact. Windows 10 publishes an additional 88-byte V2 layout
+mapping, bound to the same SHA-256 fingerprint and checked again inside DWM.
+
+The broker verifies the Windows 10 field accesses and virtual-base table in
+the matching DWM image before activation. Unknown layouts retain the
+Composition fallback. Windows 10 ARM64 and older Windows 10 releases retain
+their existing fallback; this adapter is for the requested 22H2 x64 target.
+The cache permissions and versioned runtime deployment also apply to this path.
+
+The Windows 10 observer runs on the extension's existing worker thread. Its
+hidden window receives session, display, device and power notifications; a
+250 ms sampler also checks WTS connection/protocol state and DXGI factory
+currency. Stable console and RDP/Enhanced Sessions can use native glass.
+Session and display transitions pause native optical drawing and reset the
+readiness event, so the app selects its existing Composition fallback.
+The observer retires cached backgrounds, shader resources and retained marker
+tags after an active draw finishes, using a non-blocking mutex attempt.
+Native drawing resumes only after two seconds of stable active-session samples and
+completed resource retirement. A stale observer or outdated generation cannot
+reopen rendering. On WTS query access denied, DWM's virtual account can use
+physical console attachment or its own remote-session metric. Disconnect,
+lock and logoff notifications override this fallback until a corresponding
+connect, unlock or logon notification. Other query errors pause rendering.
+Notifications for other sessions do not suspend this session. Query operations
+run outside the app's frame path; optical callbacks use the fresh admitted
+generation rather than requiring RDP to be the physical console.
+
+Windows 10 retains the native context/device for each optical pass, checks the
+device-removal reason before flushing and around rendering, and verifies that
+the native target belongs to the same COM device identity. Device loss revokes
+readiness and starts a new generation. Re-entrant geometry callbacks forward
+to the original emitter without repeating optical work or double-consuming a
+queued primitive. Windows 11 keeps its original flush and locking order.
+These guards follow the documented
+[WTS session protocol](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ne-wtsapi32-wts_info_class),
+[console attachment](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-wtsgetactiveconsolesessionid),
+[DXGI factory currency](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgifactory1-iscurrent)
+and [D3D11 device-loss](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11device-getdeviceremovedreason)
+APIs. Console use includes Moonlight while it streams that console session;
+native refraction also resumes in an active RDP session after settling. The
+former presenter check on `SM_REMOTESESSION` prevented the broker from starting
+there, leaving `--status` without a mapping (exit 13). That permanent startup
+block has been removed while retaining transition and device guards.
+
+Offline symbol and layout validation passed against Microsoft's
+[`dwmcore.dll` 10.0.19041.7725](https://msdl.microsoft.com/download/symbols/dwmcore.dll/F1A0D9C4376000/dwmcore.dll),
+SHA-256 `b7488eb96e3ad2a845fdf0cd03d2d729e970eca81e08c087ce7a6deea8d2cd9d`,
+and its matching PDB `72052572E107EC32B9A529B7B7487E09`, age 1. An older 22H2
+[`dwmcore.dll` 10.0.19041.3636](https://msdl.microsoft.com/download/symbols/dwmcore.dll/35B83791372000/dwmcore.dll)
+also passed with its matching symbols and fingerprint
+`122e00a501847a334c68ae5d9296a072d1c9989b568163a9fbf3e4475a4ca59f`.
+Windows 10 22H2 uses the 19041 DWM binary family. To validate a target module without modifying
+the running compositor, use:
+
+```powershell
+& '.\liquid_glass_dwm_broker.exe' --resolve-windows10 `
+    'C:\Windows\System32\dwmcore.dll' "$env:LOCALAPPDATA\VibranceDwmSymbols"
+```
+
+The initial VM diagnostics showed loaded hooks and marker scopes but zero
+optical draws. The adapter had treated temporary primitive-vector endpoints as
+entry identity: the first empty queue failed tagging, and each subsequent
+append invalidated its tag. Identity now uses the stable geometry, effect and
+bounds; an observed ordinary brush draw removes a previous tag. The transform
+comes from the queued primitive, since DWM sets the execution context's matrix
+inside the original emitter, after our interception. Each override erases
+exactly one 76-byte primitive, matching the native queue lifecycle.
+
+Windows 10 also omits the padded identity-backdrop visual, which can resolve
+to an opaque black intermediate surface. The legacy pass samples the live
+native target, and its rim clock invalidates the marker visual itself. Windows
+11 retains its existing identity backdrop and clock.
+
+Tests exercise the production Windows 10 marker adapter, initially empty and
+mutating queues, retained-entry invalidation, queued matrix decoding, native
+lens placement, repeated queue consumption and ordinary draw forwarding.
+The same fixture checks Windows 11 command decoding and brush colours. ABI
+mutation tests reject changed fields, invalid RVAs and unsupported OS/CPU
+combinations. Live Windows 10 display, capture and multi-monitor checks still
+require a Windows 10 22H2 machine; they cannot be verified on the Windows 11 host.
+
+For development, launch the app with `VIBRANCE_DISABLE_LIQUID_DWM_EXTENSION=1`
+in its environment. In PowerShell, run:
+
+```powershell
+$env:VIBRANCE_DISABLE_LIQUID_DWM_EXTENSION = '1'
+& '.\build\windows-x64\Release\app\Vibrance.exe'
+```
+
+This uses the native Composition fallback and suppresses extension activation,
+including when an extension is already running. Remove the environment variable
+to enable it again. Disabling does not unload the pinned DWM module.
+
+The broker loads a verified, versioned copy of the DLL and its five shaders from
+the symbol cache's `runtime` subdirectory (normally
+`%LOCALAPPDATA%\VibranceDwmSymbols\runtime`), keeping build and install
+files available for replacement.
+The cache grants the Window Manager group read and execute access to each
+version directory, DLL and shader, preserving the owner's existing permissions.
+Existing cached bundles have these permissions repaired before activation.
+A build encountering an older mapped DLL
+renames that image to an `.in-use-*` sibling and installs the new DLL at the
+original path. It reports errors rather than packaging an outdated DLL.
+The retained image can be deleted after signing out. Native extension updates
+take effect in a new Windows session; the build does not restart DWM.
+
 To check the running extension, use `liquid_glass_dwm_broker.exe --region` and
 `--status` from the architecture's app output. Status word 147 counts recognised
 native batch markers, 151 counts successful shader draws, 152 counts rendering
@@ -194,6 +324,26 @@ Desktop Duplication respectively when that output scope is available. Counters
 must be paired with visible displaced background in the actual output; they
 alone do not prove that glass is displayed or captured correctly.
 Status words 160–223 count successful draws for the 64 lens slots.
+On Windows 10, words 224/225 count accepted/rejected marker tags, 226 counts
+missing or malformed primitive queues, 227 counts complete queued markers,
+and 228 counts queue-consumption failures forwarded to the original emitter.
+Words 146 and 156 count calls to its common and brush geometry hooks. Word
+253 is 19045 when the Windows 10 adapter is active.
+Word 229 is 1 when the observer admits native drawing, 230 counts skipped or
+busy optical passes, 231 counts device-loss suspensions, 232 counts rejected
+target/device identities, and 233 stores the last device-removal HRESULT.
+Words 234/235 count transition invalidations/resumptions, 236 counts completed
+GPU resource retirements, and 237 stores an observer initialisation error.
+Word 238 reports session evidence (0 unknown, 1 inactive, 2 console, 3 remote),
+239 is 1 when disconnect/lock/logoff notifications block admission, and 240
+is 1 when the DXGI factory is current. Exit 13 now reports a missing status
+mapping and its Windows error explicitly.
+Lifecycle regressions cover console-to-RDP recovery, disconnect/lock overrides,
+stale samples, concurrent
+invalidation, clock changes and device generations. The production fixture
+uses separate WARP devices to verify identity checks, exercises retirement
+while another thread holds the draw lock, and checks readiness revocation and
+re-entrant forwarding without resetting a GPU or installing live DWM hooks.
 
 The D3D11 shader test verifies that optical drawing changes pixels only inside
 the island/scissor intersection, agrees with the unclipped result there, and

@@ -134,6 +134,10 @@ UiConfirmationDialogHandle ui_create_confirmation_dialog(
     constexpr float buttonHeight = 38.0f;
     constexpr float buttonGap = 12.0f;
     const bool hasCancel = !options.cancelLabel.empty();
+    const bool hasAdditional = !options.additionalLabel.empty();
+    const float actionHeight = hasAdditional ?
+        (hasCancel ? 3.0f : 2.0f) * buttonHeight +
+            (hasCancel ? 2.0f : 1.0f) * buttonGap : buttonHeight;
     const float width = std::max(options.size.x, 280.0f);
     const bool hasIcon = options.icon.valid();
     const float textTop = 28.0f + (hasIcon ? iconSize + iconGap : 0.0f);
@@ -169,7 +173,7 @@ UiConfirmationDialogHandle ui_create_confirmation_dialog(
         12.0f + std::max(measure(options.message, messageOptions), messageOptions.fontSize);
     const glm::vec2 size { width, std::max(options.size.y,
         textTop + titleHeight + messageHeight + 24.0f +
-            buttonHeight + inset) };
+            actionHeight + inset) };
     UiSurfaceBlockOptions surface = ui_dialog_surface_options(options.theme);
     surface.layer = options.layer;
     surface.order = options.order;
@@ -189,10 +193,11 @@ UiConfirmationDialogHandle ui_create_confirmation_dialog(
         ui_fit_content_size(ui, handle.root, handle.titleText,
             { width, options.size.y },
             { inset, textTop, inset, 24.0f + inset +
-                buttonHeight }, false, true);
+                actionHeight }, false, true);
     }
     if (!options.message.empty())
-        ui_create_text_block(ui, fontAtlas, handle.root, options.message, messageOptions);
+        handle.messageText = ui_create_text_block(ui, fontAtlas, handle.root,
+            options.message, messageOptions).entity;
 
     auto confirmOptions = ui_button_options_from_theme(options.theme, true);
     if (options.destructive)
@@ -204,16 +209,33 @@ UiConfirmationDialogHandle ui_create_confirmation_dialog(
     confirmOptions.onClick = [action = std::move(options.onConfirm)](const PointerInputEvent&) {
         if (action) action();
     };
-    const float buttonWidth = hasCancel ? (width - inset * 2.0f - buttonGap) * 0.5f :
+    const float buttonWidth = hasCancel && !hasAdditional ? (width - inset * 2.0f - buttonGap) * 0.5f :
         width - inset * 2.0f;
-    const float buttonOffset = hasCancel ? (buttonWidth + buttonGap) * 0.5f : 0.0f;
+    const float buttonOffset = hasCancel && !hasAdditional ? (buttonWidth + buttonGap) * 0.5f : 0.0f;
+    const float confirmY = -inset - (hasAdditional ?
+        (hasCancel ? 2.0f : 1.0f) * (buttonHeight + buttonGap) : 0.0f);
     const auto confirm = ui_create_aligned_text_button(ui, fontAtlas, handle.root,
-        UiAlignment::eBottomCentre, { buttonOffset, -inset },
+        UiAlignment::eBottomCentre, { buttonOffset, confirmY },
         options.confirmLabel, { buttonWidth, buttonHeight },
         options.layer + 3, options.order + 4u, std::move(confirmOptions));
     handle.confirmButton = confirm.root;
     handle.confirmLabel = confirm.label;
     ui_apply_liquid_button(ui, confirm.root);
+    if (hasAdditional)
+    {
+        auto additionalOptions = ui_button_options_from_theme(options.theme);
+        additionalOptions.onClick = [action = std::move(options.onAdditional)](const PointerInputEvent&) {
+            if (action) action();
+        };
+        const auto additional = ui_create_aligned_text_button(ui, fontAtlas, handle.root,
+            UiAlignment::eBottomCentre,
+            { 0.0f, -inset - (hasCancel ? buttonHeight + buttonGap : 0.0f) },
+            options.additionalLabel, { buttonWidth, buttonHeight },
+            options.layer + 3, options.order + 6u, std::move(additionalOptions));
+        handle.additionalButton = additional.root;
+        handle.additionalLabel = additional.label;
+        ui_apply_liquid_button(ui, additional.root);
+    }
     if (hasCancel)
     {
         auto cancelOptions = ui_button_options_from_theme(options.theme);

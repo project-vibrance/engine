@@ -124,6 +124,11 @@ struct SystemBackdropRegion
     bool hasExclusion = false;
     bool paintCapGradient = false;
     std::array<float, 3> capColour { 0.0f, 0.0f, 0.0f };
+    // An independent viewport mask keeps each lens intact while clipping and
+    // fading its final pixels. Rectangle coordinates are in framebuffer space;
+    // parameters are top/bottom fade heights, minimum opacity and enabled (0/1).
+    std::array<float, 4> viewportRect {};
+    std::array<float, 4> viewportFade {};
     // Top/bottom opacity, start/end fraction of the merged material height.
     std::array<float, 4> capGradient { 0.98f, 0.015f, 0.0f, 1.0f };
 };

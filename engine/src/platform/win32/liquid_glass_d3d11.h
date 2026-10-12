@@ -65,6 +65,8 @@ struct LiquidGlassRenderRegion
     bool paintCapGradient = false;
     std::array<float, 3> capColour { 0.0f, 0.0f, 0.0f };
     std::array<float, 4> capGradient { 0.98f, 0.015f, 0.0f, 1.0f };
+    std::array<float, 4> viewportRect {};
+    std::array<float, 4> viewportFade {};
 };
 static_assert(sizeof(LiquidGlassRenderRegion::Contour) == 56u);
 

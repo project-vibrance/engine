@@ -9,7 +9,7 @@
 #define VIBRANCE_COMPOSITION_CALL
 #endif
 
-constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 22u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 23u;
 constexpr std::uint32_t VIBRANCE_COMPOSITION_MAX_BUFFERS = 3u;
 
 constexpr std::uint32_t VIBRANCE_COMPOSITION_CREATE_TRANSPARENT_FRAMEBUFFER =
@@ -133,8 +133,10 @@ struct VibranceCompositionRegion
     float capGradient[4] { 0.98f, 0.015f, 0.0f, 1.0f };
     VibranceCompositionContour contours[3] {};
     VibranceCompositionContour exclusion {};
+    float viewportRect[4] {};
+    float viewportFade[4] {};
 };
-static_assert(sizeof(VibranceCompositionRegion) == 400u);
+static_assert(sizeof(VibranceCompositionRegion) == 432u);
 #pragma pack(pop)
 
 using VibranceCompositionHandle = void*;

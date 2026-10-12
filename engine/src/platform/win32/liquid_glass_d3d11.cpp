@@ -424,6 +424,13 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         for (const float value : region.capColour)
             if (!std::isfinite(value)) return false;
     }
+    if (region.viewportFade[3] != 0.0f)
+    {
+        for (const float value : region.viewportRect) if (!std::isfinite(value)) return false;
+        for (const float value : region.viewportFade) if (!std::isfinite(value)) return false;
+        if (region.viewportRect[2] <= 0.0f || region.viewportRect[3] <= 0.0f ||
+            region.viewportFade[0] < 0.0f || region.viewportFade[1] < 0.0f) return false;
+    }
     ComPtr<ID3D11Resource> targetResource;
     target->GetResource(&targetResource);
     ComPtr<ID3D11Texture2D> targetTexture;
@@ -619,6 +626,8 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         (capByte(region.capColour[2]) << 24u)) : 0u;
     for (std::size_t index = 0u; index < region.capGradient.size(); ++index)
         optical.capGradient[index] = std::clamp(region.capGradient[index], 0.0f, 1.0f);
+    std::copy(region.viewportRect.begin(), region.viewportRect.end(), optical.viewportRect);
+    std::copy(region.viewportFade.begin(), region.viewportFade.end(), optical.viewportFade);
     const auto packContour = [](const LiquidGlassRenderRegion::Contour& contour,
         LiquidGlassContourParameters& packed) {
         packed.rect[0] = contour.x;

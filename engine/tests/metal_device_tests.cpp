@@ -476,7 +476,7 @@ int main()
         device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16, {target.get(), depth.get()});
         shape.color0.w = 0.5f;
         device.dispatch("shape_2d_comp", &shape, sizeof(shape), 16, 16, {target.get()});
-        glm::uvec4 composite(2, 0, 0, 0);
+        Renderer2DCompositeConstants composite { { 2u, 0u, 0u, 0u } };
         device.dispatch("composite_2d_comp", &composite, sizeof(composite), 16, 16,
                         {target.get(), blank.get(), blank.get(), scratch.get(), output.get()});
         device.flush();

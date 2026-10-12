@@ -674,7 +674,7 @@ void CompositePipeline::record(
     bool useExternalBackdropUnderlay,
     bool writeNativeSurface,
     bool writeCompositionSurface,
-    glm::uvec4 contentRect) const
+    glm::uvec4 contentRect, Renderer2DViewportFade viewportFade) const
 {
     const PipelineType pipelineType = PipelineType::eComposite2D;
     if (!bind_pipeline(commandBuffer, pipelineType, pipelines))
@@ -712,7 +712,8 @@ void CompositePipeline::record(
         return;
     }
 
-    const glm::uvec4 constants { flags, bounds.x, bounds.y, 0u };
+    const Renderer2DCompositeConstants constants { { flags | (viewportFade.enabled ? 16u : 0u), bounds.x, bounds.y, 0u },
+        viewportFade.rect, { viewportFade.topHeight, viewportFade.bottomHeight, viewportFade.minimumOpacity, 0.0f } };
     commandBuffer.pushConstants(pipelineLayouts[pipelineType],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
     dispatch_bounds(commandBuffer, bounds);
@@ -783,6 +784,7 @@ void Renderer2D::record(
     {
         textBatchResources->writtenGlyphs = 0u;
     }
+    const auto previousViewportFade = renderPlanCache.viewportFade;
     scene.build_render_plan(renderPlanCache, currentTimeSeconds, cachedLayerGeneration);
     recordDiagnostics = {};
 
@@ -1687,7 +1689,9 @@ void Renderer2D::record(
     vibrance::renderer::coalesce_entity_bounds(currentEntityBounds);
 
     DispatchBounds trackedDamage = {};
-    if (rebuildCachedLayer || scene.fullDamagePending_)
+    // A viewport mask changes the final pixels without changing cached paint.
+    // Refresh every retained composition buffer when its gradient changes.
+    if (rebuildCachedLayer || scene.fullDamagePending_ || previousViewportFade != renderPlanCache.viewportFade)
     {
         trackedDamage = make_full_screen_bounds(swapchain);
     }
@@ -1752,7 +1756,7 @@ void Renderer2D::record_composite(
         useExternalBackdropUnderlay,
         writeNativeSurface,
         writeCompositionSurface,
-        contentRect);
+        contentRect, renderPlanCache.viewportFade);
 }
 
 glm::uvec4 Renderer2D::content_bounds() const

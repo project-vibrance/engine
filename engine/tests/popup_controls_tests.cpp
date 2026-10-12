@@ -155,6 +155,28 @@ int main()
             UiAlignment::eCenter, {}, options);
         passed &= expect(single.cancelButton == entt::null,
             "single-action alerts must not reserve an unused secondary action");
+        options.icon = {};
+        options.cancelLabel = "Cancel";
+        options.confirmLabel = "OK";
+        options.additionalLabel = "OK. Don't Show Again";
+        unsigned remembered = 0u;
+        options.onAdditional = [&] { ++remembered; };
+        const auto three = ui_create_confirmation_dialog(ui, atlas, parent,
+            UiAlignment::eCenter, {}, options);
+        const auto& accept = registry.get<Layout2DComponent>(three.confirmButton);
+        const auto& remember = registry.get<Layout2DComponent>(three.additionalButton);
+        const auto& cancel = registry.get<Layout2DComponent>(three.cancelButton);
+        passed &= expect(close(accept.offset.x, 0.0f) &&
+            close(remember.offset.x, 0.0f) && close(cancel.offset.x, 0.0f) &&
+            accept.offset.y < remember.offset.y && remember.offset.y < cancel.offset.y &&
+            close(remember.offset.y - accept.offset.y, 50.0f * magnification),
+            "three-action alerts should stack full-width actions in their requested order");
+        passed &= expect(close(registry.get<ShapeComponent>(three.root).size.y -
+            registry.get<ShapeComponent>(plain.root).size.y, 100.0f * magnification),
+            "three-action alerts should reserve both extra rows at every scale");
+        registry.get<ButtonInputComponent>(three.additionalButton).onClick({});
+        passed &= expect(remembered == 1u,
+            "the additional confirmation action should invoke its own callback");
     }
     return passed ? 0 : 1;
 }

@@ -182,7 +182,8 @@ public:
         bool useExternalBackdropUnderlay = false,
         bool writeNativeSurface = true,
         bool writeCompositionSurface = false,
-        glm::uvec4 contentRect = glm::uvec4(0u)
+        glm::uvec4 contentRect = glm::uvec4(0u),
+        Renderer2DViewportFade viewportFade = {}
     ) const;
 };
 

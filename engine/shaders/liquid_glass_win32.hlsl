@@ -45,6 +45,8 @@ cbuffer LiquidGlassParameters : register(b0)
     float4 capGradient;
     ContourParameters contours[3];
     ContourParameters exclusion;
+    float4 viewportRect;
+    float4 viewportFade;
 };
 
 struct PixelInput
@@ -198,6 +200,16 @@ float2 surface_normal(float2 pixelPosition)
 float4 main(PixelInput input) : SV_Target
 {
     float2 pixelPosition = input.uv * drawSize - panelOrigin;
+    float viewportOpacity = 1.0;
+    if (viewportFade.w != 0.0)
+    {
+        float2 offset = pixelPosition - viewportRect.xy;
+        if (offset.x < 0.0 || offset.y < 0.0 || offset.x >= viewportRect.z || offset.y >= viewportRect.w)
+            return float4(0.0, 0.0, 0.0, 0.0);
+        if (viewportFade.x > 0.0) viewportOpacity = min(viewportOpacity, smoothstep(0.0, viewportFade.x, offset.y));
+        if (viewportFade.y > 0.0) viewportOpacity = min(viewportOpacity, smoothstep(0.0, viewportFade.y, viewportRect.w - offset.y));
+        viewportOpacity = lerp(saturate(viewportFade.z), 1.0, viewportOpacity);
+    }
     float distance = rounded_box_distance(pixelPosition);
     float coverage = saturate(0.5 - distance);
     if (coverage <= 0.0)
@@ -268,6 +280,6 @@ float4 main(PixelInput input) : SV_Target
         saturate(sharpSample.a * 8.0);
     float rimAvailable = 0.3 * fresnel;
     // DWM can use scRGB render targets, so retain values above 1.0.
-    return float4(max(colour, 0.0), coverage * opacity *
+    return float4(max(colour, 0.0), coverage * opacity * viewportOpacity *
         max(sourceAvailable, rimAvailable));
 }

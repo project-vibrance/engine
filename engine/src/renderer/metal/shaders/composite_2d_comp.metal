@@ -8,6 +8,8 @@ using namespace metal;
 struct Composite2DConstants
 {
     uint4 data;
+    float4 fadeRect;
+    float4 fadeParameters;
 };
 
 static inline __attribute__((always_inline))
@@ -77,6 +79,23 @@ kernel void composite_2d_comp(constant Composite2DConstants& pc [[buffer(0)]], t
             color = uiExternalBackdropSurface.read(uint2(pixel));
         color = blend_over(color, staticColor);
         color = blend_over(color, sceneColor);
+    }
+    if ((pc.data.x & 16u) != 0u)
+    {
+        float2 point = float2(pixel) + float2(0.5);
+        float alpha = 1.0;
+        if (point.x < pc.fadeRect.x || point.x >= pc.fadeRect.x + pc.fadeRect.z ||
+            point.y < pc.fadeRect.y || point.y >= pc.fadeRect.y + pc.fadeRect.w)
+            alpha = 0.0;
+        else
+        {
+            if (pc.fadeParameters.x > 0.0)
+                alpha = min(alpha, smoothstep(0.0, pc.fadeParameters.x, point.y - pc.fadeRect.y));
+            if (pc.fadeParameters.y > 0.0)
+                alpha = min(alpha, smoothstep(0.0, pc.fadeParameters.y, pc.fadeRect.y + pc.fadeRect.w - point.y));
+            alpha = mix(pc.fadeParameters.z, 1.0, alpha);
+        }
+        color.w *= alpha;
     }
     if ((pc.data.x & 4u) != 0u)
     {

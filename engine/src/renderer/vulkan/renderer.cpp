@@ -333,6 +333,7 @@ namespace
             left.clipRawBackdropToShape == right.clipRawBackdropToShape &&
             left.paintCapGradient == right.paintCapGradient &&
             left.capGradient == right.capGradient && left.capColour == right.capColour &&
+            left.viewportRect == right.viewportRect && left.viewportFade == right.viewportFade &&
             std::memcmp(left.contours.data(), right.contours.data(),
                 sizeof(left.contours)) == 0 &&
             (!left.hasExclusion || std::memcmp(&left.exclusion,
@@ -1779,7 +1780,10 @@ void Engine::Impl::make_pipeline_layouts()
 	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(glm::uvec4));
 	vk::PipelineLayout compositeLayout = builder.build(deviceDeletionQueue);
 	pipelineLayouts[PipelineType::eCompositeHosted3D] = compositeLayout;
-	pipelineLayouts[PipelineType::eComposite2D] = compositeLayout;
+	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
+	builder.add(descriptorSetLayouts[DescriptorScope::ePost]);
+	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(Renderer2DCompositeConstants));
+	pipelineLayouts[PipelineType::eComposite2D] = builder.build(deviceDeletionQueue);
 
 	builder.add(descriptorSetLayouts[DescriptorScope::eModel3DTexture]);
 	builder.add_push_constants(
@@ -2273,7 +2277,13 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 	regions.reserve(orderedRegions.size());
 	for (const OrderedBackdropRegion& entry : orderedRegions)
 	{
-		regions.push_back(entry.region);
+        auto fade = entry.visual.viewportFade;
+        fade.rect *= glm::vec4(outputScaleX, outputScaleY, outputScaleX, outputScaleY);
+        fade.topHeight *= outputScaleY;
+        fade.bottomHeight *= outputScaleY;
+        const auto clip = entry.visual.clipRect * glm::vec4(outputScaleX, outputScaleY, outputScaleX, outputScaleY);
+        auto clipped = renderer2d_clip_backdrop_region(entry.region, clip, fade);
+        regions.insert(regions.end(), clipped.begin(), clipped.end());
 	}
 	return regions;
 }

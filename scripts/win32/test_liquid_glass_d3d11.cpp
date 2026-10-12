@@ -649,6 +649,39 @@ int wmain(int argc, wchar_t** argv)
         return checkReference(samplePixels);
     };
 
+    // Native viewport fades retain the complete lens geometry. Check every
+    // row across both edges, including the small header controls which used
+    // to be subdivided into separate optical strips.
+    for (const unsigned buttonHeight : { 192u, 22u })
+    {
+        auto maskedRegion = coverageRegion;
+        maskedRegion.shape = 1u;
+        maskedRegion.height = buttonHeight;
+        maskedRegion.width = buttonHeight == 22u ? 78u : region.width;
+        maskedRegion.y = buttonHeight == 22u ? 48 : region.y;
+        maskedRegion.viewportRect = { 0, 52.0f - maskedRegion.y,
+            static_cast<float>(maskedRegion.width), 152 };
+        maskedRegion.viewportFade = { 16, 20, 0, 1 };
+        if (!renderSample(whiteBackdrop.Get(), maskedRegion)) return 60;
+        const auto smooth = [](float distance, float extent) {
+            const float t = std::clamp(distance / extent, 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        };
+        unsigned fadeFailures = 0;
+        for (unsigned y = 0; y < height; ++y)
+        {
+            const float point = y + 0.5f;
+            const bool inside = point >= 52 && point < 204 &&
+                point >= maskedRegion.y && point < maskedRegion.y + maskedRegion.height;
+            const float alpha = inside ? std::min(smooth(point - 52, 16), smooth(204 - point, 20)) : 0;
+            const int actual = samplePixels[y * width + maskedRegion.x + maskedRegion.width / 2] & 255u;
+            if (std::abs(actual - (16 + 239 * alpha)) > 2) ++fadeFailures;
+        }
+        std::cout << "Continuous viewport fade, lens height " << buttonHeight
+                  << ": " << fadeFailures << " pixel failures\n";
+        if (fadeFailures) return 61;
+    }
+
     // Blur must affect the centre, where the edge's refraction band is zero.
     // Compare stripe contrast there: an edge-only frost blend cannot pass.
     D3D11_SUBRESOURCE_DATA stripedData { pixels.data(),

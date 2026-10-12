@@ -9,6 +9,8 @@
 #include "../../engine/src/platform/win32/liquid_glass_dwm_identity.h"
 #include "../../engine/src/platform/win32/liquid_glass_dwm_protocol.h"
 #include "../../engine/src/platform/win32/liquid_glass_dwm_security.h"
+#include "../../engine/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
+#include "liquid_glass_runtime_cache.h"
 
 #include <array>
 #include <cstdint>
@@ -19,6 +21,32 @@
 namespace
 {
 using vibrance::win32::LiquidDwmHookConfig;
+using vibrance::win32::LiquidDwmWindows10Config;
+
+DWORD windows_build_number()
+{
+    using GetVersionFn = LONG (WINAPI*)(OSVERSIONINFOW*);
+    const auto getVersion = reinterpret_cast<GetVersionFn>(GetProcAddress(
+        GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    OSVERSIONINFOW version { sizeof(version) };
+    return getVersion && getVersion(&version) == 0 ? version.dwBuildNumber : 0u;
+}
+
+bool native_hooks_allowed()
+{
+#if defined(_M_ARM64)
+    constexpr std::uint32_t machine = IMAGE_FILE_MACHINE_ARM64;
+#else
+    constexpr std::uint32_t machine = IMAGE_FILE_MACHINE_AMD64;
+#endif
+    return vibrance::win32::liquid_dwm_native_hooks_allowed(windows_build_number(), machine);
+}
+
+struct MappingHandle
+{
+    HANDLE value = nullptr;
+    ~MappingHandle() { if (value) CloseHandle(value); }
+};
 
 bool enable_debug_privilege()
 {
@@ -255,6 +283,55 @@ bool resolve_config(const std::wstring& symbolCache,
     return resolved;
 }
 
+bool resolve_windows10_config(const std::wstring& path, const std::wstring& symbolCache,
+    LiquidDwmHookConfig& config, LiquidDwmWindows10Config& layout)
+{
+    // Separate resolution avoids treating Windows 10 entry pointers as
+    // Windows 11 rendering-command pointers. No Windows 11 symbols are changed.
+    if (!vibrance::win32::file_sha256(path, config.dwmcoreSha256)) return false;
+    config.moduleMachine = IMAGE_FILE_MACHINE_AMD64;
+    const HANDLE process = GetCurrentProcess();
+    const auto searchPath = symbolCache + L";srv*" + symbolCache + L"*https://msdl.microsoft.com/download/symbols";
+    SymSetOptions(SYMOPT_DEFERRED_LOADS);
+    if (!SymInitializeW(process, searchPath.c_str(), FALSE)) return false;
+    const DWORD64 base = SymLoadModuleExW(process, nullptr, path.c_str(), L"dwmcore", 0, 0, nullptr, 0);
+    const auto resolve = [&](const char* name, std::uint64_t& rva) {
+        return base && resolve_symbol(process, name, base, rva);
+    };
+    const bool resolved =
+        resolve("dwmcore!?Draw@CBrush@@UEAAJPEAVCDrawingContext@@AEBUD2D_SIZE_F@@PEAVCDrawListCache@@@Z", config.brushDrawRva) &&
+        resolve("dwmcore!??_7CColorBrush@@6BIUnknown@@@", config.colourBrushVtableRva) &&
+        resolve("dwmcore!?Render@CHWDrawListEntry@@UEAAJPEAVCDrawingContext@@AEBVCMILMatrix@@MW4Enum@MilCompositingMode@@@Z", config.drawListEntryRenderRva) &&
+        resolve("dwmcore!??_7CHWDrawListEntry@@6BCBaseDrawListEntry@@@", config.drawListEntryVtableRva) &&
+        resolve("dwmcore!?EmitGeometry@CCommonRenderingEffect@@UEBAJPEAVCD3DBatchExecutionContext@@PEBVCBaseDrawListEntry@@@Z", config.commonEffectEmitRva) &&
+        resolve("dwmcore!?EmitGeometry@CBrushRenderingEffect@@UEBAJPEAVCD3DBatchExecutionContext@@PEBVCBaseDrawListEntry@@@Z", config.brushEffectEmitRva) &&
+        resolve("dwmcore!?Flush@CD3DBatchExecutionContext@@QEAAXW4FlushReason@@@Z", config.batchFlushRva) &&
+        resolve("dwmcore!?SetLocalToWorld@CD3DBatchExecutionContext@@QEAAXAEBVCMILMatrix@@@Z", layout.setLocalToWorldRva) &&
+        resolve("dwmcore!?GetBrushParameters@CColorBrush@@UEBAJPEAVCBrushDrawListGenerator@@@Z", layout.brushParametersRva) &&
+        resolve("dwmcore!??0CColorBrush@@QEAA@PEAVCComposition@@AEBU_D3DCOLORVALUE@@@Z", layout.colourConstructorRva) &&
+        resolve("dwmcore!?GetBounds@CHWDrawListEntry@@UEBA?AUD2D_RECT_F@@XZ", layout.entryBoundsRva) &&
+        resolve("dwmcore!?GetRenderingEffect@CHWDrawListEntry@@UEBAPEAVCRenderingEffect@@XZ", layout.entryEffectRva) &&
+        resolve("dwmcore!?EmitGeometryImpl@CRenderingEffect@@KAJPEAVCD3DBatchExecutionContext@@PEBVCHWDrawListEntry@@_N@Z", layout.emitGeometryImplRva);
+    SymCleanup(process);
+    if (!resolved) return false;
+    std::memcpy(layout.dwmcoreSha256, config.dwmcoreSha256, 32u);
+    MappingHandle file { CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr) };
+    if (file.value == INVALID_HANDLE_VALUE) { file.value = nullptr; return false; }
+    MappingHandle mapping { CreateFileMappingW(file.value, nullptr,
+        PAGE_READONLY | SEC_IMAGE_NO_EXECUTE, 0, 0, nullptr) };
+    if (!mapping.value) return false;
+    const auto* image = static_cast<const std::uint8_t*>(MapViewOfFile(mapping.value, FILE_MAP_READ, 0, 0, 0));
+    if (!image) return false;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(image + dos->e_lfanew);
+    const bool valid = nt->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
+        vibrance::win32::validate_liquid_windows10_layout({ image, nt->OptionalHeader.SizeOfImage },
+            layout, config.commonEffectEmitRva, config.brushDrawRva, config.drawListEntryRenderRva);
+    UnmapViewOfFile(image);
+    return valid;
+}
+
 std::uintptr_t remote_module_base(DWORD pid, const wchar_t* name)
 {
     const HANDLE snapshot = CreateToolhelp32Snapshot(
@@ -342,6 +419,20 @@ bool load_remote(HANDLE process, DWORD pid,
 
 int wmain(int argc, wchar_t** argv)
 {
+    if (argc == 4 && _wcsicmp(argv[1], L"--resolve-windows10") == 0)
+    {
+        LiquidDwmHookConfig config {};
+        LiquidDwmWindows10Config layout {};
+        if (!resolve_windows10_config(argv[2], argv[3], config, layout))
+        {
+            std::wcerr << L"Windows 10 22H2 DWM symbols or object layout are unsupported\n";
+            return 4;
+        }
+        std::wcout << L"Validated Windows 10 22H2 x64 entry pipeline; brush=0x" << std::hex <<
+            config.brushDrawRva << L" entry=0x" << config.drawListEntryRenderRva <<
+            L" common=0x" << config.commonEffectEmitRva << L" matrix=0x" << layout.setLocalToWorldRva << L"\n";
+        return 0;
+    }
     if (argc == 4 && _wcsicmp(argv[1], L"--symbol-rva") == 0)
     {
         wchar_t systemDirectory[MAX_PATH] {};
@@ -456,6 +547,11 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc == 3 && _wcsicmp(argv[1], L"--load-only") == 0)
     {
+        if (!native_hooks_allowed())
+        {
+            std::wcerr << L"Native Liquid Glass hooks are unavailable on this Windows build or architecture\n";
+            return 23;
+        }
         const std::wstring extension = argv[2];
         if (GetFileAttributesW(extension.c_str()) == INVALID_FILE_ATTRIBUTES ||
             !enable_debug_privilege())
@@ -526,6 +622,8 @@ int wmain(int argc, wchar_t** argv)
             vibrance::win32::liquidDwmStatusName);
         if (!mapping)
         {
+            std::wcerr << L"Native Liquid Glass status is unavailable in this session (Win32 error "
+                << GetLastError() << L"). The extension may not have started.\n";
             return 13;
         }
         const auto* values = static_cast<const LONG*>(MapViewOfFile(mapping,
@@ -533,7 +631,9 @@ int wmain(int argc, wchar_t** argv)
             vibrance::win32::liquidDwmStatusWords * sizeof(LONG)));
         if (!values)
         {
+            const auto error = GetLastError();
             CloseHandle(mapping);
+            std::wcerr << L"Cannot read native Liquid Glass status (Win32 error " << error << L").\n";
             return 13;
         }
         for (std::uint32_t index = 0;
@@ -551,9 +651,25 @@ int wmain(int argc, wchar_t** argv)
             L"EXTENSION_DLL SYMBOL_CACHE_DIRECTORY\n";
         return 2;
     }
-    const std::wstring extension = argv[1];
+    if (argc == 4 && _wcsicmp(argv[1], L"--stage-runtime") == 0)
+    {
+        const auto cached = vibrance::win32::cache_liquid_runtime(argv[2], argv[3]);
+        if (cached.empty())
+        {
+            std::wcerr << L"Cannot stage the Liquid Glass runtime bundle\n";
+            return 3;
+        }
+        std::wcout << cached << L"\n";
+        return 0;
+    }
+    if (!native_hooks_allowed())
+    {
+        std::wcerr << L"Native Liquid Glass hooks are unavailable on this Windows build or architecture\n";
+        return 23;
+    }
+    const std::wstring sourceExtension = argv[1];
     const std::wstring symbolCache = argv[2];
-    if (GetFileAttributesW(extension.c_str()) ==
+    if (GetFileAttributesW(sourceExtension.c_str()) ==
         INVALID_FILE_ATTRIBUTES ||
         !CreateDirectoryW(symbolCache.c_str(), nullptr) &&
         GetLastError() != ERROR_ALREADY_EXISTS)
@@ -561,8 +677,25 @@ int wmain(int argc, wchar_t** argv)
         std::wcerr << L"Extension or symbol cache path is unavailable\n";
         return 3;
     }
+    const auto extension = vibrance::win32::cache_liquid_runtime(
+        sourceExtension, (std::filesystem::path(symbolCache) / L"runtime").wstring());
+    if (extension.empty())
+    {
+        std::wcerr << L"Cannot stage the Liquid Glass runtime bundle\n";
+        return 3;
+    }
     LiquidDwmHookConfig config {};
-    if (!resolve_config(symbolCache, config))
+    LiquidDwmWindows10Config windows10Layout {};
+#if defined(_M_ARM64)
+    const bool windows10 = false;
+#else
+    const bool windows10 = vibrance::win32::liquid_dwm_uses_windows10_adapter(
+        windows_build_number(), IMAGE_FILE_MACHINE_AMD64);
+#endif
+    wchar_t systemDirectory[MAX_PATH] {};
+    GetSystemDirectoryW(systemDirectory, ARRAYSIZE(systemDirectory));
+    if (!(windows10 ? resolve_windows10_config(std::wstring(systemDirectory) + L"\\dwmcore.dll",
+            symbolCache, config, windows10Layout) : resolve_config(symbolCache, config)))
     {
         std::wcerr << L"Matching dwmcore PDB symbols are unavailable\n";
         return 4;
@@ -612,6 +745,22 @@ int wmain(int argc, wchar_t** argv)
         InterlockedExchange(status + index, 0);
     }
     vibrance::win32::PublicReadSecurity security;
+    MappingHandle windows10Mapping;
+    if (windows10)
+    {
+        windows10Mapping.value = CreateFileMappingW(INVALID_HANDLE_VALUE, security.get(),
+            PAGE_READWRITE, 0, sizeof(windows10Layout), vibrance::win32::liquidDwmWindows10ConfigName);
+        auto* layoutView = windows10Mapping.value ? MapViewOfFile(windows10Mapping.value,
+            FILE_MAP_WRITE, 0, 0, sizeof(windows10Layout)) : nullptr;
+        if (!layoutView)
+        {
+            UnmapViewOfFile(const_cast<LONG*>(status));
+            CloseHandle(statusMapping);
+            return 6;
+        }
+        std::memcpy(layoutView, &windows10Layout, sizeof(windows10Layout));
+        UnmapViewOfFile(layoutView);
+    }
     const HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE,
         security.get(), PAGE_READWRITE, 0, sizeof(config),
         vibrance::win32::liquidDwmConfigName);

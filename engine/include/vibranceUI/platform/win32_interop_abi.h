@@ -13,7 +13,7 @@
 // This header is the only contract shared by SDK consumers and the MSVC
 // C++/WinRT companion. Keep it POD-only: no C++ standard-library objects,
 // COM pointers, or allocations may cross the DLL boundary.
-constexpr std::uint32_t VIBRANCE_WIN32_INTEROP_ABI_VERSION = 8u;
+constexpr std::uint32_t VIBRANCE_WIN32_INTEROP_ABI_VERSION = 9u;
 
 enum VibranceWin32MediaPlaybackQuality : std::uint32_t
 {
@@ -106,6 +106,8 @@ struct VibranceWin32NotificationItem
     char title[384] {};
     char message[768] {};
     char iconPath[768] {};
+    char activationArguments[4096] {};
+    std::uint32_t activationKind = 0u;
 };
 
 struct VibranceWin32ApplicationIcon
@@ -159,6 +161,12 @@ using VibranceWin32InteropActivateNotificationSourceFn =
     std::uint32_t(VIBRANCE_WIN32_INTEROP_CALL*)(
         VibranceWin32InteropHandle,
         const char*);
+using VibranceWin32InteropActivateNotificationFn =
+    std::uint32_t(VIBRANCE_WIN32_INTEROP_CALL*)(VibranceWin32InteropHandle,
+        const char*, const char*, std::uint32_t);
+
+constexpr const char* VIBRANCE_WIN32_INTEROP_ACTIVATE_NOTIFICATION_SYMBOL =
+    "vibrance_win32_interop_activate_notification";
 using VibranceWin32InteropResolveApplicationIconFn =
     std::uint32_t(VIBRANCE_WIN32_INTEROP_CALL*)(
         VibranceWin32InteropHandle,

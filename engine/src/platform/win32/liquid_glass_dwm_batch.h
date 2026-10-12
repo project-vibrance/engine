@@ -52,6 +52,26 @@ bool read_liquid_native_entry_identity(void* pointer,
     __try
     {
         const auto* entry = static_cast<const std::uint8_t*>(pointer);
+        if (windows10Adapter)
+        {
+            // EmitGeometry receives the CBaseDrawListEntry interface;
+            // CHWDrawListEntry::Render receives its complete object instead.
+            identity.vtable = *reinterpret_cast<const std::uintptr_t*>(entry + 0x10);
+            if (identity.vtable != reinterpret_cast<std::uintptr_t>(dwmcoreModule) +
+                    hookConfig.drawListEntryVtableRva) return false;
+            identity.geometry = *reinterpret_cast<const std::uint8_t* const*>(entry + 0xb8);
+            // GetRenderingEffect's +0xb0 read is relative to that +0x10 base.
+            identity.effect = *reinterpret_cast<const void* const*>(entry + 0xc0);
+            if (!identity.geometry || !identity.effect) return false;
+            // +0x40/+0x48/+0x50 are a temporary primitive queue, not colour
+            // identity. Render appends work after tagging; EmitGeometry then
+            // consumes it. The queue can also be empty on the first draw.
+            identity.colourResource = nullptr;
+            std::fill(std::begin(identity.tint), std::end(identity.tint), 0.0f);
+            std::memcpy(identity.bounds, identity.geometry + 0x48, sizeof(identity.bounds));
+            for (float value : identity.bounds) if (!std::isfinite(value)) return false;
+            return true;
+        }
         const auto* base = reinterpret_cast<const std::uint8_t*>(dwmcoreModule);
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
         if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
@@ -132,9 +152,11 @@ void tag_native_marker_entry(void* entry, std::uint32_t slot,
         !published.width || !published.height ||
         !read_liquid_native_entry_identity(entry, identity))
     {
+        if (windows10Adapter) status(225);
         untag_native_marker_entry(entry);
         return;
     }
+    if (windows10Adapter) status(224);
     try
     {
         std::lock_guard<std::mutex> lock(nativeMarkerTagsMutex);
@@ -318,7 +340,7 @@ bool flush_liquid_native_batch(void* executionContext,
         if (type != D3D11_DEVICE_CONTEXT_IMMEDIATE) return false;
         // Geometry emitted before this command must reach the output before
         // the live backdrop is copied. Flushing a deferred context cannot do so.
-        nativeBatchFlush(executionContext, 0x80000000u);
+        nativeBatchFlush(executionContext, windows10Adapter ? 0u : 0x80000000u);
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
@@ -417,6 +439,9 @@ bool liquid_native_batch_region(const LiquidNativeBatchMarker& marker,
         region.capColour[channel] = float((published.paintCapGradient >> (8u + channel * 8u)) & 255u) / 255.0f;
     std::copy(std::begin(published.capGradient), std::end(published.capGradient),
         region.capGradient.begin());
+    for (unsigned index = 0; index < 4; ++index) region.viewportRect[index] = published.viewportRect[index] * scale;
+    region.viewportFade = { published.viewportFade[0] * scale, published.viewportFade[1] * scale,
+        published.viewportFade[2], published.viewportFade[3] };
     const auto copyContour = [scale](const auto& source, auto& destination) {
         destination.x = source.x * scale;
         destination.y = source.y * scale;
@@ -441,12 +466,24 @@ bool liquid_native_batch_region(const LiquidNativeBatchMarker& marker,
     return true;
 }
 
-bool render_batch_marker(void* command, void* executionContext)
+bool render_native_marker(const LiquidNativeBatchMarker& marker, void* executionContext)
 {
-    LiquidNativeBatchMarker marker {};
-    if (!read_liquid_native_batch_marker(command, executionContext, marker))
-        return false;
     status(147);
+    std::unique_lock<std::mutex> rendererLock(rendererMutex, std::defer_lock);
+    ComPtr<ID3D11DeviceContext> retainedContext;
+    ComPtr<ID3D11Device> retainedDevice;
+    if (windows10Adapter)
+    {
+        // A transition never waits behind another optical draw. The observer
+        // retires device resources once the current draw has left this scope.
+        if (!marker.complete || !windows10_optical_render_ready() || !rendererLock.try_lock())
+        { status(230); return true; }
+        if (!windows10_optical_render_ready()) { status(230); return true; }
+        retainedContext = marker.context;
+        retainedContext->GetDevice(&retainedDevice);
+        const HRESULT reason = retainedDevice ? retainedDevice->GetDeviceRemovedReason() : E_POINTER;
+        if (FAILED(reason)) { windows10_suspend_optical_render(reason); return true; }
+    }
     if (!marker.complete ||
         !flush_liquid_native_batch(executionContext, marker.context))
     {
@@ -483,6 +520,17 @@ bool render_batch_marker(void* command, void* executionContext)
         }
         D3D11_TEXTURE2D_DESC description {};
         texture->GetDesc(&description);
+        if (windows10Adapter)
+        {
+            ComPtr<ID3D11Device> targetDevice;
+            texture->GetDevice(&targetDevice);
+            if (!windows10_device_matches(retainedDevice.Get(), targetDevice.Get()))
+            {
+                status(232);
+                windows10_suspend_optical_render(DXGI_ERROR_INVALID_CALL);
+                return true;
+            }
+        }
         detail(157, static_cast<LONG>(description.Width));
         detail(158, static_cast<LONG>(description.Height));
         detail(159, static_cast<LONG>(description.Format));
@@ -524,6 +572,10 @@ bool render_batch_marker(void* command, void* executionContext)
         shape.paintCapGradient = published.paintCapGradient;
         std::copy(std::begin(published.capGradient), std::end(published.capGradient),
             std::begin(shape.capGradient));
+        std::copy(std::begin(published.viewportRect), std::end(published.viewportRect), std::begin(shape.viewportRect));
+        std::copy(std::begin(published.viewportFade), std::end(published.viewportFade), std::begin(shape.viewportFade));
+        shape.viewportRect[0] += static_cast<float>(published.x - shape.x);
+        shape.viewportRect[1] += static_cast<float>(published.y - shape.y);
         if (published.width == shape.width && published.height == shape.height)
         {
             // Retained marker geometry can stay unchanged while a neighbour
@@ -601,7 +653,13 @@ bool render_batch_marker(void* command, void* executionContext)
             status(152);
             return true;
         }
-        std::lock_guard<std::mutex> lock(rendererMutex);
+        if (!windows10Adapter) rendererLock.lock();
+        if (windows10Adapter)
+        {
+            const HRESULT reason = retainedDevice->GetDeviceRemovedReason();
+            if (FAILED(reason)) { windows10_suspend_optical_render(reason); return true; }
+            if (!windows10_optical_render_ready()) { status(230); return true; }
+        }
         auto& snapshot = activeDdaTarget ? ddaBackgrounds[marker.slot] :
             inCaptureRender ? captureBackgrounds[marker.slot] :
                 displayBackgrounds[marker.slot];
@@ -616,7 +674,19 @@ bool render_batch_marker(void* command, void* executionContext)
             status(liquidDwmRegionStatusBase + marker.slot);
         }
         else status(152);
+        if (windows10Adapter)
+        {
+            const HRESULT reason = retainedDevice->GetDeviceRemovedReason();
+            if (FAILED(reason)) windows10_suspend_optical_render(reason);
+        }
     }
     catch (...) { status(152); }
     return true;
+}
+
+bool render_batch_marker(void* command, void* executionContext)
+{
+    LiquidNativeBatchMarker marker {};
+    return read_liquid_native_batch_marker(command, executionContext, marker) &&
+        render_native_marker(marker, executionContext);
 }
