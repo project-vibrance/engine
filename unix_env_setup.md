@@ -27,7 +27,7 @@ binaries typically contain only the architecture of that Homebrew installation.
 GLM is header-only and can be shared between targets.
 For a nonstandard package prefix, add it to `CMAKE_PREFIX_PATH` in `.env.cmake`.
 
-Use Xcode 26 or newer and the macOS 26 release (or newer) of
+Use Xcode 26 or newer and a release with Metal 3 support of
 [Metal-cpp](https://developer.apple.com/metal/cpp/). Extract Metal-cpp into
 `~/dev/metal-cpp`; CMake discovers that location automatically. For another
 location, set `METAL_CPP_PATH` in `.env.cmake` or pass it with `-D`.
@@ -36,9 +36,8 @@ Metal-cpp is header-only and the same checkout supports Intel and Apple silicon.
 The macOS media session companion uses the MediaRemote adapter source tree.
 Set `MEDIAREMOTE_ADAPTER_ROOT` in `.env.cmake` to its directory under `~/dev`.
 
-The deployment target defaults to macOS 13.0. Metal 3 is used on supported GPUs
-on macOS 13–15 and on Intel Macs; macOS 26 and newer select Metal 4 when the GPU
-supports it, with Metal 3 as the compatibility path. Versions before macOS 13
+The deployment target defaults to macOS 13.0. Metal 3 is used on every supported
+GPU on Intel and Apple silicon, including macOS 26 and newer. Versions before macOS 13
 cannot provide Metal 3. There is no Vulkan/MoltenVK runtime or Vulkan SDK
 requirement for macOS builds.
 

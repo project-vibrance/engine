@@ -26,9 +26,6 @@ struct EngineCreateInfo
     uint32_t msaaSamples = 4;
     RendererPresentMode presentMode = RendererPresentMode::eAuto;
     RenderBackend renderBackend = default_render_backend();
-    // Metal 4 is preferred by default. Transaction-backed surfaces can opt
-    // into Metal 3's command-buffer scheduling handshake.
-    bool preferMetal4 = true;
     PresentationBackend presentationBackend = PresentationBackend::eNative;
     // 0 means uncapped; otherwise draw waits to stay near the requested frame rate
     uint32_t targetFrameRate = 0;

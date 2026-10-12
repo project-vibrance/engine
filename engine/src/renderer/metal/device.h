@@ -8,8 +8,6 @@
 #include <array>
 #include <span>
 #include <stdexcept>
-#include <condition_variable>
-#include <mutex>
 
 namespace vibrance::metal
 {
@@ -42,9 +40,8 @@ class SubmissionError : public std::runtime_error
 class Device
 {
   public:
-    explicit Device(bool preferMetal4 = true);
+    Device();
     ~Device();
-    bool metal4 = false;
     bool diagnosticsEnabled = false;
     bool gpuDiagnosticsEnabled = false;
     struct Diagnostics
@@ -60,12 +57,8 @@ class Device
     Owned<MTL::Device> gpu;
     Owned<MTL::CommandQueue> queue;
     Owned<MTL::SamplerState> sampler;
-    Owned<MTL4::CommandQueue> queue4;
-    Owned<MTL::ResidencySet> residency;
-    Owned<MTL::SharedEvent> completed;
     Owned<MTL::CommandBuffer> commands;
     Owned<MTL::ComputeCommandEncoder> encoder;
-    Owned<MTL4::ComputeCommandEncoder> encoder4;
     MTL::ComputePipelineState *boundPipeline = nullptr;
     std::array<MTL::Texture *, 5> boundMetal3Textures{};
     struct ConstantPage
@@ -73,32 +66,6 @@ class Device
         Owned<MTL::Buffer> buffer;
         size_t used = 0;
     };
-    // A submission owns its constant ranges until GPU completion. Argument
-    // tables are snapshotted by Metal at each dispatch, so one table suffices.
-    struct Metal4Feedback
-    {
-        std::mutex mutex;
-        std::condition_variable available;
-        Owned<NS::Error> error;
-        double gpuStartTime = 0, gpuEndTime = 0;
-        bool ready = false;
-        void finish(NS::Error *result, double begin = 0, double end = 0);
-    };
-    struct Metal4Frame
-    {
-        Owned<MTL4::CommandAllocator> allocator;
-        Owned<MTL4::CommandBuffer> commands;
-        std::vector<ConstantPage> constantPages;
-        size_t constantPage = 0;
-        uint64_t completionValue = 0;
-        std::shared_ptr<Metal4Feedback> feedback;
-        bool sampleGpu = false;
-    };
-    // Separate command memory and CPU-written constants let the next frame be
-    // encoded while the GPU consumes the previous one. Queue-stage barriers
-    // still order accesses to the shared offscreen colour and scratch images.
-    std::array<Metal4Frame, 2> metal4Frames;
-    size_t metal4Frame = 0;
     struct Metal3Frame
     {
         Owned<MTL::CommandBuffer> pending;
@@ -111,15 +78,6 @@ class Device
     // constants and command-buffer references need separate frame storage.
     std::array<Metal3Frame, 2> metal3Frames;
     size_t metal3Frame = 0;
-    Owned<MTL4::ArgumentTable> arguments;
-    std::array<MTL::ResourceID, 5> boundTextures{};
-    struct ResidentResource
-    {
-        Owned<MTL::Resource> resource;
-        uint64_t submission = 0;
-    };
-    std::unordered_map<MTL::Resource *, ResidentResource> residentResources;
-    bool residencyChanged = false;
     struct PipelineNameHash
     {
         using is_transparent = void;
@@ -140,9 +98,7 @@ class Device
     // allocation for shader names longer than std::string's inline capacity.
     std::unordered_map<std::string, Owned<MTL::ComputePipelineState>, PipelineNameHash,
                        PipelineNameEqual> pipelines;
-    uint64_t serial = 0;
     bool recording = false;
-    bool inFlight = false;
     Owned<MTL::Function> function(const char *name);
     MTL::ComputePipelineState *pipeline(const char *name);
     Owned<MTL::Texture> target(uint32_t width, uint32_t height,
@@ -156,10 +112,8 @@ class Device
     void submit(std::span<CA::MetalDrawable* const> drawables, bool presentWithTransaction);
 
   private:
-    void use_resource(MTL::Resource *resource);
     std::pair<MTL::Buffer *, size_t> write_constants(const void *data, size_t size);
     void retire_metal3_frame(Metal3Frame &frame);
-    void retire_metal4_frame(Metal4Frame &frame);
     void record_gpu_sample(double begin, double end);
     void wait_idle();
 };

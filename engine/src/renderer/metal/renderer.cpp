@@ -179,7 +179,7 @@ struct Engine::Impl
     }
 
     explicit Impl(const EngineCreateInfo &info)
-        : device(info.preferMetal4), window(info.nativeWindowHandle),
+        : device(), window(info.nativeWindowHandle),
           audio(info.enableAudio), cap(info.maxRenderPixels),
           frameRate(info.targetFrameRate), preference(info.presentMode)
     {
@@ -209,7 +209,7 @@ struct Engine::Impl
         models.emplace(0, make_metal_triangle(upload));
         resize(info.framebufferWidth, info.framebufferHeight);
         valid = true;
-        Logger::fetch_logger()->info(std::string("Native Metal ") + (device.metal4 ? "4" : "3") +
+        Logger::fetch_logger()->info(std::string("Native Metal 3") +
                                      " renderer: " + device.gpu->name()->utf8String());
     }
     ~Impl()
@@ -811,7 +811,6 @@ struct Engine::Impl
             if (!drawable) { presentationComplete = false; return; }
             retainedDrawables.push_back(NS::RetainPtr(drawable));
             drawables.push_back(drawable);
-            if (device.metal4) device.queue4->wait(drawable);
             glm::uvec4 composite(2u | 8u | (externalBackdrop && backdrop ? 1u : 0u), 0, 0, 0);
             device.dispatch("composite_2d_comp", &composite, sizeof(composite), extent.width, extent.height,
                 {colour.get(), colour.get(), backdrop ? texture(backdrop.get()) : colour.get(),
@@ -1187,8 +1186,8 @@ struct Engine::Impl
         const auto presentationStart = device.diagnosticsEnabled ? Clock::now() : Clock::time_point{};
         if (device.diagnosticsEnabled) cpuTimings[1].add(presentationStart - recordingStart);
         if (!damageBounds.empty()) encode_presentation(layer.get(), true);
-        // All native content and the base drawable share one submission. Metal
-        // 4 no longer waits for a complete GPU frame between individual lenses.
+        // Native content and the base drawable share one submission and one
+        // scheduling wait before the Core Animation transaction presents.
         device.submit(drawables, nativeGlass->active() || surface_presents_with_transaction(layer.get()));
         if (!presentationComplete) { frameDamage.invalidate(); return; }
         ++frameCount;
@@ -1526,7 +1525,7 @@ std::string Engine::vulkan_api_version() const
 }
 std::string Engine::graphics_api_version() const
 {
-    return impl->device.metal4 ? "4" : "3";
+    return "3";
 }
 void Engine::refresh_localised_texts()
 {

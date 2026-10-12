@@ -30,10 +30,8 @@ int main(int argc, char **argv)
         options.enableAudio = false;
         options.focusOnShow = false;
         options.transparentFramebuffer = true;
-        options.configureEngine = [metal3BlurExpansion, metal3Expansion](EngineCreateInfo &info) {
+        options.configureEngine = [](EngineCreateInfo &info) {
             info.defaultRenderer2DFontPath = "/System/Library/Fonts/Helvetica.ttc";
-            if (metal3BlurExpansion || metal3Expansion)
-                info.preferMetal4 = false;
         };
         GlfwWindowHost host(options);
         if (!host.open())

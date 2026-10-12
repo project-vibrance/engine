@@ -106,9 +106,9 @@ struct GlfwPanelWindowTemplateOptions
     float uiScale = 1.0f;
     float titleHeight = 58.0f;
     float resizeEdgeThickness = 12.0f;
-    float cornerRadius = 28.0f;
-    float panelSquircleAmount = 1.0f;
-    float panelSquirclePower = 3.65f;
+    float cornerRadius = UiPanelShape::radius;
+    float panelSquircleAmount = UiPanelShape::amount;
+    float panelSquirclePower = UiPanelShape::power;
     glm::vec4 panelInset { 0.0f };
     glm::vec4 contentMargin { 24.0f, 72.0f, 24.0f, 24.0f };
     bool resizable = true;

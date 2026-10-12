@@ -191,6 +191,27 @@ struct UiButtonOptions
     std::function<void(const PointerInputEvent&)> onClick;
 };
 
+inline UiButtonOptions ui_button_options_from_theme(
+    const UiTheme& theme,
+    bool primary = false)
+{
+    UiButtonOptions options;
+    options.primary = primary;
+    // Clamped to half the control height by the renderer: capsule actions.
+    options.cornerRadius = 1000.0f;
+    options.textColor = primary ? "#FFFFFFFF" : theme.text;
+    options.iconTint = primary ? "#FFFFFFFF" : theme.icon;
+    options.backgroundColor = primary ? theme.accent : theme.surfaceMuted;
+    options.hoveredBackgroundColor = primary ? theme.accentHover : theme.surfaceElevated;
+    options.pressedBackgroundColor = primary ? theme.accentPressed : theme.surface;
+    options.disabledBackgroundColor = theme.surfaceMuted;
+    options.outlineColor = primary ? "#FFFFFF38" : theme.outline;
+    options.hoveredOutlineColor = primary ? "#FFFFFF55" : theme.outlineStrong;
+    options.pressedOutlineColor = primary ? "#00000018" : theme.outlineStrong;
+    options.disabledOutlineColor = theme.outline;
+    return options;
+}
+
 struct UiSubmenuRowOptions
 {
     // Responsive card row built on the standard text-button interaction model.

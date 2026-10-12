@@ -14,6 +14,25 @@
 #include <vibranceUI/ui/builder.h>
 #include <vibranceUI/ui/styles.h>
 
+// Window shell profile. Matched against
+// a native AppKit window contour at 2x backing scale; the power also lands on
+// the renderer's mask quantisation grid so paint and clipping agree.
+namespace UiPanelShape
+{
+    inline constexpr float radius = 24.0f;
+    inline constexpr float amount = 1.0f;
+    inline constexpr float power = 3.2f;
+}
+
+// Native alerts have broader corners than ordinary windows. Keep this
+// independent so adjusting a dialog never reshapes the main window.
+namespace UiDialogShape
+{
+    inline constexpr float radius = 40.0f;
+    inline constexpr float amount = 1.0f;
+    inline constexpr float power = 3.2f;
+}
+
 inline ShapeStyleComponent ui_clear_surface_style(float alpha = 0.0f)
 {
     // Transparent surfaces are still useful as layout parents, masks, and hit areas
@@ -38,6 +57,25 @@ struct UiSurfaceBlockOptions
     bool dynamicCache = false;
     bool clipChildren = false;
 };
+
+inline UiSurfaceBlockOptions ui_panel_surface_options(const UiTheme& theme)
+{
+    UiSurfaceBlockOptions options;
+    options.style = theme.elevated_style(0.9f);
+    options.cornerRadius = UiPanelShape::radius;
+    options.squircleAmount = UiPanelShape::amount;
+    options.squirclePower = UiPanelShape::power;
+    return options;
+}
+
+inline UiSurfaceBlockOptions ui_dialog_surface_options(const UiTheme& theme)
+{
+    auto options = ui_panel_surface_options(theme);
+    options.cornerRadius = UiDialogShape::radius;
+    options.squircleAmount = UiDialogShape::amount;
+    options.squirclePower = UiDialogShape::power;
+    return options;
+}
 
 inline entt::entity ui_create_surface_block(
     UiBuilder& ui,

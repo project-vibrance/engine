@@ -11,6 +11,7 @@ struct UiLiquidControlSurface {
     bool desktopBackdrop = false;
     bool cutoutParentPaint = false;
     bool preserveColour = false;
+    bool alwaysEnabled = false;
 };
 struct UiLiquidControlParentContour {
     ShapeComponent original;
@@ -43,7 +44,8 @@ inline ShapeStyleComponent ui_liquid_control_paint(ShapeStyleComponent paint)
 struct UiLiquidThumbPaint { ShapeStyleComponent shape; };
 
 inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
-    const UiGlassOptions& options, bool desktopBackdrop = false)
+    const UiGlassOptions& options, bool desktopBackdrop = false,
+    entt::entity onlySurface = entt::null)
 {
     auto& registry = scene.registry();
     const auto restoreParentPaint = [&](entt::entity entity, UiLiquidControlPaint& saved) {
@@ -93,12 +95,18 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
         }
     };
     for (const auto entity : registry.view<UiLiquidControlSurface, StretchDynamicsComponent>())
-        if (registry.get<UiLiquidControlSurface>(entity).preserveColour)
-            registry.get<StretchDynamicsComponent>(entity).options.enabled = enabled;
-    if (!enabled)
+        if ((onlySurface == entt::null || onlySurface == entity) &&
+            registry.get<UiLiquidControlSurface>(entity).preserveColour)
+            registry.get<StretchDynamicsComponent>(entity).options.enabled =
+                enabled || registry.get<UiLiquidControlSurface>(entity).alwaysEnabled;
+    if (!enabled && onlySurface == entt::null)
     {
         std::vector<entt::entity> restore;
-        for (auto entity : registry.view<UiLiquidControlPaint>()) restore.push_back(entity);
+        for (auto entity : registry.view<UiLiquidControlPaint>())
+        {
+            const auto* surface = registry.try_get<UiLiquidControlSurface>(entity);
+            if (!surface || !surface->alwaysEnabled) restore.push_back(entity);
+        }
         for (auto entity : restore) remove(entity);
         restore.clear();
         for (auto entity : registry.view<UiLiquidThumbPaint>()) restore.push_back(entity);
@@ -120,7 +128,6 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
         }
         for (auto entity : registry.view<UiSwitchControlComponent>())
             registry.get<UiSwitchControlComponent>(entity).liquidThumbEnabled = false;
-        return;
     }
     const auto apply = [&](entt::entity entity) {
         if (!registry.valid(entity) || !registry.all_of<ShapeStyleComponent, ShapeComponent>(entity)) return;
@@ -333,7 +340,17 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             region.liquidTint = tint;
         }
     };
-    for (auto entity : registry.view<UiLiquidControlSurface>()) apply(entity);
+    if (onlySurface != entt::null)
+    {
+        const auto* surface = registry.try_get<UiLiquidControlSurface>(onlySurface);
+        if (enabled || (surface && surface->alwaysEnabled)) apply(onlySurface);
+        else remove(onlySurface);
+        return;
+    }
+    for (auto entity : registry.view<UiLiquidControlSurface>())
+        if (enabled || registry.get<UiLiquidControlSurface>(entity).alwaysEnabled)
+            apply(entity);
+    if (!enabled) return;
     const auto thumb = [&](entt::entity entity, bool dragging) {
         if (!registry.valid(entity) || !registry.all_of<ShapeStyleComponent>(entity)) return;
         if (!registry.any_of<UiLiquidThumbPaint>(entity))
@@ -375,4 +392,15 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
         const auto& bar = registry.get<ScrollBarInputComponent>(entity);
         thumb(bar.thumb, bar.enabled && bar.dragging);
     }
+}
+
+inline void ui_apply_liquid_button(UiBuilder& ui, entt::entity button)
+{
+    if (!ui.registry().valid(button) ||
+        !ui.registry().all_of<ButtonInputComponent, ShapeComponent>(button)) return;
+    ui_clear_glass_material(ui, button);
+    ui.registry().emplace_or_replace<UiLiquidControlSurface>(button,
+        UiLiquidControlSurface { .preserveColour = true, .alwaysEnabled = true });
+    // Creating one action must not reset another control's active drag or glass.
+    ui_update_liquid_controls(ui.scene(), true, ui_liquid_glass_options(), false, button);
 }

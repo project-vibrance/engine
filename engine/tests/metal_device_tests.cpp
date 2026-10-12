@@ -301,14 +301,9 @@ void check_async_constants(Device &device)
 void check_two_frames_in_flight(Device &device)
 {
     auto gate = own(device.gpu->newSharedEvent());
-    if (device.metal4)
-        device.queue4->wait(gate.get(), 1);
-    else
-    {
-        auto command = device.queue->commandBuffer();
-        command->encodeWait(gate.get(), 1);
-        command->commit();
-    }
+    auto command = device.queue->commandBuffer();
+    command->encodeWait(gate.get(), 1);
+    command->commit();
     // Release on successful encoding, or after a timeout so a regression in
     // CPU/GPU overlap reports a failure instead of hanging the test process.
     std::promise<void> encoded;
@@ -389,41 +384,6 @@ void check_submission_resource_lifetime(Device &device)
 
 void check_failed_submission_retirement(Device &device)
 {
-    if (device.metal4)
-    {
-        auto &frame = device.metal4Frames[device.metal4Frame];
-        const auto completedBeforeFailure = device.successfulCompletions;
-        frame.feedback = std::make_shared<Device::Metal4Feedback>();
-        frame.completionValue = device.serial + 1; // This event deliberately never signals.
-        frame.constantPage = 3;
-        device.inFlight = true;
-        auto feedback = frame.feedback;
-        {
-            auto pool = own(NS::AutoreleasePool::alloc()->init());
-            feedback->finish(NS::Error::error(string("VibranceTestSubmission"),
-                                              MTL4::CommandQueueErrorInternal, nullptr));
-        } // Error transport must own the autoreleased NSError independently.
-        auto target = device.target(8, 8);
-        auto depth = device.target(1, 1, MTL::PixelFormatR32Uint);
-        glm::uvec4 clear(0);
-        bool reported = false;
-        try
-        {
-            device.dispatch("clear_screen_comp", &clear, sizeof(clear), 8, 8, {target.get(), depth.get()});
-        }
-        catch (const SubmissionError &error)
-        {
-            reported = std::string_view(error.what()).find("VibranceTestSubmission") != std::string_view::npos;
-        }
-        if (!reported || frame.feedback || frame.completionValue || frame.constantPage ||
-            device.recording || device.inFlight || device.successfulCompletions != completedBeforeFailure)
-            throw std::runtime_error("Metal 4 failed feedback was not retained, reported and retired");
-        device.dispatch("clear_screen_comp", &clear, sizeof(clear), 8, 8, {target.get(), depth.get()});
-        device.flush();
-        if (device.successfulCompletions != completedBeforeFailure + 1)
-            throw std::runtime_error("Metal 4 feedback recovery did not complete the later frame");
-        return;
-    }
     // A small Objective-C stand-in covers the terminal error path without
     // deliberately causing a GPU fault or relying on driver timeout behaviour.
     const auto type = objc_allocateClassPair(objc_getClass("NSObject"), "VibranceFailedCommandBuffer", 0);
@@ -473,111 +433,108 @@ int main()
         return 77;
     try
     {
-        for (bool prefer4 : {false, true})
+        Device device;
+        for (const char *name :
+             {"shape_2d_comp", "shadow_2d_comp", "blur_2d_comp", "media_2d_comp", "text_msdf_comp",
+              "clear_screen_comp", "composite_2d_comp", "hosted_3d_composite_comp"})
+            device.pipeline(name);
+        device.function("model_3d_vert");
+        device.function("model_3d_frag");
+        auto target = device.target(16, 16);
+        auto depth = device.target(16, 16, MTL::PixelFormatR32Uint);
+        glm::uvec4 zero(0);
+        device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16, {target.get(), depth.get()});
+        Renderer2DPushConstants shape;
+        shape.rect = {0, 0, 16, 16};
+        shape.color0 = {1, 0, 0, 1};
+        shape.effect0.w = 1;
+        shape.data.x = uint32_t(Renderer2DPrimitive::eRectangle);
+        device.dispatch("shape_2d_comp", &shape, sizeof(shape), 16, 16, {target.get()});
+        device.flush();
+        auto readback = own(device.gpu->newBuffer(16 * 256, MTL::ResourceStorageModeShared));
+        auto command = device.queue->commandBuffer();
+        auto blit = command->blitCommandEncoder();
+        blit->copyFromTexture(target.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(16, 16, 1),
+                              readback.get(), 0, 256, 16 * 256);
+        blit->endEncoding();
+        command->commit();
+        command->waitUntilCompleted();
+        if (command->status() == MTL::CommandBufferStatusError)
+            throw std::runtime_error("Readback failed");
+        const auto pixels = static_cast<const unsigned char *>(readback->contents());
+        for (size_t y = 0; y < 16; ++y)
+            for (size_t x = 0; x < 16; ++x)
+            {
+                const auto p = pixels + y * 256 + x * 4;
+                if (p[0] != 255 || p[1] != 0 || p[2] != 0 || p[3] != 255)
+                    throw std::runtime_error("Incorrect shape pixels or command ordering");
+            }
+        // Core Animation requires premultiplied alpha at the native surface.
+        auto blank = device.target(16, 16), output = device.target(16, 16),
+             scratch = device.target(16, 16);
+        device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16, {blank.get(), depth.get()});
+        device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16, {target.get(), depth.get()});
+        shape.color0.w = 0.5f;
+        device.dispatch("shape_2d_comp", &shape, sizeof(shape), 16, 16, {target.get()});
+        glm::uvec4 composite(2, 0, 0, 0);
+        device.dispatch("composite_2d_comp", &composite, sizeof(composite), 16, 16,
+                        {target.get(), blank.get(), blank.get(), scratch.get(), output.get()});
+        device.flush();
+        command = device.queue->commandBuffer();
+        blit = command->blitCommandEncoder();
+        blit->copyFromTexture(output.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(16, 16, 1),
+                              readback.get(), 0, 256, 16 * 256);
+        blit->endEncoding();
+        command->commit();
+        command->waitUntilCompleted();
+        if (pixels[0] < 127 || pixels[0] > 128 || pixels[3] < 127 || pixels[3] > 128)
+            throw std::runtime_error("Native composition alpha is not premultiplied");
+        // Hosted 3D must honour the complete dispatch rectangle, including a non-zero origin.
+        glm::uvec4 modelRect(4, 4, 4, 4);
+        device.dispatch("hosted_3d_composite_comp", &modelRect, sizeof(modelRect), 4, 4,
+                        {blank.get(), output.get()});
+        device.flush();
+        command = device.queue->commandBuffer();
+        blit = command->blitCommandEncoder();
+        blit->copyFromTexture(blank.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(16, 16, 1),
+                              readback.get(), 0, 256, 16 * 256);
+        blit->endEncoding();
+        command->commit();
+        command->waitUntilCompleted();
+        if (pixels[0] != 0 || pixels[4 * 256 + 4 * 4] < 254 || pixels[4 * 256 + 4 * 4 + 3] < 127)
+            throw std::runtime_error("Hosted 3D composition bounds are incorrect");
+        const std::array<unsigned char, 4> rgba{10, 20, 30, 255};
+        if (!device.upload(1, 1, rgba, false, true) || device.upload(2, 2, rgba, false, false))
+            throw std::runtime_error("Texture upload validation failed");
+        check_retained_frames(device);
+        check_batched_text(device);
+        check_text_dependency_waves(device);
+        check_foreground_blur_transitions(device);
+        check_async_constants(device);
+        check_two_frames_in_flight(device);
+        check_submission_resource_lifetime(device);
+        check_failed_submission_retirement(device);
+        // Consecutive submissions reuse storage only after the GPU completes.
+        // Alternate constants to catch stale bindings and premature reuse.
+        for (unsigned frame = 0; frame < 12; ++frame)
         {
-            Device device(prefer4);
-            for (const char *name :
-                 {"shape_2d_comp", "shadow_2d_comp", "blur_2d_comp", "media_2d_comp", "text_msdf_comp",
-                  "clear_screen_comp", "composite_2d_comp", "hosted_3d_composite_comp"})
-                device.pipeline(name);
-            device.function("model_3d_vert");
-            device.function("model_3d_frag");
-            auto target = device.target(16, 16);
-            auto depth = device.target(16, 16, MTL::PixelFormatR32Uint);
-            glm::uvec4 zero(0);
-            device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16, {target.get(), depth.get()});
-            Renderer2DPushConstants shape;
-            shape.rect = {0, 0, 16, 16};
-            shape.color0 = {1, 0, 0, 1};
-            shape.effect0.w = 1;
-            shape.data.x = uint32_t(Renderer2DPrimitive::eRectangle);
+            device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16,
+                            {target.get(), depth.get()});
+            shape.color0 = frame % 2 ? glm::vec4(0, 1, 0, 1) : glm::vec4(1, 0, 0, 1);
             device.dispatch("shape_2d_comp", &shape, sizeof(shape), 16, 16, {target.get()});
             device.flush();
-            auto readback = own(device.gpu->newBuffer(16 * 256, MTL::ResourceStorageModeShared));
-            auto command = device.queue->commandBuffer();
-            auto blit = command->blitCommandEncoder();
+            command = device.queue->commandBuffer();
+            blit = command->blitCommandEncoder();
             blit->copyFromTexture(target.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(16, 16, 1),
                                   readback.get(), 0, 256, 16 * 256);
             blit->endEncoding();
             command->commit();
             command->waitUntilCompleted();
-            if (command->status() == MTL::CommandBufferStatusError)
-                throw std::runtime_error("Readback failed");
-            const auto pixels = static_cast<const unsigned char *>(readback->contents());
-            for (size_t y = 0; y < 16; ++y)
-                for (size_t x = 0; x < 16; ++x)
-                {
-                    const auto p = pixels + y * 256 + x * 4;
-                    if (p[0] != 255 || p[1] != 0 || p[2] != 0 || p[3] != 255)
-                        throw std::runtime_error("Incorrect shape pixels or command ordering");
-                }
-            // Core Animation requires premultiplied alpha at the native surface.
-            auto blank = device.target(16, 16), output = device.target(16, 16),
-                 scratch = device.target(16, 16);
-            device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16, {blank.get(), depth.get()});
-            device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16, {target.get(), depth.get()});
-            shape.color0.w = 0.5f;
-            device.dispatch("shape_2d_comp", &shape, sizeof(shape), 16, 16, {target.get()});
-            glm::uvec4 composite(2, 0, 0, 0);
-            device.dispatch("composite_2d_comp", &composite, sizeof(composite), 16, 16,
-                            {target.get(), blank.get(), blank.get(), scratch.get(), output.get()});
-            device.flush();
-            command = device.queue->commandBuffer();
-            blit = command->blitCommandEncoder();
-            blit->copyFromTexture(output.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(16, 16, 1),
-                                  readback.get(), 0, 256, 16 * 256);
-            blit->endEncoding();
-            command->commit();
-            command->waitUntilCompleted();
-            if (pixels[0] < 127 || pixels[0] > 128 || pixels[3] < 127 || pixels[3] > 128)
-                throw std::runtime_error("Native composition alpha is not premultiplied");
-            // Hosted 3D must honour the complete dispatch rectangle, including a non-zero origin.
-            glm::uvec4 modelRect(4, 4, 4, 4);
-            device.dispatch("hosted_3d_composite_comp", &modelRect, sizeof(modelRect), 4, 4,
-                            {blank.get(), output.get()});
-            device.flush();
-            command = device.queue->commandBuffer();
-            blit = command->blitCommandEncoder();
-            blit->copyFromTexture(blank.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(16, 16, 1),
-                                  readback.get(), 0, 256, 16 * 256);
-            blit->endEncoding();
-            command->commit();
-            command->waitUntilCompleted();
-            if (pixels[0] != 0 || pixels[4 * 256 + 4 * 4] < 254 || pixels[4 * 256 + 4 * 4 + 3] < 127)
-                throw std::runtime_error("Hosted 3D composition bounds are incorrect");
-            const std::array<unsigned char, 4> rgba{10, 20, 30, 255};
-            if (!device.upload(1, 1, rgba, false, true) || device.upload(2, 2, rgba, false, false))
-                throw std::runtime_error("Texture upload validation failed");
-            check_retained_frames(device);
-            check_batched_text(device);
-            check_text_dependency_waves(device);
-            check_foreground_blur_transitions(device);
-            check_async_constants(device);
-            check_two_frames_in_flight(device);
-            check_submission_resource_lifetime(device);
-            check_failed_submission_retirement(device);
-            // Consecutive submissions reuse storage only after the GPU completes.
-            // Alternate constants to catch stale bindings and premature reuse.
-            for (unsigned frame = 0; frame < 12; ++frame)
-            {
-                device.dispatch("clear_screen_comp", &zero, sizeof(zero), 16, 16,
-                                {target.get(), depth.get()});
-                shape.color0 = frame % 2 ? glm::vec4(0, 1, 0, 1) : glm::vec4(1, 0, 0, 1);
-                device.dispatch("shape_2d_comp", &shape, sizeof(shape), 16, 16, {target.get()});
-                device.flush();
-                command = device.queue->commandBuffer();
-                blit = command->blitCommandEncoder();
-                blit->copyFromTexture(target.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(16, 16, 1),
-                                      readback.get(), 0, 256, 16 * 256);
-                blit->endEncoding();
-                command->commit();
-                command->waitUntilCompleted();
-                if (pixels[0] != (frame % 2 ? 0 : 255) || pixels[1] != (frame % 2 ? 255 : 0) ||
-                    pixels[2] != 0 || pixels[3] != 255)
-                    throw std::runtime_error("Reused dispatch storage produced stale pixels");
-            }
-            std::cout << "Metal " << (device.metal4 ? 4 : 3) << " shader and pixel checks passed\n";
+            if (pixels[0] != (frame % 2 ? 0 : 255) || pixels[1] != (frame % 2 ? 255 : 0) ||
+                pixels[2] != 0 || pixels[3] != 255)
+                throw std::runtime_error("Reused dispatch storage produced stale pixels");
         }
+        std::cout << "Metal 3 shader and pixel checks passed\n";
     }
     catch (const std::exception &error)
     {

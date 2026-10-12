@@ -534,17 +534,16 @@ Developers can also create pull requests to implement features and fixing bugs o
 ## Native Metal on macOS
 
 The minimum deployment target is macOS 13.0 for both `arm64` and `x86_64`.
-Metal 3 requires a Metal 3-capable GPU. On macOS 26 and newer, the engine uses
-Metal 4 when the device reports `MTLGPUFamilyMetal4`; Intel GPUs continue to use
-Metal 3. OS version alone never selects Metal 4. See
+The engine uses Metal 3 on every supported GPU, including macOS 26 and newer.
+A Metal 3-capable GPU is required. See
 [Apple’s GPU feature tables](https://developer.apple.com/metal/feature-sets/).
 
-Install the macOS 26 release (or newer) of [Metal-cpp](https://developer.apple.com/metal/cpp/)
+Install a release with Metal 3 support of [Metal-cpp](https://developer.apple.com/metal/cpp/)
 in `~/dev/metal-cpp`, or configure `-DMETAL_CPP_PATH=/path/to/metal-cpp`.
 The normal macOS build does not require a Vulkan SDK, VMA, glslc or SPIRV-Cross.
 Native MSL is embedded in the engine and compiled by Metal for the selected GPU;
-Metal 3 and Metal 4 share the shader maths, with separate command submission,
-resource residency and argument binding. Cocoa owns the `CAMetalLayer` only.
+Metal 3 command buffers retain encoded resources until GPU completion.
+Cocoa owns the `CAMetalLayer` only.
 
 ```sh
 ./unixBuild.sh Debug '' all
@@ -556,7 +555,7 @@ Build the app and installer against their matching freshly installed SDKs.
 SDK metadata rejects the wrong architecture or a consumer deployment target
 older than the engine. The app and installer also reject legacy Vulkan SDKs.
 GPU tests require a logged-in graphical session: `vibrance_metal_device_tests`
-checks both command paths and pixel output; `vibrance_metal_window_tests` checks
+checks Metal 3 submission and pixel output; `vibrance_metal_window_tests` checks
 native presentation, text, blur, media, hosted MSAA 3D, and resizing. A host with
 no accessible Metal 3 device skips these tests.
 
@@ -577,16 +576,16 @@ convention. The animated mode forces a redraw on each tick. These are renderer
 measurements, not whole-app measurements or a fixed CPU budget on every machine.
 Unchanged sizes retain their textures; idle draws skip GPU submission and retain
 polling limits even with an uncapped frame rate. Metal compute passes reuse their
-encoder, and Metal 4 binding storage is reused only after GPU completion.
+encoder, and constant storage is reused only after GPU completion.
 The countdown and expansion modes use a wide interface with static labels and
 moving content. Their optional second argument fixes the frame rate for fair
 CPU comparisons; a faster renderer can otherwise spend its savings on more frames.
 Metal retains the colour surface and redraws the union of old and new paint
 bounds, replaying overlapping content in stacking order. Blur and hosted 3D keep
 the full redraw path. Disjoint glyphs share a compute dispatch; overlapping glyphs,
-shadows and glows remain ordered. Constant buffers use reusable pages and Metal 4
-keeps stable resources resident. Presentation is submitted without waiting on the
-CPU; completion is checked before reusing resources or crossing command queues.
+shadows and glows remain ordered. Constant buffers use reusable pages in two
+frame slots. Transaction presentation waits until GPU work is scheduled;
+completion is checked before reusing resources or crossing command queues.
 
 Hosts can call `Engine::idle_event_wait_seconds()` after ticking all windows and
 pass a positive result to `wait_glfw_events()`. Metal recommends a 50 ms event

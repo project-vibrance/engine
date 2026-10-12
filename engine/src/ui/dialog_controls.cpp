@@ -2,9 +2,11 @@
 
 #include <vibranceUI/ui/controls.h>
 #include <vibranceUI/ui/glass.h>
+#include <vibranceUI/ui/liquid_controls.h>
 #include <vibranceUI/ui/styles.h>
 #include <vibranceUI/ui/surfaces.h>
 #include <vibranceUI/ui/text.h>
+#include <vibranceUI/ui/text_block.h>
 #include <vibranceUI/ui/visuals.h>
 
 #include <algorithm>
@@ -40,9 +42,9 @@ namespace
                 0.9f,
                 1.0f);
         surface.primitive = Renderer2DPrimitive::eSquircle;
-        surface.cornerRadius = 30.0f;
-        surface.squircleAmount = 0.86f;
-        surface.squirclePower = 4.15f;
+        surface.cornerRadius = UiDialogShape::radius;
+        surface.squircleAmount = UiDialogShape::amount;
+        surface.squirclePower = UiDialogShape::power;
         surface.layer = layer;
         surface.order = order;
         // This is a background surface; children use higher layers and must
@@ -95,32 +97,6 @@ namespace
         return options;
     }
 
-    UiButtonOptions primary_button_options(
-        bool destructive,
-        std::function<void()> action)
-    {
-        UiButtonOptions options = {};
-        options.cornerRadius = 28.0f;
-        options.fontSize = 19.0f;
-        options.primary = true;
-        options.textColor = "#FFFFFFFF";
-        options.backgroundColor = destructive ?
-            "#E5484DFF" : "#087CFAFF";
-        options.hoveredBackgroundColor = destructive ?
-            "#D63C42FF" : "#0874E8FF";
-        options.pressedBackgroundColor = destructive ?
-            "#C9343AFF" : "#0067D4FF";
-        options.outlineColor = "rgba(255, 255, 255, 0.22)";
-        options.onClick = [action = std::move(action)](
-            const PointerInputEvent&) {
-            if (action)
-            {
-                action();
-            }
-        };
-        return options;
-    }
-
     ShapeStyleComponent verification_slot_style(
         bool filled,
         bool active)
@@ -152,91 +128,106 @@ UiConfirmationDialogHandle ui_create_confirmation_dialog(
     UiConfirmationDialogOptions options)
 {
     UiConfirmationDialogHandle handle = {};
-    const glm::vec2 size {
-        std::max(options.size.x, 360.0f),
-        std::max(options.size.y, 300.0f)
+    constexpr float inset = 24.0f;
+    constexpr float iconSize = 64.0f;
+    constexpr float iconGap = 20.0f;
+    constexpr float buttonHeight = 38.0f;
+    constexpr float buttonGap = 12.0f;
+    const bool hasCancel = !options.cancelLabel.empty();
+    const float width = std::max(options.size.x, 280.0f);
+    const bool hasIcon = options.icon.valid();
+    const float textTop = 28.0f + (hasIcon ? iconSize + iconGap : 0.0f);
+    UiTextBlockOptions titleOptions;
+    titleOptions.width = width - 2.0f * inset;
+    titleOptions.fontSize = options.fontSize;
+    // A fallback font with tall metrics must not spread short alert lines apart.
+    // Keep enough leading for the actual scripts used in this title.
+    std::string singleLineTitle = options.title;
+    std::replace(singleLineTitle.begin(), singleLineTitle.end(), '\n', ' ');
+    const float fontSize = scaled_scalar(options.fontSize, ui.scale());
+    const auto titleMetrics = fontAtlas.layout_text(singleLineTitle, fontSize);
+    if (titleMetrics.lineHeight > 0.0f)
+        titleOptions.lineHeightMultiplier = std::max(fontSize * 1.3f,
+            titleMetrics.bounds.y + fontSize * 0.18f) / titleMetrics.lineHeight;
+    titleOptions.style = options.theme.text_style(660.0f);
+    titleOptions.offset = { inset, textTop };
+    titleOptions.layer = options.layer + 2;
+    titleOptions.order = options.order + 2u;
+    const glm::vec2 scale = glm::max(ui.scale().factor, glm::vec2(0.0001f));
+    const auto measure = [&](std::string_view text, const UiTextBlockOptions& textOptions) {
+        return fontAtlas.layout_text(std::string(text),
+            scaled_scalar(textOptions.fontSize, ui.scale()),
+            ui_text_block_renderer_options(ui, textOptions)).bounds.y / scale.y;
     };
-    handle.root = create_dialog_surface(
-        ui,
-        parent,
-        alignment,
-        offset,
-        size,
-        options.layer,
-        options.order,
-        true);
-
-    UiSurfaceBlockOptions iconSlotOptions = {};
-    iconSlotOptions.style = ui_clear_surface_style();
-    iconSlotOptions.cornerRadius = 16.0f;
-    iconSlotOptions.layer = options.layer + 2;
-    iconSlotOptions.order = options.order + 1u;
-    handle.iconSlot = ui_create_surface_block(
-        ui,
-        handle.root,
-        UiAlignment::eTopLeft,
-        { 42.0f, 38.0f },
-        { 108.0f, 108.0f },
-        iconSlotOptions);
-
-    ui.create_aligned_text(
-        options.title,
-        fontAtlas,
-        handle.root,
-        UiAlignment::eTopLeft,
-        23.0f,
-        dialog_text_style("#202124FF", 720.0f),
-        options.layer + 2,
-        options.order + 2u,
-        { 42.0f, 188.0f });
-    if (!options.message.empty())
+    const float titleHeight = std::max(measure(options.title, titleOptions), options.fontSize);
+    UiTextBlockOptions messageOptions = titleOptions;
+    messageOptions.fontSize = 13.0f;
+    messageOptions.style = options.theme.muted_text_style(430.0f);
+    messageOptions.offset.y += titleHeight + 12.0f;
+    messageOptions.order++;
+    const float messageHeight = options.message.empty() ? 0.0f :
+        12.0f + std::max(measure(options.message, messageOptions), messageOptions.fontSize);
+    const glm::vec2 size { width, std::max(options.size.y,
+        textTop + titleHeight + messageHeight + 24.0f +
+            buttonHeight + inset) };
+    UiSurfaceBlockOptions surface = ui_dialog_surface_options(options.theme);
+    surface.layer = options.layer;
+    surface.order = options.order;
+    handle.root = ui_create_surface_block(ui, parent, alignment, offset, size, surface);
+    ui.add_shadow(handle.root, { 0.0f, 8.0f }, 28.0f, 0.30f);
+    if (hasIcon)
     {
-        ui.create_aligned_text(
-            options.message,
-            fontAtlas,
-            handle.root,
-            UiAlignment::eTopLeft,
-            19.0f,
-            dialog_text_style("rgba(31, 32, 35, 0.90)", 430.0f),
-            options.layer + 2,
-            options.order + 3u,
-            { 42.0f, size.y - 145.0f });
+        handle.iconSlot = ui.create_aligned_media(options.icon, handle.root,
+            UiAlignment::eTopLeft, { iconSize, iconSize },
+            options.layer + 2, options.order + 1u, { inset, 28.0f });
     }
+    handle.titleText = ui_create_text_block(ui, fontAtlas, handle.root,
+        options.title, titleOptions).entity;
+    if (options.message.empty())
+    {
+        // Keep live/localised title changes clear of the anchored action stack.
+        ui_fit_content_size(ui, handle.root, handle.titleText,
+            { width, options.size.y },
+            { inset, textTop, inset, 24.0f + inset +
+                buttonHeight }, false, true);
+    }
+    if (!options.message.empty())
+        ui_create_text_block(ui, fontAtlas, handle.root, options.message, messageOptions);
 
-    constexpr float buttonGap = 16.0f;
-    constexpr float horizontalInset = 32.0f;
-    constexpr float buttonHeight = 56.0f;
-    const float buttonWidth = std::max(
-        (size.x - horizontalInset * 2.0f - buttonGap) * 0.5f,
-        120.0f);
-    const float buttonY = size.y - buttonHeight - 28.0f;
-    UiControlHandle cancel = ui_create_aligned_text_button(
-        ui,
-        fontAtlas,
-        handle.root,
-        UiAlignment::eTopLeft,
-        { horizontalInset, buttonY },
-        options.cancelLabel,
-        { buttonWidth, buttonHeight },
-        options.layer + 3,
-        options.order + 4u,
-        secondary_button_options(std::move(options.onCancel)));
-    handle.cancelButton = cancel.root;
-
-    UiControlHandle confirm = ui_create_aligned_text_button(
-        ui,
-        fontAtlas,
-        handle.root,
-        UiAlignment::eTopLeft,
-        { horizontalInset + buttonWidth + buttonGap, buttonY },
-        options.confirmLabel,
-        { buttonWidth, buttonHeight },
-        options.layer + 3,
-        options.order + 5u,
-        primary_button_options(
-            options.destructive,
-            std::move(options.onConfirm)));
+    auto confirmOptions = ui_button_options_from_theme(options.theme, true);
+    if (options.destructive)
+    {
+        confirmOptions.backgroundColor = options.theme.danger;
+        confirmOptions.hoveredBackgroundColor = options.theme.danger;
+        confirmOptions.pressedBackgroundColor = options.theme.danger;
+    }
+    confirmOptions.onClick = [action = std::move(options.onConfirm)](const PointerInputEvent&) {
+        if (action) action();
+    };
+    const float buttonWidth = hasCancel ? (width - inset * 2.0f - buttonGap) * 0.5f :
+        width - inset * 2.0f;
+    const float buttonOffset = hasCancel ? (buttonWidth + buttonGap) * 0.5f : 0.0f;
+    const auto confirm = ui_create_aligned_text_button(ui, fontAtlas, handle.root,
+        UiAlignment::eBottomCentre, { buttonOffset, -inset },
+        options.confirmLabel, { buttonWidth, buttonHeight },
+        options.layer + 3, options.order + 4u, std::move(confirmOptions));
     handle.confirmButton = confirm.root;
+    handle.confirmLabel = confirm.label;
+    ui_apply_liquid_button(ui, confirm.root);
+    if (hasCancel)
+    {
+        auto cancelOptions = ui_button_options_from_theme(options.theme);
+        cancelOptions.onClick = [action = std::move(options.onCancel)](const PointerInputEvent&) {
+            if (action) action();
+        };
+        const auto cancel = ui_create_aligned_text_button(ui, fontAtlas, handle.root,
+            UiAlignment::eBottomCentre, { -buttonOffset, -inset }, options.cancelLabel,
+            { buttonWidth, buttonHeight }, options.layer + 3,
+            options.order + 5u, std::move(cancelOptions));
+        handle.cancelButton = cancel.root;
+        handle.cancelLabel = cancel.label;
+        ui_apply_liquid_button(ui, cancel.root);
+    }
     return handle;
 }
 

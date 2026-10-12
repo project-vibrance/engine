@@ -306,7 +306,6 @@ int main(int argc, char** argv)
     try
     {
         const bool benchmark = argc > 1 && std::string_view(argv[1]) == "--benchmark";
-        for (bool metal4 : {false, true})
         {
             GlfwWindowHostOptions options;
             options.title = "Native liquid control test";
@@ -314,8 +313,7 @@ int main(int argc, char** argv)
             options.transparentFramebuffer = true;
             options.enableAudio = false;
             options.focusOnShow = false;
-            options.configureEngine = [metal4, benchmark](EngineCreateInfo& info) {
-                info.preferMetal4 = metal4;
+            options.configureEngine = [benchmark](EngineCreateInfo& info) {
                 if (benchmark) info.presentMode = RendererPresentMode::eImmediate;
                 info.defaultRenderer2DFontPath = "/System/Library/Fonts/Helvetica.ttc";
             };
@@ -371,10 +369,10 @@ int main(int argc, char** argv)
                 for (unsigned frame = 0; frame < 180; ++frame) animate(frame);
                 const double elapsed = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - start).count();
-                std::cout << "Metal " << (metal4 ? 4 : 3) << " native glass animation: "
+                std::cout << "Metal 3 native glass animation: "
                     << elapsed / 180 << " ms/frame\n";
                 host.close();
-                continue;
+                return 0;
             }
             NSWindow* window = (__bridge NSWindow*)glfw_native_window_handle(host.window());
             CAMetalLayer* baseLayer = (CAMetalLayer*)window.contentView.layer;

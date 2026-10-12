@@ -2,6 +2,7 @@
 
 #include <vibranceUI/export.h>
 #include <vibranceUI/ui/builder.h>
+#include <vibranceUI/ui/styles.h>
 
 #include <cstddef>
 #include <functional>
@@ -12,7 +13,11 @@
 
 struct UiConfirmationDialogOptions
 {
-    glm::vec2 size { 520.0f, 464.0f };
+    // Height is a minimum; zero sizes the panel to its wrapped content.
+    glm::vec2 size { 360.0f, 0.0f };
+    UiTheme theme {};
+    Media2DHandle icon {};
+    float fontSize = 16.0f;
     std::string title = "Are you sure?";
     std::string message {};
     std::string cancelLabel = "Cancel";
@@ -28,8 +33,11 @@ struct UiConfirmationDialogHandle
 {
     entt::entity root = entt::null;
     entt::entity iconSlot = entt::null;
+    entt::entity titleText = entt::null;
     entt::entity cancelButton = entt::null;
     entt::entity confirmButton = entt::null;
+    entt::entity cancelLabel = entt::null;
+    entt::entity confirmLabel = entt::null;
 };
 
 VIBRANCE_ENGINE_API UiConfirmationDialogHandle
