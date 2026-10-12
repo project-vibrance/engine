@@ -210,7 +210,7 @@ struct UiTheme
         std::string navOutline = "rgba(255, 255, 255, 0.45)";
         std::string navDivider = "rgba(0, 0, 0, 0.08)";
         std::string navIcon = "rgba(85, 88, 94, 1)";
-        std::string navIconDisabled = "rgba(177, 180, 186, 1)";
+        std::string navIconDisabled = "rgba(85, 88, 94, 0.65)";
         std::string sidebarRowSelected = "rgba(0, 113, 227, 1)";
         std::string sidebarRowSelectedHover = "rgba(0, 103, 207, 1)";
         std::string sidebarRowSelectedPressed = "rgba(0, 92, 190, 1)";

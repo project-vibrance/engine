@@ -85,6 +85,7 @@ public:
     // never claims, dismisses, activates, or persists a notification.
     bool dismiss(std::uint32_t providerId);
     bool activate_source(std::string_view activationTarget);
+    // Accepts a Windows application identity or an absolute executable path.
     SystemApplicationIcon resolve_application_icon(
         std::string_view activationTarget);
     // The reference remains valid until the next non-const provider call,

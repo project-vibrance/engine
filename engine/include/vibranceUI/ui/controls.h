@@ -305,6 +305,7 @@ struct UiSearchFieldOptions
     std::string placeholder = "Search";
     std::size_t maxBytes = 256u;
     std::string placeholderColor = "#707075E8";
+    std::string textColor = "#1D1D1FFF";
     std::string iconTint {};
     std::string backgroundColor = "#E7E7EAF0";
     std::string backgroundBottomColor {};
@@ -336,6 +337,8 @@ struct UiSearchIndexEntry
     std::string title;
     std::string subtitle;
     std::string keywords;
+    // Empty preserves full-colour artwork; monochrome icons use a theme tint.
+    std::string iconTint;
 };
 
 struct UiSearchDestinationSpec
@@ -388,6 +391,7 @@ struct UiSearchResultListComponent
     uint32_t maxResults = 5u;
     uint32_t maxVisibleResults = 5u;
     bool showNoResults = true;
+    bool dismissOnSelected = true;
     std::string noResultsTitle = "No results";
     std::string noResultsSubtitle = "Try another search";
     std::size_t maxTitleCharacters = 0u;
@@ -406,6 +410,7 @@ struct UiSearchResultListOptions
     float menuGap = 6.0f;
     float verticalPadding = 5.0f;
     bool showNoResults = true;
+    bool dismissOnSelected = true;
     std::string noResultsTitle = "No results";
     std::string noResultsSubtitle = "Try another search";
     std::string backgroundColor = "rgba(246, 246, 248, 0.94)";
@@ -872,6 +877,8 @@ struct UiSidebarNavItemOptions
     Media2DFit mediaIconFit = Media2DFit::eContain;
     bool mediaIconUsesContainer = true;
     bool showIconBackground = true;
+    std::string mediaIconTint;
+    std::string selectedMediaIconTint;
     std::string selectedRowColor = "rgba(0, 113, 227, 1)";
     std::string selectedHoveredRowColor = "rgba(0, 103, 207, 1)";
     std::string selectedPressedRowColor = "rgba(0, 92, 190, 1)";
@@ -1034,6 +1041,12 @@ inline void ui_apply_sidebar_nav_palette(const UiTheme& theme, UiSidebarNavItemO
     options.pressedRowColor = theme.settingsPanel.sidebarRowPressed;
     options.labelColor = theme.settingsPanel.sidebarLabel;
     options.selectedLabelColor = theme.settingsPanel.sidebarSelectedLabel;
+    if (options.mediaIcon.sourceType == Media2DSourceType::eSvg &&
+        !options.mediaIconUsesContainer && !options.showIconBackground)
+    {
+        options.mediaIconTint = theme.icon;
+        options.selectedMediaIconTint = theme.settingsPanel.sidebarSelectedLabel;
+    }
 }
 
 inline void ui_apply_rich_sidebar_row_palette(const UiTheme& theme, UiSidebarRichButtonOptions& options)
@@ -1118,6 +1131,9 @@ inline UiSearchFieldOptions ui_search_field_options_from_theme(
     options.icon = searchIcon;
     options.placeholder = std::move(placeholder);
     options.placeholderColor = theme.settingsPanel.searchPlaceholder;
+    options.textColor = theme.text;
+    options.iconTint = theme.icon;
+    options.caretColor = theme.accent;
     options.backgroundColor = theme.settingsPanel.searchBackground;
     options.backgroundBottomColor = theme.settingsPanel.searchBackgroundBottom;
     options.focusedBackgroundColor = theme.settingsPanel.searchFocusedBackground;
@@ -1441,6 +1457,9 @@ inline void ui_apply_sidebar_nav_item_state(
     {
         *labelStyle = ui_sidebar_nav_label_style(options, selected);
     }
+    const auto& iconTint = selected && !options.selectedMediaIconTint.empty() ?
+        options.selectedMediaIconTint : options.mediaIconTint;
+    if (!iconTint.empty()) ui_set_media_mask_tint(scene, handle.mediaIcon, iconTint);
     ui_update_button_visual(scene, handle.row);
     if (handle.icon != entt::null && registry.valid(handle.icon))
     {
@@ -1694,6 +1713,9 @@ inline UiSidebarNavItemHandle ui_create_sidebar_nav_item(
             order,
             directMediaIcon ? directOffset : glm::vec2(0.0f),
             options.mediaIconFit);
+        const auto& iconTint = options.selected && !options.selectedMediaIconTint.empty() ?
+            options.selectedMediaIconTint : options.mediaIconTint;
+        if (!iconTint.empty()) ui_set_media_mask_tint(scene, handle.mediaIcon, iconTint);
     }
     else if (!options.glyph.empty())
     {
@@ -2618,6 +2640,8 @@ inline void ui_refresh_search_result_slots(
                 media->set_tint(glm::vec4(1.0f));
                 media->cornerRadius = 0.0f;
                 scene.mark_dirty(list->iconMedia[slot]);
+                if (!entry.iconTint.empty())
+                    ui_tint_icon_media(scene, list->iconMedia[slot], entry.iconTint);
             }
         }
         else
@@ -2840,6 +2864,7 @@ inline UiControlHandle ui_create_search_result_list(
     list.maxResults = maxResults;
     list.maxVisibleResults = rowSlots;
     list.showNoResults = options.showNoResults;
+    list.dismissOnSelected = options.dismissOnSelected;
     list.noResultsTitle = std::move(options.noResultsTitle);
     list.noResultsSubtitle = std::move(options.noResultsSubtitle);
     list.maxTitleCharacters = options.maxTitleCharacters;
@@ -2894,7 +2919,8 @@ inline UiControlHandle ui_create_search_result_list(
             }
             auto callback = captured->onSelected;
             UiSearchIndexEntry entry = captured->entries[entryIndex];
-            ui_set_search_result_list_visible(*scenePtr, resultList, false);
+            if (captured->dismissOnSelected)
+                ui_set_search_result_list_visible(*scenePtr, resultList, false);
             if (callback)
             {
                 callback(entry, event);
@@ -3177,6 +3203,7 @@ inline UiControlHandle ui_create_search_field(
     visual.idle = idleStyle;
     visual.focused = focusedStyle;
     visual.placeholderText = ui_macos26_text_style(options.placeholderColor);
+    visual.valueText = ui_macos26_text_style(options.textColor);
     visual.caretStyle = make_solid_style(options.caretColor, "#00000000", 0.0f, 1.0f);
     registry.emplace<TextInputVisualComponent>(handle.root, std::move(visual));
     ui_update_text_input_visual(scene, fontAtlas, handle.root);

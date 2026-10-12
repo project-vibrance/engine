@@ -189,6 +189,8 @@ struct MacMediaSession::State
             [payload isKindOfClass:NSDictionary.class] ? payload : nil,
             artworkDirectory);
         next.playbackQuality = qualityProbe.refresh(next);
+        if (next.sessionAvailable && !AXIsProcessTrusted())
+            next.diagnostic = "Playback quality detection requires Vibrance's Accessibility permission in System Settings > Privacy & Security > Accessibility.";
         publish(std::move(next));
     }
 

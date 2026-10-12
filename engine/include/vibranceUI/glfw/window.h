@@ -35,6 +35,7 @@ struct GlfwWindowCreateInfo
     // Initial desktop-shell behavior is applied before the window is first
     // shown so overlays do not flash, steal focus, or briefly enter switchers.
     bool focusOnShow = true;
+    // On macOS, visible participating windows keep the application in the Dock.
     bool showInTaskbar = true;
     bool showInAltTab = true;
     // When supplied, the window is created hidden, positioned, and only then

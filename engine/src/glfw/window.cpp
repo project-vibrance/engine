@@ -19,6 +19,11 @@
 #endif
 #endif
 
+#if defined(__APPLE__)
+void glfw_macos_refresh_application_presence();
+void glfw_macos_forget_window(GLFWwindow* window);
+#endif
+
 namespace
 {
 #if defined(_WIN32) && defined(__MINGW32__)
@@ -338,7 +343,7 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     else
     {
         logger->print("Failed to create GLFW window");
-        glfwTerminate();
+        terminate_glfw();
     }
 
     return window;
@@ -553,12 +558,18 @@ void destroy_glfw_window(GLFWwindow* window)
 {
     if (window)
     {
+#if defined(__APPLE__)
+        glfw_macos_forget_window(window);
+#endif
         glfwDestroyWindow(window);
     }
 }
 
 void terminate_glfw()
 {
+#if defined(__APPLE__)
+    glfw_macos_forget_window(nullptr);
+#endif
     glfwTerminate();
 }
 
@@ -1079,6 +1090,9 @@ void focus_glfw_window(GLFWwindow* window)
         return;
     }
     glfwShowWindow(window);
+#if defined(__APPLE__)
+    glfw_macos_refresh_application_presence();
+#endif
     glfwFocusWindow(window);
 }
 
@@ -1096,6 +1110,9 @@ void set_glfw_window_visible(GLFWwindow* window, bool visible)
     {
         glfwHideWindow(window);
     }
+#if defined(__APPLE__)
+    glfw_macos_refresh_application_presence();
+#endif
 }
 
 void set_glfw_window_title(GLFWwindow* window, const char* title)

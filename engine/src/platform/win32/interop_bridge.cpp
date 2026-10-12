@@ -878,7 +878,20 @@ public:
         std::uint64_t revision = 0u;
         std::string path;
         bool loaded = false;
-        try
+        // Desktop apps can supply their executable instead of a packaged AUMID.
+        // Reuse the native shell icon and the existing PNG cache, independently
+        // of notification-listener permission or a visible application window.
+        const std::filesystem::path executable(identity.c_str());
+        std::error_code iconError;
+        if (executable.is_absolute() &&
+            std::filesystem::is_regular_file(executable, iconError) && !iconError)
+        {
+            SHFILEINFOW fileInfo {};
+            if (SHGetFileInfoW(executable.c_str(), 0, &fileInfo, sizeof(fileInfo),
+                    SHGFI_ICON | SHGFI_LARGEICON) && fileInfo.hIcon)
+                loaded = cache_icon(fileInfo.hIcon, revision, path);
+        }
+        if (!loaded) try
         {
             const auto appInfo = winrt::Windows::ApplicationModel::AppInfo::
                 GetFromAppUserModelId(identity);

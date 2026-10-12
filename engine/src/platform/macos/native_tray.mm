@@ -100,8 +100,8 @@ struct NativeTray::Impl
         if (!options.registerWithShell) return false;
         @autoreleasepool
         {
-            statusItem = [[NSStatusBar systemStatusBar]
-                statusItemWithLength:NSSquareStatusItemLength];
+            statusItem = [[[NSStatusBar systemStatusBar]
+                statusItemWithLength:NSSquareStatusItemLength] retain];
             if (!statusItem)
             {
                 return false;
@@ -112,6 +112,8 @@ struct NativeTray::Impl
             NSStatusBarButton* button = [statusItem button];
             NSImage* image = options.iconPath.empty() ? nil :
                 [[NSImage alloc] initWithContentsOfFile:make_string(options.iconPath.string())];
+            if (!image)
+                image = [[NSImage imageNamed:NSImageNameApplicationIcon] copy];
             if (image)
             {
                 [image setSize:NSMakeSize(18, 18)];
@@ -176,6 +178,7 @@ struct NativeTray::Impl
                 [statusItem setMenu:nil];
                 [[NSStatusBar systemStatusBar]
                     removeStatusItem:statusItem];
+                [statusItem release];
                 statusItem = nil;
             }
             if (nativeMenu)

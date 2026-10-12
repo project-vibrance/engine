@@ -9,7 +9,7 @@
 
 namespace media_quality_detection
 {
-enum class Role { eContainer, eText, eButton, eExcluded, eWindow };
+enum class Role { eContainer, eText, eButton, eExcluded, eWindow, eSlider };
 
 struct Node
 {
@@ -70,6 +70,33 @@ inline bool playback_control(const Node& node)
         id.find(L"play_pause") != id.npos;
 }
 
+inline bool complete_playback_controls(std::span<const Node> nodes, int scope)
+{
+    bool next = false, previous = false, position = false;
+    for (std::size_t child = 0; child < nodes.size(); ++child)
+    {
+        if (!belongs_to(nodes, static_cast<int>(child), scope)) continue;
+        const auto& node = nodes[child];
+        if (node.role != Role::eButton && node.role != Role::eSlider) continue;
+        const auto name = normalise(node.name);
+        const auto id = normalise(node.automationId);
+        if (node.role == Role::eButton)
+        {
+            next |= name == L"next" || name.starts_with(L"next ") ||
+                name.starts_with(L"skip to next") || id.find(L"next") != id.npos;
+            previous |= name == L"previous" || name.starts_with(L"previous ") ||
+                name.starts_with(L"skip to previous") || id.find(L"previous") != id.npos;
+        }
+        else
+            for (const auto keyword : { L"position", L"progress", L"seek", L"timeline" })
+                position |= name.find(keyword) != name.npos || id.find(keyword) != id.npos;
+    }
+    return next && previous && position;
+}
+
+// The default policy remains unchanged for Windows. macOS can additionally
+// identify a complete player when its artist metadata is an unlabelled image.
+template <bool AllowUnlabelledMetadata = false>
 inline MediaPlaybackQuality detect(std::span<const Node> nodes,
     std::wstring_view currentTitle, std::wstring_view currentArtist,
     std::wstring_view currentAlbum = {})
@@ -115,7 +142,10 @@ inline MediaPlaybackQuality detect(std::span<const Node> nodes,
                     artistMatches |= i != badge && name == artist;
                     transport |= playback_control(nodes[i]);
                 }
-                if (count <= 96u && titleMatches && artistMatches && transport)
+                bool identityMatches = titleMatches && artistMatches;
+                if constexpr (AllowUnlabelledMetadata)
+                    identityMatches |= count <= 96u && titleMatches && complete_playback_controls(nodes, scope);
+                if (count <= 96u && identityMatches && transport)
                 {
                     atmos |= quality == MediaPlaybackQuality::eDolbyAtmos;
                     lossless |= quality == MediaPlaybackQuality::eLossless;
