@@ -17,6 +17,15 @@ The installed SDK includes starter scripts, a minimal template and the
 
 Configure dependency locations in a local `.env.cmake` using
 `envWindowsExample.cmake` or `envUnixExample.cmake` as a starting point.
+Colour emoji shaping uses a private static HarfBuzz build from the local
+source tree specified by `HARFBUZZ_PATH` in `.env.cmake`, for example
+`set(HARFBUZZ_PATH "C:/dev/harfbuzz-11.4.5")`. The directory must contain
+`src/harfbuzz.cc`, `src/hb.h` and `COPYING`. CMake builds those sources separately
+for each target architecture and installs their licence with the SDK. HarfBuzz
+11.4.5 is the tested version. Colour bitmap PNGs use the existing image decoder,
+so FreeType does not need libpng.
+On macOS, set `MEDIAREMOTE_ADAPTER_ROOT` to the MediaRemote adapter source
+directory under `~/dev`; the engine builds and bundles its companion framework.
 
 On Windows with MinGW:
 
@@ -52,9 +61,25 @@ matching ARM64 SDK selected through `FFMPEG_ARM64_PATH`.
 
 On Unix-like systems:
 
+For macOS prerequisites, dependency paths, and optional audio/video setup, follow
+the [macOS development setup guide](unix_env_setup.md) and
+[Unix environment example](envUnixExample.cmake).
+
 ```sh
-./unixBuild.sh Release /opt/vibranceUI
+./unixBuild.sh Release "$HOME/dev/vibranceUI"
 ```
+
+On macOS, build separate Apple Silicon and Intel SDKs with:
+
+```sh
+./unixBuild.sh Release '' all
+```
+
+This installs into separate Apple Silicon and Intel SDK directories, using
+separate build directories. The third argument also accepts `silicon`, `intel`,
+or `native`. Use GLFW and FreeType source trees for builds targeting both
+architectures; set `FFMPEG_SILICON_PATH` and `FFMPEG_INTEL_PATH` for the matching
+optional video SDKs.
 
 The selected prefix is a relocatable SDK:
 
@@ -108,12 +133,20 @@ capture.start();
 // ready to use with any UiBuilder owned by an engine window or panel.
 ```
 
+On macOS, loopback uses Core Audio process taps on 14.2+ and ScreenCaptureKit
+on 13.0–14.1. Set `AudioLoopbackCaptureMode::eProcessTree` to capture only a
+selected PID and its descendants; a missing target produces silence. The
+ScreenCaptureKit backend filters applications, so it cannot isolate browser
+tabs within one app. The host bundle must include `NSAudioCaptureUsageDescription`
+and the user must allow audio capture (Screen Recording for the older backend).
+
 `<vibranceUI/media/media.h>` similarly exposes UTF-8/time/aspect helpers,
 artwork presentation and playback animation, `RevisionedMediaSlot`, and
 `MediaArtworkView`. It also includes the portable `GlobalMediaSession` provider,
 status, commands, and snapshot contract from `<vibranceUI/media/session.h>`.
-The optional installed Win32 companion supplies GSMTC; other platforms fail
-closed until a provider is implemented. Applications provide refresh cadence,
+The installed Win32 companion supplies GSMTC. On macOS, the bundled
+MediaRemote adapter supplies metadata, cached artwork and transport controls.
+Other platforms fail closed until a provider is implemented. Applications provide refresh cadence,
 optimistic UI state, and product routing, while the SDK owns provider and
 renderer-local behavior.
 
@@ -265,7 +298,7 @@ already-visible viewport; colors, outline, corner radius, scrollbar behavior,
 edge fades, and scroll callbacks are regular options. The returned handle also
 exposes each retained entity for advanced styling without requiring it.
 
-Window hosts also expose independent initialization policy for focus, taskbar
+Window hosts also expose independent initialisation policy for focus, taskbar
 presence, and Alt-Tab/window-cycle presence. Disabling one of these policies
 causes the native window to be configured before its first visible frame.
 `GlfwWindowPositionOptions` adds reusable monitor-work-area alignment (including
@@ -354,6 +387,13 @@ direction. Explicit newlines receive `paragraphSpacing`; automatically wrapped
 lines receive the chosen line height and line spacing. `set_text_entity`
 reflows an existing block, including after localization changes, and
 `ui_set_text_block_layout` updates its editorial settings in logical pixels.
+`<vibranceUI/ui/content_sizing.h>` adds retained intrinsic sizing through
+`ui_fit_content_size`. It measures untransformed text, media or shape dimensions
+plus logical padding, with independent width and height fitting and minimum
+bounds. `UiButtonOptions::fitContentWidth` makes a text button's requested width
+a minimum and accounts for its label, padding and optional icons. Label or
+locale changes resize the existing button and its hit region during layout.
+
 Use a shared-width `layout_group` or `UiStackLayout` when headings and body
 blocks need the same edge and controlled spacing between differently styled
 sections.
@@ -392,7 +432,9 @@ Renderer-specific implementation is separated by API:
 
 ```text
 engine/src/
-  renderer/vulkan/  Vulkan renderer
+  renderer/common/  Shared scene planning, fonts and asset decoders
+  renderer/vulkan/  Vulkan renderer (Windows/Linux)
+  renderer/metal/   Native Metal 3/4 renderer and MSL shaders (macOS)
   animation/        Animation importers
   graphics/         Shared material routing
   platform/win32/   Windows Composition, interop and native tray
@@ -446,13 +488,14 @@ need no MSVC discovery or custom build/copy rules.
 ## Dependency policy
 
 Compiled third-party code is linked privately into the engine shared library.
-GLFW support and precompiled engine shaders are part of that same library.
-Public dependency headers used by the current C++ API (GLM, EnTT, VMA, GLFW,
-and Vulkan headers) are copied into the SDK and do not leak local source paths
-through the exported CMake target.
+GLFW support and embedded engine shaders are part of that same library.
+Public dependency headers (GLM, EnTT and GLFW, plus VMA/Vulkan on Windows
+and Linux) are copied into the SDK without exposing local source paths.
+Metal-cpp remains private to the macOS engine build.
 
 On MinGW, the GCC, standard C++, and threading runtimes are linked statically.
-The Vulkan loader remains a system/driver dependency by design.
+The Vulkan loader remains a system/driver dependency on Windows and Linux.
+macOS links Apple’s Metal framework and bundles no Vulkan loader or MoltenVK.
 
 FFmpeg is enabled only when `FFMPEG_PATH` supplies genuine static archives.
 Shared FFmpeg import libraries cannot be embedded in another DLL, so a
@@ -487,3 +530,101 @@ user directory.
 While implementation is currently somewhat vague, developers and users are welcome to audit the source code's infrastructure. Contribution to document the engine's capabilities and functionalities are always welcome.
 
 Developers can also create pull requests to implement features and fixing bugs or issues found within the source code.
+
+## Native Metal on macOS
+
+The minimum deployment target is macOS 13.0 for both `arm64` and `x86_64`.
+The engine uses Metal 3 on every supported GPU, including macOS 26 and newer.
+A Metal 3-capable GPU is required. See
+[Apple’s GPU feature tables](https://developer.apple.com/metal/feature-sets/).
+
+Install a release with Metal 3 support of [Metal-cpp](https://developer.apple.com/metal/cpp/)
+in `~/dev/metal-cpp`, or configure `-DMETAL_CPP_PATH=/path/to/metal-cpp`.
+The normal macOS build does not require a Vulkan SDK, VMA, glslc or SPIRV-Cross.
+Native MSL is embedded in the engine and compiled by Metal for the selected GPU;
+Metal 3 command buffers retain encoded resources until GPU completion.
+Cocoa owns the `CAMetalLayer` only.
+
+```sh
+./unixBuild.sh Debug '' all
+ctest --test-dir build/macos-silicon/Debug --output-on-failure
+ctest --test-dir build/macos-intel/Debug --output-on-failure
+```
+
+Build the app and installer against their matching freshly installed SDKs.
+SDK metadata rejects the wrong architecture or a consumer deployment target
+older than the engine. The app and installer also reject legacy Vulkan SDKs.
+GPU tests require a logged-in graphical session: `vibrance_metal_device_tests`
+checks Metal 3 submission and pixel output; `vibrance_metal_window_tests` checks
+native presentation, text, blur, media, hosted MSAA 3D, and resizing. A host with
+no accessible Metal 3 device skips these tests.
+
+For repeatable CPU measurements, build `Release` and run:
+
+```sh
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-idle
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-idle-uncapped
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-animated
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-countdown 30
+build/macos-silicon/Release/engine/tests/vibrance_metal_window_tests --benchmark-expansion 30
+```
+
+These exercise a fixed scene with text, blur, media and 3D, including the host's
+repeated size notifications. After a two-second warm-up they measure five seconds
+of process CPU time as a percentage of one core, matching Activity Monitor's
+convention. The animated mode forces a redraw on each tick. These are renderer
+measurements, not whole-app measurements or a fixed CPU budget on every machine.
+Unchanged sizes retain their textures; idle draws skip GPU submission and retain
+polling limits even with an uncapped frame rate. Metal compute passes reuse their
+encoder, and constant storage is reused only after GPU completion.
+The countdown and expansion modes use a wide interface with static labels and
+moving content. Their optional second argument fixes the frame rate for fair
+CPU comparisons; a faster renderer can otherwise spend its savings on more frames.
+Metal retains the colour surface and redraws the union of old and new paint
+bounds, replaying overlapping content in stacking order. Blur and hosted 3D keep
+the full redraw path. Disjoint glyphs share a compute dispatch; overlapping glyphs,
+shadows and glows remain ordered. Constant buffers use reusable pages in two
+frame slots. Transaction presentation waits until GPU work is scheduled;
+completion is checked before reusing resources or crossing command queues.
+
+Hosts can call `Engine::idle_event_wait_seconds()` after ticking all windows and
+pass a positive result to `wait_glfw_events()`. Metal recommends a 50 ms event
+wait after all scenes have been unchanged for 250 ms, with no pending animation.
+Input wakes the event wait early; the timeout also polls pointer-pass-through
+overlays. CPU-driven animations retain their normal cadence until they settle.
+Vulkan recommends a 16.7 ms interruptible event wait once every window retains
+an unchanged scene with no pending animation or presentation. Active scenes
+keep their existing display and user frame-rate pacing. On macOS, audio
+clips can be preloaded without starting CoreAudio; the output device opens on
+first playback or an explicit `AudioEngine::available()` probe.
+
+Set `VIBRANCE_RENDER_DIAGNOSTICS=2` for one-second Vulkan submission and scene
+activity logging, renderer CPU wall timings and panel UI phase timings. The log
+also counts foreground glyphs, text dispatches, batched dispatches and layered
+memory barriers. Renderer
+timings exclude frame pacing; panel draw timing includes pacing and is reported
+separately from input and other UI work. On Windows,
+`VIBRANCE_RENDER_DIAGNOSTICS=1` additionally samples
+GPU timestamps once per 16 successful submissions and reports the sampled
+command-buffer mean, maximum and sample count, plus approximate 2D, composite
+and output-copy checkpoint means. Samples use the existing completed frame
+fences; unsupported timestamp clocks are skipped. The GPU maximum covers sampled
+frames. Use `2` for CPU phase diagnosis without timestamp-query overhead. Leave
+the variable unset for normal process resource comparisons.
+
+Windows foreground text batches disjoint glyphs through a bounded mapped upload
+of 512 KiB per frame slot. Each glyph retains its original shader and sixteen
+coverage samples; overlapping glyphs keep their paint order. Missing resources
+or exhausted upload capacity use ordinary text dispatches. Generated monochrome
+SDF layouts retain source-padding metadata so sharp foreground drawing can omit
+proven empty padding. Colour glyphs, customised UVs and filtered foreground text
+retain their original bounds; shadows, glow, retained replay and damage retain
+their complete envelopes. These layout additions require rebuilding SDK users
+with the matching engine headers and runtime.
+
+For shader maintainers, `python3 scripts/generate_metal_shaders.py` regenerates
+`engine/src/renderer/metal/shaders/*.metal` from the shared GLSL maths. This
+optional authoring step requires `glslc` and `spirv-cross`; generated MSL belongs
+in source control. Run the Metal GPU tests after changing shader bindings.
+
+Runtime and full compilation diagnostics are documented in [LOGGING.md](LOGGING.md).

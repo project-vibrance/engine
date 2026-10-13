@@ -1,4 +1,13 @@
+if(APPLE)
+    set(VIBRANCE_RENDER_BACKEND Metal)
+else()
+    set(VIBRANCE_RENDER_BACKEND Vulkan)
+endif()
 set(ENGINE_SOURCES
+    src/renderer/common/scene.cpp
+    src/renderer/common/font_atlas.cpp
+    src/renderer/common/media2d.cpp
+    src/renderer/common/text_direction.cpp
     src/animation/lottie.cpp
     src/audio/audio.cpp
     src/audio/loopback_capture.cpp
@@ -9,11 +18,9 @@ set(ENGINE_SOURCES
     src/core/process.cpp
     src/core/secure_credential.cpp
     src/core/single_instance.cpp
-    src/core/vma_usage.cpp
     src/display/foreground.cpp
     src/display/placement.cpp
     src/display/preferences.cpp
-    src/factories/mesh_factory.cpp
     src/glfw/panel_window.cpp
     src/glfw/ui_surface.cpp
     src/glfw/ui_window.cpp
@@ -28,22 +35,6 @@ set(ENGINE_SOURCES
     src/notifications/provider.cpp
     src/notifications/stack_layout.cpp
     src/platform/native_dialog.cpp
-    src/renderer/vulkan/buffer.cpp
-    src/renderer/vulkan/command.cpp
-    src/renderer/vulkan/descriptors.cpp
-    src/renderer/vulkan/device.cpp
-    src/renderer/vulkan/font_atlas.cpp
-    src/renderer/vulkan/frame.cpp
-    src/renderer/vulkan/image.cpp
-    src/renderer/vulkan/instance.cpp
-    src/renderer/vulkan/media2d.cpp
-    src/renderer/vulkan/renderer.cpp
-    src/renderer/vulkan/renderer2d.cpp
-    src/renderer/vulkan/renderer3d.cpp
-    src/renderer/vulkan/shader.cpp
-    src/renderer/vulkan/swapchain.cpp
-    src/renderer/vulkan/synchronisation.cpp
-    src/renderer/vulkan/text_direction.cpp
     src/time/countdown_timer.cpp
     src/ui/animated_text_view.cpp
     src/ui/context_menu.cpp
@@ -51,6 +42,32 @@ set(ENGINE_SOURCES
     src/ui/resource_loading.cpp
     src/ui/theme.cpp
 )
+if(APPLE)
+    list(APPEND ENGINE_SOURCES
+        src/renderer/metal/renderer.cpp
+        src/renderer/metal/device.cpp
+        src/renderer/metal/surface.mm
+        src/renderer/metal/native_glass.mm
+        src/renderer/metal/mesh.cpp)
+    set_source_files_properties(src/renderer/metal/native_glass.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+else()
+    list(APPEND ENGINE_SOURCES src/core/vma_usage.cpp src/factories/mesh_factory.cpp
+        src/renderer/vulkan/buffer.cpp
+        src/renderer/vulkan/command.cpp
+        src/renderer/vulkan/descriptors.cpp
+        src/renderer/vulkan/device.cpp
+        src/renderer/vulkan/frame.cpp
+        src/renderer/vulkan/image.cpp
+        src/renderer/vulkan/instance.cpp
+        src/renderer/vulkan/renderer.cpp
+        src/renderer/vulkan/renderer2d.cpp
+        src/renderer/vulkan/renderer3d.cpp
+        src/renderer/vulkan/shader.cpp
+        src/renderer/vulkan/swapchain.cpp
+        src/renderer/vulkan/synchronisation.cpp
+    )
+endif()
+
 # C++/WinRT stays in its MSVC companion DLL and must never enter the MinGW
 # engine target. The MinGW side talks to it through a versioned POD C ABI.
 
@@ -72,67 +89,22 @@ if(WIN32)
     list(APPEND ENGINE_SOURCES src/platform/win32/native_tray.cpp
         src/platform/win32/composition_presenter.cpp)
 elseif(APPLE)
-    list(APPEND ENGINE_SOURCES src/glfw/window_macos.mm src/platform/macos/native_tray.mm)
+    list(APPEND ENGINE_SOURCES src/glfw/window_macos.mm src/platform/macos/native_tray.mm
+        src/media/session_macos.mm src/audio/loopback_capture_macos.mm)
+    set_source_files_properties(src/media/session_macos.mm src/audio/loopback_capture_macos.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 else()
     list(APPEND ENGINE_SOURCES src/platform/portable/native_tray.cpp)
 endif()
-if(NOT WIN32)
+if(NOT WIN32 AND NOT APPLE)
     list(APPEND ENGINE_SOURCES src/platform/portable/composition_presenter.cpp)
 endif()
 
-# Compile shader sources once, then turn the SPIR-V binaries into a generated
-# translation unit. Runtime applications therefore need neither shader files
-# nor shaderc beside the engine DLL.
-set(EMBEDDED_SHADER_DIR "${ENGINE_GENERATED_DIR}")
-set(EMBEDDED_SHADER_HEADER "${EMBEDDED_SHADER_DIR}/embedded_shaders.h")
-set(EMBEDDED_SHADER_CPP "${EMBEDDED_SHADER_DIR}/embedded_shaders.cpp")
-set(EMBEDDED_SHADER_MANIFEST "${EMBEDDED_SHADER_DIR}/embedded_shaders.manifest")
-file(MAKE_DIRECTORY "${EMBEDDED_SHADER_DIR}/spirv")
-file(CONFIGURE
-    OUTPUT "${EMBEDDED_SHADER_HEADER}"
-    CONTENT [[#pragma once
-#include <cstddef>
-#include <span>
-#include <string_view>
-std::span<const std::byte> vibrance_embedded_shader_spirv(std::string_view fileName);
-]])
+if(APPLE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/renderer/metal/shaders.cmake")
+else()
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/renderer/vulkan/shaders.cmake")
+endif()
 
-file(GLOB ENGINE_SHADER_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.comp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.vert"
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.frag")
-set(EMBEDDED_SHADER_BINARIES)
-set(EMBEDDED_SHADER_MANIFEST_CONTENT "")
-foreach(SHADER_SOURCE IN LISTS ENGINE_SHADER_SOURCES)
-    get_filename_component(SHADER_NAME "${SHADER_SOURCE}" NAME)
-    set(SHADER_BINARY "${EMBEDDED_SHADER_DIR}/spirv/${SHADER_NAME}.spv")
-    add_custom_command(
-        OUTPUT "${SHADER_BINARY}"
-        COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.3 -O
-            "${SHADER_SOURCE}" -o "${SHADER_BINARY}"
-        DEPENDS "${SHADER_SOURCE}"
-        COMMENT "Compiling ${SHADER_NAME} to SPIR-V"
-        VERBATIM)
-    list(APPEND EMBEDDED_SHADER_BINARIES "${SHADER_BINARY}")
-    string(APPEND EMBEDDED_SHADER_MANIFEST_CONTENT "${SHADER_NAME}|${SHADER_BINARY}\n")
-endforeach()
-file(CONFIGURE
-    OUTPUT "${EMBEDDED_SHADER_MANIFEST}"
-    CONTENT "${EMBEDDED_SHADER_MANIFEST_CONTENT}")
-
-add_custom_command(
-    OUTPUT "${EMBEDDED_SHADER_CPP}"
-    COMMAND "${CMAKE_COMMAND}"
-        "-DMANIFEST=${EMBEDDED_SHADER_MANIFEST}"
-        "-DOUTPUT=${EMBEDDED_SHADER_CPP}"
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake"
-    DEPENDS
-        ${EMBEDDED_SHADER_BINARIES}
-        "${EMBEDDED_SHADER_MANIFEST}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake"
-    COMMENT "Embedding engine SPIR-V in the DLL"
-    VERBATIM)
-list(APPEND ENGINE_SOURCES "${EMBEDDED_SHADER_CPP}")
 
 add_library(vibrance_engine SHARED ${ENGINE_SOURCES})
 add_library(vibrance::engine ALIAS vibrance_engine)
@@ -235,6 +207,16 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_bridge_abi.h")
         set(VIBRANCE_COMPOSITION_PRIVATE_HEADER
             "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/private_composition_19041.h")
+        set(VIBRANCE_LIQUID_SHADER_ABI_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_shader_abi.h")
+        set(VIBRANCE_LIQUID_D3D_SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_d3d11.cpp")
+        set(VIBRANCE_LIQUID_D3D_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_d3d11.h")
+        set(VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_protocol.h")
+        set(VIBRANCE_LIQUID_DWM_SECURITY_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_security.h")
         set(VIBRANCE_COMPOSITION_BUILD_SCRIPT
             "${PROJECT_SOURCE_DIR}/scripts/win32/build_composition_bridge.bat")
         add_custom_command(
@@ -255,6 +237,14 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_COMPOSITION_SOURCE}"
                 "${VIBRANCE_COMPOSITION_ABI_HEADER}"
                 "${VIBRANCE_COMPOSITION_PRIVATE_HEADER}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/system_backdrop_policy.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_session.h"
+                "${VIBRANCE_LIQUID_SHADER_ABI_HEADER}"
+                "${VIBRANCE_LIQUID_D3D_SOURCE}"
+                "${VIBRANCE_LIQUID_D3D_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
                 "${VIBRANCE_COMPOSITION_BUILD_SCRIPT}"
             BYPRODUCTS
                 "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_win32_composition.exp"
@@ -264,6 +254,156 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
         add_custom_target(vibrance_win32_composition ALL
             DEPENDS "${VIBRANCE_COMPOSITION_DLL}")
         add_dependencies(vibrance_engine vibrance_win32_composition)
+        set(VIBRANCE_LIQUID_DWM_EXTENSION
+            "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_liquid_dwm_extension.dll")
+        set(VIBRANCE_LIQUID_DWM_BROKER
+            "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_dwm_broker.exe")
+        # Symbol-server support is supplied by the matching Debugging Tools
+        # runtime; the OS DbgHelp alone cannot fetch a fresh DWM symbol cache.
+        get_filename_component(_vibrance_debugging_kits_root
+            "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots;KitsRoot10]"
+            ABSOLUTE)
+        find_file(VIBRANCE_LIQUID_DBGHELP_RUNTIME NAMES dbghelp.dll
+            HINTS "${_vibrance_sdk_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+                "${_vibrance_debugging_kits_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+            NO_DEFAULT_PATH)
+        find_file(VIBRANCE_LIQUID_SYMSRV_RUNTIME NAMES symsrv.dll
+            HINTS "${_vibrance_sdk_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+                "${_vibrance_debugging_kits_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+            NO_DEFAULT_PATH)
+        set(VIBRANCE_LIQUID_DWM_EXTENSION_SCRIPT
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_liquid_dwm_extension.bat")
+        set(VIBRANCE_LIQUID_DWM_BROKER_SCRIPT
+            "${PROJECT_SOURCE_DIR}/scripts/win32/build_liquid_dwm_broker.bat")
+        set(VIBRANCE_LIQUID_DWM_EXTENSION_SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_present.cpp")
+        set(VIBRANCE_LIQUID_DWM_BROKER_SOURCE
+            "${PROJECT_SOURCE_DIR}/scripts/win32/liquid_glass_dwm_broker.cpp")
+        add_custom_command(
+            OUTPUT "${VIBRANCE_LIQUID_DWM_EXTENSION}"
+            COMMAND "${VIBRANCE_LIQUID_DWM_EXTENSION_SCRIPT}"
+                "${VIBRANCE_VCVARSALL}"
+                "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32"
+                "${VIBRANCE_LIQUID_DWM_EXTENSION}"
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/dwm-extension-obj"
+                "${VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT}"
+                "${VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR}"
+                "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
+            DEPENDS "${VIBRANCE_LIQUID_DWM_EXTENSION_SOURCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_batch.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_lifecycle.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_lifecycle_policy.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_session.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
+                "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
+                "${VIBRANCE_LIQUID_D3D_SOURCE}"
+                "${VIBRANCE_LIQUID_D3D_HEADER}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/detours/detours.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/detours/modules.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/detours/disasm.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/third_party/detours/detours.h"
+                "${VIBRANCE_LIQUID_DWM_EXTENSION_SCRIPT}"
+            COMMENT "Building Windows Liquid Glass DWM extension with MSVC"
+            VERBATIM)
+        add_custom_target(vibrance_liquid_dwm_extension ALL
+            DEPENDS "${VIBRANCE_LIQUID_DWM_EXTENSION}")
+        add_custom_command(
+            OUTPUT "${VIBRANCE_LIQUID_DWM_BROKER}"
+            COMMAND "${VIBRANCE_LIQUID_DWM_BROKER_SCRIPT}"
+                "${VIBRANCE_VCVARSALL}"
+                "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
+                "${VIBRANCE_LIQUID_DWM_BROKER}"
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/dwm-broker-obj"
+                "${VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT}"
+                "${VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR}"
+                "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
+            DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER_SOURCE}"
+                "${PROJECT_SOURCE_DIR}/scripts/win32/liquid_glass_runtime_cache.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
+                "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
+                "${VIBRANCE_LIQUID_DWM_BROKER_SCRIPT}"
+            COMMENT "Building Windows Liquid Glass DWM broker with MSVC"
+            VERBATIM)
+        add_custom_target(vibrance_liquid_dwm_broker ALL
+            DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER}")
+        add_dependencies(vibrance_engine
+            vibrance_liquid_dwm_extension vibrance_liquid_dwm_broker)
+        find_program(VIBRANCE_LIQUID_FXC_EXECUTABLE
+            NAMES fxc.exe
+            HINTS
+                "${_vibrance_sdk_root}/bin/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}/x64"
+                "${_vibrance_sdk_root}/bin/${VIBRANCE_COMPOSITION_WINDOWS_SDK_VERSION}/${VIBRANCE_COMPOSITION_SDK_ARCH}"
+            NO_DEFAULT_PATH)
+        if(VIBRANCE_LIQUID_FXC_EXECUTABLE)
+            set(VIBRANCE_LIQUID_SHADER_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_win32.hlsl")
+            set(VIBRANCE_LIQUID_SHADER_OBJECT
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_win32.cso")
+            add_custom_command(
+                OUTPUT "${VIBRANCE_LIQUID_SHADER_OBJECT}"
+                COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                    /nologo /T ps_4_0 /E main
+                    /Fo "${VIBRANCE_LIQUID_SHADER_OBJECT}"
+                    "${VIBRANCE_LIQUID_SHADER_SOURCE}"
+                DEPENDS "${VIBRANCE_LIQUID_SHADER_SOURCE}"
+                COMMENT "Compiling the Windows Liquid Glass optical pixel shader"
+                VERBATIM)
+            add_custom_target(vibrance_liquid_glass_shader ALL
+                DEPENDS "${VIBRANCE_LIQUID_SHADER_OBJECT}")
+            set(VIBRANCE_LIQUID_UI_SHADER_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_ui_win32.hlsl")
+            set(VIBRANCE_LIQUID_UI_SHADER_OBJECT
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_ui_win32.cso")
+            add_custom_command(
+                OUTPUT "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}"
+                COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                    /nologo /T ps_4_0_level_9_3 /E main
+                    /Fo "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}"
+                    "${VIBRANCE_LIQUID_UI_SHADER_SOURCE}"
+                DEPENDS "${VIBRANCE_LIQUID_UI_SHADER_SOURCE}"
+                COMMENT "Compiling the Windows Liquid Glass UI composite pixel shader"
+                VERBATIM)
+            add_custom_target(vibrance_liquid_glass_ui_shader ALL
+                DEPENDS "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}")
+            set(VIBRANCE_LIQUID_FULLSCREEN_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_fullscreen_win32.hlsl")
+            set(VIBRANCE_LIQUID_FULLSCREEN_OBJECT
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_fullscreen.cso")
+            add_custom_command(
+                OUTPUT "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}"
+                COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                    /nologo /T vs_4_0 /E main
+                    /Fo "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}"
+                    "${VIBRANCE_LIQUID_FULLSCREEN_SOURCE}"
+                DEPENDS "${VIBRANCE_LIQUID_FULLSCREEN_SOURCE}"
+                COMMENT "Compiling Windows Liquid Glass fullscreen vertex shader"
+                VERBATIM)
+            add_custom_target(vibrance_liquid_glass_fullscreen_shader ALL
+                DEPENDS "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}")
+            set(VIBRANCE_LIQUID_BLUR_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_blur_win32.hlsl")
+            set(VIBRANCE_LIQUID_BLUR_OBJECTS "")
+            foreach(_vibrance_blur_axis IN ITEMS horizontal vertical)
+                set(_vibrance_blur_object
+                    "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_blur_${_vibrance_blur_axis}.cso")
+                add_custom_command(
+                    OUTPUT "${_vibrance_blur_object}"
+                    COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                        /nologo /T ps_4_0 /E "blur_${_vibrance_blur_axis}"
+                        /Fo "${_vibrance_blur_object}"
+                        "${VIBRANCE_LIQUID_BLUR_SOURCE}"
+                    DEPENDS "${VIBRANCE_LIQUID_BLUR_SOURCE}"
+                    COMMENT "Compiling Windows Liquid Glass ${_vibrance_blur_axis} blur pass"
+                    VERBATIM)
+                list(APPEND VIBRANCE_LIQUID_BLUR_OBJECTS "${_vibrance_blur_object}")
+            endforeach()
+            add_custom_target(vibrance_liquid_glass_blur_shaders ALL
+                DEPENDS ${VIBRANCE_LIQUID_BLUR_OBJECTS})
+        endif()
         set(VIBRANCE_WIN32_COMPOSITION_AVAILABLE ON)
         if(VIBRANCE_COMPOSITION_SDK_INCLUDE_ROOT AND
            VIBRANCE_COMPOSITION_SDK_UM_LIBRARY_DIR AND
@@ -345,6 +485,10 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
             DEPENDS
                 "${VIBRANCE_WIN32_INTEROP_SOURCE}"
                 "${VIBRANCE_WIN32_INTEROP_ABI_HEADER}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/playback_quality_probe.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/notification_activation.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/media/playback_quality_detection.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/media/playback_quality.h"
                 "${VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT}"
             BYPRODUCTS
                 "${VIBRANCE_WIN32_INTEROP_DIRECTORY}/vibrance_win32_interop.exp"
@@ -381,6 +525,10 @@ option(
     OFF)
 
 target_compile_features(vibrance_engine PUBLIC cxx_std_20)
+if(APPLE)
+    target_include_directories(vibrance_engine PRIVATE "${METAL_CPP_INCLUDE_DIR}")
+    target_compile_options(vibrance_engine PRIVATE -fblocks)
+endif()
 if (CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     # Debug retains symbols/assertions, but renderer hot paths must not run at
     # GCC's default -O0. -O2 is required here because this target contains the
@@ -405,7 +553,7 @@ target_include_directories(vibrance_engine
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
-        "${EMBEDDED_SHADER_DIR}"
+        "${ENGINE_GENERATED_DIR}"
         "${STB_INCLUDE_DIR}"
         ${FREETYPE_INCLUDE_DIRS})
 
@@ -452,7 +600,8 @@ if(SOLOUD_FOUND AND NOT TARGET soloud)
 endif()
 
 target_link_libraries(vibrance_engine PRIVATE
-    Vulkan::Vulkan
+    vibrance_harfbuzz
+    $<$<NOT:$<PLATFORM_ID:Darwin>>:Vulkan::Vulkan>
     ${FREETYPE_LIBRARIES}
     ${GLFW_LIBRARIES})
 
@@ -487,9 +636,22 @@ if(WIN32)
     target_link_libraries(vibrance_engine PRIVATE
         advapi32 dwmapi mmdevapi ole32 uuid winmm user32 gdi32 shell32)
 elseif(APPLE)
+    # Local static FreeType archives do not carry their compression dependencies.
+    find_package(ZLIB REQUIRED)
+    find_package(BZip2 REQUIRED)
     target_link_libraries(vibrance_engine PRIVATE
+        ZLIB::ZLIB
+        BZip2::BZip2
+        "-framework Metal"
         "-framework Cocoa"
+        "-framework ApplicationServices"
+        "-framework IOKit"
         "-framework CoreFoundation"
+        "-framework CoreAudio"
+        "-framework CoreMedia"
+        "-weak_framework ScreenCaptureKit"
+        "-framework CoreVideo"
+        "-framework QuartzCore"
         "-framework Security")
 else()
     target_link_libraries(vibrance_engine PRIVATE pthread dl m)
@@ -509,6 +671,10 @@ endif()
 include(CMakePackageConfigHelpers)
 set(CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/vibrance_engine")
 
+if(APPLE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/media/macos_adapter.cmake")
+endif()
+
 install(TARGETS vibrance_engine
     EXPORT vibrance_engineTargets
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
@@ -518,7 +684,27 @@ install(TARGETS vibrance_engine
 if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
     install(FILES "${VIBRANCE_COMPOSITION_DLL}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/VibranceLockedRuntime.cmake")
+    vibrance_install_locked_runtime("${VIBRANCE_LIQUID_DWM_EXTENSION}"
+        "${CMAKE_INSTALL_BINDIR}")
+    install(PROGRAMS "${VIBRANCE_LIQUID_DWM_BROKER}"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    if(VIBRANCE_LIQUID_DBGHELP_RUNTIME AND VIBRANCE_LIQUID_SYMSRV_RUNTIME)
+        install(FILES "${VIBRANCE_LIQUID_DBGHELP_RUNTIME}"
+            "${VIBRANCE_LIQUID_SYMSRV_RUNTIME}"
+            DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    endif()
 endif()
+if(TARGET vibrance_liquid_glass_shader)
+    install(FILES "${VIBRANCE_LIQUID_SHADER_OBJECT}"
+        "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}"
+        "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}"
+        ${VIBRANCE_LIQUID_BLUR_OBJECTS}
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/licences/liquid-glass-winui.txt"
+    "${CMAKE_CURRENT_SOURCE_DIR}/licences/detours.txt"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/licences")
 if(VIBRANCE_WIN32_INTEROP_AVAILABLE)
     install(FILES "${VIBRANCE_WIN32_INTEROP_DLL}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")
@@ -528,25 +714,43 @@ endif()
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/vibranceUI")
 
+if(APPLE)
+    install(FILES "${METAL_CPP_INCLUDE_DIR}/LICENSE.txt"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/licences"
+        RENAME metal-cpp.txt)
+endif()
+
 install(FILES "${ENGINE_MANIFEST_JSON}"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine")
 
 # Copy every dependency header tree referenced by the public C++ API. All
 # compiled dependency code remains private inside vibrance_engine.
-install(DIRECTORY "${GLM_INCLUDE_DIR}/glm"
+# Homebrew exposes glm through a relative symlink. Copy the real directory so
+# the installed SDK does not retain a broken link into Homebrew's Cellar.
+file(REAL_PATH "${GLM_INCLUDE_DIR}/glm" _vibrance_glm_headers)
+install(DIRECTORY "${_vibrance_glm_headers}"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 install(DIRECTORY "${ENTT_INCLUDE_DIR}/entt"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+if(NOT APPLE)
 install(FILES "${VMA_HEADER_TO_INSTALL}"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/vma"
     RENAME vk_mem_alloc.h)
-install(DIRECTORY "${GLFW_INCLUDE_DIRS}/GLFW"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+endif()
+
+if(EXISTS "${GLFW_INCLUDE_DIRS}/GLFW")
+    file(REAL_PATH "${GLFW_INCLUDE_DIRS}/GLFW" _vibrance_glfw_headers)
+    install(DIRECTORY "${_vibrance_glfw_headers}/"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/GLFW")
+endif()
+if(NOT APPLE)
 install(DIRECTORY "${Vulkan_INCLUDE_DIRS}/vulkan"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
 if(EXISTS "${Vulkan_INCLUDE_DIRS}/vk_video")
     install(DIRECTORY "${Vulkan_INCLUDE_DIRS}/vk_video"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+endif()
+
 endif()
 
 install(EXPORT vibrance_engineTargets
@@ -575,6 +779,7 @@ if(BUILD_TESTING)
 endif()
 
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VibranceApplication.cmake"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VibranceLockedRuntime.cmake"
     DESTINATION "${CONFIG_INSTALL_DIR}")
 install(PROGRAMS
     "${PROJECT_SOURCE_DIR}/scripts/create-vibrance-app.sh"

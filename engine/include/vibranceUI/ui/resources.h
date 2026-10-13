@@ -449,12 +449,9 @@ private:
             const std::filesystem::directory_entry entry = *iterator;
             if (entry.is_regular_file(error) && !error)
             {
-                std::filesystem::path relativePath = std::filesystem::relative(entry.path(), root, error);
-                if (error)
-                {
-                    error.clear();
-                    relativePath = entry.path().lexically_relative(root);
-                }
+                // Iterator paths already share this root. Canonicalising every
+                // ancestor performs many unnecessary stat calls on each poll.
+                const std::filesystem::path relativePath = entry.path().lexically_relative(root);
 
                 if (kind == ResourceKind::eConfig &&
                     config_path_ignored(relativePath))

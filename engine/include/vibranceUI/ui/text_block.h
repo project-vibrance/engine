@@ -34,6 +34,7 @@ struct UiTextBlockOptions
     int32_t layer = 0;
     uint32_t order = 0u;
     bool dynamicCache = false;
+    bool tabularDigits = true;
 };
 
 struct UiTextBlockHandle
@@ -62,6 +63,7 @@ inline TextLayout2DOptions ui_text_block_renderer_options(
         options.characterSpacing,
         scale);
     layout.wordSpacing = scaled_scalar(options.wordSpacing, scale);
+    layout.tabularDigits = options.tabularDigits;
     return layout;
 }
 

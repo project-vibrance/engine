@@ -3,6 +3,7 @@
 #include "vibranceUI/export.h"
 #include <vulkan/vulkan.hpp>
 #include <glm/glm.hpp>
+#include <cstddef>
 #include <unordered_map>
 #include <vibranceUI/renderer/buffer.h>
 #include <vibranceUI/renderer/render_types.h>
@@ -12,6 +13,16 @@
 
 class Renderer3D;
 class StorageImage;
+
+// The frame slot owns and flushes this mapped, 128-byte-per-glyph storage buffer.
+// Recording falls back to ordinary text dispatches when it is unavailable or full.
+struct Renderer2DTextBatchResources
+{
+    vk::DescriptorSet descriptorSet {};
+    std::byte* glyphConstants = nullptr;
+    uint32_t capacity = 0u;
+    uint32_t writtenGlyphs = 0u;
+};
 
 class ShapePipeline
 {
@@ -91,6 +102,15 @@ public:
         bool includeStaticBackdrop = false,
         bool includeExternalBackdrop = false
     ) const;
+
+    void record_foreground_group(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const Renderer2DBatch& batch
+    ) const;
 };
 
 class TextPipeline
@@ -162,7 +182,8 @@ public:
         bool useExternalBackdropUnderlay = false,
         bool writeNativeSurface = true,
         bool writeCompositionSurface = false,
-        glm::uvec4 contentRect = glm::uvec4(0u)
+        glm::uvec4 contentRect = glm::uvec4(0u),
+        Renderer2DViewportFade viewportFade = {}
     ) const;
 };
 
@@ -184,6 +205,17 @@ public:
 class VIBRANCE_ENGINE_API Renderer2D
 {
 public:
+    struct RecordDiagnostics
+    {
+        uint32_t cacheRebuilds = 0u;
+        uint32_t cachedBatchReplays = 0u;
+        uint32_t dynamicBatchReplays = 0u;
+        uint32_t textGlyphs = 0u;
+        uint32_t textDispatches = 0u;
+        uint32_t textBatchDispatches = 0u;
+        uint32_t layeredBarriers = 0u;
+    };
+
     // Records the full 2D pass order: blur, shadow, shape, media, text, hosted 3D, composite
     void record(
         vk::CommandBuffer commandBuffer,
@@ -202,7 +234,9 @@ public:
         vk::RenderPass hosted3DRenderPass = nullptr,
         vk::Framebuffer hosted3DFramebuffer = nullptr,
         bool hosted3DUsesResolveAttachment = false,
-        bool externalBackdropAvailable = false
+        bool externalBackdropAvailable = false,
+        StorageImage* foregroundBlurRenderTarget = nullptr,
+        Renderer2DTextBatchResources* textBatchResources = nullptr
     ) const;
 
     void record_composite(
@@ -222,6 +256,7 @@ public:
     // pixels across the rest of a full-screen overlay window.
     glm::uvec4 content_bounds() const;
     glm::uvec4 damage_bounds() const;
+    RecordDiagnostics record_diagnostics() const;
 
     // Call when the frame slot receives a new dynamic storage image. The next
     // record clears the complete image once before returning to bounded clears.
@@ -237,17 +272,14 @@ private:
     CompositePipeline compositePipeline;
     mutable Renderer2DRenderPlan renderPlanCache;
     mutable Renderer2DRenderPlan cachedLayerPlanCache;
+    mutable RecordDiagnostics recordDiagnostics;
     mutable uint64_t cachedLayerGeneration = 0;
-    mutable bool cachedLayerHasDynamicCutoff = false;
-    mutable int32_t cachedLayerCutoffStackLayer = 0;
-    mutable uint32_t cachedLayerCutoffStackOrder = 0;
-    mutable int32_t cachedLayerCutoffLayer = 0;
-    mutable uint32_t cachedLayerCutoffOrder = 0;
-    mutable bool cachedLayerCutoffAlwaysOnTop = false;
-    mutable glm::uvec4 cachedLayerCutoffBounds { 0u };
+    mutable std::vector<std::pair<uint32_t, std::size_t>> cachedLayerReplayBatches;
+    mutable std::vector<std::pair<uint32_t, std::size_t>> currentCachedLayerReplayBatches;
     mutable bool dynamicSurfaceInitialized = false;
     mutable std::vector<uint32_t> cachedDynamicEntities;
     mutable std::vector<std::pair<entt::entity, glm::uvec4>> presentedBounds;
+    mutable std::vector<std::pair<entt::entity, glm::uvec4>> currentEntityBounds;
     mutable glm::uvec4 dynamicSurfaceBounds { 0u };
     mutable glm::uvec4 contentBounds { 0u };
     mutable glm::uvec4 damageBounds { 0u };

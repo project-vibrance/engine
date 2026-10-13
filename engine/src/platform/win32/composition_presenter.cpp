@@ -5,6 +5,7 @@
 #include <vibranceUI/core/logger.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -621,15 +622,16 @@ bool CompositionPresenter::set_regions(
     nativeRegions.reserve(regions.size());
     for (const SystemBackdropRegion& region : regions)
     {
-        // The native bridge accepts only eSystemGlass. Renderer-owned liquid
-        // requests use LiquidGlassComponent and can never enter this path.
-        if (region.material != GlassMaterial::eSystemGlass ||
+        if ((region.material != GlassMaterial::eSystemGlass &&
+             region.material != GlassMaterial::eLiquid) ||
             region.width <= 0.0f || region.height <= 0.0f)
         {
             continue;
         }
         VibranceCompositionRegion native = {};
+        native.identity = region.identity;
         native.material = static_cast<std::uint32_t>(region.material);
+        native.liquidBackend = static_cast<std::uint32_t>(region.liquidBackend);
         native.provider = static_cast<std::uint32_t>(region.provider);
         native.shape = static_cast<std::uint32_t>(region.shape);
         native.x = region.x;
@@ -645,6 +647,31 @@ bool CompositionPresenter::set_regions(
         native.squirclePower = region.squirclePower;
         native.notchAmount = region.notchAmount;
         native.notchDepth = region.notchDepth;
+        native.liquidRefraction = region.liquidRefraction;
+        native.liquidBlur = region.liquidBlur;
+        native.liquidRim = region.liquidRim;
+        native.liquidDispersion = region.liquidDispersion;
+        native.liquidTintRed = region.liquidTint.red;
+        native.liquidTintGreen = region.liquidTint.green;
+        native.liquidTintBlue = region.liquidTint.blue;
+        native.liquidTintAlpha = region.liquidTint.alpha;
+        static_assert(sizeof(SystemBackdropRegion::Contour) ==
+            sizeof(VibranceCompositionContour));
+        native.contourCount = std::min(region.contourCount, 3u);
+        native.hasExclusion = region.hasExclusion ? 1u : 0u;
+        const auto capByte = [](float value) { return static_cast<std::uint32_t>(
+            std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f)); };
+        native.paintCapGradient = region.paintCapGradient ? (1u |
+            (capByte(region.capColour[0]) << 8u) | (capByte(region.capColour[1]) << 16u) |
+            (capByte(region.capColour[2]) << 24u)) : 0u;
+        native.flags = region.clipRawBackdropToShape ? 1u : 0u;
+        std::copy(region.capGradient.begin(), region.capGradient.end(), native.capGradient);
+        // Both contour layouts contain the same thirteen floats and uint32
+        // shape, guarded by their fixed-size assertions in the public/POD ABI.
+        std::memcpy(native.contours, region.contours.data(), sizeof(native.contours));
+        std::memcpy(&native.exclusion, &region.exclusion, sizeof(native.exclusion));
+        std::copy(region.viewportRect.begin(), region.viewportRect.end(), native.viewportRect);
+        std::copy(region.viewportFade.begin(), region.viewportFade.end(), native.viewportFade);
         native.verticalStart = region.verticalStart;
         native.opacity = region.opacity;
         native.blurRadius = region.blurRadius;

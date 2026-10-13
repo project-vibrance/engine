@@ -1,8 +1,10 @@
 #pragma once
 #define VULKAN_HPP_NO_EXCEPTIONS
 #include "vibranceUI/export.h"
+#if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
+#endif
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -34,6 +36,9 @@ struct Media2DLoadOptions
     // reduces the number of unique frames available during playback.
     uint32_t maxVideoFrames = 0;
     uint32_t maxVideoPixels = 640u * 640u;
+    // Trim transparent outer pixels from static images before upload, keeping
+    // a one-pixel filtering gutter. Animated images retain their full canvas.
+    bool trimTransparentBorders = false;
 };
 
 struct Media2DAsset
@@ -53,10 +58,16 @@ struct Media2DAsset
     bool premultipliedAlpha = false;
     std::unique_ptr<StorageImage> image;
     std::vector<std::unique_ptr<StorageImage>> extraFrameImages;
+#if defined(__APPLE__)
+    std::vector<StorageImage*> frameImages;
+#else
     std::vector<vk::DescriptorSet> frameDescriptorSets;
+#endif
     std::vector<double> frameDurationsSeconds;
+#if !defined(__APPLE__)
     vk::Sampler sampler = nullptr;
     vk::DescriptorSet descriptorSet = nullptr;
+#endif
 
     Media2DHandle handle() const
     {
@@ -80,6 +91,9 @@ Media2DHandle load_media_2d_asset(
     const std::filesystem::path& path,
     const Media2DLoadOptions& options,
     uint32_t mediaId,
+#if defined(__APPLE__)
+    const MetalTextureUpload& upload,
+#else
     VmaAllocator& allocator,
     std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
     std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue,
@@ -88,5 +102,6 @@ Media2DHandle load_media_2d_asset(
     vk::Device logicalDevice,
     vk::DescriptorPool descriptorPool,
     vk::DescriptorSetLayout descriptorSetLayout,
+#endif
     Media2DAsset& outAsset
 );

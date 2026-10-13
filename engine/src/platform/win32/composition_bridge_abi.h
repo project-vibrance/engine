@@ -9,7 +9,7 @@
 #define VIBRANCE_COMPOSITION_CALL
 #endif
 
-constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 16u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 23u;
 constexpr std::uint32_t VIBRANCE_COMPOSITION_MAX_BUFFERS = 3u;
 
 constexpr std::uint32_t VIBRANCE_COMPOSITION_CREATE_TRANSPARENT_FRAMEBUFFER =
@@ -76,10 +76,23 @@ struct VibranceCompositionUploadInfo
     std::uint32_t rowPitch = 0u;
 };
 
+struct VibranceCompositionContour
+{
+    float x = 0.0f, y = 0.0f, width = 0.0f, height = 0.0f;
+    float cornerRadius = 0.0f;
+    float topLeftRadius = 0.0f, topRightRadius = 0.0f;
+    float bottomRightRadius = 0.0f, bottomLeftRadius = 0.0f;
+    float squircleAmount = 1.0f, squirclePower = 4.0f;
+    float notchAmount = 0.0f, notchDepth = 0.0f;
+    std::uint32_t shape = 0u;
+};
+static_assert(sizeof(VibranceCompositionContour) == 56u);
+
 struct VibranceCompositionRegion
 {
     std::uint32_t structSize = sizeof(VibranceCompositionRegion);
     std::uint32_t material = 0u;
+    std::uint32_t liquidBackend = 0u;
     std::uint32_t provider = 0u;
     std::uint32_t shape = 0u;
     float x = 0.0f;
@@ -103,7 +116,27 @@ struct VibranceCompositionRegion
     float tintGreen = 1.0f;
     float tintBlue = 1.0f;
     float tintAlpha = 0.0f;
+    float liquidRefraction = 0.70f;
+    float liquidBlur = 0.15f;
+    float liquidRim = 0.60f;
+    float liquidDispersion = 0.35f;
+    float liquidTintRed = 213.0f / 255.0f;
+    float liquidTintGreen = 231.0f / 255.0f;
+    float liquidTintBlue = 1.0f;
+    float liquidTintAlpha = 0.0f;
+    std::uint64_t identity = 0u;
+    std::uint32_t contourCount = 0u;
+    std::uint32_t hasExclusion = 0u;
+    // Bit 0 enables the cap; upper three bytes contain its RGB8 colour.
+    std::uint32_t paintCapGradient = 0u;
+    std::uint32_t flags = 0u; // Bit 0 clips raw dependency paint for control lenses.
+    float capGradient[4] { 0.98f, 0.015f, 0.0f, 1.0f };
+    VibranceCompositionContour contours[3] {};
+    VibranceCompositionContour exclusion {};
+    float viewportRect[4] {};
+    float viewportFade[4] {};
 };
+static_assert(sizeof(VibranceCompositionRegion) == 432u);
 #pragma pack(pop)
 
 using VibranceCompositionHandle = void*;

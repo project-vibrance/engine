@@ -1,4 +1,5 @@
 #pragma once
+#include <vibranceUI/renderer/viewport_fade.h>
 #include "vibranceUI/export.h"
 #include <algorithm>
 #include <array>
@@ -92,6 +93,8 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleMsdfText = 1u << 6,
     eRenderer2DStyleClear = 1u << 7,
     eRenderer2DStyleAtlasText = 1u << 8,
+    // Text-specific bit, shared with the media pipeline's separate shader.
+    eRenderer2DStyleColourGlyph = 1u << 10,
     eRenderer2DStyleBlurComposite = 1u << 9,
     eRenderer2DStyleMedia = 1u << 10,
     eRenderer2DStyleRadialGradient = 1u << 11,
@@ -106,13 +109,20 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleBlurFollowsFillAlpha = 1u << 20,
     eRenderer2DStyleBlurInheritedShapeMask = 1u << 21,
     eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
+    // Shader-specific bit: optical scene sampling in the blur pipeline.
+    eRenderer2DStyleLiquidGlass = 1u << 22,
     eRenderer2DStyleShadowOutsideOnly = 1u << 23,
     eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24,
     eRenderer2DStyleTextEdgeFade = 1u << 25,
     eRenderer2DStyleMediaSingleBlurSample = 1u << 26,
+    // Blur-specific flag. Optical parameters, including all eight animation
+    // phase bits, occupy the separate packed-data word.
+    eRenderer2DStyleBlurForegroundGroupSource = 1u << 26,
     eRenderer2DStyleMediaBlurHorizontal = 1u << 27,
     eRenderer2DStyleMediaBlurVertical = 1u << 28,
-    eRenderer2DStyleShapeCutout = 1u << 29
+    eRenderer2DStyleShapeCutout = 1u << 29,
+    eRenderer2DStyleLiquidRim = 1u << 30,
+    eRenderer2DStyleMaskedLiquidShapeParameters = 1u << 31
 };
 
 inline std::optional<uint32_t> renderer2d_hex_digit(char value)
@@ -464,6 +474,7 @@ struct InteractiveVisual2DComponent
     bool blurSelf = true;
     glm::vec2 scale { 1.0f };
     glm::vec2 scaleOrigin { 0.0f };
+    glm::vec2 offset { 0.0f };
     float blurRadius = 0.0f;
     float opacity = 1.0f;
 };
@@ -493,6 +504,11 @@ struct RenderLayer2DComponent
 struct Parent2DComponent
 {
     entt::entity parent = entt::null;
+};
+
+struct ForegroundBlurGroup2DComponent
+{
+    float radius = 0.0f;
 };
 
 inline glm::vec4 renderer2d_apply_interactive_visual_rect(
@@ -533,7 +549,7 @@ inline glm::vec4 renderer2d_apply_interactive_visual_rect(
         const glm::vec2 safeScale =
             glm::max(visual.scale, glm::vec2(0.001f));
         const glm::vec2 minPosition = visual.scaleOrigin +
-            (glm::vec2(rect.x, rect.y) - visual.scaleOrigin) * safeScale;
+            (glm::vec2(rect.x, rect.y) - visual.scaleOrigin) * safeScale + visual.offset;
         const glm::vec2 size = glm::vec2(rect.z, rect.w) * safeScale;
         rect = { minPosition.x, minPosition.y, size.x, size.y };
     }
@@ -587,6 +603,20 @@ struct LayoutRect2DComponent
 struct ShapeCutout2DComponent
 {
     entt::entity source = entt::null;
+    // UI cap paint can expose a child lens without punching a hole in the
+    // native optical material underneath the complete panel.
+    bool affectBackdrop = true;
+};
+
+// Draw connected glass as one material while keeping each participant's UI.
+// All participants share this owner's scene and animation lifetime.
+struct SystemBackdropUnionComponent
+{
+    std::array<entt::entity, 3> participants {
+        entt::null, entt::null, entt::null };
+    bool paintCapGradient = false;
+    std::array<float, 3> capColour { 0.0f, 0.0f, 0.0f };
+    std::array<float, 4> capGradient { 0.98f, 0.015f, 0.0f, 1.0f };
 };
 
 struct Mask2DComponent
@@ -605,6 +635,18 @@ struct Layout2DComponent
     glm::vec2 offset { 0.0f };
     glm::vec2 size { 0.0f };
     glm::vec4 margin { 0.0f };
+};
+
+struct ContentSize2DComponent
+{
+    // Intrinsic content sizing uses framebuffer pixels, like Layout2DComponent.
+    // The source must have independent dimensions, rather than stretch to this
+    // container. Transient scale/rotation does not change its measured size.
+    entt::entity source = entt::null;
+    glm::vec2 minimumSize { 0.0f };
+    glm::vec4 padding { 0.0f };
+    bool fitWidth = true;
+    bool fitHeight = false;
 };
 
 enum class GridTrackUnit2D : uint32_t
@@ -699,12 +741,16 @@ struct SystemBackdropComponent
 
 struct LiquidGlassComponent
 {
-    // Renderer-owned liquid glass request. It is intentionally separate from
-    // SystemBackdropComponent so eLiquid can never enter a native compositor
-    // effect graph. The entity supplies bounds and shape when a backend is
-    // implemented.
+    // Liquid glass request. Windows also attaches a shaped Composition
+    // backdrop component as the live blur fallback.
     GlassMaterial material = GlassMaterial::eOff;
     LiquidGlassBackend backend = LiquidGlassBackend::eEngineRenderer;
+    // Controls refract live app content through the portable GPU renderer.
+    bool sceneBackdrop = false;
+    float refraction = 0.70f;
+    float blur = 0.15f;
+    float rim = 0.60f;
+    float dispersion = 0.35f;
 };
 
 struct DragHandle2DComponent
@@ -1157,6 +1203,14 @@ struct ScrollEdgeFade2DComponent
     float bottomHeight = 0.0f;
     float minimumOpacity = 0.0f;
     float maximumBlurRadius = 0.0f;
+    // Horizontal rulers use topHeight/bottomHeight for their left/right edges.
+    bool horizontal = false;
+    // Relative extents are fractions of the resolved viewport dimension, so
+    // the fade follows resizing and DPI without rebuilding the content.
+    bool relativeExtents = false;
+    // A window containing this scroll viewport applies its gradient once at
+    // presentation, keeping text, media and native glass on the same edges.
+    bool fadeWindow = false;
 };
 
 struct TextEdgeFade2DComponent
@@ -1268,6 +1322,12 @@ struct MSDFGlyph
     glm::vec2 uvMin { 0.0f };
     glm::vec2 uvMax { 1.0f };
     float advance = 0.0f;
+    bool coloured = false;
+    // Trusted empty padding around the source bitmap, in scalar atlas pixels.
+    // Only the engine's monochrome SDF bake sets this; custom glyphs retain 0.
+    float sdfPadding = 0.0f;
+    glm::vec2 sdfAtlasSize { 0.0f };
+    glm::vec4 sdfUvRect { 0.0f };
 };
 
 struct MSDFGlyphAtlasComponent
@@ -1309,6 +1369,9 @@ struct TextLayout2DOptions
     float paragraphSpacing = 0.0f;
     float characterSpacing = 0.0f;
     float wordSpacing = 0.0f;
+    // Centre 0-9 in equal-width cells. Include those cells in measured bounds
+    // so timestamps and counters do not resize when their digit values change.
+    bool tabularDigits = true;
 };
 
 struct TextLayout2DComponent
@@ -1316,6 +1379,14 @@ struct TextLayout2DComponent
     TextLayout2DOptions options {};
     uint32_t lineCount = 0u;
     float resolvedLineHeight = 0.0f;
+};
+
+// Opt-in alignment for labels beside icons. The first-line capital-height
+// midpoint follows the layout anchor; ascenders/descenders retain their natural
+// positions instead of changing the vertical centring of the entire run.
+struct TextCapHeightAlignment2DComponent
+{
+    float centreOffsetY = 0.0f;
 };
 
 struct TextComponent
@@ -1424,6 +1495,7 @@ struct TextStyleComponent
 struct Renderer2DBatch
 {
     entt::entity entity = entt::null;
+    entt::entity foregroundBlurGroup = entt::null;
     int32_t stackLayer = 0;
     uint32_t stackOrder = 0;
     int32_t layer = 0;
@@ -1441,21 +1513,34 @@ struct Renderer2DBatch
     glm::vec4 effect1 { 0.0f };
     uint32_t flags = eRenderer2DStyleNone;
     uint32_t packedData = 0;
+    uint32_t backdropCapColour = 0u; // RGB8, used only by optical blur batches.
     uint32_t mediaId = 0;
     uint32_t frameIndex = 0;
+    // Empty by default: only validated generated SDF glyphs narrow foreground
+    // writes. Underlays, replay dependencies and damage keep their full bounds.
+    glm::vec4 textForegroundRect { 0.0f };
 };
 
 struct Renderer2DShapeVisualState
 {
+    glm::vec4 clipRect { -1000000.0f, -1000000.0f, 2000000.0f, 2000000.0f };
+    Renderer2DViewportFade viewportFade {};
     // The exact post-layout, inherited-transition and interactive rectangle
     // used when the renderer emits a shape batch.
     glm::vec4 rect { 0.0f };
     float opacity = 1.0f;
+    // The same inherited paint order as the sharp renderer content.
+    int32_t stackLayer = 0;
+    uint32_t stackOrder = 0;
+    int32_t layer = 0;
+    uint32_t order = 0;
+    bool alwaysOnTop = false;
 };
 
 struct Renderer3DModelBatch
 {
     entt::entity entity = entt::null;
+    entt::entity foregroundBlurGroup = entt::null;
     uint32_t modelId = 0;
     uint32_t firstTriangle = 0;
     uint32_t triangleCount = 0;
@@ -1480,6 +1565,10 @@ struct Renderer3DModelBatch
 
 struct Renderer2DRenderPlan
 {
+    Renderer2DViewportFade viewportFade {};
+    // Cache ownership includes invisible and clipped drawable entities. Paint
+    // visibility can change without migrating their pixels into the cache.
+    std::vector<uint32_t> dynamicEntities;
     std::vector<Renderer2DBatch> panelBlurs;
     std::vector<Renderer2DBatch> shadows;
     std::vector<Renderer2DBatch> blurs;
@@ -1614,6 +1703,11 @@ public:
 
     Renderer2DRenderPlan build_render_plan(double currentTimeSeconds, uint64_t rendererCacheGeneration);
     void build_render_plan(Renderer2DRenderPlan& plan, double currentTimeSeconds, uint64_t rendererCacheGeneration);
+    // Rendering can defer hidden-page layout until it becomes visible. Cache
+    // ownership still includes hidden entities, while the authoring method
+    // above continues to resolve the complete scene's geometry.
+    void build_visible_render_plan(Renderer2DRenderPlan& plan,
+        double currentTimeSeconds, uint64_t rendererCacheGeneration);
     std::optional<Renderer2DShapeVisualState> resolved_shape_visual_state(
         entt::entity entity,
         double currentTimeSeconds) const;
@@ -1623,6 +1717,9 @@ private:
     bool damage_pending(entt::entity entity, double currentTimeSeconds) const;
     void commit_presented_bounds(
         std::vector<std::pair<entt::entity, glm::uvec4>> bounds);
+    void build_render_plan_impl(Renderer2DRenderPlan& plan,
+        double currentTimeSeconds, uint64_t rendererCacheGeneration,
+        bool visibleLayoutsOnly);
 
     entt::registry registry_;
     uint64_t cacheGeneration_ = 1;

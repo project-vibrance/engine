@@ -1,3 +1,4 @@
+#if !defined(__APPLE__)
 #if !defined(_WIN32) || defined(VIBRANCE_FORCE_PORTABLE_COMPOSITION)
 #include "../composition_presenter.h"
 
@@ -22,4 +23,6 @@ CompositionPresenter::PresentResult CompositionPresenter::present(
 bool CompositionPresenter::upload(std::uint32_t, const void*, std::uint32_t,
     std::uint32_t, std::uint32_t) { return false; }
 bool CompositionPresenter::set_regions(const std::vector<SystemBackdropRegion>&) { return false; }
+#endif
+
 #endif

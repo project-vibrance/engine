@@ -19,6 +19,11 @@
 #endif
 #endif
 
+#if defined(__APPLE__)
+void glfw_macos_refresh_application_presence();
+void glfw_macos_forget_window(GLFWwindow* window);
+#endif
+
 namespace
 {
 #if defined(_WIN32) && defined(__MINGW32__)
@@ -222,10 +227,14 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
 {
     Logger* logger = Logger::fetch_logger();
 
+    glfwSetErrorCallback([](int code, const char* description) {
+        Logger::fetch_logger()->error("GLFW error " + std::to_string(code) + ": " +
+            (description ? description : "No description"));
+    });
     // GLFW stays inside this backend layer so the engine can remain platform-agnostic
     if (glfwInit() != GLFW_TRUE)
     {
-        logger->print("Failed to initialise GLFW.");
+        logger->error("Failed to initialise GLFW.");
         return nullptr;
     }
 
@@ -334,7 +343,7 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     else
     {
         logger->print("Failed to create GLFW window");
-        glfwTerminate();
+        terminate_glfw();
     }
 
     return window;
@@ -549,12 +558,18 @@ void destroy_glfw_window(GLFWwindow* window)
 {
     if (window)
     {
+#if defined(__APPLE__)
+        glfw_macos_forget_window(window);
+#endif
         glfwDestroyWindow(window);
     }
 }
 
 void terminate_glfw()
 {
+#if defined(__APPLE__)
+    glfw_macos_forget_window(nullptr);
+#endif
     glfwTerminate();
 }
 
@@ -908,17 +923,26 @@ bool glfw_screen_cursor_position(
 
 int vibrance_glfw_create_surface(void* instance, void* userData, void* surfaceOut)
 {
+#if defined(__APPLE__)
+    (void)instance; (void)userData; (void)surfaceOut;
+    return -1;
+#else
     return glfwCreateWindowSurface(
         static_cast<VkInstance>(instance),
         static_cast<GLFWwindow*>(userData),
         nullptr,
         static_cast<VkSurfaceKHR*>(surfaceOut));
+#endif
 }
 
 const char** glfw_required_instance_extensions(uint32_t& count)
 {
     count = 0u;
+#if defined(__APPLE__)
+    return nullptr;
+#else
     return glfwGetRequiredInstanceExtensions(&count);
+#endif
 }
 
 bool glfw_framebuffer_size(GLFWwindow* window, int& width, int& height)
@@ -979,6 +1003,19 @@ bool glfw_window_focused(GLFWwindow* window)
 
 bool glfw_window_hovered(GLFWwindow* window)
 {
+#if defined(__APPLE__)
+    // GLFW's Cocoa hover query asks WindowServer which window is topmost.
+    // Most overlay ticks have the pointer elsewhere: reject those locally
+    // before paying for the synchronous WindowServer round trip.
+    if (!window)
+        return false;
+    double x = 0.0, y = 0.0;
+    int width = 0, height = 0;
+    glfwGetCursorPos(window, &x, &y);
+    glfwGetWindowSize(window, &width, &height);
+    if (x < 0.0 || y < 0.0 || x >= width || y >= height)
+        return false;
+#endif
 #ifdef GLFW_HOVERED
     return window && glfwGetWindowAttrib(window, GLFW_HOVERED) == GLFW_TRUE;
 #else
@@ -1053,6 +1090,9 @@ void focus_glfw_window(GLFWwindow* window)
         return;
     }
     glfwShowWindow(window);
+#if defined(__APPLE__)
+    glfw_macos_refresh_application_presence();
+#endif
     glfwFocusWindow(window);
 }
 
@@ -1070,6 +1110,9 @@ void set_glfw_window_visible(GLFWwindow* window, bool visible)
     {
         glfwHideWindow(window);
     }
+#if defined(__APPLE__)
+    glfw_macos_refresh_application_presence();
+#endif
 }
 
 void set_glfw_window_title(GLFWwindow* window, const char* title)
@@ -1308,6 +1351,8 @@ void set_glfw_window_should_close(GLFWwindow* window, bool shouldClose)
     }
 }
 
+// The Cocoa implementation is in window_macos.mm.
+#if !defined(__APPLE__)
 void* glfw_native_window_handle(GLFWwindow* window)
 {
 #if defined(_WIN32)
@@ -1318,6 +1363,7 @@ void* glfw_native_window_handle(GLFWwindow* window)
 #endif
 }
 
+#endif
 #if !defined(__APPLE__)
 bool begin_glfw_native_window_drag(GLFWwindow* window)
 {
@@ -1620,6 +1666,13 @@ bool glfw_cursor_framebuffer_point(GLFWwindow* window, int renderWidth, int rend
     double cursorX = 0.0;
     double cursorY = 0.0;
     glfwGetCursorPos(window, &cursorX, &cursorY);
+    if (!std::isfinite(cursorX) || !std::isfinite(cursorY)) return false;
+    // Keep the release position even outside the hit-testable window. A
+    // captured switch or custom button must not finish its gesture at (0, 0).
+    point = {
+        static_cast<float>(cursorX * static_cast<double>(renderWidth) / static_cast<double>(windowWidth)),
+        static_cast<float>(cursorY * static_cast<double>(renderHeight) / static_cast<double>(windowHeight))
+    };
     if (cursorX < 0.0 ||
         cursorY < 0.0 ||
         cursorX >= static_cast<double>(windowWidth) ||
@@ -1628,16 +1681,53 @@ bool glfw_cursor_framebuffer_point(GLFWwindow* window, int renderWidth, int rend
         return false;
     }
 
-    point = {
-        static_cast<float>(cursorX * static_cast<double>(renderWidth) / static_cast<double>(windowWidth)),
-        static_cast<float>(cursorY * static_cast<double>(renderHeight) / static_cast<double>(windowHeight))
-    };
     return true;
+}
+
+#if defined(__APPLE__)
+// Cocoa can route mouse-up outside the GLFW render view. Query the physical
+// buttons as well as GLFW's cached state so a missed release cannot strand
+// a captured control until another click arrives.
+bool glfw_macos_mouse_button_pressed(int button);
+#endif
+
+namespace
+{
+    bool glfw_mouse_button_pressed(GLFWwindow* window, int button)
+    {
+        if (!window || glfwGetMouseButton(window, button) != GLFW_PRESS)
+            return false;
+#if defined(__APPLE__)
+        return glfw_macos_mouse_button_pressed(button);
+#else
+        return true;
+#endif
+    }
 }
 
 bool glfw_left_mouse_pressed(GLFWwindow* window)
 {
-    return window && glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    return glfw_mouse_button_pressed(window, GLFW_MOUSE_BUTTON_LEFT);
+}
+
+void glfw_reconcile_ui_mouse_events(GLFWwindow* window, const UiInputState& inputState)
+{
+#if defined(__APPLE__)
+    if (window && glfw_ui_input_has_pointer_capture(inputState) &&
+        ((!glfw_left_mouse_pressed(window) &&
+          glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) ||
+         (!glfw_mouse_button_pressed(window, GLFW_MOUSE_BUTTON_RIGHT) &&
+          glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)))
+    {
+        // A physical release may still be queued for normal delivery. Drain
+        // it before sampling the host's pointer and geometry so quick clicks
+        // keep their onClick callbacks and resize events cannot stale samples.
+        poll_glfw_events();
+    }
+#else
+    (void)window;
+    (void)inputState;
+#endif
 }
 
 bool glfw_engine_render_size(const Engine* engine, int& width, int& height)
@@ -1687,7 +1777,13 @@ void glfw_update_ui_drag_inputs(
 {
     // Shared drag path for panels and direct-manipulation controls
     const bool leftPressed = glfw_left_mouse_pressed(window);
+    const bool rightPressed = glfw_mouse_button_pressed(window, GLFW_MOUSE_BUTTON_RIGHT);
     Renderer2DScene& scene = engine.renderer2d_scene();
+    ui_recover_pointer_button_release(scene, inputState, leftPressed, rightPressed, pointer.point);
+    ui_update_switch_drag(scene, inputState, leftPressed, pointer.hasPoint, pointer.point);
+    if (const auto* toggle = scene.registry().try_get<UiSwitchControlComponent>(inputState.pressedInputEntity);
+        toggle && toggle->dragging && inputState.activeStretchDynamics != inputState.pressedInputEntity)
+        ui_begin_stretch_dynamics(scene, inputState, inputState.pressedInputEntity, toggle->dragPressPoint);
     ui_update_stretch_dynamics_drag(
         scene,
         inputState,

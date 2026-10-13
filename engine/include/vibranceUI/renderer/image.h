@@ -1,4 +1,8 @@
 #pragma once
+#if defined(__APPLE__)
+#include <vibranceUI/renderer/metal/resources.h>
+#else
+#pragma once
 #define VULKAN_HPP_NO_EXCEPTIONS
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
@@ -124,3 +128,5 @@ void copy_image_region_to_image(
     vk::Extent2D srcSize,
     vk::Extent2D dstSize,
     vk::Rect2D srcRegion);
+
+#endif

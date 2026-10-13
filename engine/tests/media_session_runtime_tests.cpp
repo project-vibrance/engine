@@ -18,6 +18,14 @@ int main()
             << session.snapshot().diagnostic << '\n';
         return 1;
     }
+#elif defined(__APPLE__)
+    if (!GlobalMediaSession::platform_supported())
+    {
+        std::cerr << "macOS media-session provider was not enabled\n";
+        return 1;
+    }
+    // Missing companions fail closed with a diagnostic, just like Win32.
+    if (!session.bridge_loaded() && session.snapshot().diagnostic.empty()) return 1;
 #else
     if (GlobalMediaSession::platform_supported() || session.bridge_loaded())
     {

@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <thread>
 
 #ifdef _WIN32
@@ -55,6 +56,85 @@
 namespace
 {
 	constexpr uint32_t kCompositionBufferCount = 2u;
+	constexpr uint64_t kGpuTimestampSampleInterval = 16u;
+
+	enum class RendererCpuPhase : std::size_t
+	{
+		eRetainedCheck,
+		eCadenceCheck,
+		eRedrawCheck,
+		eGlyphScan,
+		eCommandRecording,
+		eBackdropGeometry,
+		eInteropAcquire,
+		eSurfaceAcquire,
+		eQueueSubmit,
+		eFenceWait,
+		eBackdropApply,
+		ePresent,
+		eCount
+	};
+
+	struct RendererCpuWallTiming
+	{
+		uint64_t samples = 0u;
+		double totalMilliseconds = 0.0;
+		double maxMilliseconds = 0.0;
+	};
+
+	class RendererCpuTimingScope
+	{
+	public:
+		explicit RendererCpuTimingScope(RendererCpuWallTiming* timing) : timing_(timing)
+		{
+			// Disabled diagnostics perform no clock reads or aggregation.
+			if (timing_)
+			{
+				start_ = std::chrono::steady_clock::now();
+			}
+		}
+
+		~RendererCpuTimingScope()
+		{
+			if (timing_)
+			{
+				const double milliseconds = std::chrono::duration<double, std::milli>(
+					std::chrono::steady_clock::now() - start_).count();
+				++timing_->samples;
+				timing_->totalMilliseconds += milliseconds;
+				timing_->maxMilliseconds = std::max(timing_->maxMilliseconds, milliseconds);
+			}
+		}
+
+		RendererCpuTimingScope(const RendererCpuTimingScope&) = delete;
+		RendererCpuTimingScope& operator=(const RendererCpuTimingScope&) = delete;
+
+	private:
+		RendererCpuWallTiming* timing_ = nullptr;
+		std::chrono::steady_clock::time_point start_ {};
+	};
+
+	// A shared UI thread ticks every window before asking for its next event
+	// wait. Only let that thread sleep when every renderer retained its image;
+	// one animating or pending window keeps the normal presentation cadence.
+	thread_local bool rendererDrawSeen = false;
+	thread_local bool allRendererDrawsSettled = true;
+	thread_local bool rendererHostUsesIdleEventWait = false;
+
+	struct RendererDrawActivity
+	{
+		bool settled = false;
+
+		RendererDrawActivity()
+		{
+			rendererDrawSeen = true;
+		}
+
+		~RendererDrawActivity()
+		{
+			allRendererDrawsSettled &= settled;
+		}
+	};
 
 	vk::Extent2D hosted_3d_extent(
 		vk::Extent2D renderExtent,
@@ -222,7 +302,9 @@ namespace
 				(std::isfinite(a) && std::isfinite(b) &&
 					std::abs(a - b) <= 0.05f);
 		};
-		return left.material == right.material &&
+        return left.identity == right.identity &&
+            left.material == right.material &&
+			left.liquidBackend == right.liquidBackend &&
 			left.provider == right.provider &&
 			left.shape == right.shape &&
 			close(left.x, right.x) && close(left.y, right.y) &&
@@ -232,10 +314,30 @@ namespace
 			close(left.topRightRadius, right.topRightRadius) &&
 			close(left.bottomRightRadius, right.bottomRightRadius) &&
 			close(left.bottomLeftRadius, right.bottomLeftRadius) &&
-			close(left.squircleAmount, right.squircleAmount) &&
-			close(left.squirclePower, right.squirclePower) &&
-			close(left.notchAmount, right.notchAmount) &&
+            left.squircleAmount == right.squircleAmount &&
+            left.squirclePower == right.squirclePower &&
+            left.notchAmount == right.notchAmount &&
 			close(left.notchDepth, right.notchDepth) &&
+			// Optical settings change in 1% steps; geometry's tolerance would
+			// suppress those updates and leave the native shader's values stale.
+			left.liquidRefraction == right.liquidRefraction &&
+			left.liquidBlur == right.liquidBlur &&
+			left.liquidRim == right.liquidRim &&
+            left.liquidDispersion == right.liquidDispersion &&
+            left.liquidTint.red == right.liquidTint.red &&
+            left.liquidTint.green == right.liquidTint.green &&
+            left.liquidTint.blue == right.liquidTint.blue &&
+            left.liquidTint.alpha == right.liquidTint.alpha &&
+            left.contourCount == right.contourCount &&
+            left.hasExclusion == right.hasExclusion &&
+            left.clipRawBackdropToShape == right.clipRawBackdropToShape &&
+            left.paintCapGradient == right.paintCapGradient &&
+            left.capGradient == right.capGradient && left.capColour == right.capColour &&
+            left.viewportRect == right.viewportRect && left.viewportFade == right.viewportFade &&
+            std::memcmp(left.contours.data(), right.contours.data(),
+                sizeof(left.contours)) == 0 &&
+            (!left.hasExclusion || std::memcmp(&left.exclusion,
+                &right.exclusion, sizeof(left.exclusion)) == 0) &&
 			close(left.verticalStart, right.verticalStart) &&
 			std::abs(left.opacity - right.opacity) <= 0.002f &&
 			close(left.blurRadius, right.blurRadius) &&
@@ -869,6 +971,12 @@ private:
 	void apply_system_backdrop_regions(
 		const std::vector<SystemBackdropRegion>& regions);
 	void publish_completed_composition_frames();
+	void collect_gpu_render_timings(Frame& frame);
+	RendererCpuTimingScope measure_cpu_phase(RendererCpuPhase phase)
+	{
+		return RendererCpuTimingScope(renderDiagnosticsEnabled ?
+			&diagnosticCpuTimings[static_cast<std::size_t>(phase)] : nullptr);
+	}
 
 	uint32_t framebufferWidth = 0;
 	uint32_t framebufferHeight = 0;
@@ -953,6 +1061,24 @@ private:
 	uint64_t diagnosticContinuousRequests = 0u;
 	uint64_t diagnosticRetainedSyncRequests = 0u;
 	uint64_t diagnosticLastSceneGeneration = 0u;
+	bool gpuTimestampDiagnosticsEnabled = false;
+	bool gpuTimestampDiagnosticsAvailable = false;
+	uint64_t gpuTimestampSubmissionIndex = 0u;
+	uint64_t diagnosticGpuSamples = 0u;
+	double diagnosticGpuTotalMilliseconds = 0.0;
+	double diagnosticGpuRender2DMilliseconds = 0.0;
+	double diagnosticGpuCompositeMilliseconds = 0.0;
+	double diagnosticGpuOutputMilliseconds = 0.0;
+	double diagnosticGpuMaxMilliseconds = 0.0;
+	uint64_t diagnosticCacheRebuilds = 0u;
+	uint64_t diagnosticCachedBatchReplays = 0u;
+	uint64_t diagnosticDynamicBatchReplays = 0u;
+	uint64_t diagnosticTextGlyphs = 0u;
+	uint64_t diagnosticTextDispatches = 0u;
+	uint64_t diagnosticTextBatchDispatches = 0u;
+	uint64_t diagnosticLayeredBarriers = 0u;
+	std::array<RendererCpuWallTiming,
+		static_cast<std::size_t>(RendererCpuPhase::eCount)> diagnosticCpuTimings {};
 
 	std::unordered_map<uint32_t, Model3DAsset> modelAssets;
 	std::unordered_map<std::string, uint32_t> modelIdsByPath;
@@ -967,11 +1093,14 @@ private:
 
 Engine::Engine(const EngineCreateInfo& createInfo) : impl(std::make_unique<Impl>(createInfo))
 {
+    Logger::fetch_logger()->log(ready() ? LogLevel::eInfo : LogLevel::eError,
+        ready() ? "Engine renderer ready: vulkan." : "Engine renderer initialisation failed: vulkan.");
 	register_live_engine(this);
 }
 
 Engine::~Engine()
 {
+    Logger::fetch_logger()->info("Engine instance shutting down: vulkan.");
 	unregister_live_engine(this);
 }
 
@@ -987,6 +1116,7 @@ int Engine::update_timing(double currentTimeSeconds)
 
 bool Engine::set_present_mode(RendererPresentMode mode)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::set_present_mode");
 	return impl->set_present_mode(mode);
 }
 
@@ -1020,6 +1150,18 @@ uint32_t Engine::recommended_ui_update_rate() const
 	return impl->recommended_ui_update_rate();
 }
 
+double Engine::idle_event_wait_seconds()
+{
+	rendererHostUsesIdleEventWait = true;
+	const bool settled = rendererDrawSeen && allRendererDrawsSettled;
+	rendererDrawSeen = false;
+	allRendererDrawsSettled = true;
+	// Passthrough overlays still sample the desktop pointer promptly. Native
+	// input interrupts the GLFW wait immediately, and moving content continues
+	// through the renderer's existing display and user frame-rate pacing.
+	return settled ? 1.0 / 60.0 : 0.0;
+}
+
 void Engine::resize(uint32_t framebufferWidth, uint32_t framebufferHeight)
 {
 	impl->resize(framebufferWidth, framebufferHeight);
@@ -1027,11 +1169,13 @@ void Engine::resize(uint32_t framebufferWidth, uint32_t framebufferHeight)
 
 Model3DHandle Engine::load_model_3d(const std::filesystem::path& path)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_model_3d");
 	return impl->load_model_3d(path);
 }
 
 Media2DHandle Engine::load_media_2d(const std::filesystem::path& path, const Media2DLoadOptions& options)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_media_2d");
 	return impl->load_media_2d(path, options);
 }
 
@@ -1052,16 +1196,19 @@ const AudioEngine& Engine::audio() const
 
 bool Engine::load_renderer2d_font(const std::filesystem::path& path)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_renderer2d_font");
 	return impl->load_renderer2d_font(path);
 }
 
 bool Engine::load_renderer2d_font(const std::filesystem::path& path, const Renderer2DFontAtlasLoadOptions& options)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_renderer2d_font");
 	return impl->load_renderer2d_font(path, options);
 }
 
 bool Engine::load_localisation_directory(const std::filesystem::path& directory)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_localisation_directory");
 	const bool loaded = impl->load_localisation_directory(directory);
 	if (loaded)
 	{
@@ -1073,6 +1220,7 @@ bool Engine::load_localisation_directory(const std::filesystem::path& directory)
 bool Engine::load_localisation_directories(
 	const std::vector<std::filesystem::path>& directories)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::load_localisation_directories");
 	const bool loaded = impl->load_localisation_directories(directories);
 	if (loaded)
 	{
@@ -1084,11 +1232,13 @@ bool Engine::load_localisation_directories(
 
 bool Engine::set_locale(const std::string& locale)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::set_locale");
 	return impl->set_locale(locale);
 }
 
 bool Engine::set_shared_locale(const std::string& locale)
 {
+    const LogOperation diagnosticOperation("vulkan: Engine::set_shared_locale");
 	{
 		std::lock_guard<std::mutex> lock(live_engine_mutex());
 		shared_locale_value() = locale;
@@ -1227,6 +1377,8 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	renderDiagnosticsEnabled = renderDiagnostics &&
 		std::strcmp(renderDiagnostics, "0") != 0;
 #if defined(_WIN32)
+	gpuTimestampDiagnosticsEnabled = renderDiagnostics &&
+		std::strcmp(renderDiagnostics, "1") == 0;
 	compositionFrameRate = monitor_refresh_rate(nativeWindowHandle);
 #endif
     if (renderBackend != RenderBackend::eVulkan)
@@ -1437,8 +1589,10 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	descriptorPools[DescriptorScope::eFrame] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 	descriptorPools[DescriptorScope::eModelFrame] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 	descriptorPools[DescriptorScope::eUICache] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
+	descriptorPools[DescriptorScope::eForegroundBlur] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 	descriptorTypes[0] = vk::DescriptorType::eStorageBuffer;
 	descriptorPools[DescriptorScope::eDrawCall] = make_descriptor_pool(logicalDevice, frameCount, 1, descriptorTypes.data(), deviceDeletionQueue);
+	descriptorPools[DescriptorScope::eTextBatch] = make_descriptor_pool(logicalDevice, frameCount, 1, descriptorTypes.data(), deviceDeletionQueue);
 	descriptorTypes = {
 		vk::DescriptorType::eCombinedImageSampler,
 		vk::DescriptorType::eCombinedImageSampler,
@@ -1486,17 +1640,32 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 
 	descriptorSets.resize(frameCount);
 	frames.reserve(frameCount);
+	uint32_t diagnosticTimestampValidBits = 0u;
+	double diagnosticTimestampPeriodNanoseconds = 0.0;
+	if (gpuTimestampDiagnosticsEnabled)
+	{
+		const auto queueFamilies = physicalDevice.getQueueFamilyProperties();
+		if (graphicsQueueFamilyIndex < queueFamilies.size())
+		{
+			diagnosticTimestampValidBits =
+				queueFamilies[graphicsQueueFamilyIndex].timestampValidBits;
+			diagnosticTimestampPeriodNanoseconds =
+				physicalDevice.getProperties().limits.timestampPeriod;
+		}
+	}
 	for (uint32_t i = 0; i < frameCount; ++i) 
 	{
 		vk::CommandBuffer commandBuffer = allocate_command_buffer(logicalDevice, commandPool);
-		constexpr int scopeCount = 6;
+		constexpr int scopeCount = 8;
 		DescriptorScope scopes[scopeCount] = {
 			DescriptorScope::eFrame,
 			DescriptorScope::eModelFrame,
 			DescriptorScope::eDrawCall,
 			DescriptorScope::ePost,
 			DescriptorScope::eUICache,
-			DescriptorScope::eUICachePost
+			DescriptorScope::eUICachePost,
+			DescriptorScope::eForegroundBlur,
+			DescriptorScope::eTextBatch
 		};
 		for (int j = 0; j < scopeCount; ++j) 
 		{
@@ -1511,6 +1680,13 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 			descriptorSets[i], pipelineLayouts,
 			allocator, &modelAssets, &mediaAssets, renderer2DScene, renderer2DFontAtlas.image()
 		));
+		if (gpuTimestampDiagnosticsEnabled)
+		{
+			gpuTimestampDiagnosticsAvailable |= frames.back().enable_gpu_timing(
+				diagnosticTimestampValidBits,
+				diagnosticTimestampPeriodNanoseconds,
+				deviceDeletionQueue);
+		}
 	}
 	compositionFramePending.assign(frameCount, false);
 	compositionFrameBufferIndices.assign(frameCount, 0u);
@@ -1533,6 +1709,8 @@ void Engine::Impl::make_descriptor_sets()
 	descriptorSetLayouts[DescriptorScope::eModelFrame] = builder.build(deviceDeletionQueue);
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageBuffer);
 	descriptorSetLayouts[DescriptorScope::eDrawCall] = builder.build(deviceDeletionQueue);
+	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageBuffer);
+	descriptorSetLayouts[DescriptorScope::eTextBatch] = builder.build(deviceDeletionQueue);
 	builder.add_entry(vk::ShaderStageFlagBits::eFragment, vk::DescriptorType::eCombinedImageSampler);
 	builder.add_entry(vk::ShaderStageFlagBits::eFragment, vk::DescriptorType::eCombinedImageSampler);
 	builder.add_entry(vk::ShaderStageFlagBits::eFragment, vk::DescriptorType::eCombinedImageSampler);
@@ -1552,6 +1730,7 @@ void Engine::Impl::make_descriptor_sets()
 	builder.add_entry(vk::ShaderStageFlagBits::eCompute, vk::DescriptorType::eStorageImage);
 	descriptorSetLayouts[DescriptorScope::ePost] = builder.build(deviceDeletionQueue);
 	descriptorSetLayouts[DescriptorScope::eUICache] = descriptorSetLayouts[DescriptorScope::eFrame];
+	descriptorSetLayouts[DescriptorScope::eForegroundBlur] = descriptorSetLayouts[DescriptorScope::eFrame];
 	descriptorSetLayouts[DescriptorScope::eUICachePost] = descriptorSetLayouts[DescriptorScope::ePost];
 }
 
@@ -1579,6 +1758,11 @@ void Engine::Impl::make_pipeline_layouts()
 	builder.add(descriptorSetLayouts[DescriptorScope::ePost]);
 	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(Renderer2DPushConstants));
 	pipelineLayouts[PipelineType::eTextMSDF] = builder.build(deviceDeletionQueue);
+	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
+	builder.add(descriptorSetLayouts[DescriptorScope::ePost]);
+	builder.add(descriptorSetLayouts[DescriptorScope::eTextBatch]);
+	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(glm::uvec4));
+	pipelineLayouts[PipelineType::eTextMSDFBatch] = builder.build(deviceDeletionQueue);
 
 	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
 	builder.add(descriptorSetLayouts[DescriptorScope::eMediaTexture]);
@@ -1596,7 +1780,10 @@ void Engine::Impl::make_pipeline_layouts()
 	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(glm::uvec4));
 	vk::PipelineLayout compositeLayout = builder.build(deviceDeletionQueue);
 	pipelineLayouts[PipelineType::eCompositeHosted3D] = compositeLayout;
-	pipelineLayouts[PipelineType::eComposite2D] = compositeLayout;
+	builder.add(descriptorSetLayouts[DescriptorScope::eFrame]);
+	builder.add(descriptorSetLayouts[DescriptorScope::ePost]);
+	builder.add_push_constants(vk::ShaderStageFlagBits::eCompute, sizeof(Renderer2DCompositeConstants));
+	pipelineLayouts[PipelineType::eComposite2D] = builder.build(deviceDeletionQueue);
 
 	builder.add(descriptorSetLayouts[DescriptorScope::eModel3DTexture]);
 	builder.add_push_constants(
@@ -1624,6 +1811,11 @@ void Engine::Impl::make_pipelines()
 	);
 	pipelines[PipelineType::eTextMSDF] = make_compute_pipeline(
 		logicalDevice, "text_msdf", pipelineLayouts[PipelineType::eTextMSDF], deviceDeletionQueue
+	);
+	// Batching is optional. The ordinary text pipeline remains available if a
+	// driver cannot create this variant or its bounded upload cannot be allocated.
+	pipelines[PipelineType::eTextMSDFBatch] = make_compute_pipeline(
+		logicalDevice, "text_msdf_batch", pipelineLayouts[PipelineType::eTextMSDFBatch], deviceDeletionQueue
 	);
 	pipelines[PipelineType::eMedia2D] = make_compute_pipeline(
 		logicalDevice, "media_2d", pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue
@@ -1814,15 +2006,17 @@ bool Engine::Impl::upload_software_composition(std::uint32_t bufferIndex)
 std::vector<SystemBackdropRegion>
 Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 {
+	const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eBackdropGeometry);
 	if (!compositionPresenter.available())
 	{
 		return {};
 	}
 
-	struct OrderedBackdropRegion
+    struct OrderedBackdropRegion
 	{
 		entt::entity entity = entt::null;
-		SystemBackdropRegion region = {};
+        SystemBackdropRegion region = {};
+        Renderer2DShapeVisualState visual = {};
 	};
 	std::vector<OrderedBackdropRegion> orderedRegions;
 	entt::registry& registry = renderer2DScene.registry();
@@ -1842,7 +2036,9 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 		const ShapeComponent& shape,
 		const SystemBackdropComponent& backdrop,
 		const RenderLayer2DComponent& layer) {
-		if (!layer.visible || backdrop.region.material != GlassMaterial::eSystemGlass ||
+		if (!layer.visible ||
+			(backdrop.region.material != GlassMaterial::eSystemGlass &&
+			 backdrop.region.material != GlassMaterial::eLiquid) ||
 			std::abs(transform.rotationRadians) > 0.0001f ||
 			glm::length(transform.rotation3DRadians) > 0.0001f)
 		{
@@ -1869,7 +2065,8 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 			return;
 		}
 
-		SystemBackdropRegion region = backdrop.region;
+        SystemBackdropRegion region = backdrop.region;
+        region.identity = static_cast<std::uint64_t>(entt::to_integral(entity)) + 1u;
 		region.opacity = std::clamp(
 			region.opacity * visual->opacity,
 			0.0f,
@@ -1906,9 +2103,12 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 			case Renderer2DPrimitive::eSquircle:
 				region.shape = SystemBackdropShape::eSquircle;
 				break;
-			case Renderer2DPrimitive::eNotchedSquircle:
-				region.shape = SystemBackdropShape::eNotchedSquircle;
-				break;
+            case Renderer2DPrimitive::eNotchedSquircle:
+                region.shape = SystemBackdropShape::eNotchedSquircle;
+                break;
+            case Renderer2DPrimitive::eLiquidBridge:
+                region.shape = SystemBackdropShape::eLiquidBridge;
+                break;
 			default:
 				region.shape = SystemBackdropShape::eRoundedRectangle;
 				break;
@@ -1922,37 +2122,168 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 			region.bottomRightRadius *= shapeScale;
 			region.bottomLeftRadius *= shapeScale;
 		}
-		orderedRegions.push_back({ entity, region });
+        orderedRegions.push_back({ entity, region, *visual });
 	});
 
-	// Composition retains one effect graph per vector slot. Material/provider/
-	// shape alone is not a stable identity: two equal-material entities could
-	// exchange slots when EnTT storage changed, making a moving lens reuse the
-	// other entity's backdrop history. Keep the entity id as the final key so a
-	// dragged region always updates its own retained graph.
+    const auto contourForRegion = [](const SystemBackdropRegion& region,
+        float originX, float originY) {
+        SystemBackdropRegion::Contour contour {};
+        contour.x = region.x - originX;
+        contour.y = region.y - originY;
+        contour.width = region.width;
+        contour.height = region.height;
+        contour.cornerRadius = region.cornerRadius;
+        contour.topLeftRadius = region.topLeftRadius;
+        contour.topRightRadius = region.topRightRadius;
+        contour.bottomRightRadius = region.bottomRightRadius;
+        contour.bottomLeftRadius = region.bottomLeftRadius;
+        contour.squircleAmount = region.squircleAmount;
+        contour.squirclePower = region.squirclePower;
+        contour.notchAmount = region.notchAmount;
+        contour.notchDepth = region.notchDepth;
+        contour.shape = static_cast<std::uint32_t>(region.shape);
+        return contour;
+    };
+    const auto contourForEntity = [&](entt::entity entity, float originX,
+        float originY) -> std::optional<SystemBackdropRegion::Contour> {
+        const auto* shape = registry.try_get<ShapeComponent>(entity);
+        const auto visual = renderer2DScene.resolved_shape_visual_state(entity,
+            renderTimeSeconds);
+        if (!shape || !visual) return std::nullopt;
+        SystemBackdropRegion source {};
+        source.x = visual->rect.x * outputScaleX;
+        source.y = visual->rect.y * outputScaleY;
+        source.width = visual->rect.z * outputScaleX;
+        source.height = visual->rect.w * outputScaleY;
+        const float scale = std::max(outputScaleX, outputScaleY);
+        const auto radii = shape->effective_corner_radii() * scale;
+        source.cornerRadius = shape->customCornerRadii ? 0.0f :
+            shape->cornerRadius * scale;
+        source.topLeftRadius = radii.x;
+        source.topRightRadius = radii.y;
+        source.bottomRightRadius = radii.z;
+        source.bottomLeftRadius = radii.w;
+        source.squircleAmount = shape->squircleAmount;
+        source.squirclePower = shape->squirclePower;
+        source.notchAmount = shape->notchAmount;
+        source.notchDepth = shape->notchDepth * scale;
+        switch (shape->primitive)
+        {
+        case Renderer2DPrimitive::eRectangle: source.shape = SystemBackdropShape::eRectangle; break;
+        case Renderer2DPrimitive::eEllipse: source.shape = SystemBackdropShape::eEllipse; break;
+        case Renderer2DPrimitive::eSquircle: source.shape = SystemBackdropShape::eSquircle; break;
+        case Renderer2DPrimitive::eNotchedSquircle: source.shape = SystemBackdropShape::eNotchedSquircle; break;
+        case Renderer2DPrimitive::eLiquidBridge: source.shape = SystemBackdropShape::eLiquidBridge; break;
+        default: source.shape = SystemBackdropShape::eRoundedRectangle; break;
+        }
+        return contourForRegion(source, originX, originY);
+    };
+    // Backing cards expose only the silhouette outside the card in front.
+    for (auto& entry : orderedRegions)
+    {
+        const auto* cutout = registry.try_get<ShapeCutout2DComponent>(entry.entity);
+        if (!cutout || !cutout->affectBackdrop || cutout->source == entt::null ||
+            !registry.valid(cutout->source)) continue;
+        if (const auto exclusion = contourForEntity(cutout->source,
+                entry.region.x, entry.region.y))
+        {
+            entry.region.exclusion = *exclusion;
+            entry.region.hasExclusion = true;
+        }
+    }
+    std::unordered_set<entt::entity> mergedParticipants;
+    for (auto& owner : orderedRegions)
+    {
+        const auto* group = registry.try_get<SystemBackdropUnionComponent>(owner.entity);
+        if (!group || owner.region.material != GlassMaterial::eLiquid) continue;
+        std::array<const OrderedBackdropRegion*, 3> participants {};
+        std::size_t count = 0u;
+        for (const auto entity : group->participants)
+        {
+            if (entity == entt::null || mergedParticipants.count(entity)) continue;
+            const auto found = std::find_if(orderedRegions.begin(), orderedRegions.end(),
+                [entity](const auto& entry) { return entry.entity == entity; });
+            if (found != orderedRegions.end() &&
+                found->region.material == owner.region.material &&
+                found->region.liquidBackend == owner.region.liquidBackend &&
+                std::none_of(participants.begin(), participants.begin() + count,
+                    [entity](const auto* entry) { return entry->entity == entity; }))
+                participants[count++] = &*found;
+        }
+        if (count < 2u || std::none_of(participants.begin(), participants.begin() + count,
+                [&](const auto* entry) { return entry->entity == owner.entity; })) continue;
+        float left = std::numeric_limits<float>::max();
+        float top = left;
+        float right = std::numeric_limits<float>::lowest();
+        float bottom = right;
+        for (std::size_t index = 0u; index < count; ++index)
+        {
+            const auto& region = participants[index]->region;
+            float flare = 0.0f;
+            if (region.shape == SystemBackdropShape::eNotchedSquircle)
+            {
+                const float progress = std::clamp((region.notchAmount - 0.85f) / 0.15f, 0.0f, 1.0f);
+                const float depth = region.notchDepth > 0.5f ? region.notchDepth :
+                    std::clamp(region.height * 0.62f, 0.0f, 92.0f);
+                flare = std::ceil(std::clamp(depth * 0.18f, 0.0f, region.height * 0.5f) *
+                    progress * progress);
+            }
+            left = std::min(left, region.x - flare);
+            top = std::min(top, region.y);
+            right = std::max(right, region.x + region.width + flare);
+            bottom = std::max(bottom, region.y + region.height);
+        }
+        auto merged = owner.region;
+        merged.x = left;
+        merged.y = top;
+        merged.width = right - left;
+        merged.height = bottom - top;
+        merged.shape = SystemBackdropShape::eRectangle;
+        merged.verticalStart = 0.0f;
+        merged.hasExclusion = false;
+        merged.contourCount = static_cast<std::uint32_t>(count);
+        merged.paintCapGradient = group->paintCapGradient;
+        merged.capGradient = group->capGradient;
+        merged.capColour = group->capColour;
+        for (std::size_t index = 0u; index < count; ++index)
+        {
+            merged.contours[index] = contourForRegion(participants[index]->region, left, top);
+            if (participants[index]->entity != owner.entity)
+                mergedParticipants.insert(participants[index]->entity);
+        }
+        owner.region = merged;
+    }
+    orderedRegions.erase(std::remove_if(orderedRegions.begin(), orderedRegions.end(),
+        [&](const auto& entry) { return mergedParticipants.count(entry.entity) != 0u; }),
+        orderedRegions.end());
+
+    // Native materials follow sharp content's paint order, so a detached shell
+    // cannot cover the main island during a merge. Identities retain their own
+    // shader slots when the sorted order changes.
 	std::stable_sort(
 		orderedRegions.begin(),
 		orderedRegions.end(),
 		[](const OrderedBackdropRegion& left, const OrderedBackdropRegion& right) {
-			if (left.region.material != right.region.material)
-			{
-				return left.region.material < right.region.material;
-			}
-			if (left.region.provider != right.region.provider)
-			{
-				return left.region.provider < right.region.provider;
-			}
-			if (left.region.shape != right.region.shape)
-			{
-				return left.region.shape < right.region.shape;
-			}
+            const auto& a = left.visual;
+            const auto& b = right.visual;
+            if (a.alwaysOnTop != b.alwaysOnTop) return b.alwaysOnTop;
+            if (a.stackLayer != b.stackLayer) return a.stackLayer < b.stackLayer;
+            if (a.stackOrder != b.stackOrder) return a.stackOrder < b.stackOrder;
+            if (a.layer != b.layer) return a.layer < b.layer;
+            if (a.order != b.order) return a.order < b.order;
 			return entt::to_integral(left.entity) < entt::to_integral(right.entity);
 		});
 	std::vector<SystemBackdropRegion> regions;
 	regions.reserve(orderedRegions.size());
 	for (const OrderedBackdropRegion& entry : orderedRegions)
 	{
-		regions.push_back(entry.region);
+        auto fade = entry.visual.viewportFade;
+        fade.rect *= glm::vec4(outputScaleX, outputScaleY, outputScaleX, outputScaleY);
+        fade.topHeight *= outputScaleY;
+        fade.bottomHeight *= outputScaleY;
+        const auto clip = entry.visual.clipRect * glm::vec4(outputScaleX, outputScaleY, outputScaleX, outputScaleY);
+        auto clipped = renderer2d_clip_backdrop_region(entry.region, clip, fade);
+        regions.insert(regions.end(), clipped.begin(), clipped.end());
 	}
 	return regions;
 }
@@ -1960,6 +2291,7 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 void Engine::Impl::apply_system_backdrop_regions(
 	const std::vector<SystemBackdropRegion>& regions)
 {
+	const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eBackdropApply);
 	if (!compositionPresenter.available())
 	{
 		return;
@@ -2004,6 +2336,26 @@ void Engine::Impl::apply_system_backdrop_regions(
 	}
 }
 
+void Engine::Impl::collect_gpu_render_timings(Frame& frame)
+{
+	if (!gpuTimestampDiagnosticsEnabled)
+	{
+		return;
+	}
+	Frame::GpuRenderTimings timings;
+	if (!frame.take_completed_gpu_timings(timings))
+	{
+		return;
+	}
+	++diagnosticGpuSamples;
+	diagnosticGpuTotalMilliseconds += timings.totalMilliseconds;
+	diagnosticGpuRender2DMilliseconds += timings.render2DMilliseconds;
+	diagnosticGpuCompositeMilliseconds += timings.compositeMilliseconds;
+	diagnosticGpuOutputMilliseconds += timings.outputMilliseconds;
+	diagnosticGpuMaxMilliseconds = std::max(
+		diagnosticGpuMaxMilliseconds, timings.totalMilliseconds);
+}
+
 void Engine::Impl::publish_completed_composition_frames()
 {
 	if (!compositionPresenter.available())
@@ -2032,13 +2384,18 @@ void Engine::Impl::publish_completed_composition_frames()
 			continue;
 		}
 
+		collect_gpu_render_timings(frames[pending]);
 		apply_system_backdrop_regions(
 			frames[pending].compositionBackdropRegions);
-		const auto presentResult = compositionPresenter.present(
-			compositionFrameBufferIndices[pending],
-			false,
-			frames[pending].compositionContentRect,
-			frames[pending].compositionDamageRect);
+		CompositionPresenter::PresentResult presentResult;
+		{
+			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::ePresent);
+			presentResult = compositionPresenter.present(
+				compositionFrameBufferIndices[pending],
+				false,
+				frames[pending].compositionContentRect,
+				frames[pending].compositionDamageRect);
+		}
 		if (presentResult == CompositionPresenter::PresentResult::eDeferred)
 		{
 			continue;
@@ -2054,6 +2411,7 @@ void Engine::Impl::publish_completed_composition_frames()
 
 void Engine::Impl::draw()
 {
+	RendererDrawActivity activity;
 	if (renderDiagnosticsEnabled)
 	{
 		const auto diagnosticsNow = std::chrono::steady_clock::now();
@@ -2066,6 +2424,76 @@ void Engine::Impl::draw()
 		{
 			const double seconds = std::chrono::duration<double>(
 				diagnosticsNow - renderDiagnosticsStart).count();
+			std::string gpuDiagnostics;
+			if (gpuTimestampDiagnosticsEnabled)
+			{
+				gpuDiagnostics = " GPU timestamps unavailable.";
+				if (gpuTimestampDiagnosticsAvailable)
+				{
+					gpuDiagnostics = " Sampled GPU timings (1 in 16 submissions): no completed samples.";
+					if (diagnosticGpuSamples > 0u)
+					{
+						const double samples = static_cast<double>(diagnosticGpuSamples);
+						std::ostringstream timings;
+						timings.setf(std::ios::fixed, std::ios::floatfield);
+						timings.precision(3);
+						timings << " Sampled GPU command buffer (1 in 16 submissions): "
+							<< diagnosticGpuTotalMilliseconds / samples
+							<< " ms mean, " << diagnosticGpuMaxMilliseconds
+							<< " ms max, " << diagnosticGpuSamples << " samples; "
+							<< "checkpoint means: 2D "
+							<< diagnosticGpuRender2DMilliseconds / samples
+							<< " ms, composite "
+							<< diagnosticGpuCompositeMilliseconds / samples
+							<< " ms, output copy "
+							<< diagnosticGpuOutputMilliseconds / samples << " ms.";
+						gpuDiagnostics = timings.str();
+					}
+				}
+				gpuDiagnostics += " 2D cache rebuilds: " +
+					std::to_string(diagnosticCacheRebuilds) +
+					", cached batch replays: " +
+					std::to_string(diagnosticCachedBatchReplays) +
+					", dynamic batch replays: " +
+					std::to_string(diagnosticDynamicBatchReplays) + ".";
+				gpuDiagnostics += " Text glyphs/dispatches/batched dispatches: " +
+					std::to_string(diagnosticTextGlyphs) + "/" +
+					std::to_string(diagnosticTextDispatches) + "/" +
+					std::to_string(diagnosticTextBatchDispatches) +
+					"; layered barriers: " + std::to_string(diagnosticLayeredBarriers) + ".";
+			}
+			static constexpr std::array<const char*,
+				static_cast<std::size_t>(RendererCpuPhase::eCount)> cpuPhaseNames {
+				"retained check", "cadence check", "redraw check", "glyph scan",
+				"Scene+command recording", "backdrop geometry", "interop acquire",
+				"surface acquire", "queue submit", "GPU fence wait", "backdrop apply", "present"
+			};
+			std::ostringstream cpuDiagnostics;
+			cpuDiagnostics.setf(std::ios::fixed, std::ios::floatfield);
+			cpuDiagnostics.precision(3);
+			cpuDiagnostics << " CPU wall timings (mean/max ms, samples; frame pacing excluded): ";
+			bool firstCpuPhase = true;
+			for (std::size_t phase = 0u; phase < diagnosticCpuTimings.size(); ++phase)
+			{
+				const auto& timing = diagnosticCpuTimings[phase];
+				if (timing.samples == 0u)
+				{
+					continue;
+				}
+				if (!firstCpuPhase)
+				{
+					cpuDiagnostics << "; ";
+				}
+				firstCpuPhase = false;
+				cpuDiagnostics << cpuPhaseNames[phase] << ' '
+					<< timing.totalMilliseconds / static_cast<double>(timing.samples)
+					<< '/' << timing.maxMilliseconds << " ms, " << timing.samples;
+			}
+			if (firstCpuPhase)
+			{
+				cpuDiagnostics << "no samples";
+			}
+			cpuDiagnostics << '.';
 			logger->info(
 				"Renderer diagnostics " +
 				std::to_string(framebufferWidth) + "x" +
@@ -2079,13 +2507,27 @@ void Engine::Impl::draw()
 				std::to_string(diagnosticContinuousRequests) +
 				" continuous-redraw requests, " +
 				std::to_string(diagnosticRetainedSyncRequests) +
-				" retained-buffer sync requests.");
+				" retained-buffer sync requests." + gpuDiagnostics + cpuDiagnostics.str());
 			renderDiagnosticsStart = diagnosticsNow;
 			diagnosticDrawCalls = 0u;
 			diagnosticSubmissions = 0u;
 			diagnosticGenerationChanges = 0u;
 			diagnosticContinuousRequests = 0u;
 			diagnosticRetainedSyncRequests = 0u;
+			diagnosticGpuSamples = 0u;
+			diagnosticGpuTotalMilliseconds = 0.0;
+			diagnosticGpuRender2DMilliseconds = 0.0;
+			diagnosticGpuCompositeMilliseconds = 0.0;
+			diagnosticGpuOutputMilliseconds = 0.0;
+			diagnosticGpuMaxMilliseconds = 0.0;
+			diagnosticCacheRebuilds = 0u;
+			diagnosticCachedBatchReplays = 0u;
+			diagnosticDynamicBatchReplays = 0u;
+			diagnosticTextGlyphs = 0u;
+			diagnosticTextDispatches = 0u;
+			diagnosticTextBatchDispatches = 0u;
+			diagnosticLayeredBarriers = 0u;
+			diagnosticCpuTimings = {};
 		}
 		++diagnosticDrawCalls;
 	}
@@ -2094,10 +2536,29 @@ void Engine::Impl::draw()
 		return;
 	}
 
-	if (framebufferWidth == 0 || framebufferHeight == 0) 
+	if (framebufferWidth == 0 || framebufferHeight == 0)
 	{
 		swapchain.outdated = true;
 		return;
+	}
+
+	{
+		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eRetainedCheck);
+		const double retainedTimeSeconds = std::chrono::duration<double>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+		if (rendererHostUsesIdleEventWait && !swapchain.outdated && hasSubmittedFrame &&
+			renderer2DScene.frame_generation() == lastSubmittedFrameGeneration &&
+			!renderer2DScene.requires_continuous_redraw(retainedTimeSeconds) &&
+			(!compositionPresenter.available() || nativeTransparencyPrimed) &&
+			std::none_of(compositionFramePending.begin(),
+				compositionFramePending.end(), [](bool pending) { return pending; }))
+		{
+			// Retained images need no timer wake-up, font scan, render-plan work,
+			// or invisible GPU submission. The host waits once after all windows
+			// settle instead of polling each idle renderer twice per refresh.
+			activity.settled = true;
+			return;
+		}
 	}
 
 	if (targetFrameRate > 0u)
@@ -2168,8 +2629,12 @@ void Engine::Impl::draw()
 		compositionAvailable && compositionPresenter.gpu_interop();
 	const double schedulingTimeSeconds = std::chrono::duration<double>(
 		std::chrono::steady_clock::now().time_since_epoch()).count();
-	const uint32_t activeUiFrameRateLimit =
-		renderer2DScene.active_frame_rate_limit(schedulingTimeSeconds);
+	uint32_t activeUiFrameRateLimit;
+	{
+		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eCadenceCheck);
+		activeUiFrameRateLimit =
+			renderer2DScene.active_frame_rate_limit(schedulingTimeSeconds);
+	}
 	const uint32_t effectiveCompositionFrameRate =
 		activeUiFrameRateLimit > 0u ?
 			std::min(compositionFrameRate, activeUiFrameRateLimit) :
@@ -2327,8 +2792,12 @@ void Engine::Impl::draw()
 	const uint64_t sceneFrameGeneration = renderer2DScene.frame_generation();
 	const bool retainedCompositionBuffersNeedSync =
 		compositionAvailable && compositionBufferDamage.has_pending();
-	const bool continuousRedrawRequired =
-		renderer2DScene.requires_continuous_redraw(renderTimeSeconds);
+	bool continuousRedrawRequired;
+	{
+		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eRedrawCheck);
+		continuousRedrawRequired =
+			renderer2DScene.requires_continuous_redraw(renderTimeSeconds);
+	}
 	if (renderDiagnosticsEnabled)
 	{
 		if (sceneFrameGeneration != diagnosticLastSceneGeneration)
@@ -2350,16 +2819,22 @@ void Engine::Impl::draw()
 		// to a retained buffer and is unioned into its next real scene update. Do not
 		// submit standalone frames merely to rotate through currently invisible
 		// buffers, because that turns a finite scene change into perpetual GPU work.
+		activity.settled = true;
 		return;
 	}
 	Frame& frame = frames[frameIndex];
     
-	vk::Result fenceResult = logicalDevice.waitForFences(frame.renderFinishedFence, false, UINT64_MAX);
+	vk::Result fenceResult;
+	{
+		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eFenceWait);
+		fenceResult = logicalDevice.waitForFences(frame.renderFinishedFence, false, UINT64_MAX);
+	}
 	if (fenceResult != vk::Result::eSuccess)
 	{
 		logger->vulkan("Failed to wait for fence.");
 		return;
 	}
+	collect_gpu_render_timings(frame);
 
 	const bool clearNativeSurface =
 		compositionAvailable && !nativeTransparencyPrimed;
@@ -2368,13 +2843,17 @@ void Engine::Impl::draw()
 	uint32_t imageIndex = 0;
 	if (presentNativeSurface)
 	{
-		const VkResult acquireResult = vkAcquireNextImageKHR(
-			logicalDevice,
-			swapchain.chain,
-			UINT64_MAX,
-			frame.imageAcquiredSemaphore,
-			VK_NULL_HANDLE,
-			&imageIndex);
+		VkResult acquireResult;
+		{
+			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eSurfaceAcquire);
+			acquireResult = vkAcquireNextImageKHR(
+				logicalDevice,
+				swapchain.chain,
+				UINT64_MAX,
+				frame.imageAcquiredSemaphore,
+				VK_NULL_HANDLE,
+				&imageIndex);
+		}
 
 		if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR ||
 			acquireResult == VK_SUBOPTIMAL_KHR)
@@ -2406,6 +2885,7 @@ void Engine::Impl::draw()
 	glm::uvec4 pendingCompositionDamageRect { 0u };
 	if (compositionPresenter.available() && compositionPresenter.buffer_count() > 0u)
 	{
+		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eInteropAcquire);
 		const uint32_t compositionBufferCount =
 			compositionPresenter.buffer_count();
 		// Some drivers publish the imported images after presenter creation.
@@ -2468,19 +2948,29 @@ void Engine::Impl::draw()
 		logger->vulkan("Failed to reset fences.");
 		return;
 	}
-	frame.record_command_buffer(
-		imageIndex,
-		renderTimeSeconds,
-		externalBackdropAvailable,
-		useExternalBackdropUnderlay,
-		presentNativeSurface,
-		clearNativeSurface,
-		compositionImage,
-		compositionBufferAcquired && !compositionGpuPath ?
-			compositionReadbackBuffer : vk::Buffer {},
-		compositionImageFirstUse,
-		pendingCompositionDamageRect,
-		graphicsQueueFamilyIndex);
+	if (gpuTimestampDiagnosticsEnabled)
+	{
+		// Keep the successful-submission index across one-second log resets so
+		// retained scenes and low frame rates still sample only one frame in 16.
+		frame.set_gpu_timing_sample_enabled(
+			gpuTimestampSubmissionIndex % kGpuTimestampSampleInterval == 0u);
+	}
+	{
+		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eCommandRecording);
+		frame.record_command_buffer(
+			imageIndex,
+			renderTimeSeconds,
+			externalBackdropAvailable,
+			useExternalBackdropUnderlay,
+			presentNativeSurface,
+			clearNativeSurface,
+			compositionImage,
+			compositionBufferAcquired && !compositionGpuPath ?
+				compositionReadbackBuffer : vk::Buffer {},
+			compositionImageFirstUse,
+			pendingCompositionDamageRect,
+			graphicsQueueFamilyIndex);
+	}
 	if (compositionBufferAcquired)
 	{
 		// Renderer2D has now advanced transitions and resolved layout for this
@@ -2540,7 +3030,10 @@ void Engine::Impl::draw()
 	}
 #endif
 
-	result = graphicsQueue.submit(submitInfo, frame.renderFinishedFence);
+	{
+		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eQueueSubmit);
+		result = graphicsQueue.submit(submitInfo, frame.renderFinishedFence);
+	}
 	if (result != vk::Result::eSuccess)
 	{
 		logger->vulkan("Failed to submit buffer to graphics queue.");
@@ -2549,6 +3042,19 @@ void Engine::Impl::draw()
 	if (renderDiagnosticsEnabled)
 	{
 		++diagnosticSubmissions;
+	}
+	if (gpuTimestampDiagnosticsEnabled)
+	{
+		frame.mark_gpu_timing_submitted();
+		++gpuTimestampSubmissionIndex;
+		const auto diagnostics = frame.renderer2D.record_diagnostics();
+		diagnosticCacheRebuilds += diagnostics.cacheRebuilds;
+		diagnosticCachedBatchReplays += diagnostics.cachedBatchReplays;
+		diagnosticDynamicBatchReplays += diagnostics.dynamicBatchReplays;
+		diagnosticTextGlyphs += diagnostics.textGlyphs;
+		diagnosticTextDispatches += diagnostics.textDispatches;
+		diagnosticTextBatchDispatches += diagnostics.textBatchDispatches;
+		diagnosticLayeredBarriers += diagnostics.layeredBarriers;
 	}
 	hasSubmittedFrame = true;
 	lastSubmittedFrameGeneration = sceneFrameGeneration;
@@ -2578,8 +3084,11 @@ void Engine::Impl::draw()
 		presentInfo.waitSemaphoreCount = 1;
 		presentInfo.pWaitSemaphores = &frame.renderFinishedSemaphore;
 		VkPresentInfoKHR rawPresentInfo = presentInfo;
-		const VkResult presentResult =
-			vkQueuePresentKHR(graphicsQueue, &rawPresentInfo);
+		VkResult presentResult;
+		{
+			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::ePresent);
+			presentResult = vkQueuePresentKHR(graphicsQueue, &rawPresentInfo);
+		}
 
 		if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
 			presentResult == VK_SUBOPTIMAL_KHR)
@@ -2614,12 +3123,17 @@ void Engine::Impl::draw()
 			targetFrameRate > effectiveCompositionFrameRate + 2u);
 	if (compositionBufferAcquired && !pipelineComposition)
 	{
-		const vk::Result compositionFenceResult = logicalDevice.waitForFences(
-			frame.renderFinishedFence,
-			true,
-			UINT64_MAX);
+		vk::Result compositionFenceResult;
+		{
+			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eFenceWait);
+			compositionFenceResult = logicalDevice.waitForFences(
+				frame.renderFinishedFence,
+				true,
+				UINT64_MAX);
+		}
 		if (compositionFenceResult == vk::Result::eSuccess)
 		{
+			collect_gpu_render_timings(frame);
 			const bool uploaded = compositionGpuPath ||
 				upload_software_composition(compositionBufferIndex);
 			CompositionPresenter::PresentResult presentResult =
@@ -2628,6 +3142,7 @@ void Engine::Impl::draw()
 			{
 				apply_system_backdrop_regions(
 					frame.compositionBackdropRegions);
+				const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::ePresent);
 				presentResult = compositionPresenter.present(
 					compositionBufferIndex,
 					true,
@@ -2864,7 +3379,8 @@ Media2DHandle Engine::Impl::load_media_2d(const std::filesystem::path& path, con
 		<< "svgFrames=" << options.svgAnimationFrames << "|"
 		<< "svgRate=" << options.svgAnimationFrameRate << "|"
 		<< "videoFrames=" << options.maxVideoFrames << "|"
-		<< "videoPixels=" << options.maxVideoPixels;
+		<< "videoPixels=" << options.maxVideoPixels << "|"
+		<< "trim=" << options.trimTransparentBorders;
 	const std::string cacheKey = cacheKeyBuilder.str();
 	if (const auto existing = mediaIdsByPath.find(cacheKey); existing != mediaIdsByPath.end())
 	{
@@ -3065,6 +3581,7 @@ bool Engine::Impl::load_renderer2d_font_internal(
 
 void Engine::Impl::ensure_renderer2d_scene_glyphs()
 {
+	const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eGlyphScan);
 	const uint64_t sceneGeneration = renderer2DScene.frame_generation();
 	if (sceneGeneration == lastRenderer2DGlyphScanGeneration ||
 		renderer2DFontPath.empty() ||
@@ -3322,3 +3839,5 @@ Engine::Impl::~Impl()
         instanceDeletionQueue.pop_back();
     }
 }
+
+std::string Engine::graphics_api_version() const { return vulkan_api_version(); }

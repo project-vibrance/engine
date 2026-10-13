@@ -93,8 +93,13 @@ struct StretchDynamicsOptions
     float maximumStretch = 0.14f;
     float maximumCompression = 0.10f;
     float dragDeadZone = 2.0f;
+    float grabScale = 1.0f; // Uniform expansion while captured, before directional stretch.
     float returnResponse = 0.26f;
     float returnDampingFraction = 0.82f;
+    bool consumeClickAfterDrag = false;
+    // Search fields may opt into a surface drag without losing text focus.
+    bool allowTextInputDrag = false;
+    bool constrainToParent = false;
 
     // A normalized direction plus a positive release distance enables an
     // inward gesture. Progress can foreground-blur the affected hierarchy;
@@ -116,6 +121,7 @@ struct StretchDynamicsComponent
     StretchDynamicsOptions options {};
     bool dragging = false;
     bool settling = false;
+    bool dragMoved = false;
     glm::vec2 pressPoint { 0.0f };
     glm::vec4 baseRect { 0.0f };
     glm::vec2 grabSide { 1.0f };
@@ -276,6 +282,11 @@ struct SliderInputComponent
     glm::vec2 hoveredThumbSize { 0.0f };
     float hoverExpansion = 0.0f;
     float hoverExpansionRate = 20.0f;
+    // Glass is confined to direct manipulation of the thumb. Its spring is
+    // separate from track hover expansion and from the slider's input value.
+    bool liquidThumbEnabled = false;
+    float liquidThumbScale = 1.0f;
+    float liquidThumbVelocity = 0.0f;
     // Smooth scrubbing lets the visual thumb chase the real value without delaying callbacks
     bool smoothScrubbing = false;
     float visualSmoothingRate = 24.0f;
@@ -285,6 +296,51 @@ struct SliderInputComponent
     // externally observable operations such as media seeking.
     std::function<void(const SliderInputEvent&)> onCommitted;
 };
+
+// Exact spring integration keeps the release bounce consistent at different
+// display rates, including a slow frame during an unfocused transition.
+inline void ui_damped_spring_step(float& value, float& velocity, float target,
+    double deltaSeconds, float frequency, float damping)
+{
+    const float dt = static_cast<float>(std::clamp(deltaSeconds, 0.0, 0.1));
+    if (dt <= 0.0f) return;
+    const float displacement = value - target;
+    const float originalVelocity = velocity;
+    if (damping < 0.999f)
+    {
+        const float decayRate = frequency * std::max(damping, 0.0f);
+        const float oscillation = frequency * std::sqrt(1.0f - damping * damping);
+        const float phase = oscillation * dt;
+        const float decay = std::exp(-decayRate * dt);
+        value = target + decay * (displacement * std::cos(phase) +
+            (originalVelocity + decayRate * displacement) / oscillation * std::sin(phase));
+        velocity = decay * (originalVelocity * std::cos(phase) -
+            (decayRate * originalVelocity + frequency * frequency * displacement) /
+                oscillation * std::sin(phase));
+    }
+    else if (damping <= 1.001f)
+    {
+        const float decay = std::exp(-frequency * dt);
+        const float c = originalVelocity + frequency * displacement;
+        value = target + decay * (displacement + c * dt);
+        velocity = decay * (originalVelocity - frequency * c * dt);
+    }
+    else
+    {
+        const float root = std::sqrt(damping * damping - 1.0f);
+        const float first = -frequency * (damping - root);
+        const float second = -frequency * (damping + root);
+        const float a = (originalVelocity - second * displacement) / (first - second);
+        const float b = displacement - a;
+        value = target + a * std::exp(first * dt) + b * std::exp(second * dt);
+        velocity = first * a * std::exp(first * dt) + second * b * std::exp(second * dt);
+    }
+    if (std::abs(value - target) < 0.0001f && std::abs(velocity) < 0.001f)
+    {
+        value = target;
+        velocity = 0.0f;
+    }
+}
 
 struct DisabledVisualComponent
 {
@@ -900,6 +956,60 @@ inline entt::entity ui_resizable_panel_at(Renderer2DScene& scene, glm::vec2 poin
     return ui_resizable_panel_at_from_hit(scene, scene.entity_at(point), point, edges);
 }
 
+inline entt::entity ui_draggable_parent_from_hit(const entt::registry& registry, entt::entity hit)
+{
+    entt::entity current = hit;
+    for (uint32_t depth = 0u; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+    {
+        if (!ui_entity_visible_by_hierarchy(registry, current))
+            return entt::null;
+        if (const auto* handle = registry.try_get<DragHandle2DComponent>(current);
+            handle && handle->enabled)
+        {
+            const entt::entity target = handle->target != entt::null ? handle->target : current;
+            return registry.valid(target) ? target : entt::null;
+        }
+        if (const auto* shape = registry.try_get<ShapeComponent>(current); shape && shape->draggable)
+            return current;
+        const auto* parent = registry.try_get<Parent2DComponent>(current);
+        if (!parent || parent->parent == entt::null || parent->parent == current)
+            break;
+        current = parent->parent;
+    }
+    return entt::null;
+}
+
+inline bool ui_pointer_capture_blocks_window_action(const UiInputState& state)
+{
+    return state.pressedInputEntity != entt::null ||
+        state.pointerInputCapture != entt::null ||
+        state.activeSlider != entt::null || state.activeScrollBar != entt::null;
+}
+
+inline bool ui_hit_blocks_window_action(Renderer2DScene& scene,
+    const UiInputState& state, glm::vec2 point, entt::entity hit)
+{
+    if (ui_pointer_capture_blocks_window_action(state))
+        return true;
+    const auto& registry = scene.registry();
+    if (ui_draggable_parent_from_hit(registry, hit) != entt::null)
+        return true;
+    uint32_t resizeEdges = ePanelResizeNone;
+    if (ui_resizable_panel_at_from_hit(scene, hit, point, resizeEdges) != entt::null)
+        return true;
+    if (const auto owner = ui_component_owner<ButtonInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<ButtonInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<TextInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<TextInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<DropTargetComponent>(registry, hit); owner != entt::null)
+        return registry.get<DropTargetComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<ScrollBarInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<ScrollBarInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<SliderInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<SliderInputComponent>(owner).enabled;
+    return false;
+}
+
 inline bool ui_append_codepoint(std::string& value, unsigned int codepoint, std::size_t maxBytes)
 {
     if (codepoint < 32u || codepoint == 127u || value.size() >= maxBytes)
@@ -962,6 +1072,13 @@ inline float ui_slider_thumb_position(float trackWidth, float thumbWidth, float 
     return inset + std::max(trackWidth - 2.0f * inset, 0.0f) * std::clamp(value, 0.0f, 1.0f);
 }
 
+inline float ui_slider_thumb_reserved_width(const SliderInputComponent& slider)
+{
+    // Reserve the grab spring's complete travel before the first hover or
+    // material change, so neither event shifts the resting thumb.
+    return std::max(slider.thumbSize.x * 1.32f, slider.hoveredThumbSize.x);
+}
+
 inline bool ui_set_slider_value_from_point(Renderer2DScene& scene, entt::entity entity, glm::vec2 point)
 {
     if (entity == entt::null)
@@ -982,8 +1099,7 @@ inline bool ui_set_slider_value_from_point(Renderer2DScene& scene, entt::entity 
         return false;
     }
 
-    const float inset = ui_slider_thumb_inset(rect.z,
-        std::max(slider->thumbSize.x, slider->hoveredThumbSize.x));
+    const float inset = ui_slider_thumb_inset(rect.z, ui_slider_thumb_reserved_width(*slider));
     const float left = rect.x + inset;
     const float right = rect.x + rect.z - inset;
     const float travel = right - left;

@@ -1,10 +1,25 @@
 #include <iostream>
 #include <chrono>
+#if !defined(__APPLE__)
 #include <format>
+#endif
+#include <iomanip>
+#include <sstream>
+#include <ctime>
 #include <filesystem>
 #include <cstdlib>
 #include <utility>
+#include <mutex>
+#include <thread>
+#include <exception>
+#include <vibranceUI/core/crash_diagnostics.h>
+#include <vibranceUI/core/runtime_log_storage.h>
+#if defined(_WIN32)
+#include <shlobj.h>
+#endif
+#if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
+#endif
 #include <vibranceUI/core/logger.h>
 
 Logger* Logger::logger;
@@ -27,6 +42,12 @@ Logger* Logger::logger;
 
 namespace 
 {
+    std::recursive_mutex& logger_mutex()
+    {
+        static auto* mutex = new std::recursive_mutex;
+        return *mutex;
+    }
+
     // Normal logs stay enabled in release, while Vulkan chatter is compile-time gated
     constexpr const char* level_name(LogLevel level)
     {
@@ -51,7 +72,9 @@ namespace
             std::cout << val;
             Logger* l = Logger::fetch_logger();
             if (l && l->is_file_open()) {
-                l->get_file_stream() << val;
+                std::ostringstream fragment;
+                fragment << val;
+                l->write_file_output(fragment.str());
             }
             return *this;
         }
@@ -61,7 +84,10 @@ namespace
             manip(std::cout);
             Logger* l = Logger::fetch_logger();
             if (l && l->is_file_open()) {
-                manip(l->get_file_stream());
+                std::ostringstream fragment;
+                manip(fragment);
+                l->write_file_output(fragment.str());
+                l->flush_file_output();
             }
             return *this;
         }
@@ -83,6 +109,13 @@ namespace
         }
 
 #ifdef _WIN32
+        PWSTR documents = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents)))
+        {
+            const auto directory = std::filesystem::path(documents) / options.directoryName;
+            CoTaskMemFree(documents);
+            return directory;
+        }
         const char* userProfile = std::getenv("USERPROFILE");
         if (userProfile)
         {
@@ -121,7 +154,23 @@ void Logger::reopen_file()
     const auto now = std::chrono::system_clock::now();
     const auto nowSeconds = std::chrono::time_point_cast<std::chrono::seconds>(now);
     const std::string prefix = outputOptions.filePrefix.empty() ? "vibrance_log" : outputOptions.filePrefix;
-    const std::string fileName = std::format("{}_{:%Y-%m-%d_%H-%M-%S}.txt", prefix, nowSeconds);
+    const auto time = std::chrono::system_clock::to_time_t(nowSeconds);
+    std::tm utc {};
+#if defined(_WIN32)
+    gmtime_s(&utc, &time);
+#else
+    gmtime_r(&time, &utc);
+#endif
+    std::ostringstream filename;
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now - nowSeconds).count();
+#if defined(_WIN32)
+    const auto processId = GetCurrentProcessId();
+#else
+    const auto processId = getpid();
+#endif
+    static std::atomic<unsigned> sequence { 0 };
+    filename << prefix << '_' << std::put_time(&utc, "%Y-%m-%d_%H-%M-%S") << '_' << milliseconds << '_' << processId << '_' << sequence.fetch_add(1) << ".txt";
+    const std::string fileName = filename.str();
     const std::filesystem::path docsPath = default_log_directory(outputOptions);
 
     try 
@@ -129,10 +178,14 @@ void Logger::reopen_file()
         std::filesystem::create_directories(docsPath);
         logPath = docsPath / fileName;
         logFile.open(logPath, std::ios::out | std::ios::trunc);
+        if (!logFile) throw std::runtime_error("Could not open log file: " + logPath.string());
+        crash_diagnostics::initialise(logPath);
+        runtime_log_storage::prune(docsPath, logPath, prefix);
+        nextRetentionCheck = std::chrono::steady_clock::now() + std::chrono::minutes(1);
     } 
 	catch (const std::exception& e) 
 	{
-        std::cerr << "\e[0;31m[Logger Error] Failed to create log directory/file: " << e.what() << "\033[0m" << std::endl;
+        std::cerr << "\033[0;31m[Logger Error] Failed to create log directory/file: " << e.what() << "\033[0m" << std::endl;
     }
 }
 
@@ -141,6 +194,7 @@ Logger::~Logger()
     if (logFile.is_open()) logFile.close();
 }
 
+#if !defined(__APPLE__)
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -172,6 +226,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     return vk::False;
 }
 
+#endif
 void Logger::set_mode(bool mode) { enabled = mode; }
 
 bool Logger::is_enabled() { return enabled; }
@@ -202,13 +257,17 @@ bool Logger::is_vulkan_validation_enabled() const
 
 Logger* Logger::fetch_logger()
 {
+    const std::lock_guard lock(logger_mutex());
     if (!logger) logger = new Logger();
-
     return logger;
 }
 
 void Logger::configure_output(LoggerOutputOptions options)
 {
+    const std::lock_guard lock(logger_mutex());
+    const auto& previous = pending_logger_output_options();
+    if (logger && previous.directory == options.directory &&
+        previous.directoryName == options.directoryName && previous.filePrefix == options.filePrefix) return;
     pending_logger_output_options() = std::move(options);
     if (!logger)
     {
@@ -216,12 +275,38 @@ void Logger::configure_output(LoggerOutputOptions options)
     }
 
     logger->outputOptions = pending_logger_output_options();
+    logger->lastMessage.clear();
+    logger->repeatedMessages = 0;
+    logger->nextRotationAttempt = {};
     logger->reopen_file();
 }
 
 void Logger::log(LogLevel level, std::string message)
 {
-    if (!enabled || static_cast<uint8_t>(level) < static_cast<uint8_t>(minLevel)) return;
+    const std::lock_guard lock(logger_mutex());
+    if (!enabled || static_cast<uint8_t>(level) < static_cast<uint8_t>(minLevel.load())) return;
+
+    constexpr std::size_t maximumMessageBytes = 64u * 1024u;
+    if (message.size() > maximumMessageBytes)
+    {
+        message.resize(maximumMessageBytes);
+        message += " [message truncated]";
+    }
+    const auto recordTime = std::chrono::steady_clock::now();
+    if (level != LogLevel::eFatal && message == lastMessage && level == lastMessageLevel &&
+        recordTime - lastMessageTime < std::chrono::seconds(5))
+    {
+        ++repeatedMessages;
+        return;
+    }
+    if (repeatedMessages)
+    {
+        logOut << "[repeated " << repeatedMessages << " times] " << lastMessage << std::endl;
+        repeatedMessages = 0;
+    }
+    lastMessage = message;
+    lastMessageLevel = level;
+    lastMessageTime = recordTime;
 
     // Prefix messages with elapsed process time for comparing multi-window events
     auto now = std::chrono::steady_clock::now();
@@ -238,7 +323,66 @@ void Logger::log(LogLevel level, std::string message)
 
     auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
 
-    logOut << std::format("[{:02}:{:02}:{:02}.{:09}] [{:<5}] ", hours.count(), minutes.count(), seconds.count(), nanoseconds.count(), level_name(level)) << message << std::endl;
+    std::ostringstream line;
+    const auto wallTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm utc {};
+#if defined(_WIN32)
+    gmtime_s(&utc, &wallTime);
+#else
+    gmtime_r(&wallTime, &utc);
+#endif
+    line << '[' << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ") << "] ";
+    line << '[' << std::setfill('0') << std::setw(2) << hours.count() << ':'
+        << std::setw(2) << minutes.count() << ':' << std::setw(2) << seconds.count()
+        << '.' << std::setw(9) << nanoseconds.count() << "] ["
+        << std::setfill(' ') << std::left << std::setw(5) << level_name(level) << "] ";
+    line << "[thread " << std::this_thread::get_id() << "] " << message;
+    logOut << line.str() << std::endl;
+}
+
+void Logger::write_file_output(std::string_view text)
+{
+    const std::lock_guard lock(logger_mutex());
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= nextRetentionCheck)
+    {
+        runtime_log_storage::prune(logPath.parent_path(), logPath, outputOptions.filePrefix);
+        nextRetentionCheck = now + std::chrono::minutes(1);
+    }
+    while (!text.empty() && logFile.is_open())
+    {
+        const auto position = logFile.tellp();
+        if (position < 0) return;
+        const auto size = static_cast<std::uintmax_t>(position);
+        if (size >= runtime_log_storage::fileLimit ||
+            (text.size() <= runtime_log_storage::fileLimit &&
+             text.size() > runtime_log_storage::fileLimit - size))
+        {
+            if (now < nextRotationAttempt) return;
+            logFile.close();
+            if (!runtime_log_storage::rotate(logPath))
+            {
+                logFile.open(logPath, std::ios::out | std::ios::app);
+                nextRotationAttempt = now + std::chrono::minutes(1);
+                std::cerr << "Runtime log rotation failed; file output is paused to preserve its size limit.\n";
+                return;
+            }
+            logFile.clear();
+            logFile.open(logPath, std::ios::out | std::ios::trunc);
+            runtime_log_storage::prune(logPath.parent_path(), logPath, outputOptions.filePrefix);
+            if (!logFile) return;
+            continue;
+        }
+        const auto bytes = std::min<std::uintmax_t>(text.size(), runtime_log_storage::fileLimit - size);
+        logFile.write(text.data(), static_cast<std::streamsize>(bytes));
+        text.remove_prefix(static_cast<std::size_t>(bytes));
+    }
+}
+
+void Logger::flush_file_output()
+{
+    const std::lock_guard lock(logger_mutex());
+    logFile.flush();
 }
 
 void Logger::trace(std::string message) { log(LogLevel::eTrace, std::move(message)); }
@@ -257,14 +401,21 @@ void Logger::print(std::string message) { info(std::move(message)); }
 
 void Logger::vulkan(LogLevel level, std::string message)
 {
-    if (!is_vulkan_renderer_logging_enabled()) return;
+    if (level < LogLevel::eWarning && !is_vulkan_renderer_logging_enabled()) return;
     log(level, std::string("Vulkan: ") + message);
 }
 
-void Logger::vulkan(std::string message) { vulkan(LogLevel::eDebug, std::move(message)); }
+void Logger::vulkan(std::string message)
+{
+    const bool failure = message.starts_with("Failed") || message.starts_with("Cannot") ||
+        message.starts_with("No suitable") || message.starts_with("Swapchain creation produced no");
+    vulkan(failure ? LogLevel::eError : LogLevel::eDebug, std::move(message));
+}
 
+#if !defined(__APPLE__)
 void Logger::report_version_number(uint32_t version)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     vulkan(std::format("System supports the following Vulkan specifications:\n\tVariant: {}\n\tMajor: {}\n\tMinor: {}\n\tPatch: {}", vk::apiVersionVariant(version), vk::apiVersionMajor(version), vk::apiVersionMinor(version), vk::apiVersionPatch(version)));
@@ -272,6 +423,7 @@ void Logger::report_version_number(uint32_t version)
 
 void Logger::print_list(const char** list, uint32_t count)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     for (uint32_t i = 0; i < count; i++) logOut << "\t\"" << list[i] << "\"" << std::endl;
@@ -279,6 +431,7 @@ void Logger::print_list(const char** list, uint32_t count)
 
 void Logger::print_extensions(std::vector<vk::ExtensionProperties>& extensions)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     for (vk::ExtensionProperties extension : extensions) logOut << "\t\'" << extension.extensionName << "\'" << std::endl;
@@ -286,6 +439,7 @@ void Logger::print_extensions(std::vector<vk::ExtensionProperties>& extensions)
 
 void Logger::print_layers(std::vector<vk::LayerProperties>& layers)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     for (vk::LayerProperties layer : layers) logOut << "\t\'" << layer.layerName << "\'" << std::endl;
@@ -315,6 +469,7 @@ vk::DebugUtilsMessengerEXT Logger::make_debug_messenger(vk::Instance& instance, 
 
 void Logger::log(const vk::PhysicalDevice& device)
 {
+    const std::lock_guard lock(logger_mutex());
     if (!is_vulkan_renderer_logging_enabled()) return;
 
     vk::PhysicalDeviceProperties properties = device.getProperties();
@@ -496,6 +651,7 @@ void Logger::log(const std::vector<vk::PresentModeKHR>& modes) {
 
 void Logger::log(const VmaAllocationInfo& info)
 {
+    const std::lock_guard lock(logger_mutex());
 	if (!is_vulkan_renderer_logging_enabled()) return;
 
 	logOut << "---- " << info.pName << " ----" << std::endl;
@@ -606,4 +762,52 @@ for use as a fragment density map image.");
 suitable for use as a fragment shading rate attachment or shading rate image");
 
 	return result;
+}
+
+#endif
+
+int Logger::run_session(std::string component, const std::function<int()>& action)
+{
+    auto* log = fetch_logger();
+    log->info(component + ": SESSION START; log=" + log->output_path().string());
+    try
+    {
+        const int code = action();
+        log->log(code == 0 ? LogLevel::eInfo : LogLevel::eError,
+            component + ": SESSION END; exit code=" + std::to_string(code));
+        return code;
+    }
+    catch (const std::exception& error)
+    {
+        crash_diagnostics::write("FATAL: unhandled application exception: ");
+        crash_diagnostics::write(error.what());
+        crash_diagnostics::write("\n");
+        log->fatal(component + ": UNHANDLED EXCEPTION: " + error.what());
+    }
+    catch (...)
+    {
+        crash_diagnostics::write("FATAL: unhandled non-standard application exception.\n");
+        log->fatal(component + ": UNHANDLED NON-STANDARD EXCEPTION");
+    }
+    return EXIT_FAILURE;
+}
+
+LogOperation::LogOperation(std::string operation, int activeExceptions) : name(std::move(operation)),
+    exceptions(activeExceptions), started(std::chrono::steady_clock::now())
+{
+    Logger::fetch_logger()->debug("BEGIN " + name);
+}
+
+void LogOperation::finish(int activeExceptions) noexcept
+{
+    try
+    {
+        const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        const bool failed = activeExceptions > exceptions;
+        Logger::fetch_logger()->log(failed ? LogLevel::eError : LogLevel::eDebug,
+            std::string(failed ? "EXCEPTION " : "END ") + name + " (" +
+            std::to_string(milliseconds) + " ms)");
+    }
+    catch (...) {} // Diagnostics must never interrupt unwinding.
 }

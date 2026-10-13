@@ -21,6 +21,12 @@ struct UiGlassOptions
     SystemBackdropColor systemTint { 1.0f, 1.0f, 1.0f, 0.06f };
 
     LiquidGlassBackend liquidBackend = LiquidGlassBackend::eEngineRenderer;
+    bool sceneBackdrop = false;
+    float liquidRefraction = 0.70f;
+    float liquidBlur = 0.15f;
+    float liquidRim = 0.60f;
+    float liquidDispersion = 0.35f;
+    SystemBackdropColor liquidTint { 213.0f / 255.0f, 231.0f / 255.0f, 1.0f, 0.0f };
 };
 
 inline UiGlassOptions ui_system_glass_options(
@@ -86,6 +92,35 @@ inline void ui_apply_glass_material(
                 GlassMaterial::eLiquid,
                 options.liquidBackend
             });
+        auto& liquid = registry.get<LiquidGlassComponent>(entity);
+        liquid.sceneBackdrop = options.sceneBackdrop;
+        liquid.refraction = options.liquidRefraction;
+        liquid.blur = options.liquidBlur;
+        liquid.rim = options.liquidRim;
+        liquid.dispersion = options.liquidDispersion;
+#if defined(_WIN32)
+        // The Windows presenter uses a live Composition backdrop underlay
+        // and hands the same region to the DWM shader when it is available.
+        if (!options.sceneBackdrop &&
+            (options.liquidBackend == LiquidGlassBackend::eEngineRenderer ||
+            options.liquidBackend == LiquidGlassBackend::eWindowsCompositionShader))
+        {
+            SystemBackdropRegion region = {};
+            region.material = GlassMaterial::eLiquid;
+            region.liquidBackend = options.liquidBackend;
+            region.provider = SystemBackdropProvider::eEngine;
+            region.blurRadius = std::max(options.systemBlurRadius, 0.0f);
+            region.saturation = std::max(options.systemSaturation, 0.0f);
+            region.tint = options.systemTint;
+            region.liquidRefraction = std::clamp(options.liquidRefraction, 0.0f, 1.0f);
+            region.liquidBlur = std::clamp(options.liquidBlur, 0.0f, 1.0f);
+            region.liquidRim = std::clamp(options.liquidRim, 0.0f, 1.0f);
+            region.liquidDispersion = std::clamp(options.liquidDispersion, 0.0f, 1.0f);
+            region.liquidTint = options.liquidTint;
+            registry.emplace_or_replace<SystemBackdropComponent>(
+                entity, SystemBackdropComponent { region });
+        }
+#endif
     }
 }
 

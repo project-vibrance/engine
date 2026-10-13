@@ -3,6 +3,8 @@
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
 #include "text_direction.h"
+#include "emoji_shaper.h"
+#include "colour_bitmap.h"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -24,10 +26,20 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 namespace
 {
+    constexpr bool is_decimal_digit(uint32_t codepoint)
+    {
+        return codepoint >= '0' && codepoint <= '9';
+    }
+
     constexpr std::array<uint32_t, 4> kAtlasSides {
         512u,
         1024u,
@@ -41,115 +53,9 @@ namespace
     constexpr int kSdfPadding = 24;
     constexpr unsigned char kSdfOnEdgeValue = 180;
 
-    bool upload_atlas_to_image(
-        VmaAllocator& allocator,
-        vk::CommandBuffer commandBuffer,
-        vk::Queue queue,
-        StorageImage& image,
-        const std::vector<unsigned char>& packedSdf)
-    {
-        // Font atlas upload uses a short-lived staging buffer and keeps the image shader-readable
-        Logger* logger = Logger::fetch_logger();
-        const vk::DeviceSize uploadSize = static_cast<vk::DeviceSize>(packedSdf.size());
-        if (uploadSize == 0)
-        {
-            return false;
-        }
-
-        vk::BufferCreateInfo bufferInfo = {};
-        bufferInfo.size = uploadSize;
-        bufferInfo.usage = vk::BufferUsageFlagBits::eTransferSrc;
-        bufferInfo.sharingMode = vk::SharingMode::eExclusive;
-
-        VmaAllocationCreateInfo allocationInfo = {};
-        allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-            VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
-
-        VkBuffer stagingBuffer = VK_NULL_HANDLE;
-        VmaAllocation stagingAllocation = nullptr;
-        VmaAllocationInfo stagingInfo = {};
-        VkBufferCreateInfo rawBufferInfo = bufferInfo;
-        if (vmaCreateBuffer(allocator, &rawBufferInfo, &allocationInfo,
-            &stagingBuffer, &stagingAllocation, &stagingInfo) != VK_SUCCESS)
-        {
-            logger->vulkan("Failed to create font atlas staging buffer.");
-            return false;
-        }
-
-        std::memcpy(stagingInfo.pMappedData, packedSdf.data(), packedSdf.size());
-
-        vk::Result result = commandBuffer.reset();
-        if (result != vk::Result::eSuccess)
-        {
-            logger->vulkan("Failed to reset font atlas upload command buffer.");
-            vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
-            return false;
-        }
-
-        vk::CommandBufferBeginInfo beginInfo = {};
-        beginInfo.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
-        result = commandBuffer.begin(beginInfo);
-        if (result != vk::Result::eSuccess)
-        {
-            logger->vulkan("Failed to begin font atlas upload command buffer.");
-            vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
-            return false;
-        }
-
-        transition_image_layout(commandBuffer, image.image,
-            vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferDstOptimal,
-            vk::AccessFlagBits::eNone, vk::AccessFlagBits::eTransferWrite,
-            vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer);
-
-        vk::BufferImageCopy region = {};
-        region.bufferOffset = 0;
-        region.bufferRowLength = 0;
-        region.bufferImageHeight = 0;
-        region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
-        region.imageSubresource.mipLevel = 0;
-        region.imageSubresource.baseArrayLayer = 0;
-        region.imageSubresource.layerCount = 1;
-        region.imageOffset = vk::Offset3D { 0, 0, 0 };
-        region.imageExtent = vk::Extent3D { image.extent.width, image.extent.height, 1 };
-
-        commandBuffer.copyBufferToImage(stagingBuffer, image.image,
-            vk::ImageLayout::eTransferDstOptimal, 1, &region);
-
-        transition_image_layout(commandBuffer, image.image,
-            vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eGeneral,
-            vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eShaderRead,
-            vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eComputeShader);
-
-        result = commandBuffer.end();
-        if (result != vk::Result::eSuccess)
-        {
-            logger->vulkan("Failed to end font atlas upload command buffer.");
-            vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
-            return false;
-        }
-
-        vk::SubmitInfo submitInfo = {};
-        submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
-        result = queue.submit(1, &submitInfo, nullptr);
-        if (result != vk::Result::eSuccess)
-        {
-            logger->vulkan("Failed to submit font atlas upload.");
-            vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
-            return false;
-        }
-
-        result = queue.waitIdle();
-        vmaDestroyBuffer(allocator, stagingBuffer, stagingAllocation);
-        if (result != vk::Result::eSuccess)
-        {
-            logger->vulkan("Failed to wait for font atlas upload.");
-            return false;
-        }
-
-        return true;
-    }
+#if !defined(__APPLE__)
+#include "../vulkan/font_upload.inc"
+#endif
 
     void add_existing_font_path(std::vector<std::filesystem::path>& paths, const std::filesystem::path& path)
     {
@@ -519,6 +425,13 @@ namespace
                     : profile.defaultFontCandidates.front();
                 return true;
             }
+            if (key == "emoji" || key == "emojiFont")
+            {
+                std::string value;
+                if (!parse_string(value)) return false;
+                profile.emojiFontCandidates = resolve_profile_font_paths(assetFontDirectories, value);
+                return true;
+            }
             if (key == "fallbacks" || key == "fallbackFonts")
             {
                 std::vector<std::string> values;
@@ -555,7 +468,8 @@ namespace
         std::unordered_set<uint32_t> seen;
 
         auto add_codepoint = [&](uint32_t codepoint) {
-            if (codepoint == 0u || seen.contains(codepoint))
+            if (codepoint == 0u || codepoint == '\n' || codepoint == '\r' || codepoint == '\t' ||
+                seen.contains(codepoint))
             {
                 return;
             }
@@ -970,6 +884,7 @@ namespace
         std::filesystem::path path;
         std::vector<unsigned char> data;
         std::shared_ptr<const unsigned char> mappedData;
+        std::span<const unsigned char> bytes;
         FT_Face face = nullptr;
     };
 
@@ -991,6 +906,9 @@ namespace
         };
 
         add_path(primaryPath);
+        for (const auto& emoji : options.emojiFontPaths) add_path(emoji);
+        if (options.emojiFontPaths.empty())
+            add_path(primaryPath.parent_path() / "AppleColorEmoji.ttf");
         for (const std::filesystem::path& fallback : options.fallbackFontPaths)
         {
             add_path(fallback);
@@ -1041,6 +959,32 @@ namespace
             }
             CloseHandle(file);
         }
+#elif defined(__APPLE__)
+        // Multilingual and emoji collections can be hundreds of megabytes.
+        // Let FreeType fault in the tables it uses, and let the emoji shaper
+        // retain the mapping instead of copying the complete file per window.
+        const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (descriptor >= 0)
+        {
+            struct stat status {};
+            if (::fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) &&
+                status.st_size > 0 && static_cast<uint64_t>(status.st_size) <=
+                    static_cast<uint64_t>(std::numeric_limits<FT_Long>::max()))
+            {
+                const auto size = static_cast<size_t>(status.st_size);
+                void* mapping = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, descriptor, 0);
+                if (mapping != MAP_FAILED)
+                {
+                    const auto* bytes = static_cast<const unsigned char*>(mapping);
+                    out.mappedData = std::shared_ptr<const unsigned char>(bytes,
+                        [size](const unsigned char* view) {
+                            ::munmap(const_cast<unsigned char*>(view), size);
+                        });
+                    fontData = {bytes, size};
+                }
+            }
+            ::close(descriptor);
+        }
 #endif
         if (fontData.empty())
         {
@@ -1050,10 +994,11 @@ namespace
         if (fontData.empty() || fontData.size() >
             static_cast<std::size_t>(std::numeric_limits<FT_Long>::max()))
         {
-            logger->vulkan("Failed to read Renderer2D font: " + path.string());
+            logger->print("Failed to read Renderer2D font: " + path.string());
             return false;
         }
 
+        out.bytes = fontData;
         if (FT_New_Memory_Face(
             library,
             fontData.data(),
@@ -1061,7 +1006,7 @@ namespace
             choose_weighted_face_index(library, fontData, requestedFontWeight),
             &out.face) != 0)
         {
-            logger->vulkan("Failed to initialise Renderer2D font face: " + path.string());
+            logger->print("Failed to initialise Renderer2D font face: " + path.string());
             return false;
         }
 
@@ -1077,12 +1022,12 @@ namespace
             const int selectedStaticWeight = inferred_face_weight(out.face);
             if (appliedVariableWeight)
             {
-                logger->vulkan("Applied Renderer2D font variable weight " +
+                logger->print("Applied Renderer2D font variable weight " +
                     std::to_string(requestedFontWeight) + " for " + path.string() + ".");
             }
             else if (selectedStaticWeight > 0)
             {
-                logger->vulkan("Selected Renderer2D font face weight " +
+                logger->print("Selected Renderer2D font face weight " +
                     std::to_string(selectedStaticWeight) + " for requested weight " +
                     std::to_string(requestedFontWeight) + ": " + path.string() + ".");
             }
@@ -1090,10 +1035,18 @@ namespace
 
         if (FT_Set_Pixel_Sizes(out.face, 0, static_cast<FT_UInt>(std::max(pixelHeight, 1.0f))) != 0)
         {
-            logger->vulkan("Failed to set Renderer2D font size: " + path.string());
-            FT_Done_Face(out.face);
-            out.face = nullptr;
-            return false;
+            if (out.face->num_fixed_sizes == 0)
+            {
+                logger->print("Failed to set Renderer2D font size: " + path.string());
+                FT_Done_Face(out.face); out.face = nullptr;
+                return false;
+            }
+            int selected = 0;
+            for (int i = 1; i < out.face->num_fixed_sizes; ++i)
+                if (std::abs(ft_26_6_to_float(out.face->available_sizes[i].y_ppem) - pixelHeight) <
+                    std::abs(ft_26_6_to_float(out.face->available_sizes[selected].y_ppem) - pixelHeight)) selected = i;
+            if (FT_Select_Size(out.face, selected) != 0)
+            { FT_Done_Face(out.face); out.face = nullptr; return false; }
         }
 
         return true;
@@ -1231,6 +1184,8 @@ bool renderer2d_load_font_profile_layers(
         }
 
         loadedAny = true;
+        if (!layer.emojiFontCandidates.empty())
+            outProfile.emojiFontCandidates = std::move(layer.emojiFontCandidates);
         if (!layer.defaultFontPath.empty())
         {
             outProfile.defaultFontPath = std::move(layer.defaultFontPath);
@@ -1254,6 +1209,16 @@ bool renderer2d_load_font_profile_layers(
         }
     }
     return loadedAny;
+}
+
+std::vector<std::filesystem::path> renderer2d_emoji_font_candidates(
+    const Renderer2DFontProfile& profile,
+    const std::vector<std::filesystem::path>& assetFontDirectories)
+{
+    auto candidates = profile.emojiFontCandidates;
+    for (const auto& path : renderer2d_font_candidates(assetFontDirectories, "AppleColorEmoji.ttf"))
+        add_existing_font_path(candidates, path);
+    return candidates;
 }
 
 std::filesystem::path renderer2d_primary_font_for_locale(
@@ -1399,15 +1364,21 @@ std::filesystem::path renderer2d_primary_font_for_locale(
 bool Renderer2DFontAtlas::load_from_file(
     const std::filesystem::path& path,
     const Renderer2DFontAtlasLoadOptions& options,
+#if defined(__APPLE__)
+    const MetalTextureUpload& upload
+#else
     VmaAllocator& allocator,
     vk::CommandBuffer commandBuffer,
     vk::Queue queue,
     vk::Device logicalDevice,
     std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
-    std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue)
+    std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+#endif
+)
 {
     Logger* logger = Logger::fetch_logger();
     glyphs.clear();
+    emojiShaper = std::make_shared<Renderer2DEmojiShaper>();
     kerningTable.clear();
     isLoaded = false;
     const int requestedFontWeight = clamped_font_weight(options.fontWeight);
@@ -1422,7 +1393,7 @@ bool Renderer2DFontAtlas::load_from_file(
         fontName += "@wght";
         fontName += std::to_string(requestedFontWeight);
     }
-    const std::vector<uint32_t> requestedCodepoints = build_codepoint_list(options);
+    std::vector<uint32_t> requestedCodepoints = build_codepoint_list(options);
     struct PendingAtlasGlyph
     {
         uint32_t codepoint = 0u;
@@ -1431,6 +1402,8 @@ bool Renderer2DFontAtlas::load_from_file(
         int bitmapLeft = 0;
         int bitmapTop = 0;
         std::vector<unsigned char> sdf {};
+        bool coloured = false;
+        float scale = 1.0f;
     };
     struct AtlasPlacement
     {
@@ -1444,7 +1417,7 @@ bool Renderer2DFontAtlas::load_from_file(
     FT_Library library = nullptr;
     if (FT_Init_FreeType(&library) != 0)
     {
-        logger->vulkan("Failed to initialise FreeType for Renderer2D font loading.");
+        logger->print("Failed to initialise FreeType for Renderer2D font loading.");
     }
     else
     {
@@ -1459,9 +1432,46 @@ bool Renderer2DFontAtlas::load_from_file(
             }
         }
 
+        // Explicit emoji candidates take precedence over a colour-capable
+        // primary text face, without changing the ordinary text fallback order.
+        for (unsigned pass = 0; pass < 2; ++pass)
+        for (unsigned i = 0; i < faces.size(); ++i)
+        {
+            auto& face = faces[i];
+            const bool explicitEmoji = std::find(options.emojiFontPaths.begin(), options.emojiFontPaths.end(), face.path) != options.emojiFontPaths.end();
+            if ((pass == 0 && !explicitEmoji) || (pass == 1 && explicitEmoji) ||
+                (!explicitEmoji && !FT_HAS_COLOR(face.face))) continue;
+            auto owner = face.mappedData;
+            if (!owner)
+            {
+                auto bytes = std::make_shared<std::vector<unsigned char>>(std::move(face.data));
+                owner = std::shared_ptr<const unsigned char>(bytes, bytes->data());
+            }
+            emojiShaper->add(face.bytes, std::move(owner), unsigned(face.face->face_index & 0xffff), i);
+        }
+        // Presentation controls are consumed by shaping; they are not glyphs
+        // that a strict atlas preload should require from the fallback faces.
+        std::vector<uint32_t> shapedRequests;
+        for (auto cp : requestedCodepoints)
+        {
+            if (cp == 0xfe0e || Renderer2DEmojiShaper::extension(cp)) continue;
+            std::string literal;
+            Renderer2DEmojiShaper::append_utf8(literal, cp);
+            const auto run = visual_glyph_codepoints(literal);
+            shapedRequests.insert(shapedRequests.end(), run.begin(), run.end());
+        }
+        std::sort(shapedRequests.begin(), shapedRequests.end());
+        shapedRequests.erase(std::unique(shapedRequests.begin(), shapedRequests.end()), shapedRequests.end());
+        requestedCodepoints = std::move(shapedRequests);
+        const auto shaped = visual_glyph_codepoints(options.preloadText);
+        for (auto cp : shaped)
+            if (cp != '\n' && cp != '\r' && cp != '\t' &&
+                std::find(requestedCodepoints.begin(), requestedCodepoints.end(), cp) == requestedCodepoints.end())
+                requestedCodepoints.push_back(cp);
+
         if (faces.empty())
         {
-            logger->vulkan("Renderer2D font atlas has no usable font faces.");
+            logger->print("Renderer2D font atlas has no usable font faces.");
         }
         else
         {
@@ -1469,7 +1479,8 @@ bool Renderer2DFontAtlas::load_from_file(
             lineHeight = ft_26_6_to_float(faces.front().face->size->metrics.height);
             for (const LoadedFontFace& loadedFace : faces)
             {
-                lineHeight = std::max(lineHeight, ft_26_6_to_float(loadedFace.face->size->metrics.height));
+                if (!FT_HAS_COLOR(loadedFace.face))
+                    lineHeight = std::max(lineHeight, ft_26_6_to_float(loadedFace.face->size->metrics.height));
             }
             if (lineHeight <= 0.0f)
             {
@@ -1483,15 +1494,57 @@ bool Renderer2DFontAtlas::load_from_file(
             for (uint32_t codepoint : requestedCodepoints)
             {
                 GlyphRecord& record = glyphs[codepoint];
-                const std::size_t faceIndex = choose_face_for_codepoint(faces, codepoint);
-                if (faceIndex == static_cast<std::size_t>(-1))
+                const std::size_t faceIndex = codepoint >= 0x110000u
+                    ? (codepoint - 0x110000u) >> 16
+                    : choose_face_for_codepoint(faces, codepoint);
+                if (faceIndex >= faces.size())
                 {
                     ++missingGlyphs;
                     continue;
                 }
 
                 FT_Face face = faces[faceIndex].face;
-                const FT_UInt glyphIndex = FT_Get_Char_Index(face, codepoint);
+                const FT_UInt glyphIndex = codepoint >= 0x110000u
+                    ? (codepoint - 0x110000u) & 0xffffu : FT_Get_Char_Index(face, codepoint);
+                vibrance_text::ColourBitmap colour;
+                const unsigned strikeHeight = std::max(unsigned(face->size->metrics.y_ppem), 1u);
+                bool hasColour = vibrance_text::load_cbdt_bitmap(faces[faceIndex].bytes,
+                    unsigned(face->face_index & 0xffff), glyphIndex, strikeHeight, colour);
+                if (!hasColour && FT_HAS_COLOR(face) &&
+                    FT_Load_Glyph(face, glyphIndex, FT_LOAD_COLOR | FT_LOAD_RENDER) == 0 &&
+                    face->glyph->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA)
+                {
+                    const auto& bitmap = face->glyph->bitmap;
+                    colour.width = bitmap.width; colour.height = bitmap.rows;
+                    colour.left = face->glyph->bitmap_left; colour.top = face->glyph->bitmap_top;
+                    colour.advance = ft_26_6_to_float(face->glyph->advance.x);
+                    colour.rgba.resize(std::size_t(bitmap.width) * bitmap.rows * 4);
+                    for (unsigned y = 0; y < bitmap.rows; ++y)
+                        for (unsigned x = 0; x < bitmap.width; ++x)
+                        {
+                            const auto* pixel = bitmap.buffer + y * bitmap.pitch + x * 4;
+                            auto* destination = colour.rgba.data() + (std::size_t(y) * bitmap.width + x) * 4;
+                            destination[0] = pixel[2]; destination[1] = pixel[1];
+                            destination[2] = pixel[0]; destination[3] = pixel[3];
+                        }
+                    hasColour = true;
+                }
+                if (hasColour)
+                {
+                    constexpr unsigned padding = 2;
+                    const unsigned width = (colour.width + padding * 2) * 4;
+                    const unsigned height = colour.height + padding * 2;
+                    std::vector<unsigned char> pixels(std::size_t(width) * height, 0);
+                    for (unsigned y = 0; y < colour.height; ++y)
+                        std::copy_n(colour.rgba.data() + std::size_t(y) * colour.width * 4,
+                            colour.width * 4, pixels.data() + std::size_t(y + padding) * width + padding * 4);
+                    const float metricScale = bakedPixelHeight / float(strikeHeight);
+                    record.advance = colour.advance * metricScale;
+                    record.sourceFace = uint32_t(faceIndex); record.valid = true; record.coloured = true;
+                    pendingGlyphs.push_back({ codepoint, width, height, colour.left, colour.top,
+                        std::move(pixels), true, metricScale });
+                    continue;
+                }
                 if (FT_Load_Glyph(
                         face,
                         glyphIndex,
@@ -1565,9 +1618,10 @@ bool Renderer2DFontAtlas::load_from_file(
                         packedAll = false;
                         continue;
                     }
+                    if (glyph.coloured) cursorX = (cursorX + 3u) & ~3u;
                     if (cursorX + glyph.width + 1u >= side)
                     {
-                        cursorX = 1u;
+                        cursorX = glyph.coloured ? 4u : 1u;
                         cursorY += rowHeight + 1u;
                         rowHeight = 0u;
                     }
@@ -1630,13 +1684,20 @@ bool Renderer2DFontAtlas::load_from_file(
                         packedSdf[destination] = value;
                     }
                 }
+                const int padding = glyph.coloured ? 2 : kSdfPadding;
+                // The monochrome bake starts from a bitmap surrounded by
+                // exactly this many zero-alpha source pixels. Keep the atlas
+                // measure unscaled so dispatch bounds can retain its SDF edge.
+                record.sdfPadding = glyph.coloured ? 0.0f : static_cast<float>(kSdfPadding);
+                record.sdfAtlasSize = glyph.coloured ? glm::vec2(0.0f) :
+                    glm::vec2(static_cast<float>(glyph.width), static_cast<float>(glyph.height));
                 record.offset = {
-                    static_cast<float>(glyph.bitmapLeft - kSdfPadding),
-                    static_cast<float>(-glyph.bitmapTop - kSdfPadding)
+                    static_cast<float>(glyph.bitmapLeft - padding) * glyph.scale,
+                    static_cast<float>(-glyph.bitmapTop - padding) * glyph.scale
                 };
                 record.size = {
-                    static_cast<float>(glyph.width),
-                    static_cast<float>(glyph.height)
+                    static_cast<float>(glyph.coloured ? glyph.width / 4 : glyph.width) * glyph.scale,
+                    static_cast<float>(glyph.height) * glyph.scale
                 };
                 record.uvMin = {
                     static_cast<float>(placement.x) /
@@ -1699,28 +1760,28 @@ bool Renderer2DFontAtlas::load_from_file(
             isLoaded = renderedGlyphs > 0u && !incompleteRequiredGlyphs;
             if (isLoaded)
             {
-                logger->vulkan("Loaded Renderer2D SDF font atlas from " + fontName + ".");
+                logger->print("Loaded Renderer2D SDF font atlas from " + fontName + ".");
                 if (!packedAllGlyphs)
                 {
-                    logger->vulkan("Renderer2D font atlas did not fit every requested glyph: " + fontName + ".");
+                    logger->print("Renderer2D font atlas did not fit every requested glyph: " + fontName + ".");
                 }
             }
             else if (incompleteRequiredGlyphs)
             {
-                logger->vulkan("Renderer2D font is missing or could not pack required glyphs: " + fontName + ".");
+                logger->print("Renderer2D font is missing or could not pack required glyphs: " + fontName + ".");
             }
             else if (!packedAllGlyphs)
             {
-                logger->vulkan("Renderer2D font atlas was too small for every glyph in " + fontName + ".");
+                logger->print("Renderer2D font atlas was too small for every glyph in " + fontName + ".");
             }
             else
             {
-                logger->vulkan("Renderer2D font produced no drawable glyphs: " + fontName + ".");
+                logger->print("Renderer2D font produced no drawable glyphs: " + fontName + ".");
             }
 
             if (missingGlyphs > 0u)
             {
-                logger->vulkan("Renderer2D font is missing " + std::to_string(missingGlyphs) +
+                logger->print("Renderer2D font is missing " + std::to_string(missingGlyphs) +
                     " requested glyphs: " + fontName + ".");
             }
         }
@@ -1743,6 +1804,11 @@ bool Renderer2DFontAtlas::load_from_file(
             static_cast<std::size_t>(atlasSize.x) * atlasSize.y,
             0u);
     }
+#if defined(__APPLE__)
+    metalAtlasImage = upload(std::max(atlasSize.x / 4u, 1u), std::max(atlasSize.y, 1u), packedSdf, false, false);
+    atlasImage = metalAtlasImage.get();
+    if (!atlasImage) isLoaded = false;
+#else
     const vk::Extent2D packedAtlasExtent {
         std::max(atlasSize.x / 4u, 1u),
         std::max(atlasSize.y, 1u)
@@ -1762,32 +1828,69 @@ bool Renderer2DFontAtlas::load_from_file(
             *atlasImage,
             packedSdf))
     {
-        logger->vulkan("Failed to upload Renderer2D font atlas.");
+        logger->print("Failed to upload Renderer2D font atlas.");
         isLoaded = false;
     }
 
+#endif
+
+    if (isLoaded) update_tabular_digit_metrics();
     return isLoaded;
+}
+
+void Renderer2DFontAtlas::update_tabular_digit_metrics()
+{
+    tabularDigitAdvance = 0.0f;
+    for (uint32_t codepoint = '0'; codepoint <= '9'; ++codepoint)
+        if (const auto* glyph = glyph_for(codepoint); glyph && glyph->valid)
+            tabularDigitAdvance = std::max(tabularDigitAdvance, glyph->advance);
+    tabularDigitLeft = 0.0f;
+    tabularDigitRight = tabularDigitAdvance;
+    for (uint32_t codepoint = '0'; codepoint <= '9'; ++codepoint)
+    {
+        const auto* glyph = glyph_for(codepoint);
+        if (!glyph || !glyph->valid || !glyph->drawable) continue;
+        const float inset = std::min(glyph->coloured ? 2.0f : sdfPixelRange,
+            std::max(std::min(glyph->size.x, glyph->size.y) * 0.45f, 0.0f));
+        const float centreOffset = (tabularDigitAdvance - glyph->advance) * 0.5f;
+        // Share the ink envelope as well as the advance, including italic
+        // overhang and SDF padding. Trimming a narrow edge digit must not
+        // shrink the measured timestamp after assigning equal advances.
+        tabularDigitLeft = std::min(tabularDigitLeft,
+            centreOffset + glyph->offset.x + inset);
+        tabularDigitRight = std::max(tabularDigitRight,
+            centreOffset + glyph->offset.x + glyph->size.x - inset);
+    }
 }
 
 bool Renderer2DFontAtlas::load_from_file(
     const std::filesystem::path& path,
+#if defined(__APPLE__)
+    const MetalTextureUpload& upload
+#else
     VmaAllocator& allocator,
     vk::CommandBuffer commandBuffer,
     vk::Queue queue,
     vk::Device logicalDevice,
     std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
-    std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue)
+    std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+#endif
+)
 {
     Renderer2DFontAtlasLoadOptions options = {};
     return load_from_file(
         path,
         options,
+#if defined(__APPLE__)
+        upload);
+#else
         allocator,
         commandBuffer,
         queue,
         logicalDevice,
         vmaDeletionQueue,
         deviceDeletionQueue);
+#endif
 }
 
 Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, float fontSize) const
@@ -1811,7 +1914,7 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, flo
     glm::vec2 inkMax { std::numeric_limits<float>::lowest() };
     uint32_t previous = 0;
 
-    for (uint32_t codepoint : renderer2d_visual_codepoints(text))
+    for (uint32_t codepoint : visual_glyph_codepoints(text))
     {
         if (codepoint == '\n')
         {
@@ -1833,7 +1936,10 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, flo
             continue;
         }
 
-        if (previous != 0)
+        const bool tabularDigit = is_decimal_digit(codepoint) && tabularDigitAdvance > 0.0f;
+        const float advance = tabularDigit ? tabularDigitAdvance : glyph->advance;
+        const float centreOffset = tabularDigit ? (advance - glyph->advance) * 0.5f : 0.0f;
+        if (previous != 0 && !is_decimal_digit(previous) && !tabularDigit)
         {
             penX += kerning(previous, codepoint) * scale;
         }
@@ -1843,16 +1949,20 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, flo
             MSDFGlyph outGlyph = {};
             outGlyph.codepoint = codepoint;
             outGlyph.position = {
-                penX + glyph->offset.x * scale,
+                penX + (glyph->offset.x + centreOffset) * scale,
                 penY + scaledBaseline + glyph->offset.y * scale
             };
             outGlyph.size = glyph->size * scale;
             outGlyph.uvMin = glyph->uvMin;
             outGlyph.uvMax = glyph->uvMax;
-            outGlyph.advance = glyph->advance * scale;
+            outGlyph.advance = advance * scale;
+            outGlyph.coloured = glyph->coloured;
+            outGlyph.sdfPadding = glyph->sdfPadding;
+            outGlyph.sdfAtlasSize = glyph->sdfAtlasSize;
+            outGlyph.sdfUvRect = { glyph->uvMin.x, glyph->uvMin.y, glyph->uvMax.x, glyph->uvMax.y };
             // Align by visible ink, not the padded SDF atlas rect, so mixed font sizes share the same edge
             const float inkInset = std::min(
-                sdfPixelRange * scale,
+                (glyph->coloured ? 2.0f : sdfPixelRange) * scale,
                 std::max(std::min(outGlyph.size.x, outGlyph.size.y) * 0.45f, 0.0f));
             const glm::vec2 glyphInkMin = outGlyph.position + glm::vec2(inkInset);
             const glm::vec2 glyphInkMax = outGlyph.position + outGlyph.size - glm::vec2(inkInset);
@@ -1869,15 +1979,23 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, flo
             layout.glyphs.push_back(outGlyph);
         }
 
-        penX += glyph->advance * scale;
+        if (tabularDigit)
+        {
+            inkMin.x = std::min(inkMin.x, penX + tabularDigitLeft * scale);
+            inkMax.x = std::max(inkMax.x, penX + tabularDigitRight * scale);
+        }
+
+        penX += advance * scale;
         maxX = std::max(maxX, penX);
         previous = codepoint;
     }
 
     layout.lineHeight = scaledLineHeight;
+    layout.baseline = scaledBaseline;
     if (!layout.glyphs.empty())
     {
         const glm::vec2 origin = (std::isfinite(inkMin.x) && std::isfinite(inkMin.y)) ? inkMin : glm::vec2(0.0f);
+        layout.baseline -= origin.y;
         for (MSDFGlyph& glyph : layout.glyphs)
         {
             glyph.position -= origin;
@@ -1908,7 +2026,7 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
         std::abs(options.paragraphSpacing) <= 0.0001f &&
         std::abs(options.characterSpacing) <= 0.0001f &&
         std::abs(options.wordSpacing) <= 0.0001f;
-    if (legacyLayout)
+    if (legacyLayout && options.tabularDigits)
     {
         return layout_text(text, fontSize);
     }
@@ -1945,6 +2063,14 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
         return codepoint == ' ' || codepoint == '\t' ||
             codepoint == 0x00A0u || codepoint == 0x3000u;
     };
+    const bool tabularDigits = options.tabularDigits && tabularDigitAdvance > 0.0f;
+    const auto advanceFor = [this, tabularDigits](uint32_t codepoint, const GlyphRecord& glyph) {
+        return tabularDigits && is_decimal_digit(codepoint) ? tabularDigitAdvance : glyph.advance;
+    };
+    const auto kerningFor = [this, tabularDigits](uint32_t previous, uint32_t current) {
+        return tabularDigits && (is_decimal_digit(previous) || is_decimal_digit(current)) ?
+            0.0f : kerning(previous, current);
+    };
     const auto glyph_for_layout = [this](
         uint32_t codepoint,
         uint32_t& resolvedCodepoint) -> const GlyphRecord* {
@@ -1961,6 +2087,8 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
         this,
         &glyph_for_layout,
         &is_wrap_space,
+        &advanceFor,
+        &kerningFor,
         characterSpacing,
         wordSpacing,
         scale](const std::vector<uint32_t>& codepoints,
@@ -1979,10 +2107,10 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
             }
             if (previous != 0u)
             {
-                width += kerning(previous, resolved) * scale +
+                width += kerningFor(previous, resolved) * scale +
                     characterSpacing;
             }
-            width += glyph->advance * scale;
+            width += advanceFor(resolved, *glyph) * scale;
             if (is_wrap_space(codepoints[index]))
             {
                 width += wordSpacing;
@@ -2000,7 +2128,7 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
     };
 
     std::vector<std::vector<uint32_t>> paragraphs(1u);
-    for (uint32_t codepoint : renderer2d_visual_codepoints(text))
+    for (uint32_t codepoint : visual_glyph_codepoints(text))
     {
         if (codepoint == '\n')
         {
@@ -2160,6 +2288,7 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
         float penX = 0.0f;
         float lineInkMin = std::numeric_limits<float>::max();
         float lineInkMax = std::numeric_limits<float>::lowest();
+        bool hasTabularDigits = false;
         uint32_t previous = 0u;
         for (uint32_t codepoint : line.codepoints)
         {
@@ -2171,23 +2300,30 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
             }
             if (previous != 0u)
             {
-                penX += kerning(previous, resolved) * scale +
+                penX += kerningFor(previous, resolved) * scale +
                     characterSpacing;
             }
+            const bool tabularDigit = tabularDigits && is_decimal_digit(resolved);
+            const float advance = advanceFor(resolved, *glyph);
+            const float centreOffset = tabularDigit ? (advance - glyph->advance) * 0.5f : 0.0f;
             if (glyph->drawable)
             {
                 PendingGlyph out = {};
                 out.glyph.codepoint = resolved;
                 out.glyph.position = {
-                    penX + glyph->offset.x * scale,
+                    penX + (glyph->offset.x + centreOffset) * scale,
                     penY + scaledBaseline + glyph->offset.y * scale
                 };
                 out.glyph.size = glyph->size * scale;
                 out.glyph.uvMin = glyph->uvMin;
                 out.glyph.uvMax = glyph->uvMax;
-                out.glyph.advance = glyph->advance * scale;
+                out.glyph.advance = advance * scale;
+                out.glyph.coloured = glyph->coloured;
+                out.glyph.sdfPadding = glyph->sdfPadding;
+                out.glyph.sdfAtlasSize = glyph->sdfAtlasSize;
+                out.glyph.sdfUvRect = { glyph->uvMin.x, glyph->uvMin.y, glyph->uvMax.x, glyph->uvMax.y };
                 out.inkInset = std::min(
-                    sdfPixelRange * scale,
+                    (glyph->coloured ? 2.0f : sdfPixelRange) * scale,
                     std::max(
                         std::min(out.glyph.size.x, out.glyph.size.y) * 0.45f,
                         0.0f));
@@ -2199,7 +2335,13 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
                     out.glyph.position.x + out.glyph.size.x - out.inkInset);
                 pending.push_back(out);
             }
-            penX += glyph->advance * scale;
+            if (tabularDigit)
+            {
+                hasTabularDigits = true;
+                lineInkMin = std::min(lineInkMin, penX + tabularDigitLeft * scale);
+                lineInkMax = std::max(lineInkMax, penX + tabularDigitRight * scale);
+            }
+            penX += advance * scale;
             if (is_wrap_space(codepoint))
             {
                 penX += wordSpacing + justifySpacing;
@@ -2234,6 +2376,8 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
             break;
         }
         alignedLeft = std::max(alignedLeft, 0.0f);
+        if (hasTabularDigits)
+            maximumVisibleX = std::max(maximumVisibleX, alignedLeft + visibleWidth);
         const float lineShift = lineHasInk ?
             alignedLeft - lineInkMin : alignedLeft;
 
@@ -2268,8 +2412,10 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
     const float typographicHeight = lines.empty() ? 0.0f :
         penY + scaledLineHeight *
             std::max(options.lineHeightMultiplier, 0.2f);
+    layout.baseline = scaledBaseline;
     if (hasInk)
     {
+        layout.baseline -= inkMinY;
         for (MSDFGlyph& glyph : layout.glyphs)
         {
             glyph.position.y -= inkMinY;
@@ -2288,6 +2434,12 @@ Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
     return layout;
 }
 
+std::vector<uint32_t> Renderer2DFontAtlas::visual_glyph_codepoints(std::string_view text) const
+{
+    return emojiShaper && !emojiShaper->faces.empty()
+        ? emojiShaper->visual(text) : renderer2d_visual_codepoints(text);
+}
+
 bool Renderer2DFontAtlas::covers_text(std::string_view text) const
 {
     return missing_codepoints(text).empty();
@@ -2298,7 +2450,7 @@ std::vector<uint32_t> Renderer2DFontAtlas::missing_codepoints(
 {
     std::vector<uint32_t> missing;
     std::unordered_set<uint32_t> seen;
-    for (const uint32_t codepoint : renderer2d_visual_codepoints(text))
+    for (const uint32_t codepoint : visual_glyph_codepoints(text))
     {
         // Newlines affect layout but never require an atlas entry.
         if (codepoint == '\n' || codepoint == 0u || seen.contains(codepoint))

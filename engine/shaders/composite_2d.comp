@@ -15,6 +15,8 @@ const uint COMPOSITE_WRITE_NATIVE_SURFACE = 1u << 2;
 
 layout (push_constant) uniform Composite2DConstants {
     uvec4 data;
+    vec4 fadeRect;
+    vec4 fadeParameters;
 } pc;
 
 vec4 blend_over(vec4 dst, vec4 src) {
@@ -42,6 +44,21 @@ void main() {
     }
     color = blend_over(color, staticColor);
     color = blend_over(color, sceneColor);
+    if ((pc.data.x & 16u) != 0u) {
+        vec2 point = vec2(pixel) + vec2(0.5);
+        float alpha = 1.0;
+        if (point.x < pc.fadeRect.x || point.x >= pc.fadeRect.x + pc.fadeRect.z ||
+            point.y < pc.fadeRect.y || point.y >= pc.fadeRect.y + pc.fadeRect.w) {
+            alpha = 0.0;
+        } else {
+            if (pc.fadeParameters.x > 0.0)
+                alpha = min(alpha, smoothstep(0.0, pc.fadeParameters.x, point.y - pc.fadeRect.y));
+            if (pc.fadeParameters.y > 0.0)
+                alpha = min(alpha, smoothstep(0.0, pc.fadeParameters.y, pc.fadeRect.y + pc.fadeRect.w - point.y));
+            alpha = mix(pc.fadeParameters.z, 1.0, alpha);
+        }
+        color.a *= alpha;
+    }
     if ((pc.data.x & COMPOSITE_WRITE_NATIVE_SURFACE) != 0u) {
         imageStore(tempSurface, pixel, color);
     }

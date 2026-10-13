@@ -15,6 +15,24 @@
 #include <array>
 #endif
 
+
+#if !defined(VIBRANCE_FORCE_PORTABLE_NOTIFICATION_PROVIDER)
+#include <vibranceUI/core/logger.h>
+#endif
+namespace
+{
+void provider_diagnostic(bool failure, const std::string& message)
+{
+#if !defined(VIBRANCE_FORCE_PORTABLE_NOTIFICATION_PROVIDER)
+    Logger::fetch_logger()->log(failure ? LogLevel::eWarning : LogLevel::eInfo,
+        "SystemNotificationProvider: " + message);
+#else
+    (void)failure;
+    (void)message;
+#endif
+}
+}
+
 struct SystemNotificationProvider::Impl
 {
     SystemNotificationSnapshot current;
@@ -27,6 +45,7 @@ struct SystemNotificationProvider::Impl
     VibranceWin32InteropGetNotificationsFn getNotifications = nullptr;
     VibranceWin32InteropDismissNotificationFn dismissNotification = nullptr;
     VibranceWin32InteropActivateNotificationSourceFn activateSource = nullptr;
+    VibranceWin32InteropActivateNotificationFn activateNotification = nullptr;
     VibranceWin32InteropResolveApplicationIconFn resolveIcon = nullptr;
     bool hasNotificationSnapshot = false;
     // Keep the item storage off the refresh stack: even a metadata-only return
@@ -89,10 +108,12 @@ struct SystemNotificationProvider::Impl
                 VIBRANCE_WIN32_INTEROP_ACTIVATE_NOTIFICATION_SOURCE_SYMBOL);
         resolveIcon = load<VibranceWin32InteropResolveApplicationIconFn>(
             VIBRANCE_WIN32_INTEROP_RESOLVE_APPLICATION_ICON_SYMBOL);
+        activateNotification = load<VibranceWin32InteropActivateNotificationFn>(
+            VIBRANCE_WIN32_INTEROP_ACTIVATE_NOTIFICATION_SYMBOL);
 
         if (!abiVersion || !create || !destroy || !requestAccess ||
             !getNotifications || !dismissNotification || !activateSource ||
-            !resolveIcon ||
+            !resolveIcon || !activateNotification ||
             abiVersion() != VIBRANCE_WIN32_INTEROP_ABI_VERSION)
         {
             current.access = SystemNotificationAccess::eUnavailable;
@@ -229,6 +250,8 @@ struct SystemNotificationProvider::Impl
             item.title = bridgeItem.title;
             item.message = bridgeItem.message;
             item.activationTarget = bridgeItem.appUserModelId;
+            item.activationArguments = bridgeItem.activationArguments;
+            item.activationKind = static_cast<SystemNotificationActivationKind>(bridgeItem.activationKind);
             item.iconPath = bridgeItem.iconPath;
             current.items.push_back(std::move(item));
         }
@@ -252,6 +275,13 @@ struct SystemNotificationProvider::Impl
         }
         const std::string target(activationTarget);
         return activateSource(handle, target.c_str()) != 0u;
+    }
+
+    bool activate_notification(std::string_view target, std::string_view arguments, SystemNotificationActivationKind kind)
+    {
+        if (!handle || !activateNotification || target.empty()) return false;
+        const std::string identity(target), payload(arguments);
+        return activateNotification(handle, identity.c_str(), payload.c_str(), static_cast<std::uint32_t>(kind)) != 0u;
     }
 
     SystemApplicationIcon resolve_application_icon(
@@ -285,6 +315,7 @@ struct SystemNotificationProvider::Impl
     bool refresh() { return false; }
     bool dismiss(std::uint32_t) { return false; }
     bool activate_source(std::string_view) { return false; }
+    bool activate_notification(std::string_view, std::string_view, SystemNotificationActivationKind) { return false; }
     SystemApplicationIcon resolve_application_icon(std::string_view)
     {
         return {};
@@ -295,6 +326,8 @@ struct SystemNotificationProvider::Impl
 SystemNotificationProvider::SystemNotificationProvider() :
     impl(std::make_unique<Impl>())
 {
+    provider_diagnostic(!impl->current.bridgeLoaded, impl->current.diagnostic.empty() ?
+        "Provider initialised." : impl->current.diagnostic);
 }
 
 SystemNotificationProvider::~SystemNotificationProvider() = default;
@@ -319,23 +352,43 @@ bool SystemNotificationProvider::bridge_loaded() const
 
 bool SystemNotificationProvider::request_access()
 {
-    return impl && impl->request_access();
+    const bool succeeded = impl && impl->request_access();
+    provider_diagnostic(!succeeded, "request_access: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 bool SystemNotificationProvider::refresh()
 {
-    return impl && impl->refresh();
+    if (!impl) return false;
+    const auto previousDiagnostic = impl->current.diagnostic;
+    const bool changed = impl->refresh();
+    if (previousDiagnostic != impl->current.diagnostic)
+        provider_diagnostic(!impl->current.diagnostic.empty(), impl->current.diagnostic.empty() ?
+            "Provider recovered." : impl->current.diagnostic);
+    return changed;
 }
 
 bool SystemNotificationProvider::dismiss(std::uint32_t providerId)
 {
-    return impl && impl->dismiss(providerId);
+    const bool succeeded = impl && impl->dismiss(providerId);
+    provider_diagnostic(!succeeded, "dismiss: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 bool SystemNotificationProvider::activate_source(
     std::string_view activationTarget)
 {
-    return impl && impl->activate_source(activationTarget);
+    const bool succeeded = impl && impl->activate_source(activationTarget);
+    provider_diagnostic(!succeeded, "activate_source: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
+}
+
+bool SystemNotificationProvider::activate_notification(std::string_view target,
+    std::string_view arguments, SystemNotificationActivationKind kind)
+{
+    const bool succeeded = impl && impl->activate_notification(target, arguments, kind);
+    if (!succeeded) provider_diagnostic(true, "The notification destination could not be invoked.");
+    return succeeded;
 }
 
 SystemApplicationIcon SystemNotificationProvider::resolve_application_icon(

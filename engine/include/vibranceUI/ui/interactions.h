@@ -515,6 +515,25 @@ inline void ui_apply_stretch_dynamics_visual(
     visual.inheritToChildren = dynamics.options.stretchDescendants;
     visual.blurSelf = dynamics.options.inwardBlurSelf;
     visual.scale = glm::max(dynamics.scale, glm::vec2(0.001f));
+    if (dynamics.options.constrainToParent)
+    {
+        const auto* parent = registry.try_get<Parent2DComponent>(entity);
+        if (parent && registry.valid(parent->parent))
+        {
+            const auto bounds = ui_entity_base_framebuffer_rect(registry, parent->parent);
+            const auto own = ui_entity_base_framebuffer_rect(registry, entity);
+            for (int axis = 0; axis < 2; ++axis)
+            {
+                const float origin = dynamics.scaleOrigin[axis];
+                const float nearDistance = origin - own[axis];
+                const float farDistance = own[axis] + own[axis + 2] - origin;
+                if (nearDistance > 0.001f)
+                    visual.scale[axis] = std::min(visual.scale[axis], std::max(0.001f, (origin - bounds[axis]) / nearDistance));
+                if (farDistance > 0.001f)
+                    visual.scale[axis] = std::min(visual.scale[axis], std::max(0.001f, (bounds[axis] + bounds[axis + 2] - origin) / farDistance));
+            }
+        }
+    }
     visual.scaleOrigin = dynamics.scaleOrigin;
     visual.blurRadius = std::max(dynamics.blurRadius, 0.0f);
     visual.opacity = 1.0f;
@@ -537,6 +556,7 @@ inline bool ui_begin_stretch_dynamics(
 
     dynamics->dragging = true;
     dynamics->settling = false;
+    dynamics->dragMoved = false;
     dynamics->pressPoint = point;
     dynamics->baseRect = ui_entity_base_framebuffer_rect(registry, entity);
     const glm::vec2 baseCenter {
@@ -566,7 +586,7 @@ inline bool ui_begin_stretch_dynamics(
         dynamics->options.verticalAnchor);
     dynamics->outwardAxes = eStretchDynamicsNone;
     dynamics->displacement = glm::vec2(0.0f);
-    dynamics->scale = glm::vec2(1.0f);
+    dynamics->scale = glm::vec2(std::max(dynamics->options.grabScale, 1.0f));
     dynamics->scaleVelocity = glm::vec2(0.0f);
     dynamics->scaleOrigin = {
         dynamics->baseRect.x + dynamics->baseRect.z * 0.5f,
@@ -633,6 +653,7 @@ inline bool ui_release_stretch_dynamics(
         hasPoint ? point : dynamics->pressPoint + dynamics->displacement,
         *dynamics);
     const bool inwardReleaseArmed = event.inwardReleaseArmed;
+    const bool consumeClick = dynamics->options.consumeClickAfterDrag && dynamics->dragMoved;
     const auto onRelease = dynamics->options.onRelease;
     const auto onInwardRelease = dynamics->options.onInwardRelease;
     const float returnActiveSeconds =
@@ -649,7 +670,7 @@ inline bool ui_release_stretch_dynamics(
         scene,
         entity,
         returnActiveSeconds);
-    return inwardReleaseArmed;
+    return inwardReleaseArmed || consumeClick;
 }
 
 inline bool ui_update_stretch_dynamics_drag(
@@ -686,6 +707,8 @@ inline bool ui_update_stretch_dynamics_drag(
 
     dynamics->displacement = point - dynamics->pressPoint;
     const StretchDynamicsOptions& options = dynamics->options;
+    const float deadZone = std::max(options.dragDeadZone, 0.0f);
+    dynamics->dragMoved = dynamics->dragMoved || glm::dot(dynamics->displacement, dynamics->displacement) > deadZone * deadZone;
     const auto updateDirectionAwareSide = [&options, dynamics](
         std::size_t axis,
         uint32_t axisFlag,
@@ -744,6 +767,7 @@ inline bool ui_update_stretch_dynamics_drag(
             options.dragDeadZone);
     }
 
+    dynamics->scale *= std::max(options.grabScale, 1.0f);
     dynamics->scaleOrigin = {
         (options.axes & eStretchDynamicsHorizontal) != 0u ?
             dynamics->baseRect.x +
@@ -795,24 +819,8 @@ inline float ui_stretch_dynamics_spring_step(
     float dampingFraction)
 {
     constexpr float twoPi = 6.28318530718f;
-    const float dt = static_cast<float>(
-        std::clamp(deltaSeconds, 0.0, 1.0 / 30.0));
-    if (dt <= 0.0f)
-    {
-        return value;
-    }
-    const float frequency = twoPi / std::max(response, 0.001f);
-    const float acceleration =
-        -frequency * frequency * (value - target) -
-        2.0f * std::max(dampingFraction, 0.0f) * frequency * velocity;
-    velocity += acceleration * dt;
-    value += velocity * dt;
-    if (std::abs(value - target) < 0.0005f &&
-        std::abs(velocity) < 0.0005f)
-    {
-        value = target;
-        velocity = 0.0f;
-    }
+    ui_damped_spring_step(value, velocity, target, deltaSeconds,
+        twoPi / std::max(response, 0.001f), std::max(dampingFraction, 0.0f));
     return value;
 }
 
@@ -960,10 +968,12 @@ inline void ui_handle_pointer_button(
         // Text focus follows left-click ownership before any drag-only controls react
         ui_focus_text_input(scene, fontAtlas, state, textOwner);
         if (input.hasPoint && stretchOwner != entt::null &&
-            sliderOwner == entt::null && scrollOwner == entt::null &&
+            sliderOwner == entt::null &&
+            (scrollOwner == entt::null || buttonOwner == stretchOwner || textOwner == stretchOwner) &&
             scrollBarOwner == entt::null &&
             (!stretchBlocker || !stretchBlocker->enabled) &&
-            textOwner == entt::null)
+            (textOwner == entt::null ||
+                registry.get<StretchDynamicsComponent>(stretchOwner).options.allowTextInputDrag))
         {
             ui_begin_stretch_dynamics(
                 scene,
@@ -1081,13 +1091,13 @@ inline void ui_handle_pointer_button(
     }
 
     const entt::entity releasedEntity = state.pressedInputEntity;
-    state.pressedInputEntity = entt::null;
     // Release only clicks the same logical owner that received the press
     ButtonInputComponent* button = (releasedEntity != entt::null && registry.valid(releasedEntity)) ?
         registry.try_get<ButtonInputComponent>(releasedEntity) :
         nullptr;
     if (!button)
     {
+        state.pressedInputEntity = entt::null;
         if (input.button == PointerButton::eLeft &&
             state.activeScrollBar != entt::null &&
             registry.valid(state.activeScrollBar))
@@ -1142,11 +1152,23 @@ inline void ui_handle_pointer_button(
 
     if (input.button == PointerButton::eLeft)
     {
+        if (!button->leftPressed)
+        {
+            return;
+        }
         button->leftPressed = false;
     }
     else if (input.button == PointerButton::eRight)
     {
+        if (!button->rightPressed)
+        {
+            return;
+        }
         button->rightPressed = false;
+    }
+    if (!button->leftPressed && !button->rightPressed)
+    {
+        state.pressedInputEntity = entt::null;
     }
 
     PointerInputEvent event { releasedEntity, input.point, input.button, input.platformButton, input.modifiers };
@@ -1167,6 +1189,101 @@ inline void ui_handle_pointer_button(
         }
     }
     ui_update_button_visual(scene, releasedEntity);
+}
+
+inline bool ui_recover_pointer_button_release(
+    Renderer2DScene& scene,
+    UiInputState& state,
+    bool leftButtonPressed,
+    bool rightButtonPressed,
+    glm::vec2 point)
+{
+    const entt::entity entity = state.pressedInputEntity;
+    if (entity == entt::null)
+    {
+        // Text inputs also acquire left-button capture, without a button
+        // press owner. Dragging controls retain their own active state so
+        // their existing polling can still finish and commit the gesture.
+        if (!leftButtonPressed && state.pointerInputCapture != entt::null)
+        {
+            state.pointerInputCapture = entt::null;
+            return true;
+        }
+        return false;
+    }
+
+    entt::registry& registry = scene.registry();
+    ButtonInputComponent* button = registry.valid(entity) ?
+        registry.try_get<ButtonInputComponent>(entity) : nullptr;
+    if (!button)
+    {
+        state.pressedInputEntity = entt::null;
+        if (state.pointerInputCapture == entity)
+        {
+            state.pointerInputCapture = entt::null;
+        }
+        return true;
+    }
+
+    const bool lostLeftRelease = button->leftPressed && !leftButtonPressed;
+    const bool lostRightRelease = button->rightPressed && !rightButtonPressed;
+    if (!lostLeftRelease && !lostRightRelease)
+    {
+        return false;
+    }
+
+    // Native focus changes or an interrupted tracking loop can drop a release
+    // callback. Cancel that press once, without inventing a click from a later
+    // pointer sample. A released right button must preserve a held left press.
+    const auto onRelease = button->onRelease;
+    if (lostLeftRelease)
+    {
+        button->leftPressed = false;
+        if (state.pointerInputCapture == entity)
+        {
+            state.pointerInputCapture = entt::null;
+        }
+    }
+    if (lostRightRelease)
+    {
+        button->rightPressed = false;
+    }
+    if (!button->leftPressed && !button->rightPressed)
+    {
+        state.pressedInputEntity = entt::null;
+    }
+
+    if (lostLeftRelease)
+    {
+        ui_release_stretch_dynamics(scene, state, false, point);
+    }
+    for (const auto released : { PointerButton::eLeft, PointerButton::eRight })
+    {
+        if ((released == PointerButton::eLeft ? lostLeftRelease : lostRightRelease) &&
+            onRelease && registry.valid(entity) &&
+            registry.all_of<ButtonInputComponent>(entity))
+        {
+            onRelease(PointerInputEvent { entity, point, released });
+        }
+    }
+    // Release callbacks may remove or rebuild the control. Never keep its
+    // capture or a component reference alive across that callback.
+    if (!registry.valid(entity) || !registry.all_of<ButtonInputComponent>(entity))
+    {
+        if (state.pressedInputEntity == entity)
+        {
+            state.pressedInputEntity = entt::null;
+        }
+        if (state.pointerInputCapture == entity)
+        {
+            state.pointerInputCapture = entt::null;
+        }
+    }
+    else
+    {
+        ui_update_button_visual(scene, entity);
+    }
+    return true;
 }
 
 inline void ui_handle_scroll(Renderer2DScene& scene, const UiScrollInput& input)
@@ -1333,15 +1450,16 @@ inline void ui_handle_drop(
     scene.activate_dynamic(dropOwner, 0.5f);
 }
 
-inline UiHoverResult ui_update_input_hover(
+inline UiHoverResult ui_update_input_hover_from_hit(
     Renderer2DScene& scene,
     const Renderer2DFontAtlas& fontAtlas,
     UiInputState& state,
     bool hasPoint,
-    glm::vec2 point)
+    glm::vec2 point,
+    entt::entity resolvedHit)
 {
     entt::registry& registry = scene.registry();
-    const entt::entity hit = hasPoint ? scene.entity_at(point) : entt::null;
+    const entt::entity hit = hasPoint ? resolvedHit : entt::null;
     entt::entity buttonOwner = ui_component_owner<ButtonInputComponent>(registry, hit);
     entt::entity textOwner = ui_component_owner<TextInputComponent>(registry, hit);
     entt::entity dropOwner = ui_component_owner<DropTargetComponent>(registry, hit);
@@ -1567,6 +1685,17 @@ inline UiHoverResult ui_update_input_hover(
         resizeEdges,
         ui_cursor_kind_for_hover(registry, textOwner, buttonOwner, sliderOwner, scrollBarOwner, resizeEdges)
     };
+}
+
+inline UiHoverResult ui_update_input_hover(
+    Renderer2DScene& scene,
+    const Renderer2DFontAtlas& fontAtlas,
+    UiInputState& state,
+    bool hasPoint,
+    glm::vec2 point)
+{
+    return ui_update_input_hover_from_hit(scene, fontAtlas, state, hasPoint, point,
+        hasPoint ? scene.entity_at(point) : entt::null);
 }
 
 inline bool ui_update_slider_drag(

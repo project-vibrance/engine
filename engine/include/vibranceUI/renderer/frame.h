@@ -54,6 +54,24 @@ class Frame
 
     void resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModelRenderExtent);
 
+    struct GpuRenderTimings
+    {
+        double totalMilliseconds = 0.0;
+        double render2DMilliseconds = 0.0;
+        double compositeMilliseconds = 0.0;
+        double outputMilliseconds = 0.0;
+    };
+
+    // Optional diagnostics use the existing frame fence. The caller must only
+    // collect results after that fence completes, before reusing this slot.
+    bool enable_gpu_timing(
+        uint32_t timestampValidBits,
+        double timestampPeriodNanoseconds,
+        std::deque<std::function<void(vk::Device)>>& deletionQueue);
+    void set_gpu_timing_sample_enabled(bool enabled);
+    void mark_gpu_timing_submitted();
+    bool take_completed_gpu_timings(GpuRenderTimings& timings);
+
     // Rebinds the font image sampled by both the live UI and retained UI cache.
     // The graphics queue must be idle before changing descriptors for frames
     // that may already have been submitted.
@@ -99,6 +117,7 @@ class Frame
     // Vulkan surfaces that advertise post-multiplied composition.
     StorageImage* compositionSurface = nullptr;
     StorageImage* uiBlurSurface = nullptr, *mediaBlurSurface = nullptr;
+    StorageImage* foregroundBlurSurface = nullptr;
     StorageImage* uiStaticSurface = nullptr, *uiStaticBlurSurface = nullptr;
     StorageImage* externalBackdropSurface = nullptr, *fontAtlasImage = nullptr;
     ColorAttachmentImage* hosted3DColorBuffer = nullptr;
@@ -115,4 +134,16 @@ class Frame
 
     vk::Queue queue;
     bool uiCacheImagesReady = false;
+
+private:
+    void prepare_text_batch_resources();
+    StorageBuffer textBatchBuffer;
+    Renderer2DTextBatchResources textBatchResources;
+    bool textBatchAllocationAttempted = false;
+    vk::QueryPool gpuTimestampQueryPool;
+    uint32_t gpuTimestampValidBits = 0u;
+    double gpuTimestampPeriodNanoseconds = 0.0;
+    bool gpuTimestampSampleEnabled = false;
+    bool gpuTimestampsRecorded = false;
+    bool gpuTimestampsPending = false;
 };

@@ -8,8 +8,14 @@
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <vector>
+#include <atomic>
+#include <exception>
+#include <string_view>
+#if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
+#endif
 
 enum class LogLevel : uint8_t
 {
@@ -26,7 +32,7 @@ struct LoggerOutputOptions
 {
     // Keeps the timestamped filename format while letting apps brand the path
     std::filesystem::path directory {};
-    std::string directoryName = "vibranceUI";
+    std::string directoryName = "vibrance-dev/runtime/engine";
     std::string filePrefix = "vibrance_log";
 };
 
@@ -39,6 +45,9 @@ class VIBRANCE_ENGINE_API Logger
     static Logger* fetch_logger();
 
     static void configure_output(LoggerOutputOptions options);
+
+    // Starts diagnostics before any application work and records every exit.
+    static int run_session(std::string component, const std::function<int()>& action);
 
     // Master switch for app logs outside renderer validation
     void set_mode(bool mode);
@@ -60,6 +69,9 @@ class VIBRANCE_ENGINE_API Logger
 
     bool is_file_open() const { return logFile.is_open(); }
     std::ofstream& get_file_stream() { return logFile; }
+    // Used by both ordinary records and legacy renderer diagnostics.
+    void write_file_output(std::string_view text);
+    void flush_file_output();
     const std::filesystem::path& output_path() const { return logPath; }
 
     ~Logger();
@@ -88,6 +100,7 @@ class VIBRANCE_ENGINE_API Logger
     // Vulkan detail helpers are gated separately from ordinary app logs
     void vulkan(std::string message);
 
+#if !defined(__APPLE__)
     void report_version_number(uint32_t version);
 
     void print_list(const char** list, uint32_t count);
@@ -116,29 +129,57 @@ class VIBRANCE_ENGINE_API Logger
 
     void log(const VmaAllocationInfo& info);
 
+#endif
     private:
-    bool enabled;
-    bool vulkanRendererLoggingEnabled;
-    bool vulkanValidationEnabled;
-    LogLevel minLevel;
+    std::atomic<bool> enabled;
+    std::atomic<bool> vulkanRendererLoggingEnabled;
+    std::atomic<bool> vulkanValidationEnabled;
+    std::atomic<LogLevel> minLevel;
     std::ofstream logFile;
     LoggerOutputOptions outputOptions {};
     std::filesystem::path logPath {};
     std::chrono::steady_clock::time_point startTime;
+    std::chrono::steady_clock::time_point nextRetentionCheck {};
+    std::chrono::steady_clock::time_point nextRotationAttempt {};
+    std::string lastMessage;
+    LogLevel lastMessageLevel = LogLevel::eTrace;
+    unsigned repeatedMessages = 0;
+    std::chrono::steady_clock::time_point lastMessageTime {};
 
     Logger();
     void reopen_file();
 
+#if !defined(__APPLE__)
     std::vector<std::string> parse_transform_bits(vk::SurfaceTransformFlagsKHR bits);
 
     std::vector<std::string> parse_alpha_composite_bits(vk::CompositeAlphaFlagsKHR bits);
 
     std::vector<std::string> parse_image_usage_bits(vk::ImageUsageFlags bits);
+#endif
 };
 
+// Use around infrequent operations, never around frame or audio sample loops.
+// END means control returned; callers still record semantic success/failure.
+class VIBRANCE_ENGINE_API LogOperation
+{
+public:
+    explicit LogOperation(std::string name, int exceptions = std::uncaught_exceptions());
+    ~LogOperation() noexcept { finish(std::uncaught_exceptions()); }
+    LogOperation(const LogOperation&) = delete;
+    LogOperation& operator=(const LogOperation&) = delete;
+private:
+    std::string name;
+    int exceptions;
+    std::chrono::steady_clock::time_point started;
+    void finish(int activeExceptions) noexcept;
+};
+
+#if !defined(__APPLE__)
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
     void* pUserData
 );
+
+#endif

@@ -91,6 +91,9 @@ void GlfwUiSurface::tick()
         return;
     }
 
+    glfw_reconcile_ui_mouse_events(window, inputState);
+    if (glfw_window_should_close(window)) return;
+
     const double now = glfw_time_seconds();
     const double delta = lastTickSeconds < 0.0 ?
         0.0 : std::max(now - lastTickSeconds, 0.0);

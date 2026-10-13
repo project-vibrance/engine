@@ -78,6 +78,11 @@ namespace media_ui
         return artworkPresentation;
     }
 
+    bool MediaArtworkView::transitioning() const
+    {
+        return transitionState.active();
+    }
+
     const MediaArtworkPresentation& MediaArtworkView::presentation() const
     {
         return artworkPresentation;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vibranceUI/export.h>
+#include <vibranceUI/media/playback_quality.h>
 
 #include <cstdint>
 #include <memory>
@@ -47,6 +48,7 @@ struct MediaSessionSnapshot
     std::string album;
     std::string thumbnailPath;
     std::string diagnostic;
+    MediaPlaybackQuality playbackQuality = MediaPlaybackQuality::eUnknown;
 };
 
 // Reusable portable facade for the optional platform media-session provider.

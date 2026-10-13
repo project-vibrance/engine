@@ -1,5 +1,6 @@
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/core/process.h>
+#include <vibranceUI/ui/resources.h>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -49,6 +50,27 @@ int main()
     for (const auto& entry : std::filesystem::recursive_directory_iterator(directory))
         expect(entry.path().filename().string().find(".tmp-") == std::string::npos,
             "temporary files and directories are removed");
+
+    UiResourceDirectories resources;
+    resources.userAssetsDirectory = directory / "assets";
+    std::filesystem::create_directories(resources.userAssetsDirectory / "nested");
+    UiResourceChangeTracker tracker(resources);
+    const auto asset = resources.userAssetsDirectory / "nested" / "asset.txt";
+    write_file_atomically(asset, "first");
+    expect(tracker.poll(true).assetPaths == std::vector<std::filesystem::path>{"nested/asset.txt"},
+        "new resources retain their path relative to the watched root");
+    expect(!tracker.poll(true).any(), "unchanged resources do not trigger hot reload");
+    write_file_atomically(asset, "changed content");
+    expect(tracker.poll(true).assetPaths == std::vector<std::filesystem::path>{"nested/asset.txt"},
+        "modified resources trigger hot reload");
+    std::filesystem::remove(asset);
+    expect(tracker.poll(true).assetPaths == std::vector<std::filesystem::path>{"nested/asset.txt"},
+        "deleted resources trigger hot reload");
+#if !defined(_WIN32)
+    std::filesystem::create_symlink(path, resources.userAssetsDirectory / "linked.txt");
+    expect(tracker.poll(true).assetPaths == std::vector<std::filesystem::path>{"linked.txt"},
+        "linked resources are identified by their visible asset path");
+#endif
 #if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
     const auto executable = current_executable_path();
     expect(executable.is_absolute() && std::filesystem::is_regular_file(executable),

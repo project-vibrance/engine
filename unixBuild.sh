@@ -1,33 +1,89 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/scripts/build-logging.sh"
+vibrance_logged_build engine "${BASH_SOURCE[0]}" "$@"
+# Show exact commands for configuration, dependency builds and packaging.
+set -x
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-# Usage: ./unixBuild.sh [Debug|Release] [SDK install prefix]
-# Anchoring to SCRIPT_DIR keeps calls from downstream repositories from
-# configuring or installing the wrong source tree.
-BUILD_TYPE=${1:-Debug}
-if [[ "${BUILD_TYPE}" == "release" || "${BUILD_TYPE}" == "Release" ]]; then
-  BUILD_TYPE="Release"
-else
-  BUILD_TYPE="Debug"
+# Usage: ./unixBuild.sh [Debug|Release] [SDK install prefix|platform] [platform]
+# Supported direct platform values: native, silicon, intel, all.
+case "${1:-Debug}" in
+  Debug|debug) BUILD_TYPE=Debug ;;
+  Release|release) BUILD_TYPE=Release ;;
+  *) echo "Expected Debug or Release as the first argument." >&2; exit 1 ;;
+esac
+if (( $# > 3 )); then
+  echo "Usage: $0 [Debug|Release] [SDK install prefix|platform] [platform]" >&2
+  exit 1
 fi
 
-INSTALL_DIR=${2:-"${SCRIPT_DIR}/install"}
+PLATFORM=$(uname -s)
+ARCH=native
+INSTALL_DIR="${SCRIPT_DIR}/install"
+
+if [[ $# -ge 2 ]] && [[ "${2}" =~ ^(native|silicon|intel|all)$ ]]; then
+  ARCH="${2}"
+elif [[ $# -ge 2 ]]; then
+  INSTALL_DIR="${2}"
+  if [[ $# -ge 3 ]]; then
+    ARCH="${3}"
+  fi
+fi
+
+if [[ "${INSTALL_DIR}" != /* ]]; then
+  INSTALL_DIR="${SCRIPT_DIR}/${INSTALL_DIR}"
+fi
+if [[ "${PLATFORM}" == Darwin ]]; then
+  MACOS_SDK=${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}
+  if [[ "${ARCH}" == native ]]; then
+    case "$(uname -m)" in
+      arm64) ARCH=silicon ;;
+      x86_64) ARCH=intel ;;
+      *) echo "Unsupported macOS host architecture." >&2; exit 1 ;;
+    esac
+  fi
+  case "${ARCH}" in
+    silicon|intel) ARCHITECTURES=("${ARCH}") ;;
+    all) ARCHITECTURES=(silicon intel) ;;
+    *) echo "Expected native, silicon, intel, or all as the platform." >&2; exit 1 ;;
+  esac
+else
+  if [[ "${ARCH}" != native ]]; then
+    echo "Platform selection is currently supported only on macOS." >&2
+    exit 1
+  fi
+  ARCHITECTURES=(native)
+fi
 
 mkdir -p build
 echo "${BUILD_TYPE}" > build/.active_build
-
-echo "Building vibrance-engine with configuration: ${BUILD_TYPE}"
-echo "Installing vibrance-engine SDK to: ${INSTALL_DIR}"
-
-TARGET_DIR="build/${BUILD_TYPE}"
-mkdir -p "${TARGET_DIR}"
-
-echo "Configuring engine CMake for ${BUILD_TYPE}..."
-cmake -S . -B "${TARGET_DIR}" \
-  -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
-  -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
-cmake --build "${TARGET_DIR}" --config "${BUILD_TYPE}"
-cmake --install "${TARGET_DIR}" --prefix "${INSTALL_DIR}" --config "${BUILD_TYPE}"
+for TARGET_ARCH in "${ARCHITECTURES[@]}"; do
+  CONFIGURE_ARGS=()
+  TARGET_DIR="build/${BUILD_TYPE}"
+  PREFIX="${INSTALL_DIR}"
+  if [[ "${PLATFORM}" == Darwin ]]; then
+    if [[ "${TARGET_ARCH}" == silicon ]]; then
+      CMAKE_ARCH="arm64"
+      PLATFORM_NAME="macos-silicon"
+    else
+      CMAKE_ARCH="x86_64"
+      PLATFORM_NAME="macos-intel"
+    fi
+    TARGET_DIR="build/${PLATFORM_NAME}/${BUILD_TYPE}"
+    CONFIGURE_ARGS+=("-DCMAKE_OSX_SYSROOT=${MACOS_SDK}" "-DCMAKE_OSX_ARCHITECTURES=${CMAKE_ARCH}" "-DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-13.0}")
+    if [[ "${ARCH}" == all || ( $# -ge 3 && -z "${2:-}" ) ]]; then
+      PREFIX="${INSTALL_DIR}/${PLATFORM_NAME}"
+    fi
+  fi
+  echo "Building vibrance-engine ${BUILD_TYPE} (${TARGET_ARCH})"
+  echo "Installing vibrance-engine SDK to: ${PREFIX}"
+  cmake -S "${SCRIPT_DIR}" -B "${TARGET_DIR}" \
+    -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
+    -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
+    ${CONFIGURE_ARGS[@]+"${CONFIGURE_ARGS[@]}"}
+  cmake --build "${TARGET_DIR}" --config "${BUILD_TYPE}" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" --verbose
+  cmake --install "${TARGET_DIR}" --prefix "${PREFIX}" --config "${BUILD_TYPE}"
+done

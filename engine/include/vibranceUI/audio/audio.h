@@ -49,7 +49,9 @@ struct AudioPlayOptions
 class VIBRANCE_ENGINE_API AudioEngine
 {
     public:
-    // Small facade around the optional SoLoud implementation
+    // Small facade around the optional SoLoud implementation. On macOS the
+    // output device starts on the first playback or explicit available() probe,
+    // so silent UI windows do not keep an audio mixing thread running.
     explicit AudioEngine(bool enabled = true);
     ~AudioEngine();
 

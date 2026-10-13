@@ -12,6 +12,10 @@
 #include <utility>
 #include <vector>
 
+#ifdef __APPLE__
+#include "loopback_capture_macos.h"
+#endif
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -683,6 +687,11 @@ struct AudioLoopbackCapture::Impl
             }
             if (SUCCEEDED(result))
             {
+                // A capture stream must not share the host's default playback
+                // session: its mixer volume can otherwise attenuate the input
+                // before spectrum analysis even when the source is at 100%.
+                GUID captureSession {};
+                result = CoCreateGuid(&captureSession);
                 DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK |
                     AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
                 if (processOnly)
@@ -690,13 +699,16 @@ struct AudioLoopbackCapture::Impl
                     streamFlags |= AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
                         AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
                 }
-                result = audioClient->Initialize(
-                    AUDCLNT_SHAREMODE_SHARED,
-                    streamFlags,
-                    0,
-                    0,
-                    mixFormat,
-                    nullptr);
+                if (SUCCEEDED(result))
+                {
+                    result = audioClient->Initialize(
+                        AUDCLNT_SHAREMODE_SHARED,
+                        streamFlags,
+                        0,
+                        0,
+                        mixFormat,
+                        &captureSession);
+                }
             }
             if (SUCCEEDED(result))
             {
@@ -875,6 +887,8 @@ struct AudioLoopbackCapture::Impl
         {
             CoUninitialize();
         }
+#elif defined(__APPLE__)
+        mac_audio_capture_loop(callbacks, options, targetProcessId, captureRequested);
 #endif
     }
 
@@ -922,6 +936,8 @@ bool AudioLoopbackCapture::platform_supported()
 {
 #ifdef _WIN32
     return true;
+#elif defined(__APPLE__)
+    return mac_audio_capture_supported();
 #else
     return false;
 #endif

@@ -2,18 +2,180 @@
 
 #include <vibranceUI/ui/builder.h>
 #include <vibranceUI/ui/controls.h>
+#include <vibranceUI/ui/liquid_controls.h>
 #include <vibranceUI/ui/styles.h>
 #include <vibranceUI/ui/surfaces.h>
 #include <vibranceUI/ui/text.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <sstream>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace
 {
     constexpr int kFallbackMaxWindowSize = 1000000;
+
+    enum class PanelUiCpuPhase : std::size_t
+    {
+        eUiWork,
+        eWindowAction,
+        ePointerSample,
+        eTimedControls,
+        eDragInputs,
+        eHover,
+        eHoverHitTest,
+        eWindowBlockHitTests,
+        eInputHover,
+        eResizeRebuild,
+        eBeforeDraw,
+        eRendererDraw,
+        eCount
+    };
+
+    struct PanelUiCpuTiming
+    {
+        uint64_t samples = 0u;
+        double totalMilliseconds = 0.0;
+        double maxMilliseconds = 0.0;
+    };
+
+    struct PanelUiDiagnostics
+    {
+        std::array<PanelUiCpuTiming,
+            static_cast<std::size_t>(PanelUiCpuPhase::eCount)> timings {};
+        std::chrono::steady_clock::time_point intervalStart {};
+        uint64_t pointerSamples = 0u;
+        uint64_t unchangedPointerSamples = 0u;
+        uint64_t focusedSamples = 0u;
+        uint64_t hoveredSamples = 0u;
+        GlfwUiPointerSample previousPointer {};
+        bool previousFocused = false;
+        bool previousHovered = false;
+        bool hasPreviousPointer = false;
+    };
+
+    bool panel_ui_diagnostics_enabled()
+    {
+        static const bool enabled = [] {
+            const char* value = std::getenv("VIBRANCE_RENDER_DIAGNOSTICS");
+            return value && std::strcmp(value, "0") != 0;
+        }();
+        return enabled;
+    }
+
+    thread_local std::unordered_map<const GlfwPanelWindow*, PanelUiDiagnostics> panelUiDiagnostics;
+
+    PanelUiDiagnostics* panel_ui_diagnostics(const GlfwPanelWindow* panel)
+    {
+        return panel_ui_diagnostics_enabled() ? &panelUiDiagnostics[panel] : nullptr;
+    }
+
+    class PanelUiTimingScope
+    {
+    public:
+        PanelUiTimingScope(PanelUiDiagnostics* diagnostics, PanelUiCpuPhase phase,
+            double* drawMilliseconds = nullptr) : diagnostics_(diagnostics),
+            phase_(phase), drawMilliseconds_(drawMilliseconds)
+        {
+            if (diagnostics_)
+            {
+                start_ = std::chrono::steady_clock::now();
+            }
+        }
+
+        ~PanelUiTimingScope()
+        {
+            if (!diagnostics_)
+            {
+                return;
+            }
+            double milliseconds = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start_).count();
+            if (drawMilliseconds_)
+            {
+                if (phase_ == PanelUiCpuPhase::eRendererDraw)
+                    *drawMilliseconds_ += milliseconds;
+                else if (phase_ == PanelUiCpuPhase::eUiWork)
+                    milliseconds = std::max(0.0, milliseconds - *drawMilliseconds_);
+            }
+            auto& timing = diagnostics_->timings[static_cast<std::size_t>(phase_)];
+            ++timing.samples;
+            timing.totalMilliseconds += milliseconds;
+            timing.maxMilliseconds = std::max(timing.maxMilliseconds, milliseconds);
+        }
+
+        PanelUiTimingScope(const PanelUiTimingScope&) = delete;
+        PanelUiTimingScope& operator=(const PanelUiTimingScope&) = delete;
+
+    private:
+        PanelUiDiagnostics* diagnostics_ = nullptr;
+        PanelUiCpuPhase phase_;
+        double* drawMilliseconds_ = nullptr;
+        std::chrono::steady_clock::time_point start_ {};
+    };
+
+    void report_panel_ui_diagnostics(PanelUiDiagnostics* diagnostics,
+        Logger* logger, const std::string& title)
+    {
+        if (!diagnostics)
+        {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (diagnostics->intervalStart.time_since_epoch().count() == 0)
+        {
+            diagnostics->intervalStart = now;
+        }
+        else if (now - diagnostics->intervalStart >= std::chrono::seconds(1))
+        {
+            static constexpr std::array<const char*,
+                static_cast<std::size_t>(PanelUiCpuPhase::eCount)> names {
+                "UI work excluding draw", "window action", "pointer sample",
+                "timed controls", "drag inputs", "hover and cursor",
+                "shared hover hit test", "window action hit tests", "input hover", "resize/rebuild",
+                "beforeDraw", "renderer draw including pacing"
+            };
+            std::ostringstream message;
+            message.setf(std::ios::fixed, std::ios::floatfield);
+            message.precision(3);
+            message << "Panel UI diagnostics \"" << title
+                << "\": pointer samples " << diagnostics->pointerSamples
+                << ", unchanged pointer/focus/hover " << diagnostics->unchangedPointerSamples
+                << ", focused " << diagnostics->focusedSamples
+                << ", hovered " << diagnostics->hoveredSamples
+                << ", last pointer " << diagnostics->previousPointer.hasPoint
+                << " at (" << diagnostics->previousPointer.point.x
+                << ',' << diagnostics->previousPointer.point.y << ')'
+                << ". CPU wall timings (mean/max ms, samples): ";
+            bool first = true;
+            for (std::size_t phase = 0u; phase < diagnostics->timings.size(); ++phase)
+            {
+                const auto& timing = diagnostics->timings[phase];
+                if (timing.samples == 0u)
+                    continue;
+                if (!first)
+                    message << "; ";
+                first = false;
+                message << names[phase] << ' '
+                    << timing.totalMilliseconds / static_cast<double>(timing.samples)
+                    << '/' << timing.maxMilliseconds << " ms, " << timing.samples;
+            }
+            message << '.';
+            logger->info(message.str());
+            diagnostics->intervalStart = now;
+            diagnostics->timings = {};
+            diagnostics->pointerSamples = 0u;
+            diagnostics->unchangedPointerSamples = 0u;
+            diagnostics->focusedSamples = 0u;
+            diagnostics->hoveredSamples = 0u;
+        }
+    }
 
     int option_min(int value)
     {
@@ -200,6 +362,10 @@ GlfwPanelWindow::GlfwPanelWindow(GLFWwindow* window, Engine* engine, GlfwPanelWi
 
 GlfwPanelWindow::~GlfwPanelWindow()
 {
+    if (panel_ui_diagnostics_enabled())
+    {
+        panelUiDiagnostics.erase(this);
+    }
     if (window)
     {
         clear_glfw_cursor(window);
@@ -226,6 +392,25 @@ void GlfwPanelWindow::tick()
         return;
     }
 
+    glfw_reconcile_ui_mouse_events(window, inputState);
+    if (glfw_window_should_close(window)) return;
+
+    PanelUiDiagnostics* diagnostics = panel_ui_diagnostics(this);
+    report_panel_ui_diagnostics(diagnostics, logger, options.title);
+    double drawMilliseconds = 0.0;
+    const PanelUiTimingScope tickTiming(diagnostics,
+        PanelUiCpuPhase::eUiWork, &drawMilliseconds);
+    const auto draw = [&] {
+        if (options.beforeDraw)
+        {
+            const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eBeforeDraw);
+            options.beforeDraw(*engine);
+        }
+        const PanelUiTimingScope timing(diagnostics,
+            PanelUiCpuPhase::eRendererDraw, &drawMilliseconds);
+        engine->draw();
+    };
+
     const double now = glfw_time_seconds();
     engine->update_timing(now);
 
@@ -234,49 +419,86 @@ void GlfwPanelWindow::tick()
     if (hasUiUpdateSample &&
         now - lastUiUpdateSeconds < uiUpdateInterval)
     {
-        engine->draw();
+        draw();
         return;
     }
     lastUiUpdateSeconds = now;
     hasUiUpdateSample = true;
-    update_window_action();
-
-    const GlfwUiPointerSample pointer = glfw_ui_pointer_sample(window, engine, true);
-    glfw_update_ui_timed_controls(*engine, inputState, now);
-    glfw_update_ui_drag_inputs(window, *engine, inputState, pointer);
-
-    if (windowPointerAction != WindowPointerAction::eNone ||
-        inputState.draggedPanel != entt::null ||
-        inputState.resizingPanel != entt::null ||
-        inputState.pointerInputCapture != entt::null ||
-        inputState.activeSlider != entt::null ||
-        inputState.activeScrollBar != entt::null ||
-        glfw_window_focused(window) ||
-        glfw_window_hovered(window))
     {
-        update_hover_cursor();
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eWindowAction);
+        update_window_action();
     }
-    else
+    GlfwUiPointerSample pointer;
     {
-        ui_update_input_hover(
-            engine->renderer2d_scene(),
-            engine->renderer2d_font_atlas(),
-            inputState,
-            false,
-            glm::vec2(0.0f));
-        set_hovered_traffic_light(TrafficLightKind::eNone);
-        clear_glfw_cursor(window);
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::ePointerSample);
+        pointer = glfw_ui_pointer_sample(window, engine, true);
+    }
+    if (diagnostics)
+    {
+        const bool focused = glfw_window_focused(window);
+        const bool hovered = glfw_window_hovered(window);
+        const auto& previous = diagnostics->previousPointer;
+        ++diagnostics->pointerSamples;
+        diagnostics->focusedSamples += focused ? 1u : 0u;
+        diagnostics->hoveredSamples += hovered ? 1u : 0u;
+        if (diagnostics->hasPreviousPointer &&
+            pointer.hasPoint == previous.hasPoint &&
+            pointer.point.x == previous.point.x && pointer.point.y == previous.point.y &&
+            pointer.renderWidth == previous.renderWidth && pointer.renderHeight == previous.renderHeight &&
+            focused == diagnostics->previousFocused && hovered == diagnostics->previousHovered)
+        {
+            ++diagnostics->unchangedPointerSamples;
+        }
+        diagnostics->previousPointer = pointer;
+        diagnostics->previousFocused = focused;
+        diagnostics->previousHovered = hovered;
+        diagnostics->hasPreviousPointer = true;
+    }
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eTimedControls);
+        glfw_update_ui_timed_controls(*engine, inputState, now);
+    }
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eDragInputs);
+        glfw_update_ui_drag_inputs(window, *engine, inputState, pointer);
+    }
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eHover);
+        if (windowPointerAction != WindowPointerAction::eNone ||
+            inputState.draggedPanel != entt::null ||
+            inputState.resizingPanel != entt::null ||
+            inputState.pointerInputCapture != entt::null ||
+            inputState.activeSlider != entt::null ||
+            inputState.activeScrollBar != entt::null ||
+            glfw_window_focused(window) ||
+            glfw_window_hovered(window))
+        {
+            update_hover_cursor();
+        }
+        else
+        {
+            ui_update_input_hover(
+                engine->renderer2d_scene(),
+                engine->renderer2d_font_atlas(),
+                inputState,
+                false,
+                glm::vec2(0.0f));
+            set_hovered_traffic_light(TrafficLightKind::eNone);
+            clear_glfw_cursor(window);
+        }
+    }
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eResizeRebuild);
+        int width = pointer.renderWidth;
+        int height = pointer.renderHeight;
+        engine->resize(static_cast<uint32_t>(std::max(width, 0)), static_cast<uint32_t>(std::max(height, 0)));
+        if (width > 0 && height > 0 && (width != lastRenderWidth || height != lastRenderHeight))
+        {
+            build_scene();
+        }
     }
 
-    int width = pointer.renderWidth;
-    int height = pointer.renderHeight;
-    engine->resize(static_cast<uint32_t>(std::max(width, 0)), static_cast<uint32_t>(std::max(height, 0)));
-    if (width > 0 && height > 0 && (width != lastRenderWidth || height != lastRenderHeight))
-    {
-        build_scene();
-    }
-
-    engine->draw();
+    draw();
 }
 
 const GlfwPanelWindowTemplateOptions& GlfwPanelWindow::template_options() const
@@ -326,6 +548,16 @@ void GlfwPanelWindow::set_ui_scale(float scale)
 bool GlfwPanelWindow::has_pointer_capture() const
 {
     return glfw_ui_input_has_pointer_capture(inputState);
+}
+
+UiInputState& GlfwPanelWindow::input_state()
+{
+    return inputState;
+}
+
+const UiInputState& GlfwPanelWindow::input_state() const
+{
+    return inputState;
 }
 
 void GlfwPanelWindow::rebuild()
@@ -430,7 +662,9 @@ void GlfwPanelWindow::handle_mouse_button(int button, int action, int mods)
                 traffic_light_at(input.point) : TrafficLightKind::eNone;
             if (light != TrafficLightKind::eNone)
             {
-                perform_traffic_light_action(light);
+                // Actions commit on an ordinary release. A captured glass
+                // drag consumes that click and leaves the window in place.
+                glfw_handle_ui_pointer_button(window, *engine, inputState, button, action, mods);
                 return;
             }
 
@@ -517,6 +751,7 @@ void GlfwPanelWindow::load_template_font()
 
     std::filesystem::path primaryFontPath = options.fontPath;
     fontOptions.fallbackFontPaths = options.fallbackFontPaths;
+    fontOptions.emojiFontPaths = options.emojiFontPaths;
     std::filesystem::path fontDirectory = options.fontDirectory;
     if (fontDirectory.empty() && !options.fontPath.empty())
     {
@@ -542,6 +777,7 @@ void GlfwPanelWindow::load_template_font()
     };
     if (hasFontProfile)
     {
+        if (fontOptions.emojiFontPaths.empty()) fontOptions.emojiFontPaths = fontProfile.emojiFontCandidates;
         if (!fontProfile.defaultFontPath.empty())
         {
             if (primaryFontPath.empty())
@@ -638,6 +874,7 @@ void GlfwPanelWindow::build_scene()
     const Localisation& localisation = engine->localisation();
     scene.clear();
     inputState = {};
+    trafficLightEntities.fill(entt::null);
     trafficLightIconEntities.fill(entt::null);
     const PanelGeometry panelGeometry = make_panel_geometry(window, renderWidth, renderHeight, options.panelInset, options.uiScale);
     UiBuilder ui(scene, panelGeometry.scale);
@@ -717,6 +954,24 @@ void GlfwPanelWindow::build_scene()
                 dotStyle,
                 Renderer2DPrimitive::eEllipse);
             ui.set_layer(dot, 100, static_cast<uint32_t>(i), true);
+            trafficLightEntities[i] = dot;
+            scene.registry().emplace<Parent2DComponent>(dot, Parent2DComponent { panel });
+            ButtonInputComponent input {};
+            input.enabled = enabled && options.trafficLights.accessible;
+            input.onClick = [this, kind](const PointerInputEvent&) { perform_traffic_light_action(kind); };
+            scene.registry().emplace<ButtonInputComponent>(dot, std::move(input));
+            scene.registry().emplace<ButtonVisualComponent>(dot,
+                ui_fixed_colour_button_visual(dotStyle));
+            StretchDynamicsOptions stretch {};
+            stretch.enabled = false; // Enabled with the Liquid Glass material.
+            stretch.grabScale = 1.15f;
+            stretch.maximumStretch = 0.18f;
+            stretch.maximumCompression = 0.08f;
+            stretch.returnDampingFraction = 0.54f;
+            stretch.consumeClickAfterDrag = true;
+            ui_enable_stretch_dynamics(scene, dot, stretch);
+            scene.registry().emplace<UiLiquidControlSurface>(dot,
+                UiLiquidControlSurface { false, false, true });
 
             if (enabled && options.trafficLights.showIconsOnHover)
             {
@@ -737,6 +992,7 @@ void GlfwPanelWindow::build_scene()
                     }
                     RenderLayer2DComponent& iconLayer = ui.set_layer(icon, 101, static_cast<uint32_t>(i), true);
                     iconLayer.visible = hoveredTrafficLight == kind;
+                    ui.attach_aligned(icon, dot, UiAlignment::eCentre, glm::vec2(0.0f), iconSize);
                     trafficLightIconEntities[i] = icon;
                 }
             }
@@ -975,7 +1231,13 @@ bool GlfwPanelWindow::begin_window_action(glm::vec2 framebufferPoint)
 
     if (move)
     {
-        begin_glfw_native_window_drag(window);
+        // AppKit tracks and moves the window for the full native drag. Do not
+        // arm the cursor-driven fallback afterwards, or the next panel tick
+        // can move the window a second time from a stale pointer sample.
+        if (begin_glfw_native_window_drag(window))
+        {
+            return true;
+        }
     }
 
     if (!cursor_screen_point(actionStartCursorScreen) ||
@@ -1098,17 +1360,31 @@ void GlfwPanelWindow::update_hover_cursor()
         return;
     }
 
-    const bool blocksWindowAction = scene_blocks_window_action(point);
+    Renderer2DScene& scene = engine->renderer2d_scene();
+    const auto readHit = [&] {
+        const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eHoverHitTest);
+        return scene.entity_at(point);
+    };
+    entt::entity hit = readHit();
+    const uint64_t hitGeneration = scene.frame_generation();
+    const bool blocksWindowAction = [&] {
+        const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eWindowBlockHitTests);
+        return ui_hit_blocks_window_action(scene, inputState, point, hit);
+    }();
     const TrafficLightKind light = !blocksWindowAction ?
         traffic_light_at(point) : TrafficLightKind::eNone;
     if (light != TrafficLightKind::eNone)
     {
-        ui_update_input_hover(
-            engine->renderer2d_scene(),
+        const std::size_t lightIndex =
+            light == TrafficLightKind::eClose ? 0u :
+            light == TrafficLightKind::eMinimise ? 1u : 2u;
+        ui_update_input_hover_from_hit(
+            scene,
             engine->renderer2d_font_atlas(),
             inputState,
-            false,
-            glm::vec2(0.0f));
+            true,
+            point,
+            trafficLightEntities[lightIndex]);
         set_hovered_traffic_light(light);
         set_glfw_cursor_for_kind(
             window,
@@ -1142,12 +1418,25 @@ void GlfwPanelWindow::update_hover_cursor()
         return;
     }
 
-    const UiHoverResult hover = ui_update_input_hover(
-        engine->renderer2d_scene(),
-        engine->renderer2d_font_atlas(),
-        inputState,
-        true,
-        point);
+    UiHoverResult hover;
+    {
+        // Traffic-light visibility can change between chrome and input handling.
+        // Reuse the hit only while it describes this one hover update's scene.
+        if (scene.frame_generation() != hitGeneration)
+            hit = readHit();
+        const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eInputHover);
+        hover = ui_update_input_hover_from_hit(
+            scene,
+            engine->renderer2d_font_atlas(),
+            inputState,
+            true,
+            point,
+            hit);
+    }
+    for (std::size_t index = 0; index < trafficLightEntities.size(); ++index)
+        if (inputState.hoveredButton == trafficLightEntities[index] && inputState.hoveredButton != entt::null)
+            set_hovered_traffic_light(index == 0 ? TrafficLightKind::eClose :
+                index == 1 ? TrafficLightKind::eMinimise : TrafficLightKind::eMaximise);
     if (hover.cursor != UiCursorKind::eDefault)
     {
         set_glfw_cursor_for_kind(window, cursors, hover.cursor);
@@ -1282,69 +1571,17 @@ bool GlfwPanelWindow::title_hit_test(glm::vec2 windowPoint) const
 
 bool GlfwPanelWindow::scene_blocks_window_action(glm::vec2 framebufferPoint) const
 {
+    const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eWindowBlockHitTests);
     if (!engine)
     {
         return true;
     }
 
     Renderer2DScene& scene = engine->renderer2d_scene();
-    const entt::registry& registry = scene.registry();
-    if (inputState.pressedInputEntity != entt::null ||
-        inputState.pointerInputCapture != entt::null ||
-        inputState.activeSlider != entt::null ||
-        inputState.activeScrollBar != entt::null)
-    {
+    if (ui_pointer_capture_blocks_window_action(inputState))
         return true;
-    }
-
-    if (scene.draggable_parent_at(framebufferPoint) != entt::null)
-    {
-        return true;
-    }
-
-    uint32_t resizeEdges = ePanelResizeNone;
-    if (ui_resizable_panel_at(scene, framebufferPoint, resizeEdges) != entt::null)
-    {
-        return true;
-    }
-
-    const entt::entity hit = scene.entity_at(framebufferPoint);
-    const entt::entity buttonOwner = ui_component_owner<ButtonInputComponent>(registry, hit);
-    if (buttonOwner != entt::null)
-    {
-        const ButtonInputComponent* button = registry.try_get<ButtonInputComponent>(buttonOwner);
-        return button && button->enabled;
-    }
-
-    const entt::entity textOwner = ui_component_owner<TextInputComponent>(registry, hit);
-    if (textOwner != entt::null)
-    {
-        const TextInputComponent* textInput = registry.try_get<TextInputComponent>(textOwner);
-        return textInput && textInput->enabled;
-    }
-
-    const entt::entity dropOwner = ui_component_owner<DropTargetComponent>(registry, hit);
-    if (dropOwner != entt::null)
-    {
-        const DropTargetComponent* dropTarget = registry.try_get<DropTargetComponent>(dropOwner);
-        return dropTarget && dropTarget->enabled;
-    }
-
-    const entt::entity scrollBarOwner = ui_component_owner<ScrollBarInputComponent>(registry, hit);
-    if (scrollBarOwner != entt::null)
-    {
-        const ScrollBarInputComponent* scrollBar = registry.try_get<ScrollBarInputComponent>(scrollBarOwner);
-        return scrollBar && scrollBar->enabled;
-    }
-
-    const entt::entity sliderOwner = ui_component_owner<SliderInputComponent>(registry, hit);
-    if (sliderOwner != entt::null)
-    {
-        const SliderInputComponent* slider = registry.try_get<SliderInputComponent>(sliderOwner);
-        return slider && slider->enabled;
-    }
-
-    return false;
+    return ui_hit_blocks_window_action(scene, inputState, framebufferPoint,
+        scene.entity_at(framebufferPoint));
 }
 
 GlfwPanelWindow::TrafficLightKind GlfwPanelWindow::traffic_light_at(glm::vec2 windowPoint) const

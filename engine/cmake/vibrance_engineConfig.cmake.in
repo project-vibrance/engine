@@ -2,15 +2,73 @@
 
 set(vibrance_engine_VERSION "@PROJECT_VERSION@")
 set(vibrance_engine_TARGET_PLATFORM "@VIBRANCE_TARGET_PLATFORM@")
+set(vibrance_engine_RENDER_BACKEND "@VIBRANCE_RENDER_BACKEND@")
+set(vibrance_engine_MACOS_DEPLOYMENT_TARGET "@CMAKE_OSX_DEPLOYMENT_TARGET@")
+if(APPLE)
+    set_and_check(vibrance_engine_MEDIAREMOTE_FRAMEWORK
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/VibranceMediaRemoteAdapter.framework")
+    set_and_check(vibrance_engine_MEDIAREMOTE_SCRIPT
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/mediaremote-adapter.pl")
+    set_and_check(vibrance_engine_MEDIAREMOTE_LICENCE
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/vibrance_engine/licences/mediaremote-adapter.txt")
+    set_and_check(vibrance_engine_METAL_CPP_LICENCE
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/vibrance_engine/licences/metal-cpp.txt")
+    if(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        set(_vibrance_consumer_platform macos-silicon)
+    elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
+        set(_vibrance_consumer_platform macos-intel)
+    elseif(NOT CMAKE_OSX_ARCHITECTURES)
+        if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+            set(_vibrance_consumer_platform macos-silicon)
+        else()
+            set(_vibrance_consumer_platform macos-intel)
+        endif()
+    else()
+        message(FATAL_ERROR "Select one macOS architecture per build: arm64 or x86_64.")
+    endif()
+    if(NOT vibrance_engine_TARGET_PLATFORM STREQUAL _vibrance_consumer_platform)
+        message(FATAL_ERROR "The engine SDK architecture does not match this macOS build.")
+    endif()
+    if(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS vibrance_engine_MACOS_DEPLOYMENT_TARGET)
+        message(FATAL_ERROR "The consumer deployment target is older than the engine SDK's minimum macOS version.")
+    endif()
+endif()
 set(vibrance_engine_RUNTIME_COMPANIONS "")
 if(WIN32)
     set(vibrance_engine_WIN32_COMPOSITION_DLL
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/vibrance_win32_composition.dll")
     set(vibrance_engine_WIN32_INTEROP_DLL
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/vibrance_win32_interop.dll")
+    set(vibrance_engine_LIQUID_DWM_EXTENSION
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/vibrance_liquid_dwm_extension.dll")
+    set(vibrance_engine_LIQUID_DWM_BROKER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_dwm_broker.exe")
+    set(vibrance_engine_LIQUID_DBGHELP_RUNTIME
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/dbghelp.dll")
+    set(vibrance_engine_LIQUID_SYMSRV_RUNTIME
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/symsrv.dll")
+    set(vibrance_engine_LIQUID_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_win32.cso")
+    set(vibrance_engine_LIQUID_UI_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_ui_win32.cso")
+    set(vibrance_engine_LIQUID_FULLSCREEN_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_fullscreen.cso")
+    set(vibrance_engine_LIQUID_BLUR_HORIZONTAL_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_blur_horizontal.cso")
+    set(vibrance_engine_LIQUID_BLUR_VERTICAL_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_blur_vertical.cso")
     foreach(_vibrance_engine_companion IN ITEMS
         "${vibrance_engine_WIN32_COMPOSITION_DLL}"
-        "${vibrance_engine_WIN32_INTEROP_DLL}")
+        "${vibrance_engine_WIN32_INTEROP_DLL}"
+        "${vibrance_engine_LIQUID_DWM_EXTENSION}"
+        "${vibrance_engine_LIQUID_DWM_BROKER}"
+        "${vibrance_engine_LIQUID_DBGHELP_RUNTIME}"
+        "${vibrance_engine_LIQUID_SYMSRV_RUNTIME}"
+        "${vibrance_engine_LIQUID_SHADER}"
+        "${vibrance_engine_LIQUID_UI_SHADER}"
+        "${vibrance_engine_LIQUID_FULLSCREEN_SHADER}"
+        "${vibrance_engine_LIQUID_BLUR_HORIZONTAL_SHADER}"
+        "${vibrance_engine_LIQUID_BLUR_VERTICAL_SHADER}")
         if(EXISTS "${_vibrance_engine_companion}")
             list(APPEND
                 vibrance_engine_RUNTIME_COMPANIONS
@@ -24,6 +82,7 @@ set_and_check(
     "@PACKAGE_CMAKE_INSTALL_DATADIR@/vibrance_engine/vibrance_engine_manifest.json")
 
 include("${CMAKE_CURRENT_LIST_DIR}/vibrance_engineTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/VibranceLockedRuntime.cmake")
 
 if(WIN32)
     if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(ARM64|arm64|aarch64)$" OR
@@ -74,7 +133,27 @@ if(NOT COMMAND vibrance_engine_copy_runtime_companions)
                         "$<TARGET_FILE_DIR:${target_name}>/$<TARGET_SONAME_FILE_NAME:vibrance::engine>"
                     VERBATIM)
             endif()
+            if(APPLE)
+                add_custom_command(TARGET "${_vibrance_engine_copy_target}" POST_BUILD
+                    COMMAND /usr/bin/ditto
+                        "${vibrance_engine_MEDIAREMOTE_FRAMEWORK}"
+                        "$<TARGET_FILE_DIR:${target_name}>/VibranceMediaRemoteAdapter.framework"
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${vibrance_engine_MEDIAREMOTE_SCRIPT}"
+                        "$<TARGET_FILE_DIR:${target_name}>"
+                    VERBATIM)
+            endif()
             foreach(_vibrance_engine_companion IN LISTS vibrance_engine_RUNTIME_COMPANIONS)
+                if(_vibrance_engine_companion STREQUAL vibrance_engine_LIQUID_DWM_EXTENSION)
+                    add_custom_command(
+                        TARGET "${_vibrance_engine_copy_target}" POST_BUILD
+                        COMMAND "${CMAKE_COMMAND}"
+                            "-DVIBRANCE_RUNTIME_SOURCE=${_vibrance_engine_companion}"
+                            "-DVIBRANCE_RUNTIME_DESTINATION=$<TARGET_FILE_DIR:${target_name}>/vibrance_liquid_dwm_extension.dll"
+                            -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/VibranceLockedRuntime.cmake"
+                        VERBATIM)
+                    continue()
+                endif()
                 add_custom_command(
                     TARGET "${_vibrance_engine_copy_target}"
                     POST_BUILD

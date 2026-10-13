@@ -1,12 +1,17 @@
 #pragma once
 #define VULKAN_HPP_NO_EXCEPTIONS
 #include "vibranceUI/export.h"
+#if defined(__APPLE__)
+#include <vibranceUI/renderer/metal/resources.h>
+#else
 #include <vulkan/vulkan.hpp>
 #include <vma/vk_mem_alloc.h>
+#endif
 #include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -15,6 +20,7 @@
 #include <vibranceUI/renderer/renderer2d_components.h>
 
 class StorageImage;
+class Renderer2DEmojiShaper;
 
 struct Renderer2DTextLayout
 {
@@ -24,6 +30,9 @@ struct Renderer2DTextLayout
     float lineHeight = 0.0f;
     uint32_t lineCount = 0u;
     bool rightToLeft = false;
+    // First-line baseline relative to the run's local origin. Unlike the ink
+    // bounds, this can anchor text without descenders shifting the whole label.
+    float baseline = 0.0f;
 };
 
 struct Renderer2DCodepointRange
@@ -39,6 +48,7 @@ struct Renderer2DFontAtlasLoadOptions
     bool requireRequestedGlyphs = false;
     int fontWeight = 0;
     std::vector<std::filesystem::path> fallbackFontPaths;
+    std::vector<std::filesystem::path> emojiFontPaths;
     std::vector<Renderer2DCodepointRange> ranges;
     std::string preloadText;
 };
@@ -49,6 +59,7 @@ struct Renderer2DFontProfile
     std::filesystem::path defaultFontPath {};
     std::vector<std::filesystem::path> defaultFontCandidates {};
     std::vector<std::filesystem::path> fallbackFontPaths {};
+    std::vector<std::filesystem::path> emojiFontCandidates {};
     std::unordered_map<std::string, std::filesystem::path> localeFontPaths {};
     std::unordered_map<std::string, std::vector<std::filesystem::path>> localeFontCandidates {};
 };
@@ -63,6 +74,10 @@ VIBRANCE_ENGINE_API std::vector<std::filesystem::path> renderer2d_font_candidate
     const std::filesystem::path& relativeFontPath);
 
 VIBRANCE_ENGINE_API std::vector<std::filesystem::path> renderer2d_common_font_fallbacks(
+    const std::vector<std::filesystem::path>& assetFontDirectories);
+
+VIBRANCE_ENGINE_API std::vector<std::filesystem::path> renderer2d_emoji_font_candidates(
+    const Renderer2DFontProfile& profile,
     const std::vector<std::filesystem::path>& assetFontDirectories);
 
 VIBRANCE_ENGINE_API bool renderer2d_load_font_profile(
@@ -102,22 +117,30 @@ public:
     bool load_from_file(
         const std::filesystem::path& path,
         const Renderer2DFontAtlasLoadOptions& options,
+#if defined(__APPLE__)
+        const MetalTextureUpload& upload
+#else
         VmaAllocator& allocator,
         vk::CommandBuffer commandBuffer,
         vk::Queue queue,
         vk::Device logicalDevice,
         std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
         std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+#endif
     );
 
     bool load_from_file(
         const std::filesystem::path& path,
+#if defined(__APPLE__)
+        const MetalTextureUpload& upload
+#else
         VmaAllocator& allocator,
         vk::CommandBuffer commandBuffer,
         vk::Queue queue,
         vk::Device logicalDevice,
         std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
         std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+#endif
     );
 
     // Returns glyph positions in local text space for drawing and caret placement
@@ -130,6 +153,8 @@ public:
     // Literal and runtime text can arrive after the initial atlas build. These
     // helpers let the engine discover only the code points that still need to
     // be baked instead of replacing them with question marks indefinitely.
+    // Shaped emoji use internal glyph keys above the Unicode range so newly
+    // joined sequences can be discovered even when their constituents exist.
     bool covers_text(std::string_view text) const;
     std::vector<uint32_t> missing_codepoints(std::string_view text) const;
 
@@ -151,14 +176,23 @@ private:
         uint32_t sourceFace = 0u;
         bool valid = false;
         bool drawable = false;
+        bool coloured = false;
+        float sdfPadding = 0.0f;
+        glm::vec2 sdfAtlasSize { 0.0f };
     };
 
     const GlyphRecord* glyph_for(uint32_t codepoint) const;
     float kerning(uint32_t left, uint32_t right) const;
+    void update_tabular_digit_metrics();
 
     std::unordered_map<uint32_t, GlyphRecord> glyphs;
     std::unordered_map<uint64_t, float> kerningTable;
+    std::shared_ptr<Renderer2DEmojiShaper> emojiShaper;
+    std::vector<uint32_t> visual_glyph_codepoints(std::string_view text) const;
     StorageImage* atlasImage = nullptr;
+#if defined(__APPLE__)
+    std::unique_ptr<StorageImage> metalAtlasImage;
+#endif
     glm::uvec2 atlasSize { 1u, 1u };
     std::string fontName = "Renderer2D Font";
     uint32_t atlasId = 1;
@@ -166,5 +200,8 @@ private:
     float lineHeight = 96.0f;
     float baseline = 72.0f;
     float sdfPixelRange = 8.0f;
+    float tabularDigitAdvance = 0.0f;
+    float tabularDigitLeft = 0.0f;
+    float tabularDigitRight = 0.0f;
     bool isLoaded = false;
 };

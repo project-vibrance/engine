@@ -12,22 +12,32 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 class Localisation;
 class Renderer2DFontAtlas;
+class Renderer2DScene;
 class UiBuilder;
 
-inline constexpr float kUiNotificationCardHeight = 88.0f;
-inline constexpr float kUiNotificationThreeLineCardHeight = 104.0f;
-inline constexpr float kUiNotificationActionCardHeight = 120.0f;
-inline constexpr float kUiNotificationThreeLineActionCardHeight = 136.0f;
+inline constexpr float kUiNotificationCardHeight = 72.0f;
+inline constexpr float kUiNotificationTwoLineCardHeight = 90.0f;
+inline constexpr float kUiNotificationThreeLineCardHeight = 108.0f;
+inline constexpr float kUiNotificationActionCardHeight = 104.0f;
+inline constexpr float kUiNotificationTwoLineActionCardHeight = 122.0f;
+inline constexpr float kUiNotificationThreeLineActionCardHeight = 140.0f;
 
 struct UiNotificationCardMetrics
 {
     glm::vec2 size { 376.0f, kUiNotificationCardHeight };
-    float cornerRadius = 20.0f;
-    float iconSize = 48.0f;
-    float contentLeft = 72.0f;
+    float cornerRadius = 24.0f;
+    float iconSize = 36.0f;
+    float contentLeft = 64.0f;
+};
+
+struct UiNotificationCardAction
+{
+    std::string label;
+    std::function<void()> invoke;
 };
 
 // Presentation-only values. Callers decide how IDs, persistence, permissions,
@@ -58,6 +68,8 @@ struct UiNotificationCardOptions
     UiNotificationCardMetrics metrics {};
     Media2DHandle iconMedia {};
     Media2DHandle dismissIcon {};
+    // Up to two actions can appear directly in the card's bottom row.
+    std::vector<UiNotificationCardAction> actions;
     std::size_t groupSize = 1u;
     float layerOffset = 7.0f;
     std::size_t maximumLayers = 2u;
@@ -77,6 +89,7 @@ struct UiNotificationCardHandle
     entt::entity timestampText = entt::null;
     entt::entity dismissButton = entt::null;
     entt::entity optionsButton = entt::null;
+    std::vector<entt::entity> actionButtons;
     bool dismissVisible = false;
 };
 
@@ -110,3 +123,10 @@ VIBRANCE_ENGINE_API void ui_prepare_notification_card_fan(
     glm::vec2 startOffset,
     double currentTimeSeconds,
     float delaySeconds = 0.0f);
+
+// Advances arrival, reflow or fan motion on the same visual transform used
+// by sharp UI and native backdrop regions. Offsets are authored in UI units.
+VIBRANCE_ENGINE_API void ui_update_notification_card_motion(
+    Renderer2DScene& scene,
+    UiNotificationCardHandle& card,
+    double currentTimeSeconds);

@@ -1,4 +1,5 @@
 #include <vibranceUI/ui/text_block.h>
+#include <vibranceUI/ui/controls.h>
 
 #include <cmath>
 #include <iostream>
@@ -99,6 +100,45 @@ int main()
         scene.registry().get<TextLayout2DComponent>(block.entity).lineCount ==
             3u,
         "changing text should automatically reflow the retained text block");
+
+    for (float dpi : { 1.0f, 1.5f, 2.0f, 3.0f })
+    {
+        Renderer2DScene fitScene;
+        LayoutScale fitScale {};
+        fitScale.factor = glm::vec2(dpi);
+        fitScale.logicalSize = { 800.0f, 200.0f };
+        UiBuilder fitUi(fitScene, fitScale);
+        UiButtonOptions buttonOptions {};
+        buttonOptions.fitContentWidth = true;
+        buttonOptions.padding = { 24.0f, 0.0f, 24.0f, 0.0f };
+        const auto button = ui_create_aligned_text_button(fitUi, unloadedAtlas,
+            fitUi.root(), UiAlignment::eBottomLeft, { 2.0f, -2.0f },
+            "Start", { 144.0f, 42.0f }, 2, 0u, buttonOptions);
+        auto& fitRegistry = fitScene.registry();
+        fitScene.build_render_plan(0.0, 0u);
+        passed &= expect(close(fitRegistry.get<ShapeComponent>(button.root).size.x, 144.0f * dpi),
+            "short labels must retain the requested minimum button width at every DPI");
+        set_text_entity(fitScene, unloadedAtlas, button.label,
+            "D\xC3\xA9marrer une minuterie pour la dur\xC3\xA9" "e choisie");
+        // This renderer-only fixture has no glyph atlas. Supply the measured
+        // run bounds that a loaded font publishes, then exercise live reflow.
+        fitRegistry.get<TextComponent>(button.label).bounds = { 280.0f * dpi, 13.0f * dpi };
+        fitScene.build_render_plan(1.0, 0u);
+        const auto longBounds = fitRegistry.get<TextComponent>(button.label).bounds;
+        const auto buttonSize = fitRegistry.get<ShapeComponent>(button.root).size;
+        passed &= expect(buttonSize.x >= longBounds.x + 48.0f * dpi - 0.001f &&
+            buttonSize.x > 144.0f * dpi && close(buttonSize.y, 42.0f * dpi),
+            "a longer UTF-8 label must grow the existing button without changing its height");
+        const auto buttonRect = ui_entity_framebuffer_rect(fitRegistry, button.root);
+        passed &= expect(close(buttonRect.z, buttonSize.x) &&
+            fitScene.entity_at({ buttonRect.x + buttonRect.z - 8.0f * dpi,
+                buttonRect.y + buttonRect.w * 0.5f }) == button.root,
+            "the resized button must retain its full hit region beyond the original width");
+        set_text_entity(fitScene, unloadedAtlas, button.label, "Go");
+        fitScene.build_render_plan(2.0, 0u);
+        passed &= expect(close(fitRegistry.get<ShapeComponent>(button.root).size.x, 144.0f * dpi),
+            "returning to a short label must shrink the button back to its minimum");
+    }
 
     return passed ? 0 : 1;
 }

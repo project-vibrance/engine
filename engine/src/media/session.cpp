@@ -17,6 +17,28 @@
 #include <string_view>
 #endif
 
+#if defined(__APPLE__) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+#include "session_macos.h"
+#endif
+
+
+#if !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+#include <vibranceUI/core/logger.h>
+#endif
+namespace
+{
+void provider_diagnostic(bool failure, const std::string& message)
+{
+#if !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+    Logger::fetch_logger()->log(failure ? LogLevel::eWarning : LogLevel::eInfo,
+        "GlobalMediaSession: " + message);
+#else
+    (void)failure;
+    (void)message;
+#endif
+}
+}
+
 struct GlobalMediaSession::Impl
 {
     MediaSessionSnapshot snapshot;
@@ -188,6 +210,18 @@ struct GlobalMediaSession::Impl
         snapshot.album = bridgeSnapshot.album;
         snapshot.thumbnailPath = bridgeSnapshot.thumbnailPath;
         snapshot.diagnostic = bridgeSnapshot.diagnostic;
+        switch (bridgeSnapshot.playbackQuality)
+        {
+            case VIBRANCE_WIN32_MEDIA_QUALITY_DOLBY_ATMOS:
+                snapshot.playbackQuality = MediaPlaybackQuality::eDolbyAtmos;
+                break;
+            case VIBRANCE_WIN32_MEDIA_QUALITY_LOSSLESS:
+                snapshot.playbackQuality = MediaPlaybackQuality::eLossless;
+                break;
+            default:
+                snapshot.playbackQuality = MediaPlaybackQuality::eUnknown;
+                break;
+        }
 
         switch (bridgeSnapshot.playbackStatus)
         {
@@ -253,11 +287,17 @@ struct GlobalMediaSession::Impl
         return handle && seekMedia &&
             seekMedia(handle, std::max(positionMilliseconds, std::int64_t(0))) != 0u;
     }
+#elif defined(__APPLE__) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+    MacMediaSession provider;
+    Impl() { refresh(); }
+    bool refresh() { return provider.refresh(snapshot); }
+    bool send(MediaSessionCommand command) { return provider.send(command); }
+    bool seek(std::int64_t position) { return provider.seek(position); }
 #else
     Impl()
     {
         snapshot.diagnostic =
-            "Global media sessions are available on Win32 only.";
+            "Global media sessions are unavailable on this platform.";
     }
 
     bool refresh()
@@ -280,6 +320,8 @@ struct GlobalMediaSession::Impl
 GlobalMediaSession::GlobalMediaSession() :
     impl(std::make_unique<Impl>())
 {
+    provider_diagnostic(!impl->snapshot.bridgeLoaded, impl->snapshot.diagnostic.empty() ?
+        "Provider initialised." : impl->snapshot.diagnostic);
 }
 
 GlobalMediaSession::~GlobalMediaSession() = default;
@@ -289,7 +331,7 @@ GlobalMediaSession& GlobalMediaSession::operator=(
 
 bool GlobalMediaSession::platform_supported()
 {
-#if defined(_WIN32) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+#if (defined(_WIN32) || defined(__APPLE__)) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
     return true;
 #else
     return false;
@@ -303,17 +345,27 @@ bool GlobalMediaSession::bridge_loaded() const
 
 bool GlobalMediaSession::refresh()
 {
-    return impl && impl->refresh();
+    if (!impl) return false;
+    const auto previousDiagnostic = impl->snapshot.diagnostic;
+    const bool changed = impl->refresh();
+    if (previousDiagnostic != impl->snapshot.diagnostic)
+        provider_diagnostic(!impl->snapshot.diagnostic.empty(), impl->snapshot.diagnostic.empty() ?
+            "Provider recovered." : impl->snapshot.diagnostic);
+    return changed;
 }
 
 bool GlobalMediaSession::send(MediaSessionCommand command)
 {
-    return impl && impl->send(command);
+    const bool succeeded = impl && impl->send(command);
+    provider_diagnostic(!succeeded, "send: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 bool GlobalMediaSession::seek(std::int64_t positionMilliseconds)
 {
-    return impl && impl->seek(positionMilliseconds);
+    const bool succeeded = impl && impl->seek(positionMilliseconds);
+    provider_diagnostic(!succeeded, "seek: " + std::string(succeeded ? "succeeded" : "failed"));
+    return succeeded;
 }
 
 const MediaSessionSnapshot& GlobalMediaSession::snapshot() const

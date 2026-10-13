@@ -5,11 +5,15 @@
 #include <GLFW/glfw3native.h>
 #import <Cocoa/Cocoa.h>
 
+#include <algorithm>
 #include <array>
 #include <string>
+#include <unordered_set>
 
 namespace
 {
+    std::unordered_set<GLFWwindow*> dockWindows;
+
     NSEvent* current_left_mouse_down(NSWindow* window)
     {
         NSEvent* event = [NSApp currentEvent];
@@ -29,6 +33,32 @@ namespace
                                 clickCount:1
                                   pressure:1.0];
     }
+}
+
+void glfw_macos_refresh_application_presence()
+{
+    const bool visiblePanel = std::any_of(
+        dockWindows.begin(), dockWindows.end(), [](GLFWwindow* window) {
+            NSWindow* nativeWindow = glfwGetCocoaWindow(window);
+            return [nativeWindow isVisible] || [nativeWindow isMiniaturized];
+        });
+    const NSApplicationActivationPolicy policy = visiblePanel ?
+        NSApplicationActivationPolicyRegular : NSApplicationActivationPolicyAccessory;
+    if ([NSApp activationPolicy] != policy)
+        [NSApp setActivationPolicy:policy];
+}
+
+void glfw_macos_forget_window(GLFWwindow* window)
+{
+    if (window) dockWindows.erase(window);
+    else dockWindows.clear();
+    glfw_macos_refresh_application_presence();
+}
+
+bool glfw_macos_mouse_button_pressed(int button)
+{
+    if (button < 0 || button > GLFW_MOUSE_BUTTON_LAST) return false;
+    return ([NSEvent pressedMouseButtons] & (NSUInteger(1) << button)) != 0;
 }
 
 std::string glfw_monitor_identifier(GLFWmonitor* monitor)
@@ -98,7 +128,6 @@ void set_glfw_window_application_presence(
     bool showInTaskbar,
     bool showInAltTab)
 {
-    (void)showInTaskbar;
     if (!window)
     {
         return;
@@ -120,6 +149,9 @@ void set_glfw_window_application_presence(
         NSWindowCollectionBehaviorIgnoresCycle;
     [nativeWindow setCollectionBehavior:behavior];
     [nativeWindow setExcludedFromWindowsMenu:!showInAltTab];
+    if (showInTaskbar) dockWindows.insert(window);
+    else dockWindows.erase(window);
+    glfw_macos_refresh_application_presence();
 }
 
 bool begin_glfw_native_window_drag(GLFWwindow* window)
@@ -146,3 +178,8 @@ bool begin_glfw_native_window_drag(GLFWwindow* window)
     return true;
 }
 #endif
+
+void* glfw_native_window_handle(GLFWwindow* window)
+{
+    return window ? (void*)glfwGetCocoaWindow(window) : nullptr;
+}

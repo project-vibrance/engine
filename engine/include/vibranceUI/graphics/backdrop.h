@@ -3,10 +3,11 @@
 #include <vibranceUI/export.h>
 
 #include <cstdint>
+#include <array>
 
 // Glass material names are platform-neutral, but their owners are explicit:
-// eSystemGlass is supplied by the platform compositor while eLiquid belongs
-// to the engine renderer. Neither material silently substitutes for the other.
+// eSystemGlass is supplied by the platform compositor. On Windows, eLiquid
+// uses a shaped live Composition backdrop and an optional DWM shader pass.
 enum class GlassMaterial : std::uint32_t
 {
     eOff = 0u,
@@ -16,11 +17,12 @@ enum class GlassMaterial : std::uint32_t
 
 enum class LiquidGlassBackend : std::uint32_t
 {
-    // Renderer-owned implementation used by the cross-platform engine.
+    // Existing Windows Composition approximation. Kept during migration.
     eEngineRenderer = 0u,
-    // Reserved for Apple's native Liquid Glass implementation. The slot is
-    // intentionally present now, but reports unavailable until implemented.
-    eMacOSNative = 1u
+    // Apple's native AppKit Liquid Glass (macOS 26 and later).
+    eMacOSNative = 1u,
+    // Windows DWM HLSL path; reports unavailable until its extension is ready.
+    eWindowsCompositionShader = 2u
 };
 
 enum class SystemBackdropProvider : std::uint32_t
@@ -38,7 +40,8 @@ enum class SystemBackdropShape : std::uint32_t
     eRoundedRectangle = 1u,
     eEllipse = 2u,
     eSquircle = 3u,
-    eNotchedSquircle = 4u
+    eNotchedSquircle = 4u,
+    eLiquidBridge = 5u
 };
 
 struct SystemBackdropColor
@@ -51,15 +54,21 @@ struct SystemBackdropColor
 
 struct SystemBackdropRegion
 {
-    // Only eOff and eSystemGlass are valid here. eLiquid is represented by a
-    // LiquidGlassComponent and is never forwarded to a platform compositor.
+    // Stable renderer identity, retained across region sorting and animation.
+    std::uint64_t identity = 0u;
+    // eLiquid is forwarded for the Windows live backdrop underlay. The
+    // optical shader request remains a separate LiquidGlassComponent.
     GlassMaterial material = GlassMaterial::eOff;
+    LiquidGlassBackend liquidBackend = LiquidGlassBackend::eEngineRenderer;
     SystemBackdropProvider provider = SystemBackdropProvider::eEngine;
     SystemBackdropShape shape = SystemBackdropShape::eRoundedRectangle;
     // Most regions follow their renderer entity automatically. Set this false
     // when the Vulkan paint geometry is clipped by a parent but the independent
     // platform backdrop visual needs an explicit safety clip of its own.
     bool deriveShapeFromEntity = true;
+    // Control lenses retain the sampling halo but clip its identity paint to
+    // the control itself, so a halo cannot escape the enclosing interface.
+    bool clipRawBackdropToShape = false;
 
     // Framebuffer-space rectangle. It is deliberately independent from glm so
     // the DirectX bridge can retain a POD-only ABI.
@@ -76,6 +85,7 @@ struct SystemBackdropRegion
     float squirclePower = 4.0f;
     // Animated notch geometry used by island-style surfaces. Composition uses
     // these values to flatten the leading corners with the Vulkan shape.
+    // eLiquidBridge reuses notchAmount as its smooth-union merge amount.
     float notchAmount = 0.0f;
     float notchDepth = 0.0f;
     // Fraction of the shape height kept free of material from the top. The
@@ -91,7 +101,38 @@ struct SystemBackdropRegion
     float blurRadius = 24.0f;
     float saturation = 1.0f;
     SystemBackdropColor tint { 1.0f, 1.0f, 1.0f, 0.14f };
+    // Normalised optical controls for the native Liquid Glass shader.
+    float liquidRefraction = 0.70f;
+    float liquidBlur = 0.15f;
+    float liquidRim = 0.60f;
+    float liquidDispersion = 0.35f;
+    SystemBackdropColor liquidTint { 213.0f / 255.0f, 231.0f / 255.0f, 1.0f, 0.0f };
+    // Contours use coordinates relative to this region's framebuffer bounds.
+    struct Contour
+    {
+        float x = 0.0f, y = 0.0f, width = 0.0f, height = 0.0f;
+        float cornerRadius = 0.0f;
+        float topLeftRadius = 0.0f, topRightRadius = 0.0f;
+        float bottomRightRadius = 0.0f, bottomLeftRadius = 0.0f;
+        float squircleAmount = 1.0f, squirclePower = 4.0f;
+        float notchAmount = 0.0f, notchDepth = 0.0f;
+        std::uint32_t shape = 0u;
+    };
+    std::array<Contour, 3> contours {};
+    std::uint32_t contourCount = 0u;
+    Contour exclusion {};
+    bool hasExclusion = false;
+    bool paintCapGradient = false;
+    std::array<float, 3> capColour { 0.0f, 0.0f, 0.0f };
+    // An independent viewport mask keeps each lens intact while clipping and
+    // fading its final pixels. Rectangle coordinates are in framebuffer space;
+    // parameters are top/bottom fade heights, minimum opacity and enabled (0/1).
+    std::array<float, 4> viewportRect {};
+    std::array<float, 4> viewportFade {};
+    // Top/bottom opacity, start/end fraction of the merged material height.
+    std::array<float, 4> capGradient { 0.98f, 0.015f, 0.0f, 1.0f };
 };
+static_assert(sizeof(SystemBackdropRegion::Contour) == 56u);
 
 VIBRANCE_ENGINE_API const char* glass_material_name(GlassMaterial material);
 VIBRANCE_ENGINE_API const char* system_backdrop_provider_name(SystemBackdropProvider provider);

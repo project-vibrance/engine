@@ -1,3 +1,4 @@
+#include <vibranceUI/core/logger.h>
 #include <vibranceUI/glfw/ui_window.h>
 
 #include <algorithm>
@@ -28,11 +29,16 @@ const UiWindowOptions& UiWindow::options() const
 
 bool UiWindow::open()
 {
-    return host.open();
+    const LogOperation diagnosticOperation("window: UiWindow::open");
+    const bool opened = host.open();
+    Logger::fetch_logger()->log(opened ? LogLevel::eInfo : LogLevel::eError,
+        opened ? "UI window opened." : "UI window could not be opened.");
+    return opened;
 }
 
 void UiWindow::close()
 {
+    const LogOperation diagnosticOperation("window: UiWindow::close");
     host.close();
 }
 
@@ -53,6 +59,7 @@ void UiWindow::tick()
 
 int UiWindow::run()
 {
+    const LogOperation diagnosticOperation("window: UiWindow::run");
     if (!is_open() && !open())
     {
         return EXIT_FAILURE;
@@ -61,6 +68,11 @@ int UiWindow::run()
     while (is_open())
     {
         tick();
+        if (const double idleWait = Engine::idle_event_wait_seconds();
+            idleWait > 0.0)
+        {
+            wait_glfw_events(idleWait);
+        }
     }
     close();
     terminate_glfw();
@@ -69,6 +81,7 @@ int UiWindow::run()
 
 void UiWindow::rebuild()
 {
+    const LogOperation diagnosticOperation("window: UiWindow::rebuild");
     if (GlfwPanelWindow* hostedPanel = host.panel())
     {
         hostedPanel->rebuild();
@@ -141,6 +154,7 @@ GlfwPanelWindowTemplateOptions UiWindow::make_template_options(
     options.fontDirectory = windowOptions.fontDirectory;
     options.fontProfilePath = windowOptions.fontProfilePath;
     options.fallbackFontPaths = windowOptions.fallbackFontPaths;
+    options.emojiFontPaths = windowOptions.emojiFontPaths;
     options.fontWeight = windowOptions.fontWeight;
     options.useLocalePrimaryFont = windowOptions.useLocalePrimaryFont;
     options.localisationDirectory = windowOptions.localisationDirectory;

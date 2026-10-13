@@ -51,14 +51,14 @@ int main()
         !emptyCapture.start(),
         "capture should reject a missing sample consumer");
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
     processCapture.set_target_process_id(0u);
     passed &= expect(
         AudioLoopbackCapture::platform_supported(),
-        "Windows should expose the loopback backend");
+        "Windows and macOS should expose the loopback backend");
     passed &= expect(
         processCapture.start(),
-        "a valid Windows capture should start");
+        "a valid platform capture should start");
     passed &= expect(
         processCapture.running(),
         "a started capture should report running");

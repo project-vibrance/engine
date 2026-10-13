@@ -83,6 +83,7 @@ struct GlfwPanelWindowTemplateOptions
     std::filesystem::path fontDirectory {};
     std::filesystem::path fontProfilePath {};
     std::vector<std::filesystem::path> fallbackFontPaths {};
+    std::vector<std::filesystem::path> emojiFontPaths {};
     int fontWeight = 0;
     bool requireLocalisedGlyphs = true;
     bool useLocalePrimaryFont = true;
@@ -105,9 +106,9 @@ struct GlfwPanelWindowTemplateOptions
     float uiScale = 1.0f;
     float titleHeight = 58.0f;
     float resizeEdgeThickness = 12.0f;
-    float cornerRadius = 28.0f;
-    float panelSquircleAmount = 1.0f;
-    float panelSquirclePower = 3.65f;
+    float cornerRadius = UiPanelShape::radius;
+    float panelSquircleAmount = UiPanelShape::amount;
+    float panelSquirclePower = UiPanelShape::power;
     glm::vec4 panelInset { 0.0f };
     glm::vec4 contentMargin { 24.0f, 72.0f, 24.0f, 24.0f };
     bool resizable = true;
@@ -119,6 +120,8 @@ struct GlfwPanelWindowTemplateOptions
     bool showTitleText = true;
     GlfwPanelWindowTrafficLightOptions trafficLights {};
     GlfwPanelWindowContentBuilder buildContent;
+    // Runs after control input and layout, before the scene is rendered.
+    std::function<void(Engine&)> beforeDraw;
 };
 
 struct GlfwPanelWindowTemplateContext
@@ -156,6 +159,8 @@ public:
     void set_size(int width, int height);
     void set_ui_scale(float scale);
     bool has_pointer_capture() const;
+    UiInputState& input_state();
+    const UiInputState& input_state() const;
     // Forces a full scene rebuild after external state has changed
     void rebuild();
 
@@ -228,6 +233,7 @@ private:
     GlfwPanelWindowTemplateOptions options {};
     UiInputState inputState {};
     std::array<Media2DHandle, 3> trafficLightIcons {};
+    std::array<entt::entity, 3> trafficLightEntities { entt::null, entt::null, entt::null };
     std::array<entt::entity, 3> trafficLightIconEntities {
         entt::null,
         entt::null,
@@ -274,7 +280,7 @@ struct GlfwPanelWindowHostOptions
     uint32_t maxRenderPixels = 0;
     uint32_t msaaSamples = 4;
     RendererPresentMode presentMode = RendererPresentMode::eAuto;
-    RenderBackend renderBackend = RenderBackend::eVulkan;
+    RenderBackend renderBackend = default_render_backend();
     PresentationBackend presentationBackend = PresentationBackend::eNative;
     uint32_t targetFrameRate = 0;
     // Host-level override applied after makeTemplateOptions. This lets window

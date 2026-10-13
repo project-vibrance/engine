@@ -118,14 +118,79 @@ int main()
         activated && dismissed && optionsOpened,
         "card interactions should invoke only caller-owned callbacks");
 
+    {
+        auto actionOptions = options;
+        actionOptions.showOptions = false;
+        actionOptions.metrics = ui_measure_notification_card(fontAtlas, "A short message", true, false);
+        int firstAction = 0, secondAction = 0;
+        actionOptions.actions = { { "Not Now", [&] { ++firstAction; } },
+            { "Restart", [&] { ++secondAction; } } };
+        const auto actionable = ui_create_notification_card(ui, fontAtlas, localisation, actionOptions);
+        scene.build_render_plan(0.0, 0u);
+        passed &= expect(actionable.actionButtons.size() == 2u && actionable.optionsButton == entt::null,
+            "two actions should appear as direct pill buttons rather than an options menu");
+        for (const auto button : actionable.actionButtons)
+        {
+            const auto buttonRect = ui_entity_framebuffer_rect(registry, button);
+            const auto surfaceRect = ui_entity_framebuffer_rect(registry, actionable.surface);
+            passed &= expect(buttonRect.y >= surfaceRect.y + 60.0f &&
+                buttonRect.y + buttonRect.w <= surfaceRect.y + surfaceRect.w &&
+                registry.get<ShapeStyleComponent>(button).outlineWidth == 0.0f,
+                "action pills must fit below the message and retain a neutral borderless paint");
+        }
+        registry.get<ButtonInputComponent>(actionable.actionButtons[0]).onClick({});
+        registry.get<ButtonInputComponent>(actionable.actionButtons[1]).onClick({});
+        passed &= expect(firstAction == 1 && secondAction == 1,
+            "direct action pills must dispatch their own callback exactly once");
+        scene.destroy_entity_tree(actionable.root);
+    }
+
+    for (const float dpi : { 1.0f, 1.5f, 2.0f })
+    {
+        for (const double refreshRate : { 30.0, 60.0, 144.0 })
+        {
+            Renderer2DScene motionScene;
+            LayoutScale motionScale {};
+            motionScale.logicalSize = { 428.0f, 400.0f };
+            motionScale.factor = glm::vec2(dpi);
+            UiBuilder motionUi(motionScene, motionScale);
+            auto motionOptions = options;
+            motionOptions.parent = motionUi.root();
+            auto moving = ui_create_notification_card(motionUi, fontAtlas, localisation, motionOptions);
+            moving.fanDurationSeconds = 0.48f;
+            motionScene.build_render_plan(0.0, 0u);
+            const auto resting = motionScene.resolved_shape_visual_state(moving.surface, 0.0);
+            ui_prepare_notification_card_fan(motionUi, moving, { 428.0f, 0.0f }, 1.0, 0.1f);
+            motionScene.build_render_plan(1.0, 0u);
+            const auto arriving = motionScene.resolved_shape_visual_state(moving.surface, 1.0);
+            passed &= expect(resting && arriving && close(arriving->rect.x - resting->rect.x, 428.0f * dpi),
+                "new card glass and sharp UI must begin off the right edge at every DPI");
+            bool overshot = false;
+            for (int frame = 0; frame < 90; ++frame)
+            {
+                const double now = 1.0 + frame / refreshRate;
+                ui_update_notification_card_motion(motionScene, moving, now);
+                motionScene.build_render_plan(now, 0u);
+                const auto state = motionScene.resolved_shape_visual_state(moving.surface, now);
+                const auto offset = motionScene.registry().get<InteractiveVisual2DComponent>(moving.root).offset;
+                passed &= expect(state && close(state->rect.x - resting->rect.x, offset.x),
+                    "native glass must follow the same horizontal motion as its card's content");
+                overshot = overshot || offset.x < 0.0f;
+            }
+            const auto offset = motionScene.registry().get<InteractiveVisual2DComponent>(moving.root).offset;
+            passed &= expect(overshot && offset == glm::vec2(0.0f) && moving.fanStartSeconds < 0.0,
+                "arrival must settle with a small bounce and no residual position offset at all refresh rates");
+        }
+    }
+
     ui_prepare_notification_card_fan(
         ui,
         card,
         { 0.0f, -20.0f },
         10.0,
         0.1f);
-    const VisualTransform2DComponent& visual =
-        registry.get<VisualTransform2DComponent>(card.root);
+    const InteractiveVisual2DComponent& visual =
+        registry.get<InteractiveVisual2DComponent>(card.root);
     passed &= expect(
         visual.offset == glm::vec2(0.0f, -20.0f) &&
             std::abs(card.fanStartSeconds - 10.1) <= 0.001,

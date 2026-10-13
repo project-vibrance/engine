@@ -8,6 +8,8 @@ const uint STYLE_RADIAL_GRADIENT = 1u << 11;
 const uint STYLE_TRANSFORM_2_5D = 1u << 12;
 const uint STYLE_SHAPE_MASK = 1u << 15;
 const uint STYLE_SHAPE_CUTOUT = 1u << 29;
+const uint STYLE_LIQUID_RIM = 1u << 30;
+const uint STYLE_MASKED_LIQUID_SHAPE_PARAMS = 1u << 31;
 const uint STYLE_CORNER_RADII = 1u << 16;
 
 const uint PRIMITIVE_RECTANGLE = 1u;
@@ -177,8 +179,12 @@ float sd_squircle_box(vec2 p, vec2 halfSize, float radius, float amount, float p
     vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
     vec2 outside = max(q, vec2(0.0));
     float roundedNorm = length(outside);
+    if (amount <= 0.0)
+        return roundedNorm + min(max(q.x, q.y), 0.0) - safeRadius;
     float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
-    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    float squircleNorm = (outside.x == 0.0 || outside.y == 0.0)
+        ? outside.x + outside.y
+        : pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
     return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
 }
 
@@ -187,8 +193,12 @@ float sd_squircle_box_corners(vec2 p, vec2 halfSize, vec4 radii, float amount, f
     vec2 q = abs(p) - max(halfSize - vec2(safeRadius), vec2(0.0));
     vec2 outside = max(q, vec2(0.0));
     float roundedNorm = length(outside);
+    if (amount <= 0.0)
+        return roundedNorm + min(max(q.x, q.y), 0.0) - safeRadius;
     float cornerPower = mix(2.0, clamp(power, 2.0, 5.0), clamp(amount, 0.0, 1.0));
-    float squircleNorm = pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
+    float squircleNorm = (outside.x == 0.0 || outside.y == 0.0)
+        ? outside.x + outside.y
+        : pow(pow(outside.x, cornerPower) + pow(outside.y, cornerPower), 1.0 / cornerPower);
     return mix(roundedNorm, squircleNorm, clamp(amount, 0.0, 1.0)) + min(max(q.x, q.y), 0.0) - safeRadius;
 }
 
@@ -297,13 +307,14 @@ float sd_circular_progress(vec2 pixel, vec4 rect, vec4 arcParams) {
     return min(length(p - startPoint), length(p - endPoint)) - halfStroke;
 }
 
-// Polynomial smooth union of the main island's real circular end cap and the
-// detached island's real circular shell. The rect spans both complete circles,
-// so the liquid neck shares their exact SDF instead of approximating endpoints.
+// Polynomial smooth union of the main island's right cap and the detached
+// island's circular shell. The source cap continues left inside the main
+// island, so no separate source circle can appear during separation.
 float sd_liquid_bridge(vec2 p, vec2 halfSize, float amount) {
     float radius = max(halfSize.y, 0.5);
     float centerOffset = max(halfSize.x - radius, 0.0);
-    float left = length(p - vec2(-centerOffset, 0.0)) - radius;
+    vec2 source = p - vec2(-centerOffset, 0.0);
+    float left = length(vec2(max(source.x, 0.0), source.y)) - radius;
     float right = length(p - vec2(centerOffset, 0.0)) - radius;
     float centerDistance = centerOffset * 2.0;
     float surfaceGap = max(centerDistance - radius * 2.0, 0.0);
@@ -368,7 +379,8 @@ float primitive_sdf(
     float squircleAmount = clamp(shapeParams.x, 0.0, 1.0);
     float squirclePower = clamp(shapeParams.y <= 0.001 ? 4.0 : shapeParams.y, 2.0, 5.0);
     if (primitive == PRIMITIVE_SQUIRCLE) {
-        return sd_squircle_box(p, halfSize, radius, squircleAmount, squirclePower);
+        return useCornerRadii ? sd_squircle_box_corners(p, halfSize, cornerRadii, squircleAmount, squirclePower) :
+            sd_squircle_box(p, halfSize, radius, squircleAmount, squirclePower);
     }
     if (primitive == PRIMITIVE_NOTCHED_SQUIRCLE) {
         return sd_notched_squircle(
@@ -389,14 +401,25 @@ float primitive_sdf(
     return sd_rounded_box(p, halfSize, radius);
 }
 
+vec4 own_shape_parameters() {
+    if ((pc.data.y & STYLE_MASKED_LIQUID_SHAPE_PARAMS) != 0u) return pc.color2;
+    bool reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
+    return reserved ? vec4(1.0, 4.0, 0.0, 0.0) : pc.effect1;
+}
+
 float shape_sdf(vec2 pixel) {
     if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
         return sd_circular_progress(pixel, pc.rect, pc.uvRect);
     }
     bool useCornerRadii = (pc.data.y & STYLE_CORNER_RADII) != 0u;
     vec4 cornerRadii = useCornerRadii ? unpack_corner_radii(pc.data.z) : vec4(pc.effect0.x);
+    if (useCornerRadii && (pc.data.y & STYLE_MASKED_LIQUID_SHAPE_PARAMS) != 0u) {
+        uint corners = (pc.data.z >> 20u) & 15u;
+        cornerRadii = vec4(float(corners & 1u), float((corners >> 1u) & 1u),
+            float((corners >> 2u) & 1u), float((corners >> 3u) & 1u)) * pc.effect0.x;
+    }
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
-    vec4 shapeParams = effect1Reserved ? vec4(1.0, 4.0, 0.0, 0.0) : pc.effect1;
+    vec4 shapeParams = own_shape_parameters();
     return primitive_sdf(pixel, pc.rect, pc.data.x, pc.effect0.x, cornerRadii, useCornerRadii, shapeParams);
 }
 
@@ -432,6 +455,10 @@ vec4 fill_color(vec2 uv) {
         return pc.color0;
     }
 
+    if (pc.data.x == PRIMITIVE_LIQUID_BRIDGE) {
+        // uvRect carries merge progress, so use local UV for the cap gradient.
+        return mix(pc.color0, pc.color1, clamp(uv.y, 0.0, 1.0));
+    }
     if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
         vec2 pixel = pc.rect.xy + clamp(uv, vec2(0.0), vec2(1.0)) * pc.rect.zw;
         return mix(pc.color0, pc.color1, circular_progress_gradient_t(pixel));
@@ -466,14 +493,15 @@ vec4 compose_shape_layers(vec4 body, float bodyCoverage, vec4 outline, float out
 
 float top_outline_factor_for_notch(vec2 pixel, float outlineWidth, float softness) {
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
-    if (effect1Reserved ||
+    vec4 params = own_shape_parameters();
+    if ((effect1Reserved && (pc.data.y & STYLE_MASKED_LIQUID_SHAPE_PARAMS) == 0u) ||
         pc.data.x != PRIMITIVE_NOTCHED_SQUIRCLE ||
-        pc.effect1.z <= 0.01 ||
+        params.z <= 0.01 ||
         outlineWidth <= 0.001) {
         return 1.0;
     }
 
-    float notchSuppression = smoothstep(0.04, 0.22, clamp(pc.effect1.z, 0.0, 1.0));
+    float notchSuppression = smoothstep(0.04, 0.22, clamp(params.z, 0.0, 1.0));
     float topDistance = pixel.y - pc.rect.y;
     float topEdgeFactor = smoothstep(outlineWidth + softness * 0.25, outlineWidth + softness * 1.75, topDistance);
     return mix(1.0, topEdgeFactor, notchSuppression);
@@ -508,6 +536,14 @@ vec4 shade_shape_sample(vec2 samplePoint) {
     vec2 uv = clamp(surface.uv, vec2(0.0), vec2(1.0));
     vec4 body = fill_color(uv);
     vec4 outline = pc.color2;
+    if ((pc.data.y & STYLE_MASKED_LIQUID_SHAPE_PARAMS) != 0u)
+        outline = vec4(1.0, 1.0, 1.0, float((pc.data.z >> 12u) & 255u) / 255.0);
+    if ((pc.data.y & STYLE_LIQUID_RIM) != 0u) {
+        // Optical shaders animate the rim at display cadence. A second glint
+        // in cached UI paint steps whenever the sharp interface changes.
+        outline.rgb = vec3(1.0);
+        outline.a = min(outline.a, 0.12);
+    }
     vec4 src = compose_shape_layers(body, bodyCoverage, outline, outlineAlpha);
     src.a *= maskAlpha * pc.effect0.w;
     return src.a > 0.001 ? src : vec4(0.0);
@@ -527,7 +563,54 @@ vec4 resolve_accumulated_shape(vec3 premultiplied, float alpha, float weightSum)
     return vec4(rgb, alpha);
 }
 
+bool constant_solid_interior(vec2 pixelCenter) {
+    // The rotated four-sample footprint reaches at most 0.375 pixels along
+    // either axis. Use a conservative half-pixel inset, plus every fill/edge
+    // transition, to prove all four samples have full and identical coverage.
+    // These box checks avoid evaluating another SDF before the normal filter.
+    const uint varyingStyles = STYLE_GRADIENT | STYLE_RADIAL_GRADIENT |
+        STYLE_TRANSFORM_2_5D | STYLE_BLUR | STYLE_CORNER_RADII | STYLE_SHAPE_CUTOUT;
+    if ((pc.data.y & varyingStyles) != 0u ||
+        (pc.data.x != PRIMITIVE_RECTANGLE &&
+            pc.data.x != PRIMITIVE_ROUNDED_RECTANGLE &&
+            pc.data.x != PRIMITIVE_SQUIRCLE)) {
+        return false;
+    }
+
+    vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
+    float radius = pc.data.x == PRIMITIVE_RECTANGLE ? 0.0 :
+        clamp(pc.effect0.x, 0.0, min(halfSize.x, halfSize.y));
+    float softness = max(pc.effect0.z, 0.5);
+    float inset = radius + max(pc.effect0.y, 0.0) + softness + 0.5;
+    vec2 distanceFromCentre = abs(pixelCenter - (pc.rect.xy + halfSize));
+    if (any(greaterThanEqual(distanceFromCentre, halfSize - vec2(inset)))) {
+        return false;
+    }
+
+    if ((pc.data.y & STYLE_SHAPE_MASK) != 0u) {
+        uint maskPrimitive = (pc.data.z >> MASK_PRIMITIVE_SHIFT) & 15u;
+        if (maskPrimitive != PRIMITIVE_RECTANGLE &&
+            maskPrimitive != PRIMITIVE_ROUNDED_RECTANGLE &&
+            maskPrimitive != PRIMITIVE_SQUIRCLE) {
+            return false;
+        }
+        vec2 maskHalfSize = max(pc.effect1.zw * 0.5, vec2(0.5));
+        float maskRadius = maskPrimitive == PRIMITIVE_RECTANGLE ? 0.0 :
+            clamp(float(pc.data.z & MASK_RADIUS_BITS), 0.0,
+                min(maskHalfSize.x, maskHalfSize.y));
+        float maskInset = maskRadius + max(softness, 0.75) + 0.5;
+        vec2 maskDistance = abs(pixelCenter - (pc.effect1.xy + maskHalfSize));
+        if (any(greaterThanEqual(maskDistance, maskHalfSize - vec2(maskInset)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 vec4 resolve_filtered_shape(vec2 pixelCenter) {
+    if (constant_solid_interior(pixelCenter)) {
+        return shade_shape_sample(pixelCenter);
+    }
     vec3 premultiplied = vec3(0.0);
     float alpha = 0.0;
     float weightSum = 0.0;
@@ -584,7 +667,7 @@ void main() {
     vec2 p = vec2(pixel) + vec2(0.5);
     bool transformed = (pc.data.y & STYLE_TRANSFORM_2_5D) != 0u;
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
-    vec4 shapeParams = effect1Reserved ? vec4(1.0, 4.0, 0.0, 0.0) : pc.effect1;
+    vec4 shapeParams = own_shape_parameters();
     float boundsPad = pc.effect0.y + pc.effect0.z + primitive_bounds_padding(shapeParams);
     if (!transformed &&
         (p.x < pc.rect.x - boundsPad ||

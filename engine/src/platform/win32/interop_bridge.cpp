@@ -41,6 +41,9 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <memory>
+#include "playback_quality_probe.h"
+#include "notification_activation.h"
 
 namespace
 {
@@ -610,6 +613,7 @@ bool same_payload(
         left.playbackStatus == right.playbackStatus &&
         left.capabilities == right.capabilities &&
         left.sourceProcessId == right.sourceProcessId &&
+        left.playbackQuality == right.playbackQuality &&
         left.thumbnailRevision == right.thumbnailRevision &&
         left.positionMilliseconds == right.positionMilliseconds &&
         left.durationMilliseconds == right.durationMilliseconds &&
@@ -659,6 +663,8 @@ public:
     {
         snapshot.structSize = sizeof(snapshot);
         notificationSnapshot.structSize = sizeof(notificationSnapshot);
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_MEDIA) != 0u)
+            qualityProbe = std::make_unique<Win32PlaybackQualityProbe>(quality_source_window);
         worker = std::thread(&Win32InteropBridge::run, this);
     }
 
@@ -855,6 +861,21 @@ public:
             activate_application(appUserModelId);
     }
 
+    bool activate_notification(const char* appUserModelId, const char* arguments, std::uint32_t kind)
+    {
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u ||
+            !appUserModelId || !arguments) return false;
+        if (kind == 0u) return activate_notification_source(appUserModelId);
+        if (kind == 1u || kind == 3u)
+        {
+            CLSID activator {};
+            const auto identity = winrt::to_hstring(appUserModelId);
+            if (!vibrance::win32::notification_activator_clsid(identity.c_str(), activator))
+                return activate_notification_source(appUserModelId);
+        }
+        return vibrance::win32::invoke_toast_destination(appUserModelId, arguments, kind);
+    }
+
     bool resolve_application_icon(
         const char* appUserModelId,
         VibranceWin32ApplicationIcon* destination,
@@ -873,7 +894,20 @@ public:
         std::uint64_t revision = 0u;
         std::string path;
         bool loaded = false;
-        try
+        // Desktop apps can supply their executable instead of a packaged AUMID.
+        // Reuse the native shell icon and the existing PNG cache, independently
+        // of notification-listener permission or a visible application window.
+        const std::filesystem::path executable(identity.c_str());
+        std::error_code iconError;
+        if (executable.is_absolute() &&
+            std::filesystem::is_regular_file(executable, iconError) && !iconError)
+        {
+            SHFILEINFOW fileInfo {};
+            if (SHGetFileInfoW(executable.c_str(), 0, &fileInfo, sizeof(fileInfo),
+                    SHGFI_ICON | SHGFI_LARGEICON) && fileInfo.hIcon)
+                loaded = cache_icon(fileInfo.hIcon, revision, path);
+        }
+        if (!loaded) try
         {
             const auto appInfo = winrt::Windows::ApplicationModel::AppInfo::
                 GetFromAppUserModelId(identity);
@@ -1008,6 +1042,7 @@ private:
             NotificationKinds::Toast).get();
         std::vector<VibranceWin32NotificationItem> items;
         items.reserve(notifications.Size());
+        std::unordered_map<std::string, std::vector<vibrance::win32::ToastDestination>> destinations;
         for (const auto& notification : notifications)
         {
             try
@@ -1114,6 +1149,15 @@ private:
                     copy_utf8(item.title, notification.AppInfo().
                         DisplayInfo().DisplayName());
                 }
+                const std::string identity = winrt::to_string(appUserModelId);
+                auto destination = destinations.find(identity);
+                if (destination == destinations.end())
+                    destination = destinations.emplace(identity, vibrance::win32::read_toast_destinations(appUserModelId)).first;
+                if (const auto target = vibrance::win32::match_toast_destination(destination->second, item.title, item.message))
+                {
+                    item.activationKind = target->kind;
+                    copy_utf8(item.activationArguments, target->arguments);
+                }
                 items.push_back(item);
             }
             catch (...)
@@ -1150,6 +1194,7 @@ private:
             manager.GetCurrentSession();
         if (!session)
         {
+            if (qualityProbe) qualityProbe->refresh({});
             publish(next);
             return;
         }
@@ -1237,6 +1282,25 @@ private:
             std::max(
                 milliseconds(timeline.EndTime()) - startMilliseconds,
                 std::int64_t(0));
+        if (qualityProbe)
+        {
+            const auto quality = qualityProbe->refresh({ next.sourceProcessId,
+                std::wstring(sourceApp), std::wstring(mediaProperties.Title()),
+                std::wstring(mediaProperties.Artist()),
+                next.playbackStatus == VIBRANCE_WIN32_MEDIA_PLAYING ||
+                    next.playbackStatus == VIBRANCE_WIN32_MEDIA_PAUSED,
+                std::wstring(mediaProperties.AlbumTitle()), next.durationMilliseconds });
+            switch (quality)
+            {
+                case MediaPlaybackQuality::eDolbyAtmos:
+                    next.playbackQuality = VIBRANCE_WIN32_MEDIA_QUALITY_DOLBY_ATMOS;
+                    break;
+                case MediaPlaybackQuality::eLossless:
+                    next.playbackQuality = VIBRANCE_WIN32_MEDIA_QUALITY_LOSSLESS;
+                    break;
+                default: break;
+            }
+        }
         publish(next);
     }
 
@@ -1677,6 +1741,31 @@ private:
         return search.result;
     }
 
+    static HWND quality_source_window(const Win32PlaybackQualityProbe::Request& request)
+    {
+        // UI ownership can be above the audio helper in Electron/browser apps.
+        // Follow that process ancestry only for metadata inspection; keep the
+        // original audio-session PID for capture. Track identity is rechecked
+        // inside the accessibility snapshot before accepting a badge.
+        const auto processes = process_snapshot();
+        const auto executable = process_executable_path(request.processId);
+        DWORD processId = request.processId;
+        for (unsigned depth = 0; processId != 0u && depth < 32u; ++depth)
+        {
+            if (processId != request.processId &&
+                !source_matches_process(request.sourceApp, processId) &&
+                (executable.empty() || !equal_aumid(
+                    process_executable_path(processId), executable))) break;
+            if (HWND window = find_source_window({}, processId)) return window;
+            const auto entry = std::find_if(processes.begin(), processes.end(),
+                [processId](const ProcessEntry& value) { return value.processId == processId; });
+            if (entry == processes.end() || entry->parentProcessId == processId) break;
+            processId = entry->parentProcessId;
+        }
+        // Packaged apps can have an ApplicationFrameHost-owned top-level HWND.
+        return find_source_window(request.sourceApp);
+    }
+
     static bool foreground_source_window(HWND window)
     {
         if (!window)
@@ -2076,6 +2165,7 @@ private:
     bool notificationChangePending = false;
     std::uint32_t featureMask = VIBRANCE_WIN32_INTEROP_MEDIA;
     bool stopping = false;
+    std::unique_ptr<Win32PlaybackQualityProbe> qualityProbe;
     std::thread worker;
 };
 }
@@ -2094,6 +2184,7 @@ private:
 #pragma comment(linker, "/EXPORT:vibrance_win32_interop_get_notifications=_vibrance_win32_interop_get_notifications")
 #pragma comment(linker, "/EXPORT:vibrance_win32_interop_dismiss_notification=_vibrance_win32_interop_dismiss_notification")
 #pragma comment(linker, "/EXPORT:vibrance_win32_interop_activate_notification_source=_vibrance_win32_interop_activate_notification_source")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_activate_notification=_vibrance_win32_interop_activate_notification")
 #pragma comment(linker, "/EXPORT:vibrance_win32_interop_resolve_application_icon=_vibrance_win32_interop_resolve_application_icon")
 #endif
 
@@ -2251,6 +2342,23 @@ vibrance_win32_interop_dismiss_notification(
     {
         return 0u;
     }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_activate_notification(VibranceWin32InteropHandle handle,
+    const char* appUserModelId, const char* arguments, std::uint32_t kind)
+{
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return 0u;
+    std::uint32_t result = 0u;
+    try
+    {
+        auto* bridge = static_cast<Win32InteropBridge*>(handle);
+        result = bridge && bridge->activate_notification(appUserModelId, arguments, kind) ? 1u : 0u;
+    }
+    catch (...) {}
+    if (SUCCEEDED(apartment)) CoUninitialize();
+    return result;
 }
 
 extern "C" __declspec(dllexport) std::uint32_t __cdecl

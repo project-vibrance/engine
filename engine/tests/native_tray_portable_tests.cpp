@@ -1,5 +1,7 @@
 #include <vibranceUI/platform/native_tray.h>
+#if !defined(__APPLE__)
 #include "../src/platform/composition_presenter.h"
+#endif
 
 int main()
 {
@@ -12,6 +14,7 @@ int main()
     tray.shutdown();
     tray.shutdown();
     if (tray.initialise()) return 1;
+#if !defined(__APPLE__)
     CompositionPresenter presenter;
     if (presenter.initialise(nullptr, {}, {}, 1, 1, 1, 0, false, false) ||
         presenter.available() || presenter.gpu_interop() || presenter.buffer_count() ||
@@ -19,5 +22,6 @@ int main()
         presenter.set_regions({}) || presenter.present(0) != CompositionPresenter::PresentResult::eFailed)
         return 1;
     presenter.shutdown({});
+#endif
     return 0;
 }
