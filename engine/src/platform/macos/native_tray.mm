@@ -117,6 +117,7 @@ struct NativeTray::Impl
             if (image)
             {
                 [image setSize:NSMakeSize(18, 18)];
+                [image setTemplate:YES];
                 [button setImage:image];
                 [image release];
             }
