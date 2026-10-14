@@ -281,7 +281,12 @@ struct SystemNotificationProvider::Impl
     {
         if (!handle || !activateNotification || target.empty()) return false;
         const std::string identity(target), payload(arguments);
-        return activateNotification(handle, identity.c_str(), payload.c_str(), static_cast<std::uint32_t>(kind)) != 0u;
+        const bool invoked = activateNotification(handle, identity.c_str(), payload.c_str(), static_cast<std::uint32_t>(kind)) != 0u;
+        if (!invoked)
+            provider_diagnostic(true, "Original notification activation failed for " + identity +
+                "; kind=" + std::to_string(static_cast<std::uint32_t>(kind)) +
+                "; argument bytes=" + std::to_string(payload.size()));
+        return invoked;
     }
 
     SystemApplicationIcon resolve_application_icon(

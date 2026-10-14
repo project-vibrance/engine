@@ -26,6 +26,12 @@ int main()
         return 1;
     }
 #endif
+    if (provider.activate_notification("Vibrance.Tests.MissingSender", "", SystemNotificationActivationKind::eApplication) ||
+        provider.activate_notification("Vibrance.Tests.MissingSender", "", SystemNotificationActivationKind::eForeground))
+    {
+        std::cerr << "An unavailable notification action was treated as successful activation\n";
+        return 1;
+    }
 
     return 0;
 }

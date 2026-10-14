@@ -498,6 +498,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
                 "${VIBRANCE_WIN32_INTEROP_ABI_HEADER}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/playback_quality_probe.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/notification_activation.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/notification_payload_store.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/media/playback_quality_detection.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/media/playback_quality.h"
                 "${VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT}"

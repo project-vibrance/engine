@@ -275,6 +275,7 @@ if(VIBRANCE_WIN32_INTEROP_AVAILABLE AND VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
             "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
         DEPENDS notification_activation_win32_tests.cpp
             "${PROJECT_SOURCE_DIR}/engine/src/platform/win32/notification_activation.h"
+            "${PROJECT_SOURCE_DIR}/engine/src/platform/win32/notification_payload_store.h"
             "${PROJECT_SOURCE_DIR}/scripts/win32/build_notification_activation_tests.bat" VERBATIM)
     add_custom_target(vibrance_notification_activation_fixture ALL DEPENDS "${_activation_fixture}")
     add_test(NAME vibrance_notification_activation_win32_tests COMMAND "${_activation_fixture}")

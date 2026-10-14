@@ -44,6 +44,7 @@
 #include <memory>
 #include "playback_quality_probe.h"
 #include "notification_activation.h"
+#include "notification_payload_store.h"
 
 namespace
 {
@@ -865,14 +866,9 @@ public:
     {
         if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u ||
             !appUserModelId || !arguments) return false;
-        if (kind == 0u) return activate_notification_source(appUserModelId);
-        if (kind == 1u || kind == 3u)
-        {
-            CLSID activator {};
-            const auto identity = winrt::to_hstring(appUserModelId);
-            if (!vibrance::win32::notification_activator_clsid(identity.c_str(), activator))
-                return activate_notification_source(appUserModelId);
-        }
+        // Launching the application is not notification activation. Keep the
+        // original card available when its actual action cannot be dispatched.
+        if (kind == 0u) return false;
         return vibrance::win32::invoke_toast_destination(appUserModelId, arguments, kind);
     }
 
@@ -1040,9 +1036,14 @@ private:
 
         const auto notifications = listener.GetNotificationsAsync(
             NotificationKinds::Toast).get();
+        if (notifications.Size() == 0u)
+        {
+            publish_notifications(next, {});
+            return;
+        }
         std::vector<VibranceWin32NotificationItem> items;
         items.reserve(notifications.Size());
-        std::unordered_map<std::string, std::vector<vibrance::win32::ToastDestination>> destinations;
+        vibrance::win32::NotificationPayloadStore payloadStore;
         for (const auto& notification : notifications)
         {
             try
@@ -1150,10 +1151,11 @@ private:
                         DisplayInfo().DisplayName());
                 }
                 const std::string identity = winrt::to_string(appUserModelId);
-                auto destination = destinations.find(identity);
-                if (destination == destinations.end())
-                    destination = destinations.emplace(identity, vibrance::win32::read_toast_destinations(appUserModelId)).first;
-                if (const auto target = vibrance::win32::match_toast_destination(destination->second, item.title, item.message))
+                // Visual text is not an identity: two messages can look the
+                // same while referring to different conversations. Never use
+                // another history record to guess a missing native payload.
+                const auto target = payloadStore.read(item.notificationId, identity, item.creationUnixMilliseconds);
+                if (target)
                 {
                     item.activationKind = target->kind;
                     copy_utf8(item.activationArguments, target->arguments);
