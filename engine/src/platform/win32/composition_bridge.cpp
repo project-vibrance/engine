@@ -7,6 +7,7 @@
 #include <shellapi.h>
 
 #include "composition_bridge_abi.h"
+#include "composition_region_effects.h"
 #include "liquid_glass_d3d11.h"
 #include "liquid_glass_dwm_protocol.h"
 #include "liquid_glass_dwm_security.h"
@@ -1936,74 +1937,7 @@ private:
         VibranceCompositionRegion right,
         bool shaderOnly) noexcept
     {
-        // A native lens always uses the same identity backdrop and marker
-        // brush. Its vertical split, optical controls and mask are geometry
-        // or shared uniforms, so retain the native graph throughout changes.
-        // Identity and shader-slot compatibility are checked by the caller.
-        if (shaderOnly)
-        {
-            return true;
-        }
-        // These fields affect only visual geometry. Material/provider, blur,
-        // saturation, tint and vertical split still require a new effect graph.
-        left.shape = 0u;
-        right.shape = 0u;
-        left.x = 0.0f;
-        left.y = 0.0f;
-        right.x = 0.0f;
-        right.y = 0.0f;
-        left.width = 0.0f;
-        left.height = 0.0f;
-        right.width = 0.0f;
-        right.height = 0.0f;
-        left.cornerRadius = 0.0f;
-        left.topLeftRadius = 0.0f;
-        left.topRightRadius = 0.0f;
-        left.bottomRightRadius = 0.0f;
-        left.bottomLeftRadius = 0.0f;
-        right.cornerRadius = 0.0f;
-        right.topLeftRadius = 0.0f;
-        right.topRightRadius = 0.0f;
-        right.bottomRightRadius = 0.0f;
-        right.bottomLeftRadius = 0.0f;
-        left.squircleAmount = 0.0f;
-        left.squirclePower = 0.0f;
-        left.notchAmount = 0.0f;
-        left.notchDepth = 0.0f;
-        right.squircleAmount = 0.0f;
-        right.squirclePower = 0.0f;
-        right.notchAmount = 0.0f;
-        right.notchDepth = 0.0f;
-        left.opacity = 0.0f;
-        right.opacity = 0.0f;
-        const auto clearShaderMask = [](VibranceCompositionRegion& region) {
-            // Mask geometry and the cap gradient are published uniforms. A
-            // contour transition must retain its native brush and draw order.
-            region.contourCount = 0u;
-            region.hasExclusion = 0u;
-            std::fill_n(region.viewportRect, 4u, 0.0f);
-            std::fill_n(region.viewportFade, 3u, 0.0f);
-            region.paintCapGradient = 0u;
-            region.flags &= 1u;
-            std::fill_n(region.capGradient, 4u, 0.0f);
-            std::fill_n(region.contours, 3u, VibranceCompositionContour {});
-            region.exclusion = {};
-        };
-        clearShaderMask(left);
-        clearShaderMask(right);
-        if (left.material == 2u && right.material == 2u &&
-            left.liquidBackend == 2u && right.liquidBackend == 2u)
-        {
-            left.liquidRefraction = right.liquidRefraction = 0.0f;
-            left.liquidBlur = right.liquidBlur = 0.0f;
-            left.liquidRim = right.liquidRim = 0.0f;
-            left.liquidDispersion = right.liquidDispersion = 0.0f;
-            left.liquidTintRed = right.liquidTintRed = 0.0f;
-            left.liquidTintGreen = right.liquidTintGreen = 0.0f;
-            left.liquidTintBlue = right.liquidTintBlue = 0.0f;
-            left.liquidTintAlpha = right.liquidTintAlpha = 0.0f;
-        }
-        return std::memcmp(&left, &right, sizeof(left)) == 0;
+        return vibrance::win32::same_composition_region_effect_graph(left, right, shaderOnly);
     }
 
     bool initialise_liquid_pipeline()
@@ -3121,15 +3055,13 @@ private:
             }
         }
 
-        if (region.tintAlpha > 0.0001f)
+        const auto fallbackTint = vibrance::win32::composition_fallback_tint(region);
+        if (fallbackTint[3] > 0.0001f)
         {
             auto tint = compositor_.CreateSpriteVisual();
             tint.Size(materialContainer.Size());
             tint.Brush(mask_viewport_brush(state, compositor_.CreateColorBrush(color(
-                region.tintRed,
-                region.tintGreen,
-                region.tintBlue,
-                region.tintAlpha))));
+                fallbackTint[0], fallbackTint[1], fallbackTint[2], fallbackTint[3]))));
             materialContainer.Children().InsertAtTop(tint);
             state.tintVisual = tint;
         }

@@ -825,6 +825,17 @@ int main()
         };
         passed &= expect(contourRetained(plan.shapes) || contourRetained(plan.cachedShapes),
             "native control openings must preserve the section's outer squircle corners and square joining edge");
+        auto tintedOptics = optics;
+        tintedOptics.liquidTint = { 0.2f, 0.3f, 0.4f, 0.8f };
+        const auto beforeTint = nativeScene.frame_generation();
+        ui_update_liquid_controls(nativeScene, true, tintedOptics, false, search.root);
+        passed &= expect(nativeScene.frame_generation() > beforeTint &&
+            registry.get<SystemBackdropComponent>(search.root).region.liquidTint.alpha == 0.8f,
+            "changing only a native lens tint must schedule a frame and update its published material");
+        const auto afterTint = nativeScene.frame_generation();
+        ui_update_liquid_controls(nativeScene, true, tintedOptics, false, search.root);
+        passed &= expect(nativeScene.frame_generation() == afterTint,
+            "an unchanged native tint must retain the lens without continuously scheduling frames");
         registry.get<UiLiquidControlSurface>(search.root) = {};
         ui_update_liquid_controls(nativeScene, true, optics);
         passed &= expect(!registry.any_of<SystemBackdropComponent>(search.root) &&

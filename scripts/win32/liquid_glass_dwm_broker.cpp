@@ -14,6 +14,7 @@
 #include "liquid_glass_broker_startup.h"
 
 #include <array>
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -127,15 +128,23 @@ DWORD find_session_dwm()
 }
 
 bool resolve_symbol(HANDLE process, const char* name, DWORD64 base,
-                    std::uint64_t& rva)
+                    std::uint64_t& rva, bool required = false)
 {
     std::array<char, sizeof(SYMBOL_INFO) + MAX_SYM_NAME> bytes {};
     auto* symbol = reinterpret_cast<SYMBOL_INFO*>(bytes.data());
     symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
     symbol->MaxNameLen = MAX_SYM_NAME;
-    if (!SymFromName(process, name, symbol) ||
-        symbol->Address < base)
+    rva = 0;
+    SetLastError(ERROR_SUCCESS);
+    const bool found = SymFromName(process, name, symbol) != FALSE;
+    // Read the failing lookup's error before another symbol request replaces it.
+    const DWORD error = GetLastError();
+    if (!found || symbol->ModBase != base || symbol->Address < base)
     {
+        if (required)
+            std::cerr << "Required DWM symbol unavailable: " << name <<
+                " (Win32 error " << (found ? ERROR_INVALID_ADDRESS :
+                    error ? error : ERROR_NOT_FOUND) << ").\n";
         return false;
     }
     rva = symbol->Address - base;
@@ -143,8 +152,9 @@ bool resolve_symbol(HANDLE process, const char* name, DWORD64 base,
 }
 
 bool resolve_config(const std::wstring& symbolCache,
-                    LiquidDwmHookConfig& config)
+                    LiquidDwmHookConfig& config, DWORD* failureCode = nullptr)
 {
+    if (failureCode) *failureCode = 4;
     wchar_t systemDirectory[MAX_PATH] {};
     if (!GetSystemDirectoryW(systemDirectory, MAX_PATH))
     {
@@ -166,7 +176,8 @@ bool resolve_config(const std::wstring& symbolCache,
     const std::wstring searchPath = symbolCache + L";srv*" + symbolCache +
         L"*https://msdl.microsoft.com/download/symbols";
     const HANDLE process = GetCurrentProcess();
-    SymSetOptions(SYMOPT_DEFERRED_LOADS);
+    SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_EXACT_SYMBOLS |
+        SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS);
     if (!SymInitializeW(process, searchPath.c_str(), FALSE))
     {
         std::wcerr << L"SymInitialize failed: " << GetLastError() << L"\n";
@@ -178,27 +189,25 @@ bool resolve_config(const std::wstring& symbolCache,
     {
         std::wcerr << L"SymLoadModuleEx failed: " << GetLastError() << L"\n";
     }
-    const bool present = base && resolve_symbol(process,
-            "dwmcore!COverlayContext::Present", base,
-            config.presentRva);
-    const bool display = base && resolve_symbol(process,
+    // Present only counted calls in an obsolete diagnostic detour. The native
+    // marker renderer must not depend on that unused private function's name.
+    config.presentRva = 0;
+    const std::array<bool, 4> displaySymbols {{
+        base && resolve_symbol(process,
             "dwmcore!??_7CDDisplaySwapChain@@6BIDeviceResource@@@", base,
-            config.displaySwapchainVtableRva) &&
-        resolve_symbol(process,
+            config.displaySwapchainVtableRva, true),
+        base && resolve_symbol(process,
             "dwmcore!?GetPhysicalBackBuffer@CDDisplaySwapChain@@UEBAPEAVISwapChainBuffer@@XZ",
-            base, config.displayPhysicalRva) &&
-        resolve_symbol(process,
+            base, config.displayPhysicalRva, true),
+        base && resolve_symbol(process,
             "dwmcore!??_7CDDisplaySwapChainBuffer@@6B@", base,
-            config.displayBufferVtableRva) &&
-        resolve_symbol(process,
+            config.displayBufferVtableRva, true),
+        base && resolve_symbol(process,
             "dwmcore!?GetD3D11Resource@CDDisplaySwapChainBuffer@@UEAAPEAUID3D11Resource@@XZ",
-            base, config.displayResourceRva);
-    if (base && (!present || !display))
-    {
-        std::wcerr << L"DWM symbols: present=" << present <<
-            L", display=" << display << L", error=" << GetLastError() <<
-            L"\n";
-    }
+            base, config.displayResourceRva, true)
+    }};
+    const bool display = std::all_of(displaySymbols.begin(), displaySymbols.end(),
+        [](bool resolved) { return resolved; });
     if (base)
     {
         (void)resolve_symbol(process,
@@ -215,37 +224,37 @@ bool resolve_config(const std::wstring& symbolCache,
             base, config.legacyResourceRva);
         (void)resolve_symbol(process,
             "dwmcore!?RenderContent@CWindowNode@@UEAAJPEAVCDrawingContext@@PEA_N@Z",
-            base, config.windowRenderRva);
+            base, config.windowRenderRva, true);
         (void)resolve_symbol(process,
             "dwmcore!?GetHwnd@CWindowNode@@MEBAPEAUHWND__@@XZ",
-            base, config.windowGetHwndRva);
+            base, config.windowGetHwndRva, true);
         (void)resolve_symbol(process,
             "dwmcore!?FlushD2D@CDrawingContext@@QEAAJXZ",
-            base, config.drawingFlushRva);
+            base, config.drawingFlushRva, true);
         (void)resolve_symbol(process,
             "dwmcore!?Draw@CContent@@UEAAJPEAVCDrawingContext@@AEBUD2D_SIZE_F@@PEAVCDrawListCache@@@Z",
-            base, config.contentDrawRva);
+            base, config.contentDrawRva, true);
         (void)resolve_symbol(process,
             "dwmcore!??_7CColorBrush@@6BCContent@@@",
-            base, config.colourBrushVtableRva);
+            base, config.colourBrushVtableRva, true);
         (void)resolve_symbol(process,
             "dwmcore!?ApplyRenderStateInternal@CDrawingContext@@AEAAJ_N@Z",
-            base, config.applyRenderStateRva);
+            base, config.applyRenderStateRva, true);
         (void)resolve_symbol(process, "dwmcore!?Render@CDrawListEntry@@QEAAJPEAVCDrawingContext@@AEBVCMILMatrix@@MW4Enum@BlendMode@@@Z",
-            base, config.drawListEntryRenderRva);
+            base, config.drawListEntryRenderRva, true);
         (void)resolve_symbol(process, "dwmcore!?EmitGeometry@CRenderingBatchCommand@@QEBAJPEAVCD3DBatchExecutionContext@@_N@Z",
-            base, config.batchCommandEmitRva);
+            base, config.batchCommandEmitRva, true);
         (void)resolve_symbol(process, "dwmcore!?EmitGeometry@CCommonRenderingEffect@@UEBAJPEAVCD3DBatchExecutionContext@@PEBVCRenderingBatchCommand@@@Z",
-            base, config.commonEffectEmitRva);
+            base, config.commonEffectEmitRva, true);
         (void)resolve_symbol(process, "dwmcore!?EmitGeometry@CBrushRenderingEffect@@UEBAJPEAVCD3DBatchExecutionContext@@PEBVCRenderingBatchCommand@@@Z",
-            base, config.brushEffectEmitRva);
+            base, config.brushEffectEmitRva, true);
         (void)resolve_symbol(process, "dwmcore!?Flush@CD3DBatchExecutionContext@@QEAAXW4FlushReason@@@Z",
-            base, config.batchFlushRva);
+            base, config.batchFlushRva, true);
         (void)resolve_symbol(process, "dwmcore!??_7CDrawListEntry@@6B@",
-            base, config.drawListEntryVtableRva);
+            base, config.drawListEntryVtableRva, true);
         (void)resolve_symbol(process,
             "dwmcore!?Draw@CBrush@@UEAAJPEAVCDrawingContext@@AEBUD2D_SIZE_F@@PEAVCDrawListCache@@@Z",
-            base, config.brushDrawRva);
+            base, config.brushDrawRva, true);
         (void)resolve_symbol(process,
             "dwmcore!?RenderTargetDirty@CCaptureRenderTarget@@MEAAJPEAVCDrawingContext@@PEA_N@Z",
             base, config.captureRenderRva);
@@ -277,13 +286,18 @@ bool resolve_config(const std::wstring& symbolCache,
             "dwmcore!??_7CDeviceTextureTarget@@6BIDeviceResource@@IDeviceTarget@@@",
             base, config.ddaTargetVtableRva);
     }
-    const bool resolved = present && display && config.windowRenderRva &&
-        config.windowGetHwndRva && config.drawingFlushRva &&
-        config.contentDrawRva && config.colourBrushVtableRva &&
-        config.applyRenderStateRva && config.drawListEntryRenderRva &&
-        config.batchCommandEmitRva && config.commonEffectEmitRva &&
-        config.brushEffectEmitRva && config.batchFlushRva &&
-        config.drawListEntryVtableRva && config.brushDrawRva;
+    IMAGEHLP_MODULEW64 symbols {};
+    symbols.SizeOfStruct = sizeof(symbols);
+    const bool haveModuleInfo = base && SymGetModuleInfoW64(process, base, &symbols);
+    const bool matchingPdb = haveModuleInfo && symbols.SymType == SymPdb && !symbols.PdbUnmatched;
+    const bool renderer = vibrance::win32::liquid_dwm_windows11_config_complete(config);
+    std::wcout << L"DWM symbols: Windows build=" << windows_build_number() <<
+        L", matching PDB=" << matchingPdb << L", display=" << display <<
+        L", renderer=" << renderer << L"\n";
+    if (haveModuleInfo)
+        std::wcout << L"DWM symbol file: " << symbols.LoadedPdbName << L"\n";
+    if (matchingPdb && !renderer && failureCode) *failureCode = 24;
+    const bool resolved = matchingPdb && renderer;
     SymCleanup(process);
     return resolved;
 }
@@ -301,7 +315,7 @@ bool resolve_windows10_config(const std::wstring& path, const std::wstring& symb
     if (!SymInitializeW(process, searchPath.c_str(), FALSE)) return false;
     const DWORD64 base = SymLoadModuleExW(process, nullptr, path.c_str(), L"dwmcore", 0, 0, nullptr, 0);
     const auto resolve = [&](const char* name, std::uint64_t& rva) {
-        return base && resolve_symbol(process, name, base, rva);
+        return base && resolve_symbol(process, name, base, rva, true);
     };
     const bool resolved =
         resolve("dwmcore!?Draw@CBrush@@UEAAJPEAVCDrawingContext@@AEBUD2D_SIZE_F@@PEAVCDrawListCache@@@Z", config.brushDrawRva) &&
@@ -581,9 +595,9 @@ int wmain(int argc, wchar_t** argv)
     if (argc == 3 && _wcsicmp(argv[1], L"--resolve-only") == 0)
     {
         LiquidDwmHookConfig config {};
-        if (!resolve_config(argv[2], config)) return 19;
-        std::wcout << L"Present RVA=0x" << std::hex << config.presentRva
-            << L" display vtable=0x" << config.displaySwapchainVtableRva
+        DWORD failure = 4;
+        if (!resolve_config(argv[2], config, &failure)) return static_cast<int>(failure);
+        std::wcout << L"Display vtable=0x" << std::hex << config.displaySwapchainVtableRva
             << L" physical=0x" << config.displayPhysicalRva
             << L" buffer vtable=0x" << config.displayBufferVtableRva
             << L" resource=0x" << config.displayResourceRva
@@ -823,11 +837,14 @@ int wmain(int argc, wchar_t** argv)
 #endif
     wchar_t systemDirectory[MAX_PATH] {};
     GetSystemDirectoryW(systemDirectory, ARRAYSIZE(systemDirectory));
+    DWORD symbolFailure = 4;
     if (!(windows10 ? resolve_windows10_config(std::wstring(systemDirectory) + L"\\dwmcore.dll",
-            symbolCache, config, windows10Layout) : resolve_config(symbolCache, config)))
+            symbolCache, config, windows10Layout) : resolve_config(symbolCache, config, &symbolFailure)))
     {
-        std::wcerr << L"Matching dwmcore PDB symbols are unavailable\n";
-        return 4;
+        std::wcerr << (symbolFailure == 24 ?
+            L"The matching dwmcore PDB is loaded, but required renderer symbols are missing.\n" :
+            L"Matching dwmcore PDB symbols are unavailable.\n");
+        return static_cast<int>(symbolFailure);
     }
     // Symbol downloads can outlast the observer's initial desktop check.
     // Recheck immediately before touching the compositor's startup mappings.

@@ -87,6 +87,7 @@ inline const wchar_t* exit_description(DWORD code)
     case 11: return L"The helper requires an elevated administrator token.";
     case 16: return L"Startup is deferred while a fullscreen application is active.";
     case 23: return L"This Windows build or process architecture does not support the native extension.";
+    case 24: return L"The matching DWM PDB is available, but this compositor lacks required renderer symbols. See the individual lookup failures above.";
     default: return L"Liquid Glass broker startup failed; see the output above.";
     }
 }

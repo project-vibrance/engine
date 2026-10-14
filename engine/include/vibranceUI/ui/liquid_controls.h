@@ -333,10 +333,10 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             if (surface && surface->preserveColour)
                 tint = { saved->shape.color0.r, saved->shape.color0.g,
                     saved->shape.color0.b, 0.9f };
+#endif
             if (region.liquidTint.red != tint.red || region.liquidTint.green != tint.green ||
                 region.liquidTint.blue != tint.blue || region.liquidTint.alpha != tint.alpha)
                 scene.mark_dirty(entity);
-#endif
             region.liquidTint = tint;
         }
     };

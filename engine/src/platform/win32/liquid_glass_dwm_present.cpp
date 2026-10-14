@@ -1,4 +1,4 @@
-// Private DWM present integration. A matching PDB and module fingerprint are
+// Private DWM draw integration. A matching PDB and module fingerprint are
 // required before the broker loads this DLL into the session compositor.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -33,8 +33,6 @@ namespace
 {
 using namespace vibrance::win32;
 using Microsoft::WRL::ComPtr;
-using PresentFn = std::uint64_t (*)(void*, void*, std::uint32_t,
-    const std::vector<RECT>&, std::uint32_t, bool*, bool);
 using PhysicalFn = void* (*)(void*);
 using ResourceFn = ID3D11Resource* (*)(void*);
 using WindowRenderFn = HRESULT (*)(void*, void*, bool*);
@@ -57,7 +55,6 @@ using DrawListEntryRenderFn = HRESULT (*)(void*, void*, const void*, float, std:
 
 HMODULE extensionModule = nullptr;
 HMODULE dwmcoreModule = nullptr;
-PresentFn originalPresent = nullptr;
 WindowRenderFn originalWindowRender = nullptr;
 WindowRenderFn originalCaptureRender = nullptr;
 WindowRenderFn originalOffscreenRender = nullptr;
@@ -768,17 +765,6 @@ bool ensure_renderer(ID3D11Device* device)
     return rendererDevice != nullptr;
 }
 
-std::uint64_t present_hook(void* self, void* chain, std::uint32_t flags,
-    const std::vector<RECT>& dirtyRects, std::uint32_t unknown,
-    bool* value, bool legacy)
-{
-    status(1);
-    // Window content owns the optical draw. Replaying the UI here bypasses
-    // DWM's window order and leaves retained copies on secondary displays.
-    return originalPresent(self, chain, flags, dirtyRects,
-        unknown, value, legacy);
-}
-
 bool source_from_context(void* drawingContext,
     ID3D11Texture2D*& texture,
     ID3D11RenderTargetView*& target) noexcept
@@ -1196,14 +1182,7 @@ bool start_extension()
     }
     windows10Adapter = liquid_dwm_uses_windows10_adapter(version.dwBuildNumber, machine);
     if (!config || hookConfig.version != liquidDwmProtocolVersion || hookConfig.moduleMachine != machine) return false;
-    if (!windows10Adapter && (!hookConfig.presentRva || !hookConfig.displaySwapchainVtableRva ||
-        !hookConfig.displayPhysicalRva || !hookConfig.displayBufferVtableRva ||
-        !hookConfig.displayResourceRva || !hookConfig.contentDrawRva ||
-        !hookConfig.colourBrushVtableRva || !hookConfig.applyRenderStateRva ||
-        !hookConfig.batchCommandEmitRva || !hookConfig.commonEffectEmitRva ||
-        !hookConfig.brushEffectEmitRva || !hookConfig.batchFlushRva ||
-        !hookConfig.drawListEntryVtableRva || !hookConfig.brushDrawRva ||
-        !hookConfig.drawListEntryRenderRva))
+    if (!windows10Adapter && !liquid_dwm_windows11_config_complete(hookConfig))
         return false;
     dwmcoreModule = GetModuleHandleW(L"dwmcore.dll");
     if (!dwmcoreModule) return false;
@@ -1221,8 +1200,7 @@ bool start_extension()
     if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
     const auto imageSize = nt->OptionalHeader.SizeOfImage;
     if (windows10Adapter) return start_windows10_hooks(base, imageSize);
-    const std::array<std::uint64_t, 5> mandatory {{
-        hookConfig.presentRva,
+    const std::array<std::uint64_t, 4> mandatory {{
         hookConfig.displaySwapchainVtableRva + 64 * sizeof(void*),
         hookConfig.displayPhysicalRva,
         hookConfig.displayBufferVtableRva + 64 * sizeof(void*),
@@ -1260,8 +1238,6 @@ bool start_extension()
             hookConfig.displayResourceRva) == UINT32_MAX)
         return false;
     stage(4);
-    originalPresent = reinterpret_cast<PresentFn>(
-        const_cast<std::uint8_t*>(base) + hookConfig.presentRva);
     originalContentDraw = reinterpret_cast<ContentDrawFn>(
         const_cast<std::uint8_t*>(base) + hookConfig.contentDrawRva);
     originalBrushDraw = reinterpret_cast<ContentDrawFn>(
@@ -1351,48 +1327,40 @@ bool start_extension()
         }
         CloseHandle(snapshot);
     }
-    const LONG attached = DetourAttach(
-        reinterpret_cast<PVOID*>(&originalPresent),
-        reinterpret_cast<PVOID>(&present_hook));
+    // The marker is rendered inside DWM's draw batch. No diagnostic detour at
+    // COverlayContext::Present is needed, and its private name/ABI can change.
     // Scope the marker to the island's native draw in every output path.
-    const LONG windowAttached = attached == NO_ERROR && originalWindowRender ?
+    const LONG windowAttached = originalWindowRender ?
         DetourAttach(reinterpret_cast<PVOID*>(&originalWindowRender),
             reinterpret_cast<PVOID>(&window_render_hook)) : NO_ERROR;
-    const LONG captureAttached = attached == NO_ERROR &&
-        windowAttached == NO_ERROR && originalCaptureRender ?
+    const LONG captureAttached = windowAttached == NO_ERROR && originalCaptureRender ?
         DetourAttach(reinterpret_cast<PVOID*>(&originalCaptureRender),
             reinterpret_cast<PVOID>(&capture_render_hook)) : NO_ERROR;
-    const LONG offscreenAttached = attached == NO_ERROR &&
-        windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
+    const LONG offscreenAttached = windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
         originalOffscreenRender ?
         DetourAttach(reinterpret_cast<PVOID*>(&originalOffscreenRender),
             reinterpret_cast<PVOID>(&offscreen_render_hook)) : NO_ERROR;
-    const LONG flushAttached = attached == NO_ERROR &&
-        windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
+    const LONG flushAttached = windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
         offscreenAttached == NO_ERROR && drawingFlush ?
         DetourAttach(reinterpret_cast<PVOID*>(&drawingFlush),
             reinterpret_cast<PVOID>(&drawing_flush_hook)) : NO_ERROR;
-    const LONG capturePresentAttached = attached == NO_ERROR &&
-        windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
+    const LONG capturePresentAttached = windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
         offscreenAttached == NO_ERROR && flushAttached == NO_ERROR &&
         originalCapturePresent ?
         DetourAttach(reinterpret_cast<PVOID*>(&originalCapturePresent),
             reinterpret_cast<PVOID>(&capture_present_hook)) : NO_ERROR;
-    const LONG ddaAttached = attached == NO_ERROR &&
-        windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
+    const LONG ddaAttached = windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
         offscreenAttached == NO_ERROR && flushAttached == NO_ERROR &&
         capturePresentAttached == NO_ERROR && originalDdaRender ?
         DetourAttach(reinterpret_cast<PVOID*>(&originalDdaRender),
             reinterpret_cast<PVOID>(&dda_render_hook)) : NO_ERROR;
-    const LONG ddaPresentAttached = attached == NO_ERROR &&
-        windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
+    const LONG ddaPresentAttached = windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
         offscreenAttached == NO_ERROR && flushAttached == NO_ERROR &&
         capturePresentAttached == NO_ERROR && ddaAttached == NO_ERROR &&
         originalDdaPresent ?
         DetourAttach(reinterpret_cast<PVOID*>(&originalDdaPresent),
             reinterpret_cast<PVOID>(&dda_present_hook)) : NO_ERROR;
-    const LONG markerAttached = attached == NO_ERROR &&
-        windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
+    const LONG markerAttached = windowAttached == NO_ERROR && captureAttached == NO_ERROR &&
         offscreenAttached == NO_ERROR && flushAttached == NO_ERROR &&
         capturePresentAttached == NO_ERROR && ddaAttached == NO_ERROR &&
         ddaPresentAttached == NO_ERROR ?
@@ -1413,7 +1381,7 @@ bool start_extension()
     const LONG entryAttached = sourceBrushAttached == NO_ERROR ?
         DetourAttach(reinterpret_cast<PVOID*>(&originalDrawListEntryRender),
             reinterpret_cast<PVOID>(&draw_list_entry_render_hook)) : ERROR_INVALID_FUNCTION;
-    const LONG committed = attached == NO_ERROR && windowAttached == NO_ERROR &&
+    const LONG committed = windowAttached == NO_ERROR &&
         captureAttached == NO_ERROR && offscreenAttached == NO_ERROR &&
         flushAttached == NO_ERROR && capturePresentAttached == NO_ERROR &&
         ddaAttached == NO_ERROR && ddaPresentAttached == NO_ERROR &&
@@ -1422,7 +1390,7 @@ bool start_extension()
         sourceBrushAttached == NO_ERROR && entryAttached == NO_ERROR ?
         DetourTransactionCommit() : DetourTransactionAbort();
     for (HANDLE thread : threads) CloseHandle(thread);
-    if (attached != NO_ERROR || windowAttached != NO_ERROR ||
+    if (windowAttached != NO_ERROR ||
         captureAttached != NO_ERROR || offscreenAttached != NO_ERROR ||
         flushAttached != NO_ERROR || capturePresentAttached != NO_ERROR ||
         ddaAttached != NO_ERROR || ddaPresentAttached != NO_ERROR ||
@@ -1433,7 +1401,7 @@ bool start_extension()
     HMODULE pinned = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
         GET_MODULE_HANDLE_EX_FLAG_PIN,
-        reinterpret_cast<LPCWSTR>(&present_hook), &pinned);
+        reinterpret_cast<LPCWSTR>(&content_draw_hook), &pinned);
     stage(5);
     if (!SetEvent(readyEvent)) return false;
     stage(11);

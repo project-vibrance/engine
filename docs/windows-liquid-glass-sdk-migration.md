@@ -37,6 +37,16 @@ requires the ARM64 release; an emulated x64 broker is rejected before injection.
 The build requires matching Debugging Tools DLLs instead of silently packaging
 a runtime that only works with a previously downloaded symbol cache.
 
+The marker renderer does not resolve or detour `COverlayContext::Present`.
+That older hook only counted presentations and could prevent startup when
+its private symbol was absent, even with a matching PDB and functioning display
+lookups (reported on Windows build 26200, `dwmcore.dll` 10.0.26100.9278).
+Its configuration word remains reserved to preserve the shared layout; status
+counter 1 no longer counts presentations. Actual rendering symbols and the module
+fingerprint are still required. Resolution reports each failed required lookup
+immediately, the loaded PDB, and renderer completeness. Exit code 24 distinguishes
+a matching PDB with unsupported rendering symbols from a PDB retrieval failure.
+
 1. The app publishes each lens region's HWND, allocation identity, monitor and
    client bounds, shape, opacity, optical controls, tint, optional contour union
    and exclusion in a versioned shared region table. Different surfaces in the

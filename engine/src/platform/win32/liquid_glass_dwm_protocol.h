@@ -142,6 +142,8 @@ struct alignas(8) LiquidDwmHookConfig
 {
     std::uint32_t version = liquidDwmProtocolVersion;
     std::uint32_t moduleMachine = 0;
+    // Reserved for the obsolete presentation-counter hook. Keep this word so
+    // existing protocol layouts remain compatible; the renderer does not use it.
     std::uint64_t presentRva = 0;
     std::uint64_t displaySwapchainVtableRva = 0;
     std::uint64_t displayPhysicalRva = 0;
@@ -178,4 +180,16 @@ struct alignas(8) LiquidDwmHookConfig
 };
 
 static_assert(sizeof(LiquidDwmHookConfig) == 296);
+
+inline bool liquid_dwm_windows11_config_complete(const LiquidDwmHookConfig& config) noexcept
+{
+    return config.displaySwapchainVtableRva && config.displayPhysicalRva &&
+        config.displayBufferVtableRva && config.displayResourceRva &&
+        config.windowRenderRva && config.windowGetHwndRva && config.drawingFlushRva &&
+        config.contentDrawRva && config.colourBrushVtableRva &&
+        config.applyRenderStateRva && config.drawListEntryRenderRva &&
+        config.batchCommandEmitRva && config.commonEffectEmitRva &&
+        config.brushEffectEmitRva && config.batchFlushRva &&
+        config.drawListEntryVtableRva && config.brushDrawRva;
+}
 }

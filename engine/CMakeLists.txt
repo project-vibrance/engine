@@ -238,6 +238,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_COMPOSITION_ABI_HEADER}"
                 "${VIBRANCE_COMPOSITION_PRIVATE_HEADER}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/system_backdrop_policy.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_region_effects.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_session.h"
                 "${VIBRANCE_LIQUID_SHADER_ABI_HEADER}"
