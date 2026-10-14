@@ -11,10 +11,12 @@
 #include "../../engine/src/platform/win32/liquid_glass_dwm_security.h"
 #include "../../engine/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
 #include "liquid_glass_runtime_cache.h"
+#include "liquid_glass_broker_startup.h"
 
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <iostream>
 #include <string>
 
@@ -39,7 +41,10 @@ bool native_hooks_allowed()
 #else
     constexpr std::uint32_t machine = IMAGE_FILE_MACHINE_AMD64;
 #endif
-    return vibrance::win32::liquid_dwm_native_hooks_allowed(windows_build_number(), machine);
+    USHORT processMachine = 0, nativeMachine = 0;
+    return IsWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine) &&
+        nativeMachine == machine &&
+        vibrance::win32::liquid_dwm_native_hooks_allowed(windows_build_number(), machine);
 }
 
 struct MappingHandle
@@ -405,11 +410,19 @@ bool load_remote(HANDLE process, DWORD pid,
     }
     if (thread)
     {
-        success = WaitForSingleObject(thread, 15000) == WAIT_OBJECT_0 &&
-            success;
+        const DWORD wait = WaitForSingleObject(thread, 15000);
+        // The loader may still be reading this path. Freeing it after a timeout
+        // can crash DWM. Its process owns the allocation until it exits.
+        if (wait != WAIT_OBJECT_0)
+        {
+            CloseHandle(thread);
+            std::wcerr << L"DWM loader did not complete (wait result " << wait << L").\n";
+            return false;
+        }
         DWORD result = 0;
         success = GetExitCodeThread(thread, &result) && result != 0 &&
             success;
+        if (!success) std::wcerr << L"DWM LoadLibrary returned " << result << L".\n";
         CloseHandle(thread);
     }
     VirtualFreeEx(process, remotePath, 0, MEM_RELEASE);
@@ -419,6 +432,83 @@ bool load_remote(HANDLE process, DWORD pid,
 
 int wmain(int argc, wchar_t** argv)
 {
+    // A GUI subsystem prevents Task Scheduler from opening a console (and
+    // possibly changing focus) for the observer. Manual commands still attach
+    // to their caller's console; redirected diagnostic/test pipes are retained.
+    if (!(argc == 2 && _wcsicmp(argv[1], L"--watch") == 0))
+    {
+        const auto missing = [](DWORD stream) {
+            const HANDLE handle = GetStdHandle(stream);
+            return !handle || handle == INVALID_HANDLE_VALUE;
+        };
+        const bool missingOutput = missing(STD_OUTPUT_HANDLE);
+        const bool missingError = missing(STD_ERROR_HANDLE);
+        if ((missingOutput || missingError) && AttachConsole(ATTACH_PARENT_PROCESS))
+        {
+            FILE* stream = nullptr;
+            if (missingOutput) _wfreopen_s(&stream, L"CONOUT$", L"w", stdout);
+            if (missingError) _wfreopen_s(&stream, L"CONOUT$", L"w", stderr);
+        }
+    }
+    namespace startup = vibrance::win32::liquid_startup;
+    if (argc == 3 && _wcsicmp(argv[1], L"--bundle-key") == 0)
+    {
+        const auto key = startup::bundle_key(argv[2]);
+        if (key.empty()) return 3;
+        std::wcout << key << L"\n";
+        return 0;
+    }
+    if (argc == 2 && _wcsicmp(argv[1], L"--auto-config") == 0)
+    {
+        // Read-only diagnostic: generate the real scheduler definition without
+        // registering it or starting a broker, useful on managed devices.
+        startup::ComScope com;
+        vibrance::win32::ComPtr<ITaskService> service;
+        vibrance::win32::ComPtr<ITaskFolder> folder;
+        HRESULT result = startup::scheduler(service, folder);
+        vibrance::win32::ComPtr<ITaskDefinition> definition;
+        const auto source = std::filesystem::path(vibrance::win32::module_path(nullptr)).parent_path();
+        const auto directory = startup::installed_directory(startup::bundle_key(source));
+        if (directory.empty()) return 3;
+        if (SUCCEEDED(result)) result = startup::make_task_definition(service.Get(), directory, definition);
+        BSTR xml = nullptr;
+        if (SUCCEEDED(result)) result = definition->get_XmlText(&xml);
+        if (xml) { std::wcout << xml << L"\n"; SysFreeString(xml); }
+        if (FAILED(result)) std::wcerr << L"Cannot inspect automatic startup configuration (HRESULT 0x" <<
+            std::hex << static_cast<unsigned long>(result) << L").\n";
+        return SUCCEEDED(result) ? 0 : 14;
+    }
+    if (argc == 3 && _wcsicmp(argv[1], L"--install-auto-run") == 0)
+    {
+        if (!native_hooks_allowed()) return 23;
+        return startup::install_helper(argv[2]);
+    }
+    if (argc == 2 && _wcsicmp(argv[1], L"--watch") == 0)
+    {
+        const auto directory = std::filesystem::path(vibrance::win32::module_path(nullptr)).parent_path();
+        if (!native_hooks_allowed() || !enable_debug_privilege()) return 11;
+        if (directory != startup::installed_directory(startup::bundle_key(directory))) return 3;
+        return startup::watch_session(&find_session_dwm);
+    }
+    if (argc == 2 && _wcsicmp(argv[1], L"--run-auto") == 0)
+    {
+        const HRESULT result = startup::run_task();
+        if (FAILED(result)) std::wcerr << L"Automatic helper is unavailable (HRESULT 0x" <<
+            std::hex << static_cast<unsigned long>(result) << L").\n";
+        return SUCCEEDED(result) ? 0 : 14;
+    }
+    if (argc == 2 && _wcsicmp(argv[1], L"--remove-auto-run") == 0)
+    {
+        startup::ComScope com;
+        vibrance::win32::ComPtr<ITaskService> service;
+        vibrance::win32::ComPtr<ITaskFolder> folder;
+        HRESULT result = startup::scheduler(service, folder);
+        vibrance::win32::ComPtr<IRegisteredTask> task;
+        if (SUCCEEDED(result) && SUCCEEDED(folder->GetTask(startup::Bstr(startup::task_name()), &task)))
+            task->Stop(0);
+        if (SUCCEEDED(result)) result = folder->DeleteTask(startup::Bstr(startup::task_name()), 0);
+        return SUCCEEDED(result) || result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ? 0 : 14;
+    }
     if (argc == 4 && _wcsicmp(argv[1], L"--resolve-windows10") == 0)
     {
         LiquidDwmHookConfig config {};
@@ -622,8 +712,15 @@ int wmain(int argc, wchar_t** argv)
             vibrance::win32::liquidDwmStatusName);
         if (!mapping)
         {
+            const DWORD error = GetLastError();
             std::wcerr << L"Native Liquid Glass status is unavailable in this session (Win32 error "
-                << GetLastError() << L"). The extension may not have started.\n";
+                << error << L").\n";
+            if (error == ERROR_FILE_NOT_FOUND)
+                std::wcerr << L"The session status mapping does not exist; this is not a missing-DLL diagnosis.\n";
+            if (!native_hooks_allowed())
+                std::wcerr << L"Use a native architecture build on a supported Windows version. "
+                    L"An emulated x64 broker cannot load an ARM64 compositor.\n";
+            startup::report_startup_failure();
             return 13;
         }
         const auto* values = static_cast<const LONG*>(MapViewOfFile(mapping,
@@ -643,12 +740,17 @@ int wmain(int argc, wchar_t** argv)
         }
         UnmapViewOfFile(values);
         CloseHandle(mapping);
+        const HANDLE ready = OpenEventW(SYNCHRONIZE, FALSE, vibrance::win32::liquidDwmReadyName);
+        std::wcout << L"Native renderer: " << (ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0 ?
+            L"ready" : L"not ready (startup failure or session transition)") << L"\n";
+        if (ready) CloseHandle(ready);
         return 0;
     }
     if (argc != 3 && argc != 4)
     {
         std::wcerr << L"Usage: liquid_glass_dwm_broker "
-            L"EXTENSION_DLL SYMBOL_CACHE_DIRECTORY\n";
+            L"EXTENSION_DLL SYMBOL_CACHE_DIRECTORY\n"
+            L"  --status | --run-auto | --install-auto-run USER_SID | --remove-auto-run\n";
         return 2;
     }
     if (argc == 4 && _wcsicmp(argv[1], L"--stage-runtime") == 0)
@@ -666,6 +768,33 @@ int wmain(int argc, wchar_t** argv)
     {
         std::wcerr << L"Native Liquid Glass hooks are unavailable on this Windows build or architecture\n";
         return 23;
+    }
+    // Serialise all broker entry points in this session, including manual runs.
+    vibrance::win32::PublicSynchroniseSecurity mutexSecurity;
+    MappingHandle startupMutex;
+    startupMutex.value = CreateMutexW(mutexSecurity.get(), FALSE,
+        L"Local\\VibranceLiquidGlassBrokerStartupV1");
+    const DWORD mutexWait = startupMutex.value ? WaitForSingleObject(startupMutex.value, 0) : WAIT_FAILED;
+    if (mutexWait != WAIT_OBJECT_0 && mutexWait != WAIT_ABANDONED)
+    {
+        std::wcerr << L"Another Liquid Glass broker is already starting in this session.\n";
+        return 15;
+    }
+    struct MutexRelease { HANDLE value; ~MutexRelease() { ReleaseMutex(value); } } release { startupMutex.value };
+    if (!enable_debug_privilege())
+    {
+        std::wcerr << L"Debug privilege is unavailable; the broker requires an elevated administrator token\n";
+        return 11;
+    }
+    const DWORD pid = find_session_dwm();
+    if (!pid) { std::wcerr << L"No DWM process in this session\n"; return 5; }
+    if (remote_module_base(pid, L"vibrance_liquid_dwm_extension.dll"))
+    {
+        const HANDLE ready = OpenEventW(SYNCHRONIZE, FALSE, vibrance::win32::liquidDwmReadyName);
+        const bool running = ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0;
+        if (ready) CloseHandle(ready);
+        std::wcout << L"The extension is already loaded; preserving its hooks and diagnostics.\n";
+        return running ? 0 : 10;
     }
     const std::wstring sourceExtension = argv[1];
     const std::wstring symbolCache = argv[2];
@@ -700,21 +829,21 @@ int wmain(int argc, wchar_t** argv)
         std::wcerr << L"Matching dwmcore PDB symbols are unavailable\n";
         return 4;
     }
-    if (!enable_debug_privilege())
+    // Symbol downloads can outlast the observer's initial desktop check.
+    // Recheck immediately before touching the compositor's startup mappings.
+    if (find_session_dwm() != pid)
     {
-        std::wcerr << L"Debug privilege is unavailable; the broker "
-            L"requires an elevated administrator token\n";
-        return 11;
-    }
-    const DWORD pid = find_session_dwm();
-    if (!pid)
-    {
-        std::wcerr << L"No DWM process in this session\n";
+        std::wcerr << L"The compositor restarted during symbol resolution; retrying the new process is required.\n";
         return 5;
+    }
+    if (startup::fullscreen_active())
+    {
+        std::wcerr << L"Liquid Glass startup deferred until the fullscreen application yields.\n";
+        return 16;
     }
     PSECURITY_DESCRIPTOR statusDescriptor = nullptr;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:(A;;GA;;;WD)", SDDL_REVISION_1,
+            L"D:(A;;GR;;;WD)(A;;GA;;;BA)(A;;GA;;;SY)(A;;GRGW;;;S-1-5-90-0)", SDDL_REVISION_1,
             &statusDescriptor, nullptr))
     {
         return 12;
@@ -792,6 +921,21 @@ int wmain(int argc, wchar_t** argv)
         UnmapViewOfFile(const_cast<LONG*>(status));
         CloseHandle(statusMapping);
         return 8;
+    }
+    // Bind the remote load to the verified process handle, even if Windows
+    // recycled the discovered PID between the snapshot and OpenProcess.
+    std::wstring targetImage(32768, L'\0');
+    DWORD targetLength = static_cast<DWORD>(targetImage.size());
+    const bool validTarget = QueryFullProcessImageNameW(dwm, 0, targetImage.data(), &targetLength) &&
+        _wcsicmp(targetImage.c_str(), (std::wstring(systemDirectory) + L"\\dwm.exe").c_str()) == 0;
+    if (!validTarget)
+    {
+        std::wcerr << L"The compositor process identity changed; no extension was loaded.\n";
+        CloseHandle(dwm);
+        CloseHandle(mapping);
+        UnmapViewOfFile(const_cast<LONG*>(status));
+        CloseHandle(statusMapping);
+        return 5;
     }
     const bool loaded = load_remote(dwm, pid, extension);
     CloseHandle(dwm);

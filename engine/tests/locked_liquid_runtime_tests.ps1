@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$DeployScript,
     [Parameter(Mandatory = $true)][string]$Broker,
+    [Parameter(Mandatory = $true)][string]$DbgHelp,
+    [Parameter(Mandatory = $true)][string]$SymSrv,
     [Parameter(Mandatory = $true)][string]$OutputDirectory
 )
 $ErrorActionPreference = 'Stop'
@@ -116,4 +118,46 @@ $ErrorActionPreference = 'Continue'
 & $Broker --stage-runtime (Join-Path $bundle $names[0]) $cache
 $ErrorActionPreference = 'Stop'
 Assert-True ($LASTEXITCODE -ne 0) 'Incomplete bundles must fail staging'
+
+# Automatic elevation must cover the broker and symbol-server dependencies too,
+# so changing any executable or shader creates a different protected bundle.
+$helperBundle = Join-Path $fixture 'helper-bundle'
+New-Item -ItemType Directory -Path $helperBundle | Out-Null
+$helperNames = @('liquid_glass_dwm_broker.exe', 'liquid_glass_dwm_observer.exe') + $names + @('dbghelp.dll', 'symsrv.dll')
+foreach ($name in $helperNames) { [IO.File]::WriteAllText((Join-Path $helperBundle $name), $name) }
+$key = & $Broker --bundle-key $helperBundle
+Assert-True ($LASTEXITCODE -eq 0 -and $key -match '^[0-9a-f]{64}$') 'Cannot fingerprint the complete helper bundle'
+foreach ($name in $helperNames) {
+    [IO.File]::WriteAllText((Join-Path $helperBundle $name), "$name updated")
+    $updated = & $Broker --bundle-key $helperBundle
+    Assert-True ($LASTEXITCODE -eq 0 -and $updated -ne $key) "Changing $name did not version the helper"
+    [IO.File]::WriteAllText((Join-Path $helperBundle $name), $name)
+}
+Remove-Item -LiteralPath (Join-Path $helperBundle 'symsrv.dll')
+& $Broker --bundle-key $helperBundle
+Assert-True ($LASTEXITCODE -ne 0) 'A helper without symbol-server support must be rejected'
+
+# Inspect Windows' actual task XML without installing or running an elevated task.
+# The build directory does not contain packaged dbghelp/symsrv DLLs; use a copy
+# of the broker with its complete SDK bundle for this read-only check.
+$configBundle = Join-Path $fixture 'config-bundle'
+New-Item -ItemType Directory -Path $configBundle | Out-Null
+Copy-Item -LiteralPath $Broker -Destination (Join-Path $configBundle 'liquid_glass_dwm_broker.exe')
+foreach ($name in $helperNames | Where-Object { $_ -ne 'liquid_glass_dwm_broker.exe' }) {
+    [IO.File]::WriteAllText((Join-Path $configBundle $name), $name)
+}
+Copy-Item -LiteralPath $DbgHelp -Destination (Join-Path $configBundle 'dbghelp.dll') -Force
+Copy-Item -LiteralPath $SymSrv -Destination (Join-Path $configBundle 'symsrv.dll') -Force
+$configLines = & (Join-Path $configBundle 'liquid_glass_dwm_broker.exe') --auto-config
+Assert-True ($LASTEXITCODE -eq 0) 'Cannot generate the automatic helper task definition'
+[xml]$config = $configLines -join "`n"
+Assert-True ($config.Task.Principals.Principal.LogonType -eq 'InteractiveToken') 'The helper must use the interactive session'
+Assert-True ($config.Task.Principals.Principal.RunLevel -eq 'HighestAvailable') 'The helper must retain approved elevation'
+Assert-True ($config.Task.Actions.Exec.Arguments -eq '--watch') 'The elevated action must have fixed arguments'
+Assert-True ($config.Task.Actions.Exec.Command.EndsWith('\liquid_glass_dwm_observer.exe')) 'The scheduled helper must use the windowless observer'
+Assert-True ($config.Task.Actions.Exec.Command.StartsWith([Environment]::GetFolderPath('ProgramFiles') + '\VibranceLiquidGlass\')) 'The elevated executable is not in protected Program Files'
+Assert-True ($config.Task.Settings.DisallowStartIfOnBatteries -eq 'false') 'Battery operation must not prevent startup'
+Assert-True ($config.Task.Settings.StopIfGoingOnBatteries -eq 'false') 'Battery operation must not stop the helper'
+Assert-True ($config.Task.Settings.ExecutionTimeLimit -eq 'PT0S') 'The observer must survive long-running sessions'
+Assert-True ($config.Task.Triggers.LogonTrigger.UserId -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'Logon startup belongs to another user'
 Write-Host 'Locked DLL replacement and immutable runtime cache tests passed.'

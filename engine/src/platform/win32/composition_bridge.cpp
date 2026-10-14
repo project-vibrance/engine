@@ -10,6 +10,7 @@
 #include "liquid_glass_d3d11.h"
 #include "liquid_glass_dwm_protocol.h"
 #include "liquid_glass_dwm_security.h"
+#include "liquid_glass_dwm_startup.h"
 #include "liquid_glass_dwm_windows10_layout.h"
 #include "private_composition_19041.h"
 #include "system_backdrop_policy.h"
@@ -112,7 +113,10 @@ bool liquid_extension_disabled()
 #else
     constexpr std::uint32_t machine = IMAGE_FILE_MACHINE_AMD64;
 #endif
-    if (!vibrance::win32::liquid_dwm_native_hooks_allowed(build, machine)) return true;
+    USHORT processMachine = 0, nativeMachine = 0;
+    if (!IsWow64Process2(GetCurrentProcess(), &processMachine, &nativeMachine) ||
+        nativeMachine != machine ||
+        !vibrance::win32::liquid_dwm_native_hooks_allowed(build, machine)) return true;
     // Session transitions are guarded by the native observer's readiness
     // event. A stable RDP session must still be allowed to start the broker.
     wchar_t value[16] {};
@@ -151,25 +155,52 @@ void launch_liquid_extension_once()
         {
             return;
         }
-        wchar_t appData[MAX_PATH] {};
-        const DWORD appDataLength = GetEnvironmentVariableW(L"LOCALAPPDATA",
-            appData, ARRAYSIZE(appData));
-        if (!appDataLength || appDataLength >= ARRAYSIZE(appData))
+        namespace startup = vibrance::win32::liquid_startup;
+        const auto local = startup::known_folder(FOLDERID_LocalAppData) / L"VibranceDwmSymbols";
+        std::error_code error;
+        std::filesystem::create_directories(local, error);
+        const auto report = [&](const std::string& message) {
+            std::ofstream log(local / L"launcher.log", std::ios::trunc);
+            log << message << '\n';
+        };
+        const auto key = startup::bundle_key(directory);
+        if (key.empty())
         {
+            report("Liquid Glass bundle is incomplete. Reinstall the native architecture build including dbghelp.dll and symsrv.dll.");
             return;
         }
-        const std::wstring cache = std::wstring(appData, appDataLength) +
-            L"\\VibranceDwmSymbols";
-        const std::wstring parameters = L"\"" + extension +
-            L"\" \"" + cache + L"\"";
+        const auto installed = startup::installed_directory(key);
+        if (SUCCEEDED(startup::run_task(installed)))
+        {
+            report("Automatic Liquid Glass helper started without elevation.");
+            return;
+        }
+        // A first-time consent prompt switches to the secure desktop. Defer it
+        // until a game has yielded and display-mode transitions have settled.
+        unsigned desktopSamples = 0;
+        while (desktopSamples < 4)
+        {
+            desktopSamples = startup::fullscreen_active() ? 0 : desktopSamples + 1;
+            Sleep(500);
+        }
+        const std::wstring parameters = L"--install-auto-run " + startup::user_sid();
         SHELLEXECUTEINFOW launch { sizeof(launch) };
-        launch.fMask = SEE_MASK_NOCLOSEPROCESS;
+        launch.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
         launch.lpVerb = L"runas";
         launch.lpFile = broker.c_str();
         launch.lpParameters = parameters.c_str();
         launch.nShow = SW_HIDE;
-        if (ShellExecuteExW(&launch) && launch.hProcess)
+        if (!ShellExecuteExW(&launch))
         {
+            report("Automatic helper setup was not approved or could not launch (Win32 error " +
+                std::to_string(GetLastError()) + "). Liquid Glass retains its Composition fallback.");
+        }
+        else if (launch.hProcess)
+        {
+            WaitForSingleObject(launch.hProcess, INFINITE);
+            DWORD code = 0;
+            GetExitCodeProcess(launch.hProcess, &code);
+            report("Automatic helper setup returned exit code " + std::to_string(code) + ".");
             CloseHandle(launch.hProcess);
         }
         }).detach();

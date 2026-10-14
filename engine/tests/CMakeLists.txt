@@ -5,6 +5,8 @@ if(WIN32)
                 -File "${CMAKE_CURRENT_SOURCE_DIR}/locked_liquid_runtime_tests.ps1"
                 -DeployScript "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/VibranceLockedRuntime.cmake"
                 -Broker "${VIBRANCE_LIQUID_DWM_BROKER}"
+                -DbgHelp "${VIBRANCE_LIQUID_DBGHELP_RUNTIME}"
+                -SymSrv "${VIBRANCE_LIQUID_SYMSRV_RUNTIME}"
                 -OutputDirectory "${CMAKE_CURRENT_BINARY_DIR}/locked-runtime-fixture")
     endif()
     # Refresh the DLL even when the import library did not change and tests do

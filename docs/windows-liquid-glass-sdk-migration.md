@@ -10,6 +10,33 @@ once to the combined native mask.
 
 ## Current rendering path
 
+Windows startup uses a per-user Task Scheduler helper. Selecting Liquid Glass
+configures it with one administrator consent prompt, deferred while a fullscreen
+application is active. Subsequent app starts, logons and DWM restarts reuse that
+approval. A changed runtime bundle needs a new approval to deploy its binaries.
+The signed-in account must be an administrator; approval using another account
+cannot supply an elevated interactive token for the original user's session.
+
+The console broker, windowless observer, extension, five shaders, `dbghelp.dll` and `symsrv.dll` are hashed
+together and copied to a versioned directory under `%ProgramFiles%\VibranceLiquidGlass`.
+Only Administrators and SYSTEM can modify that directory or the task's fixed
+`--watch` action. The symbol cache and reports live under
+`%ProgramData%\VibranceLiquidGlass\<user SID>`. The observer retries temporary
+symbol-server/access failures, bounds extension-load failures per DWM process,
+and defers new injection during fullscreen applications. It never restarts DWM.
+Uninstall removes the startup task; loaded immutable runtimes remain pinned
+until the Windows session ends.
+
+`liquid_glass_dwm_broker.exe --status` reports readiness and, when no status
+mapping exists, the last launcher/setup/broker reports and task result. Win32
+error 2 here means that the session mapping does not exist; it does not establish
+that a DLL is missing. `--auto-config` prints the intended task XML without
+registering or running anything; `--run-auto` starts an already configured task;
+an elevated `--remove-auto-run` stops and unregisters it. Native ARM64 DWM
+requires the ARM64 release; an emulated x64 broker is rejected before injection.
+The build requires matching Debugging Tools DLLs instead of silently packaging
+a runtime that only works with a previously downloaded symbol cache.
+
 1. The app publishes each lens region's HWND, allocation identity, monitor and
    client bounds, shape, opacity, optical controls, tint, optional contour union
    and exclusion in a versioned shared region table. Different surfaces in the

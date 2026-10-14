@@ -90,6 +90,9 @@ link.exe ^
     dxgi.lib ^
     dwmapi.lib ^
     ole32.lib ^
+    oleaut32.lib ^
+    bcrypt.lib ^
+    taskschd.lib ^
     shell32.lib ^
     user32.lib ^
     windowscodecs.lib ^

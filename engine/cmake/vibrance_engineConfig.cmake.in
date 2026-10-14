@@ -43,6 +43,8 @@ if(WIN32)
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/vibrance_liquid_dwm_extension.dll")
     set(vibrance_engine_LIQUID_DWM_BROKER
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_dwm_broker.exe")
+    set(vibrance_engine_LIQUID_DWM_OBSERVER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_dwm_observer.exe")
     set(vibrance_engine_LIQUID_DBGHELP_RUNTIME
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/dbghelp.dll")
     set(vibrance_engine_LIQUID_SYMSRV_RUNTIME
@@ -62,6 +64,7 @@ if(WIN32)
         "${vibrance_engine_WIN32_INTEROP_DLL}"
         "${vibrance_engine_LIQUID_DWM_EXTENSION}"
         "${vibrance_engine_LIQUID_DWM_BROKER}"
+        "${vibrance_engine_LIQUID_DWM_OBSERVER}"
         "${vibrance_engine_LIQUID_DBGHELP_RUNTIME}"
         "${vibrance_engine_LIQUID_SYMSRV_RUNTIME}"
         "${vibrance_engine_LIQUID_SHADER}"

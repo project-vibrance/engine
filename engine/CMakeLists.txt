@@ -245,6 +245,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_LIQUID_D3D_HEADER}"
                 "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
                 "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_startup.h"
                 "${VIBRANCE_COMPOSITION_BUILD_SCRIPT}"
             BYPRODUCTS
                 "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_win32_composition.exp"
@@ -258,6 +259,8 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_liquid_dwm_extension.dll")
         set(VIBRANCE_LIQUID_DWM_BROKER
             "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_dwm_broker.exe")
+        set(VIBRANCE_LIQUID_DWM_OBSERVER
+            "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_dwm_observer.exe")
         # Symbol-server support is supplied by the matching Debugging Tools
         # runtime; the OS DbgHelp alone cannot fetch a fresh DWM symbol cache.
         get_filename_component(_vibrance_debugging_kits_root
@@ -271,6 +274,11 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             HINTS "${_vibrance_sdk_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
                 "${_vibrance_debugging_kits_root}/Debuggers/${VIBRANCE_COMPOSITION_SDK_ARCH}"
             NO_DEFAULT_PATH)
+        if(NOT VIBRANCE_LIQUID_DBGHELP_RUNTIME OR NOT VIBRANCE_LIQUID_SYMSRV_RUNTIME)
+            message(FATAL_ERROR
+                "Windows Liquid Glass requires matching dbghelp.dll and symsrv.dll. "
+                "Install the Windows SDK Debugging Tools for the target architecture.")
+        endif()
         set(VIBRANCE_LIQUID_DWM_EXTENSION_SCRIPT
             "${PROJECT_SOURCE_DIR}/scripts/win32/build_liquid_dwm_extension.bat")
         set(VIBRANCE_LIQUID_DWM_BROKER_SCRIPT
@@ -311,7 +319,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
         add_custom_target(vibrance_liquid_dwm_extension ALL
             DEPENDS "${VIBRANCE_LIQUID_DWM_EXTENSION}")
         add_custom_command(
-            OUTPUT "${VIBRANCE_LIQUID_DWM_BROKER}"
+            OUTPUT "${VIBRANCE_LIQUID_DWM_BROKER}" "${VIBRANCE_LIQUID_DWM_OBSERVER}"
             COMMAND "${VIBRANCE_LIQUID_DWM_BROKER_SCRIPT}"
                 "${VIBRANCE_VCVARSALL}"
                 "${VIBRANCE_COMPOSITION_VCVARS_ARCH}"
@@ -322,6 +330,8 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_COMPOSITION_SDK_UCRT_LIBRARY_DIR}"
             DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER_SOURCE}"
                 "${PROJECT_SOURCE_DIR}/scripts/win32/liquid_glass_runtime_cache.h"
+                "${PROJECT_SOURCE_DIR}/scripts/win32/liquid_glass_broker_startup.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_startup.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
                 "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
                 "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
@@ -329,7 +339,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             COMMENT "Building Windows Liquid Glass DWM broker with MSVC"
             VERBATIM)
         add_custom_target(vibrance_liquid_dwm_broker ALL
-            DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER}")
+            DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER}" "${VIBRANCE_LIQUID_DWM_OBSERVER}")
         add_dependencies(vibrance_engine
             vibrance_liquid_dwm_extension vibrance_liquid_dwm_broker)
         find_program(VIBRANCE_LIQUID_FXC_EXECUTABLE
@@ -687,7 +697,7 @@ if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/VibranceLockedRuntime.cmake")
     vibrance_install_locked_runtime("${VIBRANCE_LIQUID_DWM_EXTENSION}"
         "${CMAKE_INSTALL_BINDIR}")
-    install(PROGRAMS "${VIBRANCE_LIQUID_DWM_BROKER}"
+    install(PROGRAMS "${VIBRANCE_LIQUID_DWM_BROKER}" "${VIBRANCE_LIQUID_DWM_OBSERVER}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")
     if(VIBRANCE_LIQUID_DBGHELP_RUNTIME AND VIBRANCE_LIQUID_SYMSRV_RUNTIME)
         install(FILES "${VIBRANCE_LIQUID_DBGHELP_RUNTIME}"

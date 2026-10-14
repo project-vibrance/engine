@@ -7,6 +7,7 @@ if "%~4"=="" (
 set "VCVARSALL=%~1"
 set "TARGET_ARCH=%~2"
 set "BROKER_OUTPUT=%~3"
+for %%I in ("%BROKER_OUTPUT%") do set "OBSERVER_OUTPUT=%%~dpIliquid_glass_dwm_observer.exe"
 set "OBJECT_DIR=%~4"
 set "SDK_INCLUDE_ROOT=%~5"
 set "SDK_UM_LIBRARY_DIR=%~6"
@@ -32,5 +33,10 @@ cl.exe /nologo /std:c++20 /EHsc /permissive- /utf-8 /W4 /O2 /MT ^
     /Fd"%OBJECT_DIR%\liquid_glass_dwm_broker.pdb" ^
     /Fe"%BROKER_OUTPUT%" ^
     "%~dp0liquid_glass_dwm_broker.cpp" ^
-    /link %SDK_LIBRARY_FLAGS% advapi32.lib bcrypt.lib dbghelp.lib
+    /link %SDK_LIBRARY_FLAGS% advapi32.lib bcrypt.lib dbghelp.lib ole32.lib oleaut32.lib shell32.lib taskschd.lib user32.lib uuid.lib
+if errorlevel 1 exit /b %errorlevel%
+REM The scheduled observer has no console; the broker retains console/pipeline IO.
+link.exe /NOLOGO /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup ^
+    /OUT:"%OBSERVER_OUTPUT%" "%OBJECT_DIR%\liquid_glass_dwm_broker.obj" ^
+    %SDK_LIBRARY_FLAGS% advapi32.lib bcrypt.lib dbghelp.lib ole32.lib oleaut32.lib shell32.lib taskschd.lib user32.lib uuid.lib
 exit /b %errorlevel%
