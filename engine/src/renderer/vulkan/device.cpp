@@ -2,11 +2,89 @@
 #include <vibranceUI/core/logger.h>
 
 #include <algorithm>
+#include <cstring>
+#include <cwchar>
 #include <limits>
 #include <string_view>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace
 {
+#if defined(_WIN32)
+    bool composition_adapter_luid(void* nativeWindow, LUID& luid)
+    {
+        if (!nativeWindow)
+        {
+            return false;
+        }
+        MONITORINFOEXW monitor {};
+        monitor.cbSize = sizeof(monitor);
+        if (!GetMonitorInfoW(MonitorFromWindow(
+                static_cast<HWND>(nativeWindow), MONITOR_DEFAULTTONEAREST),
+                &monitor))
+        {
+            return false;
+        }
+        // Match the window's display source to its adapter. Choosing the
+        // strongest dGPU unconditionally makes an internal laptop display
+        // copy every Composition frame back to the iGPU across adapters.
+        for (unsigned attempt = 0u; attempt < 3u; ++attempt)
+        {
+            UINT32 pathCount = 0u;
+            UINT32 modeCount = 0u;
+            if (GetDisplayConfigBufferSizes(
+                    QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) != ERROR_SUCCESS)
+            {
+                return false;
+            }
+            std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+            std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+            const LONG result = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS,
+                &pathCount, paths.data(), &modeCount, modes.data(), nullptr);
+            if (result == ERROR_INSUFFICIENT_BUFFER)
+            {
+                continue;
+            }
+            if (result != ERROR_SUCCESS)
+            {
+                return false;
+            }
+            for (UINT32 index = 0u; index < pathCount; ++index)
+            {
+                DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
+                source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                source.header.size = sizeof(source);
+                source.header.adapterId = paths[index].sourceInfo.adapterId;
+                source.header.id = paths[index].sourceInfo.id;
+                if (DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS &&
+                    std::wcscmp(source.viewGdiDeviceName, monitor.szDevice) == 0)
+                {
+                    luid = source.header.adapterId;
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
+    bool matches_adapter(const vk::PhysicalDevice& device, const LUID& luid)
+    {
+        vk::PhysicalDeviceIDProperties id {};
+        vk::PhysicalDeviceProperties2 properties {};
+        properties.pNext = &id;
+        device.getProperties2(&properties);
+        return id.deviceLUIDValid &&
+            std::memcmp(id.deviceLUID.data(), &luid, VK_LUID_SIZE) == 0;
+    }
+#endif
+
     bool supports_extension(
         const std::vector<vk::ExtensionProperties>& extensions,
         std::string_view requested)
@@ -157,7 +235,8 @@ bool supports_windows_composition_interop(
 
 vk::PhysicalDevice choose_physical_device(
     const vk::Instance instance,
-    bool requireWindowsCompositionInterop)
+    bool requireWindowsCompositionInterop,
+    void* compositionWindow)
 {
     // Prefer a native GPU ICD among devices that satisfy the requested
     // feature set. A Vulkan-over-D3D implementation remains the architecture-
@@ -170,6 +249,13 @@ vk::PhysicalDevice choose_physical_device(
 
     vk::PhysicalDevice bestDevice = nullptr;
     int bestScore = std::numeric_limits<int>::min();
+#if defined(_WIN32)
+    LUID compositionLuid {};
+    const bool preferCompositionAdapter =
+        composition_adapter_luid(compositionWindow, compositionLuid);
+#else
+    (void)compositionWindow;
+#endif
 
     for (vk::PhysicalDevice device : availableDevices)
     {
@@ -177,7 +263,16 @@ vk::PhysicalDevice choose_physical_device(
         
         if (is_suitable(device, requireWindowsCompositionInterop))
         {
-            const int score = device_score(device);
+            int score = device_score(device);
+#if defined(_WIN32)
+            // This bonus chooses the display's native iGPU over a native
+            // dGPU, whilst retaining the native-over-layered driver policy.
+            if (preferCompositionAdapter && score >= 10000 &&
+                matches_adapter(device, compositionLuid))
+            {
+                score += 2000;
+            }
+#endif
             if (!bestDevice || score > bestScore)
             {
                 bestDevice = device;
@@ -193,6 +288,12 @@ vk::PhysicalDevice choose_physical_device(
             bestDevice.getProperties().deviceName.data() +
             (is_layered_driver(bestDevice) ? " (layered driver)." :
                 " (native driver)."));
+#if defined(_WIN32)
+        if (preferCompositionAdapter && matches_adapter(bestDevice, compositionLuid))
+        {
+            logger->info("Vulkan rendering uses the Windows Composition display adapter.");
+        }
+#endif
     }
 
     return bestDevice;

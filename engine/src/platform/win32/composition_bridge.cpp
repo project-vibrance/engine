@@ -8,6 +8,7 @@
 
 #include "composition_bridge_abi.h"
 #include "composition_region_effects.h"
+#include "composition_present_retry.h"
 #include "liquid_glass_d3d11.h"
 #include "liquid_glass_dwm_protocol.h"
 #include "liquid_glass_dwm_security.h"
@@ -977,10 +978,20 @@ public:
 
         const bool synchronize =
             (presentInfo->flags & VIBRANCE_COMPOSITION_PRESENT_SYNCHRONIZE) != 0u;
+        return presentRetry_.deliver(index,
+            [&] { return prepare_present(index, presentInfo, synchronize); },
+            [&] { return finish_present(synchronize); });
+    }
+
+    std::uint32_t prepare_present(
+        std::uint32_t index,
+        const VibranceCompositionPresentInfo* presentInfo,
+        bool synchronize)
+    {
         // Avoid recording a full-size D3D copy when DWM has not consumed the
         // previous frame. The newest completed Vulkan frame will be offered on
         // the next display opportunity instead.
-        if (frameLatencyWaitableObject_)
+        if (frameLatencyWaitableObject_ && !frameLatencyReady_)
         {
             const DWORD waitResult = WaitForSingleObject(
                 frameLatencyWaitableObject_,
@@ -995,6 +1006,9 @@ public:
                     "Composition frame-latency wait failed";
                 return VIBRANCE_COMPOSITION_PRESENT_FAILED;
             }
+            // A deferred keyed-mutex acquire must retain this opportunity;
+            // another wait could consume a second slot without presenting.
+            frameLatencyReady_ = true;
         }
         const std::uint32_t backBufferIndex =
             swapchain3_->GetCurrentBackBufferIndex();
@@ -1170,36 +1184,9 @@ public:
                 return VIBRANCE_COMPOSITION_PRESENT_FAILED;
             }
         }
-        DXGI_PRESENT_PARAMETERS parameters {};
-        parameters.DirtyRectsCount = has_area(copyRect) ? 1u : 0u;
-        parameters.pDirtyRects = has_area(copyRect) ? &copyRect : nullptr;
-        const HRESULT presentResult = swapchain_->Present1(
-            0u,
-            synchronize ? 0u : DXGI_PRESENT_DO_NOT_WAIT,
-            &parameters);
-        // The compositor already has a newer queued frame. Dropping this copy
-        // is preferable to blocking the Vulkan submission thread.
-        if (presentResult == DXGI_ERROR_WAS_STILL_DRAWING)
-        {
-            // Present did not submit this command stream, so explicitly flush
-            // the copy/query that releases the shared texture back to Vulkan.
-            context_->Flush();
-            return VIBRANCE_COMPOSITION_PRESENT_DEFERRED;
-        }
-        if (SUCCEEDED(presentResult))
-        {
-            backBufferPendingDamageRects_[backBufferIndex] = RECT {};
-        }
-        else
-        {
-            lastCompositionError =
-                "IDXGISwapChain1::Present1 failed (HRESULT " +
-                std::to_string(
-                    static_cast<std::int32_t>(presentResult)) + ")";
-        }
-        return SUCCEEDED(presentResult) ?
-            VIBRANCE_COMPOSITION_PRESENTED :
-            VIBRANCE_COMPOSITION_PRESENT_FAILED;
+        pendingPresentBackBuffer_ = backBufferIndex;
+        pendingPresentDamage_ = copyRect;
+        return VIBRANCE_COMPOSITION_PRESENTED;
     }
 
     bool set_regions(
@@ -1396,6 +1383,35 @@ public:
     }
 
 private:
+    std::uint32_t finish_present(bool synchronize)
+    {
+        const bool hasDamage = pendingPresentDamage_.right >
+                pendingPresentDamage_.left &&
+            pendingPresentDamage_.bottom > pendingPresentDamage_.top;
+        DXGI_PRESENT_PARAMETERS parameters {};
+        parameters.DirtyRectsCount = hasDamage ? 1u : 0u;
+        parameters.pDirtyRects = hasDamage ? &pendingPresentDamage_ : nullptr;
+        const HRESULT result = swapchain_->Present1(0u,
+            synchronize ? 0u : DXGI_PRESENT_DO_NOT_WAIT, &parameters);
+        if (result == DXGI_ERROR_WAS_STILL_DRAWING)
+        {
+            // Submit the copy/query even though DXGI did not queue a present.
+            // Keep the dirty rectangle and back buffer for the next retry.
+            context_->Flush();
+            return VIBRANCE_COMPOSITION_PRESENT_DEFERRED;
+        }
+        frameLatencyReady_ = false;
+        if (SUCCEEDED(result))
+        {
+            backBufferPendingDamageRects_[pendingPresentBackBuffer_] = RECT {};
+            return VIBRANCE_COMPOSITION_PRESENTED;
+        }
+        lastCompositionError =
+            "IDXGISwapChain1::Present1 failed (HRESULT " +
+            std::to_string(static_cast<std::int32_t>(result)) + ")";
+        return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+    }
+
     bool ensure_liquid_cpu_ui()
     {
         if (uiCpuView_) return true;
@@ -3116,7 +3132,11 @@ private:
     std::vector<bool> backBufferInitialised_;
     std::vector<RECT> backBufferContentRects_;
     std::vector<RECT> backBufferPendingDamageRects_;
+    vibrance::win32::CompositionPresentRetry presentRetry_;
+    std::uint32_t pendingPresentBackBuffer_ = 0u;
+    RECT pendingPresentDamage_ {};
     HANDLE frameLatencyWaitableObject_ = nullptr;
+    bool frameLatencyReady_ = false;
     std::vector<winrt::com_ptr<ID3D11Texture2D>> sharedTextures_;
     std::vector<winrt::com_ptr<IDXGIKeyedMutex>> sharedMutexes_;
     std::vector<HANDLE> sharedHandles_;

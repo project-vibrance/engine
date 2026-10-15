@@ -43,7 +43,6 @@ struct LiquidNativeMarkerTag
 
 std::mutex nativeMarkerTagsMutex;
 std::array<LiquidNativeMarkerTag, 128u> nativeMarkerTags {};
-constexpr ULONGLONG nativeMarkerTagLifetime = 250u;
 
 bool read_liquid_native_entry_identity(void* pointer,
     LiquidNativeEntryIdentity& identity) noexcept
@@ -117,23 +116,12 @@ bool liquid_native_entry_identity_matches(
         std::memcmp(first.bounds, second.bounds, sizeof(first.bounds)) == 0;
 }
 
-void expire_liquid_native_marker_tags(ULONGLONG now) noexcept
-{
-    // The caller holds nativeMarkerTagsMutex. No native rendering operation or
-    // rendererMutex acquisition occurs while this table is being accessed.
-    for (auto& tag : nativeMarkerTags)
-        if (tag.entry && now >= tag.lastSeenTick &&
-            now - tag.lastSeenTick >= nativeMarkerTagLifetime)
-            tag = {};
-}
-
 void untag_native_marker_entry(void* entry) noexcept
 {
     if (!entry) return;
     try
     {
         std::lock_guard<std::mutex> lock(nativeMarkerTagsMutex);
-        expire_liquid_native_marker_tags(GetTickCount64());
         for (auto& tag : nativeMarkerTags)
             if (tag.entry == entry) tag = {};
     }
@@ -161,7 +149,6 @@ void tag_native_marker_entry(void* entry, std::uint32_t slot,
     {
         std::lock_guard<std::mutex> lock(nativeMarkerTagsMutex);
         const auto now = GetTickCount64();
-        expire_liquid_native_marker_tags(now);
         LiquidNativeMarkerTag* destination = nullptr;
         for (auto& tag : nativeMarkerTags)
         {
@@ -172,6 +159,8 @@ void tag_native_marker_entry(void* entry, std::uint32_t slot,
             }
             if (!tag.entry && !destination) destination = &tag;
         }
+        // DWM can retain an idle entry indefinitely. Bound storage by evicting
+        // the least recently used entry only when the table is actually full.
         if (!destination)
             destination = &*std::min_element(nativeMarkerTags.begin(),
                 nativeMarkerTags.end(), [](const auto& first, const auto& second) {
@@ -200,7 +189,6 @@ bool find_liquid_native_marker_tag(void* entry,
     {
         std::lock_guard<std::mutex> lock(nativeMarkerTagsMutex);
         const auto now = GetTickCount64();
-        expire_liquid_native_marker_tags(now);
         for (auto& tag : nativeMarkerTags)
         {
             if (tag.entry != entry) continue;
@@ -214,8 +202,9 @@ bool find_liquid_native_marker_tag(void* entry,
             marker.taggedHeight = tag.height;
             marker.shapeSnapshot = tag.shapeSnapshot;
             marker.hasShapeSnapshot = tag.hasShapeSnapshot;
-            // An actively rendered cached entry must not expire merely because
-            // its original content-generation callback did not run this frame.
+            // Idle, occluded and low-cadence windows can reuse this entry long
+            // after its content-generation callback. Identity and live slot
+            // ownership validate it; elapsed time cannot establish its lifetime.
             tag.lastSeenTick = now;
             return true;
         }
@@ -233,7 +222,7 @@ bool preserve_native_marker_entry(void* entry) noexcept
         return false;
     }
     // Retained Entry::Render calls may arrive outside the original marker draw
-    // scope. Refresh only an existing, unexpired tag with its full identity;
+    // scope. Refresh only an existing tag with its full identity;
     // never classify a new entry merely because it shares the same address.
     LiquidNativeBatchMarker marker {};
     return find_liquid_native_marker_tag(entry, identity, marker);
@@ -660,20 +649,30 @@ bool render_native_marker(const LiquidNativeBatchMarker& marker, void* execution
             if (FAILED(reason)) { windows10_suspend_optical_render(reason); return true; }
             if (!windows10_optical_render_ready()) { status(230); return true; }
         }
-        auto& snapshot = activeDdaTarget ? ddaBackgrounds[marker.slot] :
-            inCaptureRender ? captureBackgrounds[marker.slot] :
-                displayBackgrounds[marker.slot];
-        if (snapshot_background(snapshot, texture.Get(), marker.entry, region,
-                viewDescription.Format) &&
-            ensure_renderer(device.Get()) &&
-            renderer.render(context, snapshot.texture.Get(), targets[0].Get(),
-                region, snapshot.originX, snapshot.originY, &clip))
+        record_native_render_attempt();
+        bool rendered = false;
+        if (ensure_renderer(device.Get()))
         {
+            // The renderer takes its own cropped snapshot before writing the
+            // target. Use the verified RTV format for typeless resources too,
+            // avoiding a second copy of the same backdrop on every draw.
+            const auto format = backdrop_copy_format(description.Format, viewDescription.Format);
+            rendered = format != DXGI_FORMAT_UNKNOWN &&
+                renderer.render(context, texture.Get(), targets[0].Get(), region,
+                    0, 0, &clip, format);
+        }
+        if (rendered)
+        {
+            record_native_render_success();
             status(151);
             status(activeDdaTarget ? 111u : inCaptureRender ? 120u : 6u);
             status(liquidDwmRegionStatusBase + marker.slot);
         }
-        else status(152);
+        else
+        {
+            record_native_render_failure();
+            status(152);
+        }
         if (windows10Adapter)
         {
             const HRESULT reason = retainedDevice->GetDeviceRemovedReason();

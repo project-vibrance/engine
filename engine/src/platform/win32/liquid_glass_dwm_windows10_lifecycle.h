@@ -6,17 +6,15 @@ bool retire_windows10_gpu_resources() noexcept
 {
     std::unique_lock<std::mutex> lock(rendererMutex, std::try_to_lock);
     if (!lock.owns_lock()) return false;
-    renderer = LiquidGlassD3D11 {};
-    rendererDevice.Reset();
+    reset_renderers();
     displayBackgrounds = {};
     captureBackgrounds = {};
     ddaBackgrounds = {};
     reset_ui();
     reset_cpu_ui();
-    {
-        std::lock_guard<std::mutex> tagLock(nativeMarkerTagsMutex);
-        nativeMarkerTags = {};
-    }
+    // Tags contain CPU identity snapshots, not retained GPU resources. DWM
+    // can reuse their native entries after a display or session transition;
+    // keep them subject to the normal identity and live-ownership checks.
     status(236);
     return true;
 }

@@ -18,7 +18,8 @@ bool supports_windows_composition_interop(const vk::PhysicalDevice& device);
 
 vk::PhysicalDevice choose_physical_device(
     const vk::Instance instance,
-    bool requireWindowsCompositionInterop = false);
+    bool requireWindowsCompositionInterop = false,
+    void* compositionWindow = nullptr);
 
 uint32_t find_queue_family_index(vk::PhysicalDevice physicalDevice, vk::SurfaceKHR surface, vk::QueueFlags queueType);
 

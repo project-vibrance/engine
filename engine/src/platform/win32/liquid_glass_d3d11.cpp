@@ -368,7 +368,8 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
                               const LiquidGlassRenderRegion& region,
                               std::int32_t sourceOriginX,
                               std::int32_t sourceOriginY,
-                              const D3D11_RECT* clip)
+                              const D3D11_RECT* clip,
+                              DXGI_FORMAT backdropFormat)
 {
     if (!context || !liveBackdrop || !target || !contextState_ ||
         !std::isfinite(region.blurRadius) ||
@@ -467,6 +468,34 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
 
     D3D11_TEXTURE2D_DESC source {};
     liveBackdrop->GetDesc(&source);
+    // DWM commonly uses typeless resources with a typed RTV. Copy directly
+    // into compatible typed scratch surfaces rather than making another
+    // complete backdrop copy merely to establish the sampling format.
+    if (backdropFormat == DXGI_FORMAT_UNKNOWN) backdropFormat = source.Format;
+    if (backdropFormat != source.Format)
+    {
+        bool compatible = false;
+        switch (source.Format)
+        {
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+            compatible = backdropFormat == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                backdropFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            break;
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+            compatible = backdropFormat == DXGI_FORMAT_R8G8B8A8_UNORM ||
+                backdropFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            break;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+            compatible = backdropFormat == DXGI_FORMAT_R10G10B10A2_UNORM;
+            break;
+        case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+            compatible = backdropFormat == DXGI_FORMAT_R16G16B16A16_FLOAT;
+            break;
+        default:
+            break;
+        }
+        if (!compatible) return false;
+    }
     const std::int64_t localX = static_cast<std::int64_t>(region.x) -
         sourceOriginX;
     const std::int64_t localY = static_cast<std::int64_t>(region.y) -
@@ -497,10 +526,51 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     if (cropRight <= left || cropBottom <= top) return false;
     const auto width = static_cast<std::uint32_t>(cropRight - left);
     const auto height = static_cast<std::uint32_t>(cropBottom - top);
-    if (!resize_scratch(source.Format, width, height))
+    if (!resize_scratch(backdropFormat, width, height))
     {
         return false;
     }
+
+    const float blurRadius = std::clamp(region.blurRadius, 0.0f, 30.0f);
+    if (blurRadius > 0.0f && cachedBlurRadius_ != blurRadius)
+    {
+        prepare_blur_kernel(blurRadius, blurKernel_);
+        cachedBlurRadius_ = blurRadius;
+        cachedBlurWidth_ = 0u;
+    }
+
+    // DWM frequently paints one island through several small native clips.
+    // Keep the full scratch dimensions/UVs so those draws match an unclipped
+    // draw exactly, but only populate the pixels their sampling can consume.
+    const auto expand = [width, height](D3D11_RECT bounds, LONG x, LONG y) {
+        bounds.left = std::clamp<LONG>(bounds.left - x, 0, static_cast<LONG>(width) - 1);
+        bounds.top = std::clamp<LONG>(bounds.top - y, 0, static_cast<LONG>(height) - 1);
+        bounds.right = std::clamp<LONG>(bounds.right + x, 1, static_cast<LONG>(width));
+        bounds.bottom = std::clamp<LONG>(bounds.bottom + y, 1, static_cast<LONG>(height));
+        return bounds;
+    };
+    const D3D11_RECT outputBounds = clip ? visibleClip : D3D11_RECT {
+        static_cast<LONG>(visibleLeft), static_cast<LONG>(visibleTop),
+        static_cast<LONG>(visibleRight), static_cast<LONG>(visibleBottom)
+    };
+    D3D11_RECT samplingBounds {
+        static_cast<LONG>(static_cast<std::int64_t>(outputBounds.left) - sourceOriginX - left),
+        static_cast<LONG>(static_cast<std::int64_t>(outputBounds.top) - sourceOriginY - top),
+        static_cast<LONG>(static_cast<std::int64_t>(outputBounds.right) - sourceOriginX - left),
+        static_cast<LONG>(static_cast<std::int64_t>(outputBounds.bottom) - sourceOriginY - top)
+    };
+    // One pixel for bilinear support, plus one for UV rounding. Clamp the
+    // margin before converting it, including for extreme finite parameters.
+    const auto displacement = static_cast<LONG>(std::min(static_cast<double>(std::max(width, height)),
+        std::ceil(static_cast<double>(std::max(region.refractionStrength, 0.0f)) +
+            std::max(region.dispersionStrength, 0.0f) + 2.0)));
+    samplingBounds = expand(samplingBounds, displacement, displacement);
+    const LONG kernelReach = blurRadius > 0.0f && blurKernel_.pairCount > 0u ?
+        static_cast<LONG>(std::ceil(blurKernel_.pairs[blurKernel_.pairCount - 1u][0])) + 1 : 0;
+    // The vertical pass needs horizontal results above/below its output;
+    // those horizontal results in turn need sharp pixels on either side.
+    const D3D11_RECT horizontalBounds = expand(samplingBounds, 0, kernelReach);
+    const D3D11_RECT snapshotBounds = expand(horizontalBounds, kernelReach, 0);
 
     ComPtr<ID3D11DeviceContext1> context1;
     if (FAILED(context->QueryInterface(IID_PPV_ARGS(&context1))))
@@ -511,13 +581,14 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     context1->SwapDeviceContextState(contextState_.Get(), &restore.previous);
 
     D3D11_BOX box {};
-    box.left = static_cast<UINT>(left);
-    box.top = static_cast<UINT>(top);
-    box.right = static_cast<UINT>(cropRight);
-    box.bottom = static_cast<UINT>(cropBottom);
+    box.left = static_cast<UINT>(left + snapshotBounds.left);
+    box.top = static_cast<UINT>(top + snapshotBounds.top);
+    box.right = static_cast<UINT>(left + snapshotBounds.right);
+    box.bottom = static_cast<UINT>(top + snapshotBounds.bottom);
     box.back = 1;
-    context->CopySubresourceRegion(snapshot_.Get(), 0, 0, 0, 0,
-                                   liveBackdrop, 0, &box);
+    context->CopySubresourceRegion(snapshot_.Get(), 0,
+        static_cast<UINT>(snapshotBounds.left), static_cast<UINT>(snapshotBounds.top),
+        0, liveBackdrop, 0, &box);
 
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(fullscreenVertex_.Get(), nullptr, 0);
@@ -531,16 +602,9 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     viewport.MaxDepth = 1.0f;
     context->RSSetViewports(1, &viewport);
 
-    const float blurRadius = std::clamp(region.blurRadius, 0.0f, 30.0f);
     ID3D11ShaderResourceView* blurredView = snapshotView_.Get();
     if (blurRadius > 0.0f)
     {
-        if (cachedBlurRadius_ != blurRadius)
-        {
-            prepare_blur_kernel(blurRadius, blurKernel_);
-            cachedBlurRadius_ = blurRadius;
-            cachedBlurWidth_ = 0u;
-        }
         if (cachedBlurWidth_ != width || cachedBlurHeight_ != height)
         {
             blurKernel_.texelSize[0] = 1.0f / width;
@@ -556,6 +620,8 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         ID3D11ShaderResourceView* passInput = snapshotView_.Get();
         context->PSSetShaderResources(0, 1, &passInput);
         context->PSSetShader(blurHorizontal_.Get(), nullptr, 0);
+        context->RSSetState(clippedRasteriser_.Get());
+        context->RSSetScissorRects(1, &horizontalBounds);
         context->Draw(3, 0);
 
         passInput = nullptr;
@@ -565,6 +631,7 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         passInput = blurXView_.Get();
         context->PSSetShaderResources(0, 1, &passInput);
         context->PSSetShader(blurVertical_.Get(), nullptr, 0);
+        context->RSSetScissorRects(1, &samplingBounds);
         context->Draw(3, 0);
         blurredView = blurYView_.Get();
     }
@@ -658,6 +725,7 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     };
     context->PSSetShaderResources(0, 2, sources);
     context->PSSetShader(optical_.Get(), nullptr, 0);
+    context->RSSetState(rasteriser_.Get());
     if (clip)
     {
         context->RSSetState(clippedRasteriser_.Get());

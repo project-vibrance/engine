@@ -24,7 +24,7 @@ cl.exe /nologo /std:c++20 /EHsc /permissive- /utf-8 /W4 /O2 /MT ^
     /Fe"%TEST_BUILD_DIR%\test_liquid_glass_d3d11.exe" ^
     "%~dp0test_liquid_glass_d3d11.cpp" ^
     "%~dp0..\..\engine\src\platform\win32\liquid_glass_d3d11.cpp" ^
-    /link /NOLOGO d3d11.lib
+    /link /NOLOGO d3d11.lib dxgi.lib
 if errorlevel 1 exit /b %errorlevel%
 
 "%TEST_BUILD_DIR%\test_liquid_glass_d3d11.exe" "%SHADER_DIR%" "%TEST_BUILD_DIR%\preview.ppm"

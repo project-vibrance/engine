@@ -74,6 +74,9 @@ add_test(NAME vibrance_liquid_dwm_config_tests COMMAND vibrance_liquid_dwm_confi
 add_executable(vibrance_composition_region_effects_tests composition_region_effects_tests.cpp)
 target_compile_features(vibrance_composition_region_effects_tests PRIVATE cxx_std_20)
 add_test(NAME vibrance_composition_region_effects_tests COMMAND vibrance_composition_region_effects_tests)
+add_executable(vibrance_composition_present_retry_tests composition_present_retry_tests.cpp)
+target_compile_features(vibrance_composition_present_retry_tests PRIVATE cxx_std_20)
+add_test(NAME vibrance_composition_present_retry_tests COMMAND vibrance_composition_present_retry_tests)
 if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
     set(_vibrance_hook_test "${CMAKE_CURRENT_BINARY_DIR}/vibrance_liquid_dwm_hook_tests.exe")
     add_custom_command(OUTPUT "${_vibrance_hook_test}"
@@ -90,6 +93,11 @@ if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
         VERBATIM)
     add_custom_target(vibrance_liquid_dwm_hook_fixture ALL DEPENDS "${_vibrance_hook_test}")
     add_dependencies(vibrance_liquid_dwm_hook_fixture vibrance_liquid_dwm_extension)
+    if(TARGET vibrance_liquid_glass_shader)
+        add_dependencies(vibrance_liquid_dwm_hook_fixture vibrance_liquid_glass_shader
+            vibrance_liquid_glass_ui_shader vibrance_liquid_glass_fullscreen_shader
+            vibrance_liquid_glass_blur_shaders)
+    endif()
     add_test(NAME vibrance_liquid_dwm_hook_tests COMMAND "${_vibrance_hook_test}")
 endif()
 vibrance_add_engine_test(vibrance_playback_quality_tests playback_quality_tests.cpp)

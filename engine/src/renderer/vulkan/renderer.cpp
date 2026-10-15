@@ -1451,14 +1451,16 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		compositionRequested && !forceHostUpload;
 	physicalDevice = choose_physical_device(
 		instance,
-		attemptCompositionGpuInterop);
+		attemptCompositionGpuInterop,
+		compositionRequested ? nativeWindowHandle : nullptr);
 	compositionGpuInterop = attemptCompositionGpuInterop &&
 		static_cast<bool>(physicalDevice);
 	if (!physicalDevice && attemptCompositionGpuInterop)
 	{
 		logger->warning(
 			"No Vulkan GPU supports D3D11 external-memory and keyed-mutex interop; using the host-upload Windows Composition fallback.");
-		physicalDevice = choose_physical_device(instance, false);
+		physicalDevice = choose_physical_device(
+			instance, false, nativeWindowHandle);
 	}
 	if (!physicalDevice)
 	{

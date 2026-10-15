@@ -27,6 +27,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -86,6 +87,17 @@ std::mutex regionMutex;
 std::mutex rendererMutex;
 LiquidGlassD3D11 renderer;
 ComPtr<ID3D11Device> rendererDevice;
+struct CachedRenderer
+{
+    ComPtr<ID3D11Device> device;
+    LiquidGlassD3D11 renderer;
+    ULONGLONG lastUsedTick = 0u;
+};
+// DWM can alternate devices for hybrid displays and capture output. Keep the
+// compiled shaders and scratch surfaces for each device, with a bounded LRU.
+std::array<CachedRenderer, 3u> rendererCache;
+ComPtr<ID3D11Device> failedRendererDevice;
+ULONGLONG failedRendererRetryTick = 0u;
 ComPtr<ID3D11Device1> uiDevice;
 ComPtr<ID3D11Texture2D> uiSource;
 ComPtr<IDXGIKeyedMutex> uiMutex;
@@ -136,6 +148,22 @@ void detail(std::uint32_t index, LONG value) noexcept
 {
     if (statusView && index < liquidDwmStatusWords)
         InterlockedExchange(statusView + index, value);
+}
+
+void record_native_render_attempt() noexcept
+{
+    detail(liquidDwmRenderAttemptTick, static_cast<LONG>(GetTickCount()));
+}
+
+void record_native_render_success() noexcept
+{
+    detail(liquidDwmRenderSuccessTick, static_cast<LONG>(GetTickCount()));
+}
+
+void record_native_render_failure(HRESULT result = E_FAIL) noexcept
+{
+    detail(liquidDwmRenderFailureResult, result);
+    detail(liquidDwmRenderFailureTick, static_cast<LONG>(GetTickCount()));
 }
 
 DXGI_FORMAT backdrop_copy_format(DXGI_FORMAT resource,
@@ -744,23 +772,108 @@ bool update_ui(ID3D11Device* device, ID3D11DeviceContext* context,
     return update_ui_cpu(device, context, region, rectangle);
 }
 
+void reset_renderers() noexcept
+{
+    renderer = LiquidGlassD3D11 {};
+    rendererDevice.Reset();
+    rendererCache = {};
+    failedRendererDevice.Reset();
+    failedRendererRetryTick = 0u;
+}
+
+void park_renderer() noexcept
+{
+    if (!rendererDevice) return;
+    auto* destination = &rendererCache.front();
+    for (auto& cached : rendererCache)
+    {
+        if (!cached.device) { destination = &cached; break; }
+        if (cached.lastUsedTick < destination->lastUsedTick) destination = &cached;
+    }
+    destination->device = std::move(rendererDevice);
+    destination->renderer = std::move(renderer);
+    destination->lastUsedTick = GetTickCount64();
+    renderer = LiquidGlassD3D11 {};
+}
+
+bool restore_renderer(ID3D11Device* device) noexcept
+{
+    for (auto& cached : rendererCache)
+    {
+        if (cached.device.Get() != device) continue;
+        rendererDevice = std::move(cached.device);
+        renderer = std::move(cached.renderer);
+        cached = {};
+        status(liquidDwmRendererCacheHits);
+        return true;
+    }
+    return false;
+}
+
 bool ensure_renderer(ID3D11Device* device)
 {
-    if (rendererDevice.Get() != device)
+    if (!device) return false;
+    const HRESULT reason = device->GetDeviceRemovedReason();
+    if (FAILED(reason))
     {
-        reset_ui();
-        reset_cpu_ui();
-        uiTransportOwner = 0;
-        uiTransportWindow = 0;
-        gpuUnavailableOwner = 0;
+        if (rendererDevice.Get() == device)
+        {
+            renderer = LiquidGlassD3D11 {};
+            rendererDevice.Reset();
+        }
+        for (auto& cached : rendererCache)
+            if (cached.device.Get() == device) cached = {};
+        detail(liquidDwmRendererLastError, reason);
+        status(liquidDwmRendererDeviceLosses);
+        return false;
+    }
+    if (rendererDevice.Get() == device) return true;
+    const auto now = GetTickCount64();
+    if (failedRendererDevice.Get() == device && now < failedRendererRetryTick)
+        return false;
+    reset_ui();
+    reset_cpu_ui();
+    uiTransportOwner = 0;
+    uiTransportWindow = 0;
+    gpuUnavailableOwner = 0;
+    // Restore before parking: even a full cache must preserve the requested
+    // device instead of evicting it while parking the current renderer.
+    LiquidGlassD3D11 previousRenderer = std::move(renderer);
+    ComPtr<ID3D11Device> previousDevice = std::move(rendererDevice);
+    const bool restored = restore_renderer(device);
+    if (previousDevice)
+    {
+        auto requestedRenderer = std::move(renderer);
+        auto requestedDevice = std::move(rendererDevice);
+        renderer = std::move(previousRenderer);
+        rendererDevice = std::move(previousDevice);
+        park_renderer();
+        renderer = std::move(requestedRenderer);
+        rendererDevice = std::move(requestedDevice);
+    }
+    if (restored) return true;
+    {
         renderer = LiquidGlassD3D11 {};
         const std::wstring path = module_path(extensionModule);
         const auto separator = path.find_last_of(L"\\/");
+        status(liquidDwmRendererInitialisations);
         rendererDevice = separator != std::wstring::npos &&
             renderer.initialise(device, path.substr(0, separator)) ?
                 device : nullptr;
         detail(20, rendererDevice ? 100 :
             -100 - renderer.initialisation_stage());
+        if (!rendererDevice)
+        {
+            failedRendererDevice = device;
+            failedRendererRetryTick = now + 1000u;
+            status(liquidDwmRendererFailures);
+        }
+        else
+        {
+            failedRendererDevice.Reset();
+            failedRendererRetryTick = 0u;
+            detail(liquidDwmRendererLastError, S_OK);
+        }
     }
     return rendererDevice != nullptr;
 }

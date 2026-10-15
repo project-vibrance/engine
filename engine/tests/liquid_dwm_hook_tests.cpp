@@ -76,7 +76,39 @@ int main()
         check(!windows10_device_matches(firstDevice.Get(), secondDevice.Get()) &&
             !windows10_device_matches(firstDevice.Get(), nullptr),
             "Foreign or missing native devices must not reach the optical pass");
+        std::array<LONG, liquidDwmStatusWords> deviceStatus {};
+        statusView = deviceStatus.data();
+        const auto testExecutable = module_path(nullptr);
+        const auto testSeparator = testExecutable.find_last_of(L"\\/");
+        const auto shaderDirectory = testExecutable.substr(0, testSeparator) + L"\\..\\win32-composition";
+        check(renderer.initialise(firstDevice.Get(), shaderDirectory),
+            "The hybrid-device fixture must load the optical renderer on its first WARP device");
         rendererDevice = firstDevice;
+        park_renderer();
+        check(renderer.initialise(secondDevice.Get(), shaderDirectory),
+            "The hybrid-device fixture must load the optical renderer on its second WARP device");
+        rendererDevice = secondDevice;
+        for (unsigned frame = 0u; frame < 128u; ++frame)
+        {
+            auto* expected = frame % 2u ? secondDevice.Get() : firstDevice.Get();
+            check(ensure_renderer(expected) && rendererDevice.Get() == expected,
+                "Alternating hybrid display devices must restore the correct cached optical renderer");
+        }
+        check(deviceStatus[liquidDwmRendererCacheHits] == 128 &&
+            deviceStatus[liquidDwmRendererInitialisations] == 0,
+            "Hybrid display and capture draws must reuse compiled shaders without reinitialising each frame");
+        reset_renderers();
+        const auto savedModule = extensionModule;
+        extensionModule = reinterpret_cast<HMODULE>(1u);
+        check(!ensure_renderer(firstDevice.Get()) && !ensure_renderer(firstDevice.Get()) &&
+            deviceStatus[liquidDwmRendererInitialisations] == 1 &&
+            deviceStatus[liquidDwmRendererFailures] == 1,
+            "Repeated shader-initialisation failures must wait before retrying on the compositor thread");
+        extensionModule = savedModule;
+        reset_renderers();
+        statusView = nullptr;
+        rendererDevice = firstDevice;
+        rendererCache[0].device = secondDevice;
         D3D11_TEXTURE2D_DESC textureDescription {};
         textureDescription.Width = 32u; textureDescription.Height = 32u;
         textureDescription.MipLevels = 1u; textureDescription.ArraySize = 1u;
@@ -99,7 +131,7 @@ int main()
             "Resource retirement must defer without blocking an active draw");
         released.count_down();
         activeDraw.join();
-        check(retire_windows10_gpu_resources() && !rendererDevice && !displayBackgrounds[0].texture &&
+        check(retire_windows10_gpu_resources() && !rendererDevice && !rendererCache[0].device && !displayBackgrounds[0].texture &&
             !captureBackgrounds[0].texture && !ddaBackgrounds[0].texture,
             "Quiescent retirement must release all cached native GPU resources");
     }
@@ -151,6 +183,13 @@ int main()
     LiquidNativeEntryIdentity emptyIdentity {};
     check(read_liquid_native_entry_identity(entry.data(), emptyIdentity),
         "An empty Windows 10 primitive queue must not invalidate the entry");
+    // Simulate an arbitrarily long idle interval without sleeping. Retained
+    // native entries must survive until their identity or ownership changes.
+    nativeMarkerTags[0].lastSeenTick = 0u;
+    check(preserve_native_marker_entry(entry.data()),
+        "Windows 10 must preserve an unchanged marker after a long idle interval");
+    check(retire_windows10_gpu_resources() && preserve_native_marker_entry(entry.data()),
+        "GPU resource retirement must preserve valid CPU marker identity across session transitions");
     write_at(entry, 0x40u, primitive.data());
     write_at(entry, 0x48u, primitive.data() + 0x4cu);
     write_at(entry, 0x50u, primitive.data() + 0x4cu);
@@ -276,6 +315,22 @@ int main()
         marker.context == context && marker.entry == entry.data() && marker.slot == 0u,
         "Windows 11 must retain its existing rendering-command decoder");
     check(std::equal(matrix.begin(), matrix.end(), marker.matrix), "The Windows 11 matrix must come from its command object");
+    for (auto& tag : nativeMarkerTags) tag.lastSeenTick = 0u;
+    marker = {};
+    check(preserve_native_marker_entry(entry.data()) &&
+        read_liquid_native_batch_marker(command.data(), executionContext.data(), marker) && marker.complete,
+        "Windows 11 must resume an unchanged retained marker after a long idle interval");
+    // A recycled subclass cannot use the base-class sentinel fallback. Even
+    // without a timeout, changed tint must invalidate its old classification.
+    const auto subclassVtable = entryVtable + sizeof(void*);
+    write_at(entry, 0u, subclassVtable);
+    tag_native_marker_entry(entry.data(), 0u, 300.0f, 100.0f, region);
+    for (auto& tag : nativeMarkerTags) tag.lastSeenTick = 0u;
+    write_at(entry, 0x30u, std::array<float, 4> { 0.2f, 0.3f, 0.4f, 1.0f });
+    marker = {};
+    check(!preserve_native_marker_entry(entry.data()) &&
+        !read_liquid_native_batch_marker(command.data(), executionContext.data(), marker),
+        "A recycled Windows 11 subclass must invalidate its marker even after a long idle interval");
     write_at(command, 0u, std::uint32_t { 2u }); marker = {};
     check(!read_liquid_native_batch_marker(command.data(), executionContext.data(), marker),
         "Windows 11 state-only commands must remain excluded");

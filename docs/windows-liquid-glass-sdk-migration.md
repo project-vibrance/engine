@@ -27,8 +27,13 @@ and defers new injection during fullscreen applications. It never restarts DWM.
 Uninstall removes the startup task; loaded immutable runtimes remain pinned
 until the Windows session ends.
 
-`liquid_glass_dwm_broker.exe --status` reports readiness and, when no status
-mapping exists, the last launcher/setup/broker reports and task result. Win32
+`liquid_glass_dwm_broker.exe --status` reports hook readiness separately from
+optical draw activity sampled over 500 milliseconds. It reports observed draw
+failures as degraded (exit code 20), and idle or hidden glass as unverified
+rather than claiming a visible effect is working. Per-device renderer cache
+counts, device losses and the last submission age help diagnose hybrid GPUs.
+When no status mapping exists, it reports the last launcher/setup/broker
+reports and task result. Win32
 error 2 here means that the session mapping does not exist; it does not establish
 that a DLL is missing. `--auto-config` prints the intended task XML without
 registering or running anything; `--run-auto` starts an already configured task;
@@ -62,8 +67,9 @@ a matching PDB with unsupported rendering symbols from a PDB retrieval failure.
 4. The extension recognises the marker during native colour-brush drawing and
    tags its draw-list entry. Retained entries are checked against their complete
    recorded identity, including vtable, geometry, effect, colour resource, tint,
-   and bounds. The bounded tag table expires inactive entries so reused native
-   addresses cannot classify unrelated content as glass.
+   and bounds. Idle entries remain valid across occlusion and low frame rates;
+   changed identity and ordinary-brush reuse revoke their tags. A bounded
+   least-recently-used table limits storage without a time-based expiry.
    Its captured shape remains paired with the queued native geometry, while
    current optical controls, tint and mask uniforms can update retained entries
    independently when their native draw bounds remain compatible.

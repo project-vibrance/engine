@@ -49,6 +49,15 @@ int main()
     incomplete.windowGetHwndRva = 0;
     check(!liquid_dwm_windows11_config_complete(incomplete),
         "A missing window identity accessor must still reject the compositor");
+    check(liquid_dwm_render_health(true, 0u, 0u) == LiquidDwmRenderHealth::unverified,
+        "Installed hooks alone must not report a working optical effect");
+    check(liquid_dwm_render_health(true, 7u, 0u) == LiquidDwmRenderHealth::rendering,
+        "Only successful draws observed in the sample establish rendering activity");
+    check(liquid_dwm_render_health(true, 0u, 2u) == LiquidDwmRenderHealth::degraded &&
+        liquid_dwm_render_health(true, 7u, 2u) == LiquidDwmRenderHealth::degraded,
+        "Failed draws must remain visible even when some optical draws succeed");
+    check(liquid_dwm_render_health(false, 7u, 0u) == LiquidDwmRenderHealth::unavailable,
+        "A revoked hook must override rendering activity from an earlier sample");
     static_assert(offsetof(LiquidDwmHookConfig, presentRva) == 8);
     static_assert(offsetof(LiquidDwmHookConfig, brushDrawRva) == 288);
     static_assert(sizeof(LiquidDwmHookConfig) == 296);

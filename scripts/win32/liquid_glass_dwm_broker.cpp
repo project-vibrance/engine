@@ -15,6 +15,7 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
@@ -737,7 +738,7 @@ int wmain(int argc, wchar_t** argv)
             startup::report_startup_failure();
             return 13;
         }
-        const auto* values = static_cast<const LONG*>(MapViewOfFile(mapping,
+        const auto* values = static_cast<const volatile LONG*>(MapViewOfFile(mapping,
             FILE_MAP_READ, 0, 0,
             vibrance::win32::liquidDwmStatusWords * sizeof(LONG)));
         if (!values)
@@ -747,18 +748,97 @@ int wmain(int argc, wchar_t** argv)
             std::wcerr << L"Cannot read native Liquid Glass status (Win32 error " << error << L").\n";
             return 13;
         }
+        using namespace vibrance::win32;
+        std::array<std::uint32_t, liquidDwmStatusWords> before {};
+        for (std::uint32_t index = 0; index < before.size(); ++index)
+            before[index] = static_cast<std::uint32_t>(values[index]);
+        constexpr DWORD sampleMilliseconds = 500u;
+        Sleep(sampleMilliseconds);
+        std::array<LONG, liquidDwmStatusWords> snapshot {};
+        for (std::uint32_t index = 0; index < snapshot.size(); ++index)
+            snapshot[index] = values[index];
         for (std::uint32_t index = 0;
              index < vibrance::win32::liquidDwmStatusWords; ++index)
         {
-            std::wcout << index << L": " << values[index] << L"\n";
+            std::wcout << index << L": " << snapshot[index] << L"\n";
         }
-        UnmapViewOfFile(values);
+        UnmapViewOfFile(const_cast<const LONG*>(values));
         CloseHandle(mapping);
         const HANDLE ready = OpenEventW(SYNCHRONIZE, FALSE, vibrance::win32::liquidDwmReadyName);
-        std::wcout << L"Native renderer: " << (ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0 ?
-            L"ready" : L"not ready (startup failure or session transition)") << L"\n";
+        const bool hooksReady = ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0;
         if (ready) CloseHandle(ready);
-        return 0;
+        const auto successes = static_cast<std::uint32_t>(snapshot[151]) - before[151];
+        const auto failures = static_cast<std::uint32_t>(snapshot[152]) - before[152];
+        const auto health = liquid_dwm_render_health(hooksReady, successes, failures);
+        std::wcout << L"Native hooks: " << (hooksReady ? L"installed and ready" :
+            L"not ready (startup failure or session transition)") << L"\n";
+        switch (health)
+        {
+        case LiquidDwmRenderHealth::unavailable:
+            std::wcout << L"Optical rendering: unavailable; hook readiness has been revoked.\n";
+            break;
+        case LiquidDwmRenderHealth::degraded:
+            std::wcout << L"Optical rendering: degraded (" << successes << L" successful and " <<
+                failures << L" failed draws during the " << sampleMilliseconds << L" ms sample).\n";
+            break;
+        case LiquidDwmRenderHealth::rendering:
+            std::wcout << L"Optical rendering: active (" << successes << L" successful draws during the " <<
+                sampleMilliseconds << L" ms sample).\n";
+            break;
+        case LiquidDwmRenderHealth::unverified:
+            std::wcout << L"Optical rendering: unverified; no optical draws occurred during the " <<
+                sampleMilliseconds << L" ms sample. The window may be idle, hidden or occluded.\n";
+            break;
+        }
+        std::wcout << L"Sampled desktop draws=" << (static_cast<std::uint32_t>(snapshot[6]) - before[6]) <<
+            L" capture draws=" << (static_cast<std::uint32_t>(snapshot[120]) - before[120]) <<
+            L" duplication draws=" << (static_cast<std::uint32_t>(snapshot[111]) - before[111]) << L"\n";
+        const HANDLE regions = OpenFileMappingW(FILE_MAP_READ, FALSE, liquidDwmRegionName);
+        const auto* table = regions ? static_cast<const LiquidDwmRegionTable*>(MapViewOfFile(regions,
+            FILE_MAP_READ, 0, 0, sizeof(LiquidDwmRegionTable))) : nullptr;
+        if (table)
+        {
+            for (std::uint32_t slot = 0; slot < liquidDwmRegionSlots; ++slot)
+            {
+                const auto& source = table->regions[slot];
+                auto& sequence = const_cast<std::uint32_t&>(source.sequence);
+                std::atomic_ref<std::uint32_t> publishedSequence(sequence);
+                LiquidDwmRegion region {};
+                bool stable = false;
+                for (unsigned attempt = 0u; attempt < 3u; ++attempt)
+                {
+                    const auto observed = publishedSequence.load(std::memory_order_acquire);
+                    if (observed & 1u) continue;
+                    std::memcpy(&region, &source, sizeof(region));
+                    MemoryBarrier();
+                    if (observed != publishedSequence.load(std::memory_order_acquire)) continue;
+                    stable = true;
+                    break;
+                }
+                if (!stable || region.version != liquidDwmProtocolVersion || !region.active || !region.hwnd)
+                    continue;
+                const auto draws = static_cast<std::uint32_t>(snapshot[liquidDwmRegionStatusBase + slot]) -
+                    before[liquidDwmRegionStatusBase + slot];
+                std::wcout << L"Region " << slot << L" (owner=" << region.ownerPid << L", id=" <<
+                    region.regionId << L"): " << (draws ? L"optical submissions observed" :
+                        L"unverified; no sampled optical submissions") << L", draws=" << draws << L"\n";
+            }
+            UnmapViewOfFile(table);
+        }
+        else std::wcout << L"Published regions unavailable; individual effects are unverified.\n";
+        if (regions) CloseHandle(regions);
+        const auto lastSuccess = static_cast<std::uint32_t>(snapshot[liquidDwmRenderSuccessTick]);
+        if (lastSuccess)
+            std::wcout << L"Last optical submission: " << (GetTickCount() - lastSuccess) << L" ms ago\n";
+        std::wcout << L"Renderer initialisations=" << snapshot[liquidDwmRendererInitialisations] <<
+            L" cached device restores=" << snapshot[liquidDwmRendererCacheHits] <<
+            L" device losses=" << snapshot[liquidDwmRendererDeviceLosses] << L"\n";
+        if (snapshot[liquidDwmRenderFailureResult])
+            std::wcout << L"Last optical failure HRESULT=0x" << std::hex <<
+                static_cast<std::uint32_t>(snapshot[liquidDwmRenderFailureResult]) << std::dec << L"\n";
+        std::wcout << L"Hook readiness alone does not verify a visible Liquid Glass effect.\n";
+        return health == LiquidDwmRenderHealth::unavailable ? 13 :
+            health == LiquidDwmRenderHealth::degraded ? 20 : 0;
     }
     if (argc != 3 && argc != 4)
     {

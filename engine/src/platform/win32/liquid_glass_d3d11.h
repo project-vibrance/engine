@@ -78,13 +78,15 @@ class LiquidGlassD3D11 final
 public:
     bool initialise(ID3D11Device* device, const std::wstring& shaderDirectory);
     int initialisation_stage() const noexcept { return initialisationStage_; }
+    // Supply the typed RTV format when liveBackdrop is a typeless resource.
     bool render(ID3D11DeviceContext* context,
                 ID3D11Texture2D* liveBackdrop,
                 ID3D11RenderTargetView* target,
                 const LiquidGlassRenderRegion& region,
                 std::int32_t sourceOriginX = 0,
                 std::int32_t sourceOriginY = 0,
-                const D3D11_RECT* clip = nullptr);
+                const D3D11_RECT* clip = nullptr,
+                DXGI_FORMAT backdropFormat = DXGI_FORMAT_UNKNOWN);
     bool composite_ui(ID3D11DeviceContext* context,
                       ID3D11ShaderResourceView* ui,
                       ID3D11RenderTargetView* target,

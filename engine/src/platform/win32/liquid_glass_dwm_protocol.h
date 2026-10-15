@@ -19,6 +19,32 @@ inline constexpr std::uint32_t liquidDwmStatusWords = 256;
 inline constexpr std::uint32_t liquidDwmUiBuffers = 2;
 inline constexpr std::uint32_t liquidDwmRegionSlots = 64;
 inline constexpr std::uint32_t liquidDwmRegionStatusBase = 160;
+inline constexpr std::uint32_t liquidDwmRendererInitialisations = 241;
+inline constexpr std::uint32_t liquidDwmRendererCacheHits = 242;
+inline constexpr std::uint32_t liquidDwmRendererFailures = 243;
+inline constexpr std::uint32_t liquidDwmRendererDeviceLosses = 244;
+inline constexpr std::uint32_t liquidDwmRendererLastError = 245;
+inline constexpr std::uint32_t liquidDwmRenderAttemptTick = 246;
+inline constexpr std::uint32_t liquidDwmRenderSuccessTick = 247;
+inline constexpr std::uint32_t liquidDwmRenderFailureTick = 248;
+inline constexpr std::uint32_t liquidDwmRenderFailureResult = 249;
+
+enum class LiquidDwmRenderHealth
+{
+    unavailable,
+    unverified,
+    rendering,
+    degraded
+};
+
+inline constexpr LiquidDwmRenderHealth liquid_dwm_render_health(bool hooksReady,
+    std::uint32_t successfulDraws, std::uint32_t failedDraws) noexcept
+{
+    if (!hooksReady) return LiquidDwmRenderHealth::unavailable;
+    if (failedDraws) return LiquidDwmRenderHealth::degraded;
+    if (successfulDraws) return LiquidDwmRenderHealth::rendering;
+    return LiquidDwmRenderHealth::unverified;
+}
 
 inline std::wstring liquid_dwm_ui_name(std::uint32_t ownerPid,
     std::uint64_t window, std::uint32_t index)

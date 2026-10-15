@@ -1,10 +1,12 @@
 #include "../../engine/src/platform/win32/liquid_glass_d3d11.h"
 
 #include <d3d11.h>
+#include <dxgi1_2.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -20,6 +22,10 @@ namespace
 bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
     ID3D11Device* device, ID3D11DeviceContext* context)
 {
+    const auto fail = [](const char* stage) {
+        std::cerr << "GPU benchmark failed: " << stage << '\n';
+        return false;
+    };
     constexpr UINT width = 1920u;
     constexpr UINT height = 1080u;
     std::vector<std::uint32_t> pixels(width * height);
@@ -42,16 +48,17 @@ bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
     if (FAILED(device->CreateTexture2D(&desc, &data, &source)) ||
         FAILED(device->CreateTexture2D(&desc, nullptr, &output)) ||
         FAILED(device->CreateRenderTargetView(output.Get(), nullptr, &target)))
-        return false;
+        return fail("surface creation");
     D3D11_QUERY_DESC queryDesc { D3D11_QUERY_TIMESTAMP_DISJOINT, 0u };
     ComPtr<ID3D11Query> disjoint;
     ComPtr<ID3D11Query> start;
     ComPtr<ID3D11Query> end;
-    if (FAILED(device->CreateQuery(&queryDesc, &disjoint))) return false;
+    if (FAILED(device->CreateQuery(&queryDesc, &disjoint))) return fail("disjoint query creation");
     queryDesc.Query = D3D11_QUERY_TIMESTAMP;
     if (FAILED(device->CreateQuery(&queryDesc, &start)) ||
-        FAILED(device->CreateQuery(&queryDesc, &end))) return false;
+        FAILED(device->CreateQuery(&queryDesc, &end))) return fail("timestamp query creation");
 
+    for (const bool clipped : { false, true })
     for (const float radius : { 0.0f, 7.0f, 30.0f })
     {
         vibrance::win32::LiquidGlassRenderRegion region;
@@ -60,8 +67,10 @@ bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
         region.width = 960u;
         region.height = 540u;
         region.blurRadius = radius;
+        const D3D11_RECT clip { 960, 540, 1008, 588 };
         for (UINT warm = 0u; warm < 8u; ++warm)
-            if (!lens.render(context, source.Get(), target.Get(), region)) return false;
+            if (!lens.render(context, source.Get(), target.Get(), region,
+                    0, 0, clipped ? &clip : nullptr)) return fail("warm-up render");
         std::vector<double> gpuMilliseconds;
         std::vector<double> cpuMilliseconds;
         for (UINT sample = 0u; sample < 31u; ++sample)
@@ -69,7 +78,8 @@ bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
             context->Begin(disjoint.Get());
             context->End(start.Get());
             const auto cpuStart = std::chrono::steady_clock::now();
-            if (!lens.render(context, source.Get(), target.Get(), region)) return false;
+            if (!lens.render(context, source.Get(), target.Get(), region,
+                    0, 0, clipped ? &clip : nullptr)) return fail("timed render");
             const auto cpuEnd = std::chrono::steady_clock::now();
             context->End(end.Get());
             context->End(disjoint.Get());
@@ -77,30 +87,37 @@ bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
             D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing {};
             const auto deadline = std::chrono::steady_clock::now() +
                 std::chrono::seconds(10);
-            HRESULT status = S_FALSE;
-            while ((status = context->GetData(disjoint.Get(), &timing,
-                    sizeof(timing), D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE)
-            {
-                if (std::chrono::steady_clock::now() >= deadline) return false;
-                std::this_thread::yield();
-            }
-            if (FAILED(status)) return false;
+            const auto awaitQuery = [&](ID3D11Query* query, void* value, UINT bytes) {
+                HRESULT status = S_FALSE;
+                while ((status = context->GetData(query, value, bytes,
+                        D3D11_ASYNC_GETDATA_DONOTFLUSH)) == S_FALSE)
+                {
+                    if (std::chrono::steady_clock::now() >= deadline) return false;
+                    std::this_thread::yield();
+                }
+                return SUCCEEDED(status);
+            };
+            if (!awaitQuery(disjoint.Get(), &timing, sizeof(timing)))
+                return fail("disjoint query result or timeout");
             UINT64 first = 0u;
             UINT64 last = 0u;
-            if (context->GetData(start.Get(), &first, sizeof(first), 0u) != S_OK ||
-                context->GetData(end.Get(), &last, sizeof(last), 0u) != S_OK)
-                return false;
+            // Some iGPU drivers publish the disjoint result before each
+            // individual timestamp becomes available. Wait for all three.
+            if (!awaitQuery(start.Get(), &first, sizeof(first)) ||
+                !awaitQuery(end.Get(), &last, sizeof(last)))
+                return fail("timestamp query result or timeout");
             if (timing.Disjoint || !timing.Frequency) continue;
             gpuMilliseconds.push_back(static_cast<double>(last - first) * 1000.0 /
                 static_cast<double>(timing.Frequency));
             cpuMilliseconds.push_back(std::chrono::duration<double, std::milli>(
                 cpuEnd - cpuStart).count());
         }
-        if (gpuMilliseconds.empty()) return false;
+        if (gpuMilliseconds.empty()) return fail("all timestamps disjoint");
         std::sort(gpuMilliseconds.begin(), gpuMilliseconds.end());
         std::sort(cpuMilliseconds.begin(), cpuMilliseconds.end());
         std::cout << std::fixed << std::setprecision(3)
                   << "Benchmark 960x540, radius " << radius
+                  << (clipped ? ", 48x48 clip" : ", full draw")
                   << ": GPU median " << gpuMilliseconds[gpuMilliseconds.size() / 2u]
                   << " ms, CPU submission median "
                   << cpuMilliseconds[cpuMilliseconds.size() / 2u] << " ms\n";
@@ -112,6 +129,7 @@ bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
 int wmain(int argc, wchar_t** argv)
 {
     bool runBenchmark = false;
+    unsigned adapterIndex = std::numeric_limits<unsigned>::max();
     const wchar_t* previewPath = nullptr;
     const wchar_t* capturePath = nullptr;
     const wchar_t* comparisonPath = nullptr;
@@ -120,6 +138,18 @@ int wmain(int argc, wchar_t** argv)
     {
         const std::wstring option(argv[argument]);
         if (option == L"--benchmark") runBenchmark = true;
+        else if (option == L"--adapter" && argument + 1 < argc)
+        {
+            const std::wstring index(argv[++argument]);
+            std::size_t consumed = 0u;
+            try
+            {
+                const auto parsed = std::stoul(index, &consumed);
+                validArguments = consumed == index.size() && parsed < 32u;
+                if (validArguments) adapterIndex = static_cast<unsigned>(parsed);
+            }
+            catch (...) { validArguments = false; }
+        }
         else if ((option == L"--capture" || option == L"--compare") && argument + 1 < argc)
         {
             if (option == L"--capture") capturePath = argv[++argument];
@@ -131,7 +161,7 @@ int wmain(int argc, wchar_t** argv)
     if (!validArguments || (capturePath && comparisonPath))
     {
         std::wcerr << L"Usage: test_liquid_glass_d3d11 shader-directory [preview.ppm] "
-            L"[--benchmark] [--capture file | --compare file]\n";
+            L"[--benchmark] [--adapter index] [--capture file | --compare file]\n";
         return 2;
     }
     std::ofstream capture;
@@ -183,10 +213,22 @@ int wmain(int argc, wchar_t** argv)
     ComPtr<ID3D11DeviceContext> context;
     D3D_FEATURE_LEVEL level {};
     const D3D_FEATURE_LEVEL requested[] = { D3D_FEATURE_LEVEL_11_0 };
+    ComPtr<IDXGIAdapter1> selectedAdapter;
+    if (adapterIndex != std::numeric_limits<unsigned>::max())
+    {
+        ComPtr<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+            FAILED(factory->EnumAdapters1(adapterIndex, &selectedAdapter)))
+        {
+            std::cerr << "Requested DXGI adapter is unavailable\n";
+            return 3;
+        }
+    }
     HRESULT result = D3D11CreateDevice(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, requested, 1,
+        selectedAdapter.Get(), selectedAdapter ? D3D_DRIVER_TYPE_UNKNOWN :
+            D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, requested, 1,
         D3D11_SDK_VERSION, &device, &level, &context);
-    if (FAILED(result))
+    if (FAILED(result) && !selectedAdapter)
     {
         result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
                                    requested, 1, D3D11_SDK_VERSION, &device,
@@ -197,6 +239,13 @@ int wmain(int argc, wchar_t** argv)
         std::cerr << "D3D11CreateDevice failed: " << std::hex << result << '\n';
         return 3;
     }
+    ComPtr<IDXGIDevice> dxgiDevice;
+    ComPtr<IDXGIAdapter> activeAdapter;
+    DXGI_ADAPTER_DESC adapterDescription {};
+    if (SUCCEEDED(device.As(&dxgiDevice)) &&
+        SUCCEEDED(dxgiDevice->GetAdapter(&activeAdapter)) &&
+        SUCCEEDED(activeAdapter->GetDesc(&adapterDescription)))
+        std::wcout << L"GPU adapter: " << adapterDescription.Description << L'\n';
 
     D3D11_TEXTURE2D_DESC desc {};
     desc.Width = width;
@@ -1079,5 +1128,174 @@ int wmain(int argc, wchar_t** argv)
         }
     }
     std::cout << "Alternating scratch sizes and live sources: pass\n";
+
+    // A typed DWM target can be sampled directly; typeless targets first need
+    // a cropped typed copy. Both routes must produce exactly the same lens.
+    std::size_t sourceOriginFailures = 0u;
+    for (const float radius : { 0.0f, 7.0f, 30.0f })
+    {
+        auto originRegion = region;
+        originRegion.x = 160;
+        originRegion.y = 96;
+        originRegion.width = 128;
+        originRegion.height = 64;
+        originRegion.blurRadius = radius;
+        if (!renderSample(stripedBackdrop.Get(), originRegion)) return 66;
+        const auto directReference = samplePixels;
+        const auto margin = static_cast<LONG>(std::ceil(std::max({
+            radius * 5.0f, originRegion.refractionStrength +
+                originRegion.dispersionStrength + 2.0f, 4.0f })));
+        const D3D11_BOX copyBox {
+            static_cast<UINT>(std::max<LONG>(0, originRegion.x - margin)),
+            static_cast<UINT>(std::max<LONG>(0, originRegion.y - margin)), 0,
+            std::min<UINT>(width, originRegion.x + originRegion.width + margin),
+            std::min<UINT>(height, originRegion.y + originRegion.height + margin), 1
+        };
+        auto croppedDescription = whiteDesc;
+        croppedDescription.Width = copyBox.right - copyBox.left;
+        croppedDescription.Height = copyBox.bottom - copyBox.top;
+        ComPtr<ID3D11Texture2D> croppedSource;
+        if (FAILED(device->CreateTexture2D(&croppedDescription, nullptr,
+                &croppedSource))) return 67;
+        context->CopySubresourceRegion(croppedSource.Get(), 0, 0, 0, 0,
+            stripedBackdrop.Get(), 0, &copyBox);
+        context->ClearRenderTargetView(target.Get(), dark);
+        if (!lens.render(context.Get(), croppedSource.Get(), target.Get(),
+                originRegion, static_cast<LONG>(copyBox.left),
+                static_cast<LONG>(copyBox.top))) return 68;
+        context->CopyResource(readback.Get(), backdrop.Get());
+        if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+                &mapped))) return 69;
+        for (UINT y = 0; y < height; ++y)
+        {
+            const auto* row = reinterpret_cast<const std::uint32_t*>(
+                static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+            for (UINT x = 0; x < width; ++x)
+                if (row[x] != directReference[y * width + x]) ++sourceOriginFailures;
+        }
+        context->Unmap(readback.Get(), 0);
+    }
+    std::cout << "Direct and cropped source reference failures: "
+              << sourceOriginFailures << '\n';
+    if (sourceOriginFailures) return 70;
+
+    std::size_t typelessSourceFailures = 0u;
+    for (const auto format : { DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB })
+    {
+        auto typedDescription = whiteDesc;
+        typedDescription.Format = format;
+        typedDescription.BindFlags |= D3D11_BIND_RENDER_TARGET;
+        ComPtr<ID3D11Texture2D> typedSource;
+        ComPtr<ID3D11Texture2D> typelessSource;
+        ComPtr<ID3D11RenderTargetView> typedTarget;
+        ComPtr<ID3D11RenderTargetView> typelessTarget;
+        if (FAILED(device->CreateTexture2D(&typedDescription, nullptr,
+                &typedSource)) ||
+            FAILED(device->CreateRenderTargetView(typedSource.Get(), nullptr,
+                &typedTarget))) return 71;
+        typedDescription.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        D3D11_RENDER_TARGET_VIEW_DESC typedView {};
+        typedView.Format = format;
+        typedView.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        if (FAILED(device->CreateTexture2D(&typedDescription, nullptr,
+                &typelessSource)) ||
+            FAILED(device->CreateRenderTargetView(typelessSource.Get(), &typedView,
+                &typelessTarget))) return 72;
+        for (const float radius : { 0.0f, 7.0f, 30.0f })
+        {
+            auto typelessRegion = region;
+            typelessRegion.blurRadius = radius;
+            const D3D11_RECT typelessClip { 68, 36, 282, 198 };
+            context->CopyResource(typedSource.Get(), stripedBackdrop.Get());
+            context->CopyResource(typelessSource.Get(), stripedBackdrop.Get());
+            if (!lens.render(context.Get(), typedSource.Get(), typedTarget.Get(),
+                    typelessRegion, 0, 0, &typelessClip)) return 73;
+            context->CopyResource(readback.Get(), typedSource.Get());
+            if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+                    &mapped))) return 74;
+            std::vector<std::uint32_t> typedReference(width * height);
+            for (UINT y = 0; y < height; ++y)
+            {
+                const auto* row = reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+                std::copy_n(row, width, typedReference.begin() + y * width);
+            }
+            context->Unmap(readback.Get(), 0);
+            if (!lens.render(context.Get(), typelessSource.Get(), typelessTarget.Get(),
+                    typelessRegion, 0, 0, &typelessClip, format)) return 75;
+            context->CopyResource(readback.Get(), typelessSource.Get());
+            if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+                    &mapped))) return 76;
+            for (UINT y = 0; y < height; ++y)
+            {
+                const auto* row = reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+                for (UINT x = 0; x < width; ++x)
+                    if (row[x] != typedReference[y * width + x]) ++typelessSourceFailures;
+            }
+            context->Unmap(readback.Get(), 0);
+        }
+        if (lens.render(context.Get(), typelessSource.Get(), typelessTarget.Get(),
+                region, 0, 0, nullptr, DXGI_FORMAT_B8G8R8A8_UNORM)) return 77;
+    }
+    std::cout << "Typed and typeless same-target source reference failures: "
+              << typelessSourceFailures << '\n';
+    if (typelessSourceFailures) return 78;
+
+    // DWM can paint a large island through many small, disjoint clips. Every
+    // clip must retain its full Gaussian/refraction neighbourhood, even after
+    // another clip or a different live backdrop has populated the scratch set.
+    const D3D11_RECT samplingClips[] = {
+        { 64, 32, 65, 33 }, { 447, 223, 448, 224 },
+        { 64, 32, 448, 36 }, { 64, 32, 68, 224 },
+        { 442, 32, 448, 224 }, { 64, 218, 448, 224 },
+        { 79, 47, 113, 83 }, { 229, 111, 232, 114 },
+        { 0, 0, 512, 256 }
+    };
+    std::size_t samplingClipFailures = 0u;
+    for (const float radius : { 0.0f, 7.0f, 30.0f })
+    {
+        auto clippedRegion = region;
+        clippedRegion.blurRadius = radius;
+        clippedRegion.refractionStrength = 36.0f;
+        clippedRegion.dispersionStrength = 6.0f;
+        for (ID3D11Texture2D* liveSource : { stripedBackdrop.Get(), whiteBackdrop.Get() })
+        {
+            if (!renderSample(liveSource, clippedRegion)) return 62;
+            const auto fullReference = samplePixels;
+            for (const auto& samplingClip : samplingClips)
+            {
+                ID3D11Texture2D* previousSource = liveSource == stripedBackdrop.Get() ?
+                    whiteBackdrop.Get() : stripedBackdrop.Get();
+                if (!lens.render(context.Get(), previousSource, target.Get(),
+                        clippedRegion)) return 63;
+                context->ClearRenderTargetView(target.Get(), dark);
+                if (!lens.render(context.Get(), liveSource, target.Get(),
+                        clippedRegion, 0, 0, &samplingClip)) return 63;
+                context->CopyResource(readback.Get(), backdrop.Get());
+                if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
+                        &mapped))) return 64;
+                for (UINT y = 0; y < height; ++y)
+                {
+                    const auto* row = reinterpret_cast<const std::uint32_t*>(
+                        static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+                    for (UINT x = 0; x < width; ++x)
+                    {
+                        const bool inside = static_cast<LONG>(x) >= samplingClip.left &&
+                            static_cast<LONG>(x) < samplingClip.right &&
+                            static_cast<LONG>(y) >= samplingClip.top &&
+                            static_cast<LONG>(y) < samplingClip.bottom;
+                        if (row[x] != (inside ? fullReference[y * width + x] : 0xff101010u))
+                            ++samplingClipFailures;
+                    }
+                }
+                context->Unmap(readback.Get(), 0);
+            }
+        }
+    }
+    std::cout << "Clipped sampling neighbourhood reference failures: "
+              << samplingClipFailures << '\n';
+    if (samplingClipFailures) return 65;
     return runBenchmark && !benchmark(lens, device.Get(), context.Get()) ? 54 : 0;
 }
