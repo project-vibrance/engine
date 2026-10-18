@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -45,6 +46,7 @@
 #include "playback_quality_probe.h"
 #include "notification_activation.h"
 #include "notification_payload_store.h"
+#include "../../media/timeline_range.h"
 
 namespace
 {
@@ -945,11 +947,11 @@ public:
     }
 
 private:
-    void publish(VibranceWin32MediaSnapshot next)
+    void publish(VibranceWin32MediaSnapshot next, bool forceSample = false)
     {
         std::lock_guard lock(mutex);
         next.structSize = sizeof(next);
-        if (same_payload(snapshot, next))
+        if (!forceSample && same_payload(snapshot, next))
         {
             return;
         }
@@ -1184,9 +1186,10 @@ private:
     }
 
     std::chrono::steady_clock::time_point lastProcessResolution {};
+    std::chrono::steady_clock::time_point playbackResumedAt {};
 
     void poll(
-        const GlobalSystemMediaTransportControlsSessionManager& manager)
+        const GlobalSystemMediaTransportControlsSessionManager& manager, bool forceSample = false)
     {
         VibranceWin32MediaSnapshot next {};
         next.structSize = sizeof(next);
@@ -1273,17 +1276,60 @@ private:
                 VIBRANCE_WIN32_MEDIA_CAN_SKIP_PREVIOUS;
         }
 
-        const auto timeline = session.GetTimelineProperties();
-        const std::int64_t startMilliseconds =
-            milliseconds(timeline.StartTime());
-        next.positionMilliseconds =
-            std::max(
-                milliseconds(timeline.Position()) - startMilliseconds,
-                std::int64_t(0));
-        next.durationMilliseconds =
-            std::max(
-                milliseconds(timeline.EndTime()) - startMilliseconds,
-                std::int64_t(0));
+        VibranceWin32MediaSnapshot previous;
+        {
+            std::lock_guard lock(mutex);
+            previous = snapshot;
+        }
+        const bool sameItem = previous.sessionAvailable &&
+            std::strcmp(previous.sourceApp, next.sourceApp) == 0 &&
+            std::strcmp(previous.title, next.title) == 0 &&
+            std::strcmp(previous.artist, next.artist) == 0 &&
+            std::strcmp(previous.album, next.album) == 0;
+        const auto sampledAt = std::chrono::steady_clock::now();
+        if (!sameItem) playbackResumedAt = {};
+        else if (next.playbackStatus == VIBRANCE_WIN32_MEDIA_PLAYING &&
+            previous.playbackStatus != VIBRANCE_WIN32_MEDIA_PLAYING)
+            playbackResumedAt = sampledAt;
+        try
+        {
+            const auto timeline = session.GetTimelineProperties();
+            double elapsed = 0.0;
+            if (next.playbackStatus == VIBRANCE_WIN32_MEDIA_PLAYING &&
+                timeline.LastUpdatedTime().time_since_epoch().count() > 0)
+            {
+                elapsed = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    winrt::clock::now() - timeline.LastUpdatedTime()).count());
+                // Resuming cannot count time spent paused, even when a browser
+                // has not yet refreshed its timeline timestamp.
+                if (playbackResumedAt != std::chrono::steady_clock::time_point {})
+                    elapsed = std::min(elapsed, std::chrono::duration<double, std::milli>(
+                        sampledAt - playbackResumedAt).count());
+            }
+            const auto rate = playbackInfo.PlaybackRate();
+            const auto range = vibrance::media::timeline_range(
+                milliseconds(timeline.StartTime()), milliseconds(timeline.EndTime()),
+                milliseconds(timeline.MaxSeekTime()), milliseconds(timeline.Position()),
+                elapsed, rate ? rate.Value() : 1.0, sameItem ? previous.durationMilliseconds : 0);
+            next.durationMilliseconds = range.duration;
+            next.positionMilliseconds = range.position;
+            if (sameItem && !range.hasItemEnd && milliseconds(timeline.MaxSeekTime()) <= range.origin)
+            {
+                next.durationMilliseconds = previous.durationMilliseconds;
+                if (milliseconds(timeline.Position()) == 0)
+                    next.positionMilliseconds = previous.positionMilliseconds;
+            }
+            if (next.durationMilliseconds > 0)
+                next.positionMilliseconds = std::min(next.positionMilliseconds, next.durationMilliseconds);
+        }
+        catch (const winrt::hresult_error&)
+        {
+            if (sameItem)
+            {
+                next.durationMilliseconds = previous.durationMilliseconds;
+                next.positionMilliseconds = previous.positionMilliseconds;
+            }
+        }
         if (qualityProbe)
         {
             const auto quality = qualityProbe->refresh({ next.sourceProcessId,
@@ -1303,7 +1349,7 @@ private:
                 default: break;
             }
         }
-        publish(next);
+        publish(next, forceSample);
     }
 
     static void execute(
@@ -1343,13 +1389,15 @@ private:
         {
             return;
         }
-        const std::int64_t startMilliseconds =
-            milliseconds(session.GetTimelineProperties().StartTime());
+        const auto timeline = session.GetTimelineProperties();
+        const auto range = vibrance::media::timeline_range(milliseconds(timeline.StartTime()),
+            milliseconds(timeline.EndTime()), milliseconds(timeline.MaxSeekTime()), 0);
         constexpr std::int64_t ticksPerMillisecond = 10'000;
-        const std::int64_t targetTicks =
-            (startMilliseconds +
-                std::max(positionMilliseconds, std::int64_t(0))) *
-            ticksPerMillisecond;
+        constexpr auto limit = std::numeric_limits<std::int64_t>::max() / ticksPerMillisecond;
+        const std::int64_t relativeTarget = range.hasItemEnd ?
+                std::clamp(positionMilliseconds, std::int64_t(0), range.duration) :
+                std::clamp(positionMilliseconds, std::int64_t(0), limit);
+        const std::int64_t targetTicks = std::clamp(range.origin + relativeTarget, -limit, limit) * ticksPerMillisecond;
         session.TryChangePlaybackPositionAsync(targetTicks).get();
     }
 
@@ -2083,7 +2131,7 @@ private:
                 {
                     try
                     {
-                        poll(manager);
+                        poll(manager, !pending.empty() || seekPosition.has_value());
                     }
                     catch (const winrt::hresult_error& error)
                     {

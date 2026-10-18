@@ -65,7 +65,12 @@ namespace
         {
             return;
         }
-        const float runLeft = std::max(rootShape->size.x - run.bounds.x, 0.0f);
+        const auto* parent = scene.registry().try_get<Parent2DComponent>(view.root);
+        // The numeric run keeps its LTR glyph order, but its unused character
+        // budget belongs at the trailing edge of the surrounding interface.
+        const bool rtl = ui_layout_is_rtl(scene.registry(), parent ? parent->parent : entt::null);
+        const float runLeft = rtl ? 0.0f :
+            std::max(rootShape->size.x - run.bounds.x, 0.0f);
         float inkTop = run.glyphs.front().position.y;
         float inkBottom = inkTop + run.glyphs.front().size.y;
         for (const MSDFGlyph& glyph : run.glyphs)
@@ -220,6 +225,9 @@ UiAnimatedCharacterTextView ui_create_animated_character_text(
             0.0f),
         Renderer2DPrimitive::eRectangle);
     ui.set_layer(view.root, options.layer, options.order);
+    // Character cells form one numeric/ASCII run, even inside an RTL interface.
+    ui.registry().emplace<UiLayoutDirectionComponent>(view.root,
+        UiLayoutDirectionComponent { UiLayoutDirection::eLeftToRight });
     ui.attach_aligned(
         view.root,
         parent,

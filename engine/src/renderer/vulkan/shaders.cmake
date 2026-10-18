@@ -27,8 +27,9 @@ foreach(SHADER_SOURCE IN LISTS ENGINE_SHADER_SOURCES)
     add_custom_command(
         OUTPUT "${SHADER_BINARY}"
         COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.3 -O
+            -DVIBRANCE_VULKAN_SAMPLE_LOOPS=1
             "${SHADER_SOURCE}" -o "${SHADER_BINARY}"
-        DEPENDS "${SHADER_SOURCE}"
+        DEPENDS "${SHADER_SOURCE}" "${CMAKE_CURRENT_LIST_FILE}"
         COMMENT "Compiling ${SHADER_NAME} to SPIR-V"
         VERBATIM)
     list(APPEND EMBEDDED_SHADER_BINARIES "${SHADER_BINARY}")
@@ -40,13 +41,29 @@ set(TEXT_BATCH_SHADER_BINARY "${EMBEDDED_SHADER_DIR}/spirv/text_msdf_batch.comp.
 add_custom_command(
     OUTPUT "${TEXT_BATCH_SHADER_BINARY}"
     COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.3 -O
+        -DVIBRANCE_VULKAN_SAMPLE_LOOPS=1
         -DVIBRANCE_TEXT_BATCH=1 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_msdf.comp"
         -o "${TEXT_BATCH_SHADER_BINARY}"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_msdf.comp"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_msdf.comp" "${CMAKE_CURRENT_LIST_FILE}"
     COMMENT "Compiling batched text to SPIR-V"
     VERBATIM)
 list(APPEND EMBEDDED_SHADER_BINARIES "${TEXT_BATCH_SHADER_BINARY}")
 string(APPEND EMBEDDED_SHADER_MANIFEST_CONTENT "text_msdf_batch.comp|${TEXT_BATCH_SHADER_BINARY}\n")
+# The measured NVIDIA path shares repeated media samples; other vendors use
+# the original shader, which remains faster on the local integrated GPU.
+set(NVIDIA_MEDIA_SHADER_BINARY "${EMBEDDED_SHADER_DIR}/spirv/media_2d_nvidia.comp.spv")
+add_custom_command(
+    OUTPUT "${NVIDIA_MEDIA_SHADER_BINARY}"
+    COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.3 -O
+        -DVIBRANCE_VULKAN_SAMPLE_LOOPS=1
+        -DVIBRANCE_NVIDIA_MEDIA_SAMPLE_LOOPS=1
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/media_2d.comp"
+        -o "${NVIDIA_MEDIA_SHADER_BINARY}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/media_2d.comp" "${CMAKE_CURRENT_LIST_FILE}"
+    COMMENT "Compiling NVIDIA media to SPIR-V"
+    VERBATIM)
+list(APPEND EMBEDDED_SHADER_BINARIES "${NVIDIA_MEDIA_SHADER_BINARY}")
+string(APPEND EMBEDDED_SHADER_MANIFEST_CONTENT "media_2d_nvidia.comp|${NVIDIA_MEDIA_SHADER_BINARY}\n")
 file(CONFIGURE
     OUTPUT "${EMBEDDED_SHADER_MANIFEST}"
     CONTENT "${EMBEDDED_SHADER_MANIFEST_CONTENT}")

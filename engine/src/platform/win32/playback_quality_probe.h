@@ -98,6 +98,11 @@ private:
             FAILED(element->get_CachedIsOffscreen(&offscreen))) return false;
         node.role = role(type);
         node.visible = offscreen == FALSE;
+        // The detector rejects a node and every descendant beneath an
+        // offscreen or excluded ancestor. Their cached names and children
+        // cannot contribute playback evidence, so do not traverse them.
+        if (!node.visible || node.role == media_quality_detection::Role::eExcluded)
+            return true;
         BSTR text = nullptr;
         if (SUCCEEDED(element->get_CachedName(&text)) && text)
             node.name.assign(text, SysStringLen(text));
@@ -168,8 +173,15 @@ private:
                 const Request current = request;
                 const auto version = generation;
                 lock.unlock();
-                const auto detected = sample(automation.get(), cache.get(),
-                    resolveWindow(current), current);
+                // The detector requires both normalised identity fields before
+                // accepting any badge. Avoid process/window resolution and UIA
+                // work when its result is already necessarily unknown.
+                const bool hasIdentity =
+                    !media_quality_detection::normalise(current.title).empty() &&
+                    !media_quality_detection::normalise(current.artist).empty();
+                const auto detected = hasIdentity ?
+                    sample(automation.get(), cache.get(), resolveWindow(current), current) :
+                    MediaPlaybackQuality::eUnknown;
                 lock.lock();
                 if (generation == version)
                 {

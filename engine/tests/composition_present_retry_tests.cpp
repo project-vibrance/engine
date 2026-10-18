@@ -11,6 +11,36 @@ int main()
         if (!condition) { std::cerr << message << '\n'; passed = false; }
     };
 
+    static_assert(VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_TIMEOUT_MS <= 1u,
+        "A shared UI thread must not inherit the former one-second interop wait");
+    CompositionLatencyHint stalledDisplay;
+    CompositionLatencyHint healthyDisplay;
+    check(!stalledDisplay.may_prepare(false, 100u) &&
+        !stalledDisplay.may_prepare(false, 116u) &&
+        healthyDisplay.may_prepare(true, 116u),
+        "An unsignalled output must defer immediately without preventing another display's work");
+    check(stalledDisplay.may_prepare(false, 132u) &&
+        stalledDisplay.may_prepare(false, 133u) &&
+        stalledDisplay.may_prepare(false, 148u),
+        "A hybrid driver's stuck latency hint must fall back to nonblocking Present1 without throttling later frames");
+    CompositionLatencyHint transientDisplay;
+    check(!transientDisplay.may_prepare(false, 200u) &&
+        transientDisplay.may_prepare(true, 216u) &&
+        !transientDisplay.may_prepare(false, 240u) &&
+        !transientDisplay.may_prepare(false, 256u),
+        "An ordinary latency signal must reset the transient deferral interval");
+
+    CompositionPresentStall transition;
+    check(!transition.needs_recovery(VIBRANCE_COMPOSITION_PRESENT_DEFERRED, true, 0u) &&
+        !transition.needs_recovery(VIBRANCE_COMPOSITION_PRESENT_DEFERRED, true, 999u) &&
+        transition.needs_recovery(VIBRANCE_COMPOSITION_PRESENT_DEFERRED, true, 1000u),
+        "A visible target that never accepts its pending frame must request independent bridge recovery");
+    check(!transition.needs_recovery(VIBRANCE_COMPOSITION_PRESENT_DEFERRED, false, 2000u) &&
+        !transition.needs_recovery(VIBRANCE_COMPOSITION_PRESENT_DEFERRED, true, 3000u) &&
+        !transition.needs_recovery(VIBRANCE_COMPOSITION_PRESENTED, true, 3500u) &&
+        !transition.needs_recovery(VIBRANCE_COMPOSITION_PRESENT_DEFERRED, true, 4000u),
+        "Hidden windows and successful frames must reset the stalled-output recovery interval");
+
     CompositionPresentRetry retry;
     std::uint64_t mutexKey = VIBRANCE_COMPOSITION_VULKAN_RELEASE_KEY;
     std::uint32_t copies = 0u;

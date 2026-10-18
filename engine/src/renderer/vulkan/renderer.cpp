@@ -9,7 +9,10 @@
 #include <vibranceUI/renderer/swapchain.h>
 #include <vibranceUI/factories/mesh_factory.h>
 #include <vibranceUI/ui/text.h>
+#include <vibranceUI/ui/layout_direction.h>
 #include "../../platform/composition_presenter.h"
+#include "pipeline_cache.h"
+#include "media_pipeline_policy.h"
 #if defined(_WIN32)
 #include "../../platform/win32/composition_bridge_abi.h"
 #endif
@@ -120,6 +123,8 @@ namespace
 	thread_local bool rendererDrawSeen = false;
 	thread_local bool allRendererDrawsSettled = true;
 	thread_local bool rendererHostUsesIdleEventWait = false;
+	thread_local bool externallyPacedFrameActive = false;
+	thread_local uint32_t externallyPacedFrameRate = 60u;
 
 	struct RendererDrawActivity
 	{
@@ -962,6 +967,7 @@ private:
 	void make_descriptor_sets();
 	void make_pipeline_layouts();
 	void make_pipelines();
+	bool initialise_composition_presenter();
 	bool rebuild_composition_presenter();
 	bool ensure_composition_readback(vk::Extent2D extent);
 	void destroy_composition_readback();
@@ -1021,6 +1027,7 @@ private:
 	std::vector<std::unordered_map<DescriptorScope, vk::DescriptorSet>> descriptorSets;
 	std::vector<Frame> frames;
 	std::unordered_map<PipelineType, vk::Pipeline> pipelines;
+	std::unique_ptr<vibrance::vulkan::PipelineCache> pipelineCache;
 	vk::RenderPass hosted3DRenderPass = nullptr;
 	vk::SampleCountFlagBits hosted3DSamples = vk::SampleCountFlagBits::e1;
 	Renderer2DScene renderer2DScene;
@@ -1043,6 +1050,11 @@ private:
 	uint32_t targetFrameRate = 0;
 	std::chrono::steady_clock::time_point nextFrameDeadline {};
 	std::vector<bool> compositionFramePending;
+	std::vector<bool> compositionFrameUploaded;
+	bool compositionRecoveryPending = false;
+	uint32_t consecutiveCompositionRecoveries = 0u;
+	std::chrono::steady_clock::time_point nextCompositionRecoveryDeadline {};
+	std::chrono::steady_clock::time_point compositionAcquireWaitSince {};
 	std::vector<uint32_t> compositionFrameBufferIndices;
 	RetainedDamageTracker compositionBufferDamage;
 	uint32_t nextCompositionBufferIndex = 0u;
@@ -1053,6 +1065,7 @@ private:
 	bool nativeTransparencyPrimed = false;
 	bool hasSubmittedFrame = false;
 	uint64_t lastSubmittedFrameGeneration = 0u;
+	double lastSubmittedRenderTimeSeconds = -1.0;
 	bool renderDiagnosticsEnabled = false;
 	std::chrono::steady_clock::time_point renderDiagnosticsStart {};
 	uint64_t diagnosticDrawCalls = 0u;
@@ -1102,6 +1115,17 @@ Engine::~Engine()
 {
     Logger::fetch_logger()->info("Engine instance shutting down: vulkan.");
 	unregister_live_engine(this);
+}
+
+void Engine::begin_externally_paced_frame(uint32_t frameRate)
+{
+	externallyPacedFrameRate = std::max(frameRate, 1u);
+	externallyPacedFrameActive = true;
+}
+
+void Engine::end_externally_paced_frame()
+{
+	externallyPacedFrameActive = false;
 }
 
 void Engine::draw()
@@ -1500,16 +1524,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		logger->vulkan("Swapchain creation produced no drawable images.");
 		return;
 	}
-	if (compositionRequested && compositionPresenter.initialise(
-			nativeWindowHandle,
-			physicalDevice,
-		logicalDevice,
-		swapchain.extent.width,
-		swapchain.extent.height,
-		kCompositionBufferCount,
-		graphicsQueueFamilyIndex,
-		transparentFramebuffer,
-		compositionGpuInterop))
+	if (compositionRequested && initialise_composition_presenter())
 	{
 		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
 		// Transparent Composition windows opt out of the HWND redirection
@@ -1691,6 +1706,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		}
 	}
 	compositionFramePending.assign(frameCount, false);
+	compositionFrameUploaded.assign(frameCount, false);
 	compositionFrameBufferIndices.assign(frameCount, 0u);
 
 	currentTime = 0.0;
@@ -1796,42 +1812,82 @@ void Engine::Impl::make_pipeline_layouts()
 
 void Engine::Impl::make_pipelines() 
 {
+	vk::PipelineCache cache {};
+	try
+	{
+		pipelineCache = std::make_unique<vibrance::vulkan::PipelineCache>(
+			logicalDevice, physicalDevice.getProperties(), embedded_shader_fingerprint());
+		cache = pipelineCache->handle();
+	}
+	catch (...)
+	{
+		logger->vulkan("Vulkan pipeline cache unavailable; compiling normally.");
+	}
 	pipelines[PipelineType::eClear] = make_compute_pipeline(
-		logicalDevice, "clear_screen", pipelineLayouts[PipelineType::eClear], deviceDeletionQueue
+		logicalDevice, "clear_screen", pipelineLayouts[PipelineType::eClear], deviceDeletionQueue, cache
 	);
 	pipelines[PipelineType::eRasteriseSmall] = make_compute_pipeline(
-		logicalDevice, "rasterise_small", pipelineLayouts[PipelineType::eRasteriseSmall], deviceDeletionQueue
+		logicalDevice, "rasterise_small", pipelineLayouts[PipelineType::eRasteriseSmall], deviceDeletionQueue, cache
 	);
 	pipelines[PipelineType::eShape2D] = make_compute_pipeline(
-		logicalDevice, "shape_2d", pipelineLayouts[PipelineType::eShape2D], deviceDeletionQueue
+		logicalDevice, "shape_2d", pipelineLayouts[PipelineType::eShape2D], deviceDeletionQueue, cache
 	);
 	pipelines[PipelineType::eShadow2D] = make_compute_pipeline(
-		logicalDevice, "shadow_2d", pipelineLayouts[PipelineType::eShadow2D], deviceDeletionQueue
+		logicalDevice, "shadow_2d", pipelineLayouts[PipelineType::eShadow2D], deviceDeletionQueue, cache
 	);
 	pipelines[PipelineType::eBlur2D] = make_compute_pipeline(
-		logicalDevice, "blur_2d", pipelineLayouts[PipelineType::eBlur2D], deviceDeletionQueue
+		logicalDevice, "blur_2d", pipelineLayouts[PipelineType::eBlur2D], deviceDeletionQueue, cache
 	);
 	pipelines[PipelineType::eTextMSDF] = make_compute_pipeline(
-		logicalDevice, "text_msdf", pipelineLayouts[PipelineType::eTextMSDF], deviceDeletionQueue
+		logicalDevice, "text_msdf", pipelineLayouts[PipelineType::eTextMSDF], deviceDeletionQueue, cache
 	);
 	// Batching is optional. The ordinary text pipeline remains available if a
 	// driver cannot create this variant or its bounded upload cannot be allocated.
 	pipelines[PipelineType::eTextMSDFBatch] = make_compute_pipeline(
-		logicalDevice, "text_msdf_batch", pipelineLayouts[PipelineType::eTextMSDFBatch], deviceDeletionQueue
+		logicalDevice, "text_msdf_batch", pipelineLayouts[PipelineType::eTextMSDFBatch], deviceDeletionQueue, cache
 	);
+	const uint32_t mediaVendorId = physicalDevice.getProperties().vendorID;
+	const std::string_view mediaShaderName =
+		vibrance::vulkan::media_pipeline_shader_name(mediaVendorId);
 	pipelines[PipelineType::eMedia2D] = make_compute_pipeline(
-		logicalDevice, "media_2d", pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue
+		logicalDevice, mediaShaderName.data(), pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue, cache
 	);
+	if (!pipelines[PipelineType::eMedia2D] && mediaShaderName != "media_2d")
+	{
+		pipelines[PipelineType::eMedia2D] = make_compute_pipeline(
+			logicalDevice, vibrance::vulkan::media_pipeline_shader_name(mediaVendorId, false).data(),
+			pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue, cache);
+	}
 	pipelines[PipelineType::eCompositeHosted3D] = make_compute_pipeline(
-		logicalDevice, "hosted_3d_composite", pipelineLayouts[PipelineType::eCompositeHosted3D], deviceDeletionQueue
+		logicalDevice, "hosted_3d_composite", pipelineLayouts[PipelineType::eCompositeHosted3D], deviceDeletionQueue, cache
 	);
 	pipelines[PipelineType::eComposite2D] = make_compute_pipeline(
-		logicalDevice, "composite_2d", pipelineLayouts[PipelineType::eComposite2D], deviceDeletionQueue
+		logicalDevice, "composite_2d", pipelineLayouts[PipelineType::eComposite2D], deviceDeletionQueue, cache
 	);
 	pipelines[PipelineType::eModel3D] = make_graphics_pipeline(
 		logicalDevice, "model_3d", pipelineLayouts[PipelineType::eModel3D], hosted3DRenderPass,
-		hosted3DSamples, deviceDeletionQueue
+		hosted3DSamples, deviceDeletionQueue, cache
 	);
+	if (pipelineCache) pipelineCache->persist();
+}
+
+bool Engine::Impl::initialise_composition_presenter()
+{
+	const auto initialise = [this] {
+		return compositionPresenter.initialise(nativeWindowHandle, physicalDevice,
+			logicalDevice, swapchain.extent.width, swapchain.extent.height,
+			kCompositionBufferCount, graphicsQueueFamilyIndex,
+			transparentFramebuffer, compositionGpuInterop);
+	};
+	if (initialise()) return true;
+	if (!compositionGpuInterop) return false;
+	// Extension support alone does not establish a usable shared allocation on
+	// older or hybrid drivers. Keep Composition and its visual quality through
+	// the asynchronous host-upload transport if the import contract fails.
+	Logger::fetch_logger()->warning(
+		"Windows Composition GPU sharing failed; trying the host-upload transport on the selected adapter.");
+	compositionGpuInterop = false;
+	return initialise();
 }
 
 bool Engine::Impl::rebuild_composition_presenter()
@@ -1842,10 +1898,12 @@ bool Engine::Impl::rebuild_composition_presenter()
 	nextCompositionPollDeadline = {};
 	nextNativeSubmitDeadline = {};
 	nextCompositionBufferIndex = 0u;
+	compositionAcquireWaitSince = {};
 	hasSubmittedFrame = false;
 	lastSubmittedFrameGeneration = 0u;
 	compositionBufferDamage.clear();
 	std::fill(compositionFramePending.begin(), compositionFramePending.end(), false);
+	std::fill(compositionFrameUploaded.begin(), compositionFrameUploaded.end(), false);
 	std::fill(
 		compositionFrameBufferIndices.begin(),
 		compositionFrameBufferIndices.end(),
@@ -1859,16 +1917,7 @@ bool Engine::Impl::rebuild_composition_presenter()
 	{
 		return false;
 	}
-	if (compositionPresenter.initialise(
-			nativeWindowHandle,
-			physicalDevice,
-		logicalDevice,
-		swapchain.extent.width,
-		swapchain.extent.height,
-		kCompositionBufferCount,
-		graphicsQueueFamilyIndex,
-		transparentFramebuffer,
-		compositionGpuInterop))
+	if (initialise_composition_presenter())
 	{
 		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
 		nativeTransparencyPrimed = transparentFramebuffer;
@@ -2080,7 +2129,7 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 		const float shapeScale = std::max(outputScaleX, outputScaleY);
 		if (region.deriveShapeFromEntity)
 		{
-			const glm::vec4 radii = shape.effective_corner_radii() * shapeScale;
+			const glm::vec4 radii = ui_layout_corner_radii(registry, entity, shape) * shapeScale;
 			// Preserve explicit zero-radius corners instead of letting the bridge
 			// replace them with the largest custom radius as a uniform fallback.
 			region.cornerRadius = shape.customCornerRadii ?
@@ -2119,10 +2168,15 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 		else
 		{
 			region.cornerRadius *= shapeScale;
-			region.topLeftRadius *= shapeScale;
-			region.topRightRadius *= shapeScale;
-			region.bottomRightRadius *= shapeScale;
-			region.bottomLeftRadius *= shapeScale;
+            // Explicit native silhouettes follow the same logical corners as
+            // renderer shapes. Sidebar glass keeps a square content join.
+            const auto radii = ui_layout_corner_radii(registry, entity, glm::vec4 {
+                region.topLeftRadius, region.topRightRadius,
+                region.bottomRightRadius, region.bottomLeftRadius }) * shapeScale;
+            region.topLeftRadius = radii.x;
+            region.topRightRadius = radii.y;
+            region.bottomRightRadius = radii.z;
+            region.bottomLeftRadius = radii.w;
 		}
         orderedRegions.push_back({ entity, region, *visual });
 	});
@@ -2158,7 +2212,7 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
         source.width = visual->rect.z * outputScaleX;
         source.height = visual->rect.w * outputScaleY;
         const float scale = std::max(outputScaleX, outputScaleY);
-        const auto radii = shape->effective_corner_radii() * scale;
+        const auto radii = ui_layout_corner_radii(registry, entity, *shape) * scale;
         source.cornerRadius = shape->customCornerRadii ? 0.0f :
             shape->cornerRadius * scale;
         source.topLeftRadius = radii.x;
@@ -2386,9 +2440,20 @@ void Engine::Impl::publish_completed_composition_frames()
 			continue;
 		}
 
-		collect_gpu_render_timings(frames[pending]);
-		apply_system_backdrop_regions(
-			frames[pending].compositionBackdropRegions);
+		if (!compositionFrameUploaded[pending])
+		{
+			collect_gpu_render_timings(frames[pending]);
+			if (!compositionPresenter.gpu_interop() &&
+				!upload_software_composition(compositionFrameBufferIndices[pending]))
+			{
+				compositionFramePending[pending] = false;
+				compositionRecoveryPending = true;
+				continue;
+			}
+			apply_system_backdrop_regions(
+				frames[pending].compositionBackdropRegions);
+			compositionFrameUploaded[pending] = true;
+		}
 		CompositionPresenter::PresentResult presentResult;
 		{
 			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::ePresent);
@@ -2406,6 +2471,11 @@ void Engine::Impl::publish_completed_composition_frames()
 		{
 			logger->warning(
 				"Windows Composition could not present a completed Vulkan frame.");
+			compositionRecoveryPending = true;
+		}
+		else
+		{
+			consecutiveCompositionRecoveries = 0u;
 		}
 		compositionFramePending[pending] = false;
 	}
@@ -2543,6 +2613,23 @@ void Engine::Impl::draw()
 		swapchain.outdated = true;
 		return;
 	}
+	if (compositionRecoveryPending)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (now < nextCompositionRecoveryDeadline) return;
+		// Publication errors are observed only after the sole Vulkan frame's
+		// fence has completed. Recreate this window's bridge independently;
+		// other windows continue ticking whilst a failed target backs off.
+		compositionRecoveryPending = false;
+		nextCompositionRecoveryDeadline = now + std::chrono::seconds(1);
+		if (++consecutiveCompositionRecoveries >= 2u && compositionGpuInterop)
+		{
+			logger->warning("Windows Composition GPU sharing repeatedly stalled; using the asynchronous host-upload transport.");
+			compositionGpuInterop = false;
+		}
+		(void)rebuild_composition_presenter();
+		renderer2DScene.mark_dirty();
+	}
 
 	{
 		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eRetainedCheck);
@@ -2550,7 +2637,8 @@ void Engine::Impl::draw()
 			std::chrono::steady_clock::now().time_since_epoch()).count();
 		if (rendererHostUsesIdleEventWait && !swapchain.outdated && hasSubmittedFrame &&
 			renderer2DScene.frame_generation() == lastSubmittedFrameGeneration &&
-			!renderer2DScene.requires_continuous_redraw(retainedTimeSeconds) &&
+			!renderer2DScene.requires_continuous_redraw_since(retainedTimeSeconds,
+				lastSubmittedRenderTimeSeconds, lastSubmittedFrameGeneration) &&
 			(!compositionPresenter.available() || nativeTransparencyPrimed) &&
 			std::none_of(compositionFramePending.begin(),
 				compositionFramePending.end(), [](bool pending) { return pending; }))
@@ -2563,7 +2651,7 @@ void Engine::Impl::draw()
 		}
 	}
 
-	if (targetFrameRate > 0u)
+	if (targetFrameRate > 0u && !externallyPacedFrameActive)
 	{
 		const auto interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 			std::chrono::duration<double>(1.0 / static_cast<double>(targetFrameRate)));
@@ -2637,11 +2725,11 @@ void Engine::Impl::draw()
 		activeUiFrameRateLimit =
 			renderer2DScene.active_frame_rate_limit(schedulingTimeSeconds);
 	}
-	const uint32_t effectiveCompositionFrameRate =
-		activeUiFrameRateLimit > 0u ?
+	const uint32_t effectiveCompositionFrameRate = externallyPacedFrameActive ?
+		externallyPacedFrameRate : activeUiFrameRateLimit > 0u ?
 			std::min(compositionFrameRate, activeUiFrameRateLimit) :
 			compositionFrameRate;
-	if (targetFrameRate == 0u)
+	if (targetFrameRate == 0u && !externallyPacedFrameActive)
 	{
 		// Composition can only display at the monitor cadence. Poll twice per
 		// visible frame so completed GPU work is published between submissions,
@@ -2686,6 +2774,7 @@ void Engine::Impl::draw()
 		// rather than waiting until the same frame slot cycles around again.
 		// This removes two to three frames of Vulkan/D3D latency.
 		publish_completed_composition_frames();
+		if (compositionRecoveryPending) return;
 
 		// Keep exactly one Vulkan frame in flight for the Composition bridge.
 		// DWM's latency object accepts one visible frame at a time; filling the
@@ -2706,8 +2795,9 @@ void Engine::Impl::draw()
 		// monitor rate as the same cadence. Windows commonly reports 199 Hz for
 		// a nominal 200 Hz mode; running two near-identical clocks creates a
 		// visible beat even though both counters look fast.
-		if (targetFrameRate > 0u &&
-			targetFrameRate <= effectiveCompositionFrameRate + 2u)
+		if (externallyPacedFrameActive ||
+			(targetFrameRate > 0u &&
+				targetFrameRate <= effectiveCompositionFrameRate + 2u))
 		{
 			submitCompositionFrame = true;
 			nextCompositionSubmitDeadline = {};
@@ -2741,7 +2831,7 @@ void Engine::Impl::draw()
 			return;
 		}
 	}
-	else if (targetFrameRate == 0u)
+	else if (targetFrameRate == 0u && !externallyPacedFrameActive)
 	{
 		// Native Vulkan still presents only useful display opportunities. The
 		// public timing loop remains uncapped, while duplicate GPU submissions
@@ -2798,7 +2888,8 @@ void Engine::Impl::draw()
 	{
 		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eRedrawCheck);
 		continuousRedrawRequired =
-			renderer2DScene.requires_continuous_redraw(renderTimeSeconds);
+			renderer2DScene.requires_continuous_redraw_since(renderTimeSeconds,
+				lastSubmittedRenderTimeSeconds, lastSubmittedFrameGeneration);
 	}
 	if (renderDiagnosticsEnabled)
 	{
@@ -2829,7 +2920,12 @@ void Engine::Impl::draw()
 	vk::Result fenceResult;
 	{
 		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eFenceWait);
-		fenceResult = logicalDevice.waitForFences(frame.renderFinishedFence, false, UINT64_MAX);
+		fenceResult = logicalDevice.waitForFences(frame.renderFinishedFence, false,
+			compositionAvailable || externallyPacedFrameActive ? 0u : UINT64_MAX);
+	}
+	if (fenceResult == vk::Result::eTimeout)
+	{
+		return;
 	}
 	if (fenceResult != vk::Result::eSuccess)
 	{
@@ -2843,39 +2939,6 @@ void Engine::Impl::draw()
 	const bool presentNativeSurface =
 		!compositionAvailable || clearNativeSurface;
 	uint32_t imageIndex = 0;
-	if (presentNativeSurface)
-	{
-		VkResult acquireResult;
-		{
-			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eSurfaceAcquire);
-			acquireResult = vkAcquireNextImageKHR(
-				logicalDevice,
-				swapchain.chain,
-				UINT64_MAX,
-				frame.imageAcquiredSemaphore,
-				VK_NULL_HANDLE,
-				&imageIndex);
-		}
-
-		if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR ||
-			acquireResult == VK_SUBOPTIMAL_KHR)
-		{
-			swapchain.outdated = true;
-			return;
-		}
-		if (acquireResult == VK_ERROR_SURFACE_LOST_KHR)
-		{
-			recreate_surface();
-			return;
-		}
-		if (acquireResult != VK_SUCCESS)
-		{
-			logger->vulkan(
-				"Failed to acquire swapchain image. VkResult: " +
-				std::to_string(static_cast<int>(acquireResult)));
-			return;
-		}
-	}
 
 	const bool useExternalBackdropUnderlay =
 		externalBackdropAvailable &&
@@ -2941,7 +3004,49 @@ void Engine::Impl::draw()
 		(!compositionBufferAcquired ||
 			(compositionGpuPath && !compositionImage)))
 	{
+		const auto now = std::chrono::steady_clock::now();
+		if (compositionAcquireWaitSince.time_since_epoch().count() == 0)
+			compositionAcquireWaitSince = now;
+		else if (now - compositionAcquireWaitSince >= std::chrono::seconds(1))
+		{
+			logger->warning("Windows Composition shared buffers did not become available; recreating this window's presenter.");
+			compositionRecoveryPending = true;
+		}
 		return;
+	}
+	compositionAcquireWaitSince = {};
+	// Resolve optional Composition readiness first. Acquiring a native image
+	// signals its binary semaphore, which must not be abandoned if a shared
+	// buffer subsequently defers during the initial transparent prime.
+	if (presentNativeSurface)
+	{
+		VkResult acquireResult;
+		{
+			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eSurfaceAcquire);
+			acquireResult = vkAcquireNextImageKHR(logicalDevice, swapchain.chain,
+				externallyPacedFrameActive ? 0u : UINT64_MAX,
+				frame.imageAcquiredSemaphore, VK_NULL_HANDLE, &imageIndex);
+		}
+		if (acquireResult == VK_NOT_READY || acquireResult == VK_TIMEOUT) return;
+		if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR)
+		{
+			swapchain.outdated = true;
+			return;
+		}
+		if (acquireResult == VK_ERROR_SURFACE_LOST_KHR)
+		{
+			recreate_surface();
+			return;
+		}
+		// SUBOPTIMAL still acquires an image and signals the semaphore. Consume
+		// both through submission/presentation, then rebuild on the next visit.
+		if (acquireResult == VK_SUBOPTIMAL_KHR) swapchain.outdated = true;
+		else if (acquireResult != VK_SUCCESS)
+		{
+			logger->vulkan("Failed to acquire swapchain image. VkResult: " +
+				std::to_string(static_cast<int>(acquireResult)));
+			return;
+		}
 	}
 
 	vk::Result result = logicalDevice.resetFences(frame.renderFinishedFence);
@@ -3060,6 +3165,7 @@ void Engine::Impl::draw()
 	}
 	hasSubmittedFrame = true;
 	lastSubmittedFrameGeneration = sceneFrameGeneration;
+	lastSubmittedRenderTimeSeconds = renderTimeSeconds;
 	if (compositionBufferAcquired)
 	{
 		compositionBufferDamage.commit(
@@ -3069,10 +3175,10 @@ void Engine::Impl::draw()
 	if (compositionBufferAcquired)
 	{
 		compositionPresenter.mark_used(compositionBufferIndex);
-		if (compositionGpuPath &&
-			frameIndex < compositionFramePending.size())
+		if (frameIndex < compositionFramePending.size())
 		{
 			compositionFramePending[frameIndex] = true;
+			compositionFrameUploaded[frameIndex] = false;
 			compositionFrameBufferIndices[frameIndex] = compositionBufferIndex;
 		}
 	}
@@ -3116,53 +3222,12 @@ void Engine::Impl::draw()
 		}
 	}
 
-	// Uncapped/high-rate rendering remains pipelined. Explicit rates at or below
-	// the monitor cadence publish in the same frame so Vulkan content and the
-	// D3D Composition regions cannot drift apart by multiple frame slots.
-	const bool pipelineComposition =
-		compositionGpuPath &&
-		(targetFrameRate == 0u ||
-			targetFrameRate > effectiveCompositionFrameRate + 2u);
-	if (compositionBufferAcquired && !pipelineComposition)
+	// Publish an already completed frame immediately, otherwise let the next
+	// host tick poll it. A slow display or host-upload device must never hold
+	// the shared UI thread in a fence or DXGI wait ahead of the other windows.
+	if (compositionBufferAcquired)
 	{
-		vk::Result compositionFenceResult;
-		{
-			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eFenceWait);
-			compositionFenceResult = logicalDevice.waitForFences(
-				frame.renderFinishedFence,
-				true,
-				UINT64_MAX);
-		}
-		if (compositionFenceResult == vk::Result::eSuccess)
-		{
-			collect_gpu_render_timings(frame);
-			const bool uploaded = compositionGpuPath ||
-				upload_software_composition(compositionBufferIndex);
-			CompositionPresenter::PresentResult presentResult =
-				CompositionPresenter::PresentResult::eFailed;
-			if (uploaded)
-			{
-				apply_system_backdrop_regions(
-					frame.compositionBackdropRegions);
-				const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::ePresent);
-				presentResult = compositionPresenter.present(
-					compositionBufferIndex,
-					true,
-					frame.compositionContentRect,
-					frame.compositionDamageRect);
-			}
-			if (presentResult ==
-				CompositionPresenter::PresentResult::eFailed)
-			{
-				logger->warning("Windows Composition could not present the Vulkan frame.");
-			}
-			if (frameIndex < compositionFramePending.size() &&
-				presentResult !=
-					CompositionPresenter::PresentResult::eDeferred)
-			{
-				compositionFramePending[frameIndex] = false;
-			}
-		}
+		publish_completed_composition_frames();
 	}
 
 	frameIndex = (frameIndex + 1) % frameCountLocal;
@@ -3472,6 +3537,10 @@ uint32_t Engine::Impl::target_frame_rate() const
 
 uint32_t Engine::Impl::recommended_ui_update_rate() const
 {
+	if (externallyPacedFrameActive)
+	{
+		return std::clamp(externallyPacedFrameRate, 1u, 1000u);
+	}
 	uint32_t visibleRate = targetFrameRate;
 	if (compositionPresenter.available())
 	{
@@ -3697,6 +3766,9 @@ bool Engine::Impl::set_locale(const std::string& localeValue)
 	{
 		return false;
 	}
+	renderer2DScene.registry().ctx().insert_or_assign(UiLayoutDirectionComponent {
+        ui_locale_layout_direction(localisation_.locale()) });
+	renderer2DScene.mark_dirty();
 	refresh_localised_texts();
 	return true;
 }
@@ -3812,6 +3884,9 @@ Engine::Impl::~Impl()
 			logger->vulkan("Failed to wait for queue to idle.");
 		}
 	}
+	// Keep the cache alive through device use so late driver optimisation can
+	// contribute to the final snapshot. Destroy it before its owning VkDevice.
+	pipelineCache.reset();
 	compositionPresenter.shutdown(logicalDevice);
 	destroy_composition_readback();
 

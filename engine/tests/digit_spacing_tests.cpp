@@ -2,6 +2,7 @@
 #include <vibranceUI/ui/animated_text_view.h>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -104,6 +105,61 @@ int main(int argc, char** argv)
         for (std::size_t index = 0; index < offsets.size(); ++index)
             expect(near(offsets[index], scene.registry().get<Layout2DComponent>(view.characters[index]).offset.x),
                 "Animated timers must keep every digit and colon in the same horizontal cell");
+
+        // Measure actual glyph batches: empty character cells alone cannot
+        // reveal the leading space left by a right-aligned run in RTL.
+        for (const float dpi : { 1.0f, 1.5f, 2.0f })
+        for (const float fontSize : { 18.0f, 52.0f })
+        for (const auto value : { "13m", "14:01", "1:01:00" })
+        {
+            std::array<glm::vec4, 2> bounds {};
+            for (int direction = 0; direction < 2; ++direction)
+            {
+                scene.clear();
+                scene.registry().ctx().insert_or_assign(UiLayoutDirectionComponent {
+                    direction ? UiLayoutDirection::eRightToLeft : UiLayoutDirection::eLeftToRight });
+                LayoutScale scale;
+                scale.factor = scale.contentScale = glm::vec2(dpi);
+                scale.logicalSize = { 600.0f, 160.0f };
+                UiBuilder timerUi(scene, scale);
+                UiAnimatedCharacterTextOptions timerOptions;
+                timerOptions.alignment = UiAlignment::eMiddleRight;
+                timerOptions.offset = { -8.0f, 0.0f };
+                timerOptions.characterCount = fontSize == 18.0f ? 8 : 7;
+                timerOptions.fontSize = fontSize;
+                timerOptions.proportionalSpacing = true;
+                timerOptions.characterSpacing = fontSize == 18.0f ? -1.2f : -2.0f;
+                auto timer = ui_create_animated_character_text(timerUi, atlas, timerUi.root(), value, timerOptions);
+                const auto measure = [&] {
+                    const auto plan = scene.build_render_plan(5.0, 0);
+                    float left = 1.0e6f;
+                    float right = -1.0e6f;
+                    for (const auto* batches : { &plan.texts, &plan.cachedTexts })
+                        for (const auto& batch : *batches)
+                            if (std::find(timer.characters.begin(), timer.characters.end(), batch.entity) != timer.characters.end())
+                            {
+                                left = std::min(left, batch.rect.x);
+                                right = std::max(right, batch.rect.x + batch.rect.z);
+                            }
+                    return glm::vec4(left, 0.0f, right - left, 0.0f);
+                };
+                bounds[direction] = measure();
+                expect(bounds[direction].z > 0 && bounds[direction].z < 400 * dpi,
+                    "Timer clearance checks must measure visible glyphs from a loaded font");
+                ui_update_animated_character_text(engine, timer, value, 5.0, false);
+                const auto updated = measure();
+                expect(near(updated.x, bounds[direction].x) && near(updated.z, bounds[direction].z),
+                    "Retained timer updates must preserve the initial directional clearance");
+            }
+            // Atlas quads include typeface-specific SDF padding and bearings;
+            // allow that overhang, but no unused numeric character cells.
+            const float glyphOverhang = fontSize * 0.25f * dpi;
+            expect(std::abs(bounds[1].x - (600 * dpi - bounds[0].x - bounds[0].z)) < glyphOverhang &&
+                std::abs(bounds[1].x - 8.0f * dpi) < glyphOverhang &&
+                near(bounds[0].z, bounds[1].z),
+                "Compact and expanded RTL timers must mirror visible edge clearance without leading empty cells");
+        }
+        scene.registry().ctx().insert_or_assign(UiLayoutDirectionComponent {});
     }
     expect(testedProportionalDigits, "The regression must exercise a font whose native digits have unequal advances");
     host.close();

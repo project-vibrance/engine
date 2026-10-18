@@ -69,9 +69,12 @@ float squircle_distance(float2 p, float2 halfSize, float4 radii,
     float2 q = abs(p) - max(halfSize - radius, 0.0);
     float2 outside = max(q, 0.0);
     float n = lerp(2.0, clamp(exponent, 2.0, 5.0), amount);
-    float norm = outside.x == 0.0 || outside.y == 0.0 ?
-        outside.x + outside.y :
-        pow(pow(outside.x, n) + pow(outside.y, n), 1.0 / n);
+    float norm = outside.x + outside.y;
+    // Most lens pixels lie along a straight side or inside the body. Keep
+    // their trivial norm out of the logarithm/exponential corner path.
+    [branch]
+    if (outside.x != 0.0 && outside.y != 0.0)
+        norm = pow(pow(outside.x, n) + pow(outside.y, n), 1.0 / n);
     // Keep negative coordinates signed inside the corner's central square.
     // Taking abs(q) here carved four holes and a seam inside a growing lens.
     return lerp(length(outside), norm, amount) +
@@ -108,21 +111,9 @@ float liquid_bridge_distance(float2 p, float2 halfSize, float amount)
     return distance;
 }
 
-// This follows the island renderer's squircle and dynamic notch equations.
-// The viewport includes the flares; panelOrigin retains the body coordinates.
-float shape_distance(float2 pixelPosition, float2 size, float4 radii,
-    float4 parameters, float2 kind)
+float notch_distance(float2 p, float2 halfSize, float2 size,
+    float4 parameters, float2 kind, float amount)
 {
-    float2 halfSize = max(size * 0.5, 0.5);
-    float2 p = pixelPosition - halfSize;
-    if (kind.x > 4.5) return liquid_bridge_distance(p, halfSize, parameters.z);
-    if (kind.x < 0.5) return box_distance(p, halfSize);
-    if (kind.x > 1.5 && kind.x < 2.5)
-        return (length(p / halfSize) - 1.0) * min(halfSize.x, halfSize.y);
-    float amount = kind.x > 2.5 ? saturate(parameters.x) : 0.0;
-    if (kind.x < 3.5 || parameters.z <= 0.01)
-        return squircle_distance(p, halfSize, radii, amount, parameters.y);
-
     float notch = saturate(parameters.z);
     float radius = clamp(kind.y, 0.0, min(halfSize.x, halfSize.y));
     float topRadius = radius * saturate(1.0 - notch / 0.85);
@@ -143,6 +134,42 @@ float shape_distance(float2 pixelPosition, float2 size, float4 radii,
     float rightCutout = length(p - float2(halfSize.x + flare,
         -halfSize.y + flare)) - flare;
     return min(body, max(topBar, max(-leftCutout, -rightCutout)));
+}
+
+// This follows the island renderer's squircle and dynamic notch equations.
+// Shape choices are uniform across the draw. Explicit branches stop FXC
+// evaluating the bridge or notch calculations for an ordinary rounded lens.
+float shape_distance(float2 pixelPosition, float2 size, float4 radii,
+    float4 parameters, float2 kind)
+{
+    float2 halfSize = max(size * 0.5, 0.5);
+    float2 p = pixelPosition - halfSize;
+    float distance = 0.0;
+    [branch]
+    if (kind.x > 4.5)
+        distance = liquid_bridge_distance(p, halfSize, parameters.z);
+    else
+    {
+        [branch]
+        if (kind.x < 0.5)
+            distance = box_distance(p, halfSize);
+        else
+        {
+            [branch]
+            if (kind.x > 1.5 && kind.x < 2.5)
+                distance = (length(p / halfSize) - 1.0) * min(halfSize.x, halfSize.y);
+            else
+            {
+                float amount = kind.x > 2.5 ? saturate(parameters.x) : 0.0;
+                [branch]
+                if (kind.x < 3.5 || parameters.z <= 0.01)
+                    distance = squircle_distance(p, halfSize, radii, amount, parameters.y);
+                else
+                    distance = notch_distance(p, halfSize, size, parameters, kind, amount);
+            }
+        }
+    }
+    return distance;
 }
 
 float contour_distance(float2 pixelPosition, ContourParameters contour)

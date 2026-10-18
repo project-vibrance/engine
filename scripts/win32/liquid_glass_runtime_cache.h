@@ -48,12 +48,13 @@ inline std::wstring cache_liquid_runtime(const std::wstring& extension,
                                         const std::wstring& cacheRoot)
 {
     namespace fs = std::filesystem;
-    const std::array<const wchar_t*, 6> names {
+    constexpr std::array<const wchar_t*, 7> names {
         L"vibrance_liquid_dwm_extension.dll", L"liquid_glass_win32.cso",
         L"liquid_glass_ui_win32.cso", L"liquid_glass_fullscreen.cso",
-        L"liquid_glass_blur_horizontal.cso", L"liquid_glass_blur_vertical.cso"
+        L"liquid_glass_blur_horizontal.cso", L"liquid_glass_blur_vertical.cso",
+        L"liquid_glass_compare.cso"
     };
-    std::uint8_t fingerprints[6][32] {};
+    std::uint8_t fingerprints[names.size()][32] {};
     const auto sourceDirectory = fs::absolute(extension).parent_path();
     for (std::size_t index = 0; index < names.size(); ++index)
     {

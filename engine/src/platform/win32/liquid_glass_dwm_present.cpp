@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -81,23 +82,29 @@ bool windows10Adapter = false;
 HANDLE readyEvent = nullptr;
 HANDLE statusMapping = nullptr;
 volatile LONG* statusView = nullptr;
+HANDLE drawDiagnosticsMapping = nullptr;
+LiquidDwmDrawDiagnostics* drawDiagnosticsView = nullptr;
 HANDLE regionMapping = nullptr;
 const LiquidDwmRegionTable* regionView = nullptr;
 std::mutex regionMutex;
+// This mutex protects only the renderer registry. Driver calls and renderer
+// destruction must happen after releasing it, so adapters cannot stall peers.
 std::mutex rendererMutex;
-LiquidGlassD3D11 renderer;
-ComPtr<ID3D11Device> rendererDevice;
-struct CachedRenderer
+struct DeviceRenderer
 {
+    explicit DeviceRenderer(ID3D11Device* value) : device(value) {}
     ComPtr<ID3D11Device> device;
     LiquidGlassD3D11 renderer;
+    std::mutex drawMutex;
     ULONGLONG lastUsedTick = 0u;
+    ULONGLONG retryTick = 0u;
+    bool initialised = false;
+    bool adapterKnown = false;
+    LUID adapterLuid {};
 };
-// DWM can alternate devices for hybrid displays and capture output. Keep the
-// compiled shaders and scratch surfaces for each device, with a bounded LRU.
-std::array<CachedRenderer, 3u> rendererCache;
-ComPtr<ID3D11Device> failedRendererDevice;
-ULONGLONG failedRendererRetryTick = 0u;
+// Shared leases pin an entry whilst a draw uses or waits for that device. Each
+// adapter owns its shaders, scratch surfaces, retry deadline and draw lock.
+std::array<std::shared_ptr<DeviceRenderer>, 8u> rendererStates;
 ComPtr<ID3D11Device1> uiDevice;
 ComPtr<ID3D11Texture2D> uiSource;
 ComPtr<IDXGIKeyedMutex> uiMutex;
@@ -164,6 +171,77 @@ void record_native_render_failure(HRESULT result = E_FAIL) noexcept
 {
     detail(liquidDwmRenderFailureResult, result);
     detail(liquidDwmRenderFailureTick, static_cast<LONG>(GetTickCount()));
+}
+
+std::uint64_t performance_tick() noexcept
+{
+    LARGE_INTEGER value {};
+    QueryPerformanceCounter(&value);
+    return static_cast<std::uint64_t>(value.QuadPart);
+}
+
+std::uint32_t elapsed_microseconds(std::uint64_t before, std::uint64_t after) noexcept
+{
+    static const double scale = [] {
+        LARGE_INTEGER frequency {};
+        return QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0 ?
+            1000000.0 / static_cast<double>(frequency.QuadPart) : 0.0;
+    }();
+    return after >= before ? static_cast<std::uint32_t>(std::min(
+        static_cast<double>(after - before) * scale, 4294967295.0)) : 0u;
+}
+
+void diagnostic_max(std::uint32_t& destination, std::uint32_t value) noexcept
+{
+    auto* word = reinterpret_cast<volatile LONG*>(&destination);
+    LONG observed = InterlockedCompareExchange(word, 0, 0);
+    while (static_cast<std::uint32_t>(observed) < value)
+    {
+        const LONG previous = InterlockedCompareExchange(word, static_cast<LONG>(value), observed);
+        if (previous == observed) break;
+        observed = previous;
+    }
+}
+
+void record_region_draw(std::uint32_t slot, const LUID& adapter, bool rendered,
+    std::uint32_t waitMicroseconds, std::uint32_t submitMicroseconds, HRESULT failure,
+    std::uint32_t flushMicroseconds = 0u) noexcept
+{
+    if (!drawDiagnosticsView || slot >= liquidDwmRegionSlots) return;
+    auto& region = drawDiagnosticsView->regions[slot];
+    InterlockedIncrement(reinterpret_cast<volatile LONG*>(&region.calls));
+    InterlockedExchangeAdd(reinterpret_cast<volatile LONG*>(&region.lockWaitMicroseconds),
+        static_cast<LONG>(waitMicroseconds));
+    InterlockedExchangeAdd(reinterpret_cast<volatile LONG*>(&region.submitMicroseconds),
+        static_cast<LONG>(submitMicroseconds));
+    InterlockedExchangeAdd(reinterpret_cast<volatile LONG*>(&region.flushMicroseconds),
+        static_cast<LONG>(flushMicroseconds));
+    diagnostic_max(region.maxLockWaitMicroseconds, waitMicroseconds);
+    diagnostic_max(region.maxSubmitMicroseconds, submitMicroseconds);
+    diagnostic_max(region.maxFlushMicroseconds, flushMicroseconds);
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&region.adapterLuidLow), static_cast<LONG>(adapter.LowPart));
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&region.adapterLuidHigh), adapter.HighPart);
+    if (rendered)
+        InterlockedExchange(reinterpret_cast<volatile LONG*>(&region.lastSuccessTick), static_cast<LONG>(GetTickCount()));
+    else
+    {
+        InterlockedIncrement(reinterpret_cast<volatile LONG*>(&region.failures));
+        InterlockedExchange(reinterpret_cast<volatile LONG*>(&region.lastFailureResult), failure);
+    }
+}
+
+void initialise_draw_diagnostics() noexcept
+{
+    PublicReadSecurity security;
+    drawDiagnosticsMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, security.get(),
+        PAGE_READWRITE, 0u, sizeof(LiquidDwmDrawDiagnostics), liquidDwmDrawDiagnosticsName);
+    drawDiagnosticsView = drawDiagnosticsMapping ? static_cast<LiquidDwmDrawDiagnostics*>(
+        MapViewOfFile(drawDiagnosticsMapping, FILE_MAP_WRITE, 0u, 0u, sizeof(LiquidDwmDrawDiagnostics))) : nullptr;
+    if (drawDiagnosticsView)
+    {
+        *drawDiagnosticsView = {};
+        drawDiagnosticsView->compositorPid = GetCurrentProcessId();
+    }
 }
 
 DXGI_FORMAT backdrop_copy_format(DXGI_FORMAT resource,
@@ -772,110 +850,108 @@ bool update_ui(ID3D11Device* device, ID3D11DeviceContext* context,
     return update_ui_cpu(device, context, region, rectangle);
 }
 
-void reset_renderers() noexcept
+std::shared_ptr<DeviceRenderer> find_renderer_state(ID3D11Device* device)
 {
-    renderer = LiquidGlassD3D11 {};
-    rendererDevice.Reset();
-    rendererCache = {};
-    failedRendererDevice.Reset();
-    failedRendererRetryTick = 0u;
-}
-
-void park_renderer() noexcept
-{
-    if (!rendererDevice) return;
-    auto* destination = &rendererCache.front();
-    for (auto& cached : rendererCache)
+    if (!device) return {};
     {
-        if (!cached.device) { destination = &cached; break; }
-        if (cached.lastUsedTick < destination->lastUsedTick) destination = &cached;
+        std::lock_guard<std::mutex> lock(rendererMutex);
+        for (auto& state : rendererStates)
+        {
+            if (!state || state->device.Get() != device) continue;
+            state->lastUsedTick = GetTickCount64();
+            status(liquidDwmRendererCacheHits);
+            return state;
+        }
     }
-    destination->device = std::move(rendererDevice);
-    destination->renderer = std::move(renderer);
-    destination->lastUsedTick = GetTickCount64();
-    renderer = LiquidGlassD3D11 {};
-}
-
-bool restore_renderer(ID3D11Device* device) noexcept
-{
-    for (auto& cached : rendererCache)
+    // Construct and release device references outside the registry lock.
+    auto candidate = std::make_shared<DeviceRenderer>(device);
+    std::shared_ptr<DeviceRenderer> retired;
     {
-        if (cached.device.Get() != device) continue;
-        rendererDevice = std::move(cached.device);
-        renderer = std::move(cached.renderer);
-        cached = {};
-        status(liquidDwmRendererCacheHits);
-        return true;
+        std::lock_guard<std::mutex> lock(rendererMutex);
+        auto* destination = &rendererStates.front();
+        for (auto& state : rendererStates)
+        {
+            if (state && state->device.Get() == device)
+            {
+                state->lastUsedTick = GetTickCount64();
+                status(liquidDwmRendererCacheHits);
+                return state;
+            }
+            if (!state) { destination = &state; continue; }
+            if (*destination && state.use_count() == 1 &&
+                ((*destination).use_count() != 1 ||
+                    state->lastUsedTick < (*destination)->lastUsedTick))
+                destination = &state;
+        }
+        if (*destination && (*destination).use_count() != 1) return {};
+        retired = std::move(*destination);
+        candidate->lastUsedTick = GetTickCount64();
+        *destination = candidate;
     }
-    return false;
+    return candidate;
 }
 
-bool ensure_renderer(ID3D11Device* device)
+bool retire_renderers() noexcept
 {
-    if (!device) return false;
-    const HRESULT reason = device->GetDeviceRemovedReason();
+    std::array<std::shared_ptr<DeviceRenderer>, rendererStates.size()> retired;
+    {
+        std::unique_lock<std::mutex> lock(rendererMutex, std::try_to_lock);
+        if (!lock.owns_lock()) return false;
+        // A lease may be waiting to acquire its device's draw lock. Counting
+        // leases also protects that interval before it actually enters D3D.
+        for (const auto& state : rendererStates)
+            if (state && state.use_count() != 1) return false;
+        retired = std::move(rendererStates);
+        rendererStates = {};
+    }
+    return true;
+}
+
+bool ensure_renderer(DeviceRenderer& state, const std::wstring* shaderDirectory = nullptr)
+{
+    // The caller holds this device's drawMutex; no other device is locked.
+    const HRESULT reason = state.device->GetDeviceRemovedReason();
     if (FAILED(reason))
     {
-        if (rendererDevice.Get() == device)
-        {
-            renderer = LiquidGlassD3D11 {};
-            rendererDevice.Reset();
-        }
-        for (auto& cached : rendererCache)
-            if (cached.device.Get() == device) cached = {};
+        state.renderer = LiquidGlassD3D11 {};
+        state.initialised = false;
         detail(liquidDwmRendererLastError, reason);
         status(liquidDwmRendererDeviceLosses);
         return false;
     }
-    if (rendererDevice.Get() == device) return true;
+    if (state.initialised) return true;
     const auto now = GetTickCount64();
-    if (failedRendererDevice.Get() == device && now < failedRendererRetryTick)
-        return false;
-    reset_ui();
-    reset_cpu_ui();
-    uiTransportOwner = 0;
-    uiTransportWindow = 0;
-    gpuUnavailableOwner = 0;
-    // Restore before parking: even a full cache must preserve the requested
-    // device instead of evicting it while parking the current renderer.
-    LiquidGlassD3D11 previousRenderer = std::move(renderer);
-    ComPtr<ID3D11Device> previousDevice = std::move(rendererDevice);
-    const bool restored = restore_renderer(device);
-    if (previousDevice)
+    if (now < state.retryTick) return false;
+    if (!state.adapterKnown)
     {
-        auto requestedRenderer = std::move(renderer);
-        auto requestedDevice = std::move(rendererDevice);
-        renderer = std::move(previousRenderer);
-        rendererDevice = std::move(previousDevice);
-        park_renderer();
-        renderer = std::move(requestedRenderer);
-        rendererDevice = std::move(requestedDevice);
+        ComPtr<IDXGIDevice> dxgiDevice;
+        ComPtr<IDXGIAdapter> adapter;
+        DXGI_ADAPTER_DESC description {};
+        if (SUCCEEDED(state.device.As(&dxgiDevice)) &&
+            SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) &&
+            SUCCEEDED(adapter->GetDesc(&description)))
+            state.adapterLuid = description.AdapterLuid;
+        state.adapterKnown = true;
     }
-    if (restored) return true;
+    state.renderer = LiquidGlassD3D11 {};
+    const auto path = module_path(extensionModule);
+    const auto separator = path.find_last_of(L"\\/");
+    const auto directory = shaderDirectory ? *shaderDirectory :
+        separator != std::wstring::npos ? path.substr(0, separator) : std::wstring {};
+    status(liquidDwmRendererInitialisations);
+    state.initialised = !directory.empty() && state.renderer.initialise(state.device.Get(), directory);
+    detail(20, state.initialised ? 100 : -100 - state.renderer.initialisation_stage());
+    if (!state.initialised)
     {
-        renderer = LiquidGlassD3D11 {};
-        const std::wstring path = module_path(extensionModule);
-        const auto separator = path.find_last_of(L"\\/");
-        status(liquidDwmRendererInitialisations);
-        rendererDevice = separator != std::wstring::npos &&
-            renderer.initialise(device, path.substr(0, separator)) ?
-                device : nullptr;
-        detail(20, rendererDevice ? 100 :
-            -100 - renderer.initialisation_stage());
-        if (!rendererDevice)
-        {
-            failedRendererDevice = device;
-            failedRendererRetryTick = now + 1000u;
-            status(liquidDwmRendererFailures);
-        }
-        else
-        {
-            failedRendererDevice.Reset();
-            failedRendererRetryTick = 0u;
-            detail(liquidDwmRendererLastError, S_OK);
-        }
+        state.retryTick = now + 1000u;
+        status(liquidDwmRendererFailures);
     }
-    return rendererDevice != nullptr;
+    else
+    {
+        state.retryTick = 0u;
+        detail(liquidDwmRendererLastError, S_OK);
+    }
+    return state.initialised;
 }
 
 bool source_from_context(void* drawingContext,
@@ -1258,6 +1334,7 @@ bool start_windows10_hooks(const std::uint8_t* base, std::uint32_t imageSize)
 
 bool start_extension()
 {
+    initialise_draw_diagnostics();
     statusMapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE,
         liquidDwmStatusName);
     if (statusMapping)

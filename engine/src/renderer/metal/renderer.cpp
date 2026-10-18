@@ -125,6 +125,7 @@ struct Engine::Impl
     };
     std::unordered_map<uint64_t, NativeContent> nativeContents;
     uint64_t presentedGeneration = UINT64_MAX;
+    double presentedRenderTimeSeconds = -1.0;
     bool presentationPending = false;
     unsigned consecutiveSubmissionFailures = 0;
     uint64_t successfulCompletionsAtFailure = 0;
@@ -604,7 +605,7 @@ struct Engine::Impl
             return;
         const double now = std::chrono::duration<double>(Clock::now() - start).count();
         if (!presentationPending && presentedGeneration == scene.frame_generation() &&
-            !scene.requires_continuous_redraw(now))
+            !scene.requires_continuous_redraw_since(now, presentedRenderTimeSeconds, presentedGeneration))
             return;
         // A failed drawable acquisition must be retried even when an animation
         // settles without advancing the scene generation again.
@@ -914,6 +915,7 @@ struct Engine::Impl
         if (damageBounds.empty() && nativeRegions.empty())
         {
             presentedGeneration = scene.frame_generation();
+            presentedRenderTimeSeconds = now;
             presentationPending = false;
             return;
         }
@@ -1195,6 +1197,7 @@ struct Engine::Impl
         if (!presentationComplete) { frameDamage.invalidate(); return; }
         ++frameCount;
         presentedGeneration = scene.frame_generation();
+        presentedRenderTimeSeconds = now;
         presentationPending = false;
         lastPresentation = Clock::now();
         if (device.diagnosticsEnabled)
@@ -1480,6 +1483,12 @@ bool Engine::set_locale(const std::string &locale)
 {
     const LogOperation diagnosticOperation("metal: Engine::set_locale");
     const bool result = impl->localisation.set_locale(locale);
+    if (result)
+    {
+        impl->scene.registry().ctx().insert_or_assign(UiLayoutDirectionComponent {
+            ui_locale_layout_direction(impl->localisation.locale()) });
+        impl->scene.mark_dirty();
+    }
     refresh_localised_texts();
     return result;
 }

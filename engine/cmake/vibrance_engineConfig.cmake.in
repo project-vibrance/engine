@@ -51,6 +51,8 @@ if(WIN32)
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/symsrv.dll")
     set(vibrance_engine_LIQUID_SHADER
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_win32.cso")
+    set(vibrance_engine_LIQUID_COMPARE_SHADER
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_compare.cso")
     set(vibrance_engine_LIQUID_UI_SHADER
         "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/liquid_glass_ui_win32.cso")
     set(vibrance_engine_LIQUID_FULLSCREEN_SHADER
@@ -68,6 +70,7 @@ if(WIN32)
         "${vibrance_engine_LIQUID_DBGHELP_RUNTIME}"
         "${vibrance_engine_LIQUID_SYMSRV_RUNTIME}"
         "${vibrance_engine_LIQUID_SHADER}"
+        "${vibrance_engine_LIQUID_COMPARE_SHADER}"
         "${vibrance_engine_LIQUID_UI_SHADER}"
         "${vibrance_engine_LIQUID_FULLSCREEN_SHADER}"
         "${vibrance_engine_LIQUID_BLUR_HORIZONTAL_SHADER}"

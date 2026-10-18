@@ -1,4 +1,7 @@
 #version 450
+#if defined(VIBRANCE_NVIDIA_MEDIA_SAMPLE_LOOPS)
+#extension GL_EXT_control_flow_attributes : require
+#endif
 
 const uint STYLE_GRADIENT = 1u << 0;
 const uint STYLE_BLUR = 1u << 5;
@@ -447,7 +450,13 @@ vec4 sample_media_texture_cubic_level(vec2 uv, int lodLevel) {
     vec2 maximumUv = vec2(1.0) - minimumUv;
 
     vec4 result = vec4(0.0);
+#if defined(VIBRANCE_NVIDIA_MEDIA_SAMPLE_LOOPS)
+    [[dont_unroll]]
+#endif
     for (int y = 0; y < 3; ++y) {
+#if defined(VIBRANCE_NVIDIA_MEDIA_SAMPLE_LOOPS)
+        [[dont_unroll]]
+#endif
         for (int x = 0; x < 3; ++x) {
             vec2 sampleUv = clamp(
                 vec2(sampleX[x], sampleY[y]) * inverseSize,
@@ -729,6 +738,9 @@ vec4 resolve_filtered_media(vec2 pixelCenter, float backgroundFactor) {
             vec2(-0.125,  0.375),
             vec2( 0.375,  0.125));
         float coverage = 0.0;
+#if defined(VIBRANCE_NVIDIA_MEDIA_SAMPLE_LOOPS)
+        [[dont_unroll]]
+#endif
         for (int index = 0; index < 4; ++index) {
             vec2 samplePoint = pixelCenter + offsets[index];
             SurfacePoint surface = surface_point_for_pixel(samplePoint);
@@ -754,15 +766,37 @@ vec4 resolve_filtered_media(vec2 pixelCenter, float backgroundFactor) {
     float alpha = 0.0;
     float weightSum = 0.0;
 
+#if defined(VIBRANCE_NVIDIA_MEDIA_SAMPLE_LOOPS)
+    // NVIDIA benefits from one shared shading body; other vendors retain
+    // their measured faster reconstruction through the default variant.
+    const vec2 offsets[4] = vec2[4](vec2(-0.375, -0.125), vec2(0.125, -0.375),
+        vec2(-0.125, 0.375), vec2(0.375, 0.125));
+    [[dont_unroll]] for (int index = 0; index < 4; ++index) {
+        accumulate_media_sample(pixelCenter + offsets[index], 0.25,
+            backgroundFactor, premultiplied, alpha, weightSum);
+    }
+#else
     accumulate_media_sample(pixelCenter + vec2(-0.375, -0.125), 0.25, backgroundFactor, premultiplied, alpha, weightSum);
     accumulate_media_sample(pixelCenter + vec2( 0.125, -0.375), 0.25, backgroundFactor, premultiplied, alpha, weightSum);
     accumulate_media_sample(pixelCenter + vec2(-0.125,  0.375), 0.25, backgroundFactor, premultiplied, alpha, weightSum);
     accumulate_media_sample(pixelCenter + vec2( 0.375,  0.125), 0.25, backgroundFactor, premultiplied, alpha, weightSum);
+#endif
 
     return resolve_accumulated_media(premultiplied, alpha, weightSum);
 }
 
 vec4 resolve_transformed_media(vec2 pixelCenter, float backgroundFactor) {
+#if defined(VIBRANCE_NVIDIA_MEDIA_SAMPLE_LOOPS)
+    const vec2 offsets[4] = vec2[4](vec2(-0.375, -0.125), vec2(0.125, -0.375),
+        vec2(-0.125, 0.375), vec2(0.375, 0.125));
+    vec3 premultiplied = vec3(0.0);
+    float alpha = 0.0;
+    [[dont_unroll]] for (int index = 0; index < 4; ++index) {
+        vec4 sampleColor = shade_media_sample(pixelCenter + offsets[index], backgroundFactor);
+        premultiplied += sampleColor.rgb * sampleColor.a;
+        alpha += sampleColor.a;
+    }
+#else
     vec4 s0 = shade_media_sample(pixelCenter + vec2(-0.375, -0.125), backgroundFactor);
     vec4 s1 = shade_media_sample(pixelCenter + vec2( 0.125, -0.375), backgroundFactor);
     vec4 s2 = shade_media_sample(pixelCenter + vec2(-0.125,  0.375), backgroundFactor);
@@ -774,6 +808,7 @@ vec4 resolve_transformed_media(vec2 pixelCenter, float backgroundFactor) {
         s2.rgb * s2.a +
         s3.rgb * s3.a;
     float alpha = s0.a + s1.a + s2.a + s3.a;
+#endif
     premultiplied *= 0.25;
     alpha *= 0.25;
 

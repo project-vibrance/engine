@@ -3,6 +3,7 @@
 #include <vibranceUI/renderer/render_types.h>
 #include <vibranceUI/renderer/dispatch_bounds.h>
 #include <vibranceUI/renderer/content_size.h>
+#include <vibranceUI/ui/layout_direction.h>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -352,6 +353,13 @@ namespace
     uint32_t pack_unorm8(float value)
     {
         return static_cast<uint32_t>(std::round(std::clamp(value, 0.0f, 1.0f) * 255.0f));
+    }
+
+    uint32_t portable_liquid_rim_phase(double currentTimeSeconds)
+    {
+        // Keep this identical to the eight-bit phase consumed by the optical
+        // shader. A later CPU tick in the same bucket produces the same pixels.
+        return pack_unorm8(static_cast<float>(std::fmod(currentTimeSeconds * 0.12, 1.0)));
     }
 
     uint32_t pack_range8(float value, float minValue, float maxValue)
@@ -1664,7 +1672,7 @@ namespace
         LayoutResolvedRect rect = entity_layout_bounds(registry, entity);
         if (const LayoutRect2DComponent* layoutRect = registry.try_get<LayoutRect2DComponent>(entity))
         {
-            rect.position.x += layoutRect->padding.x;
+            rect.position.x += ui_layout_is_rtl(registry, entity) ? layoutRect->padding.z : layoutRect->padding.x;
             rect.position.y += layoutRect->padding.y;
             rect.size.x = std::max(rect.size.x - layoutRect->padding.x - layoutRect->padding.z, 0.0f);
             rect.size.y = std::max(rect.size.y - layoutRect->padding.y - layoutRect->padding.w, 0.0f);
@@ -2745,11 +2753,14 @@ namespace
         resolve_entity_layout(registry, parent->parent, stack, resolved);
         stack.pop_back();
 
+        const bool rtl = ui_layout_is_rtl(registry, parent->parent);
         LayoutResolvedRect contentRect = entity_content_rect(registry, parent->parent);
         const glm::vec2 childResizeScale = entity_child_resize_scale(registry, parent->parent, contentRect);
         if (const GridCell2DComponent* gridCell = registry.try_get<GridCell2DComponent>(entity))
         {
-            contentRect = grid_cell_content_rect(registry, parent->parent, *gridCell, contentRect, childResizeScale);
+            auto cellRect = grid_cell_content_rect(registry, parent->parent, *gridCell, contentRect, childResizeScale);
+            if (rtl) cellRect.position.x = contentRect.position.x * 2.0f + contentRect.size.x - cellRect.position.x - cellRect.size.x;
+            contentRect = cellRect;
         }
         const glm::vec2 scaledOffset = layout->offset * childResizeScale;
         const glm::vec4 scaledMargin = scale_edges(layout->margin, childResizeScale);
@@ -2820,8 +2831,14 @@ namespace
             minPosition.y = anchorY - layout->pivot.y * resolvedSize.y;
         }
 
-        transform->origin = layout->pivot;
-        transform->position = minPosition + layout->pivot * resolvedSize;
+        glm::vec2 pivot = layout->pivot;
+        if (rtl)
+        {
+            minPosition.x = contentRect.position.x * 2.0f + contentRect.size.x - minPosition.x - resolvedSize.x;
+            pivot.x = 1.0f - pivot.x;
+        }
+        transform->origin = pivot;
+        transform->position = minPosition + pivot * resolvedSize;
         resolved.insert(key);
     }
 
@@ -2855,12 +2872,20 @@ namespace
             const glm::vec2 baseMin =
                 transform.position - transform.origin * baseSize;
             transform.scale *= glm::max(visual.scale, glm::vec2(0.001f));
+            auto pivot = visual.pivot;
+            auto offset = visual.offset;
+            const auto* parent = registry.try_get<Parent2DComponent>(entity);
+            if (ui_layout_is_rtl(registry, parent ? parent->parent : entt::null))
+            {
+                pivot.x = 1.0f - pivot.x;
+                offset.x = -offset.x;
+            }
             transform.origin = glm::clamp(
-                visual.pivot,
+                pivot,
                 glm::vec2(0.0f),
                 glm::vec2(1.0f));
             transform.position =
-                baseMin + baseSize * transform.origin + visual.offset;
+                baseMin + baseSize * transform.origin + offset;
         });
     }
 

@@ -27,6 +27,11 @@ so FreeType does not need libpng.
 On macOS, set `MEDIAREMOTE_ADAPTER_ROOT` to the MediaRemote adapter source
 directory under `~/dev`; the engine builds and bundles its companion framework.
 
+Windows and Linux Vulkan builds require `glslc`, supplied by the Vulkan SDK.
+Shaders are compiled and optimised during the engine build, then
+embedded in its shared library. Applications using the installed SDK do not
+need these shader tools at build time or runtime.
+
 On Windows with MinGW:
 
 ```bat

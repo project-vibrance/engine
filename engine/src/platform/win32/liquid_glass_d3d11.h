@@ -78,6 +78,10 @@ class LiquidGlassD3D11 final
 public:
     bool initialise(ID3D11Device* device, const std::wstring& shaderDirectory);
     int initialisation_stage() const noexcept { return initialisationStage_; }
+    std::uint64_t scratch_allocation_count() const noexcept { return scratchAllocationCount_; }
+    std::uint64_t blur_reuse_count() const noexcept { return blurReuseCount_; }
+    std::uint64_t blur_change_count() const noexcept { return blurChangeCount_; }
+    std::uint64_t blur_comparison_count() const noexcept { return blurComparisonCount_; }
     // Supply the typed RTV format when liveBackdrop is a typeless resource.
     bool render(ID3D11DeviceContext* context,
                 ID3D11Texture2D* liveBackdrop,
@@ -94,11 +98,22 @@ public:
                       std::uint32_t width, std::uint32_t height);
 
 private:
+    struct BlurHistory
+    {
+        D3D11_RECT snapshotBounds {};
+        D3D11_RECT blurBounds {};
+        float radius = -1.0f;
+        bool pending = false;
+        std::uint8_t changedStreak = 0u;
+        std::uint8_t backoff = 0u;
+    };
     struct ScratchSurfaces
     {
         Microsoft::WRL::ComPtr<ID3D11Texture2D> snapshot, blurX, blurY;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> snapshotView, blurXView, blurYView;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> blurXTarget, blurYTarget;
+        Microsoft::WRL::ComPtr<ID3D11Predicate> backdropChanged;
+        BlurHistory history;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
         std::uint32_t width = 0u;
         std::uint32_t height = 0u;
@@ -113,6 +128,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11PixelShader> blurHorizontal_;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> blurVertical_;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> optical_;
+    Microsoft::WRL::ComPtr<ID3D11PixelShader> compare_;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> uiPixel_;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> sampler_;
     Microsoft::WRL::ComPtr<ID3D11BlendState> blend_;
@@ -131,11 +147,18 @@ private:
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> blurYView_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> blurXTarget_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> blurYTarget_;
+    Microsoft::WRL::ComPtr<ID3D11Predicate> backdropChanged_;
+    BlurHistory blurHistory_;
     DXGI_FORMAT scratchFormat_ = DXGI_FORMAT_UNKNOWN;
     std::uint32_t scratchWidth_ = 0;
     std::uint32_t scratchHeight_ = 0;
     std::array<ScratchSurfaces, 8> scratchCache_ {};
     std::size_t scratchCacheInsertion_ = 0u;
+    std::uint64_t scratchCacheBudget_ = 32u * 1024u * 1024u;
+    std::uint64_t scratchAllocationCount_ = 0u;
+    std::uint64_t blurReuseCount_ = 0u;
+    std::uint64_t blurChangeCount_ = 0u;
+    std::uint64_t blurComparisonCount_ = 0u;
     LiquidGlassBlurParameters blurKernel_ {};
     float cachedBlurRadius_ = -1.0f;
     std::uint32_t cachedBlurWidth_ = 0u;

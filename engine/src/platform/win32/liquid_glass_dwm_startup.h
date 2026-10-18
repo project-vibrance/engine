@@ -67,11 +67,12 @@ inline std::filesystem::path cache_directory()
 }
 
 inline constexpr wchar_t observerExecutable[] = L"liquid_glass_dwm_observer.exe";
-inline constexpr std::array<const wchar_t*, 10> bundleNames {
+inline constexpr std::array<const wchar_t*, 11> bundleNames {
     L"liquid_glass_dwm_broker.exe", L"vibrance_liquid_dwm_extension.dll",
     L"liquid_glass_win32.cso", L"liquid_glass_ui_win32.cso",
     L"liquid_glass_fullscreen.cso", L"liquid_glass_blur_horizontal.cso",
-    L"liquid_glass_blur_vertical.cso", L"dbghelp.dll", L"symsrv.dll", observerExecutable
+    L"liquid_glass_blur_vertical.cso", L"liquid_glass_compare.cso",
+    L"dbghelp.dll", L"symsrv.dll", observerExecutable
 };
 
 inline std::wstring bundle_key(const std::filesystem::path& source)

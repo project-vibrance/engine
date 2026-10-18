@@ -78,17 +78,27 @@ struct ContextRestore
 {
     ID3D11DeviceContext1* context = nullptr;
     ID3DDeviceContextState* previous = nullptr;
+    ID3D11Predicate* predicate = nullptr;
+    BOOL predicateValue = FALSE;
+
+    explicit ContextRestore(ID3D11DeviceContext1* value) : context(value)
+    {
+        context->GetPredication(&predicate, &predicateValue);
+    }
 
     ~ContextRestore()
     {
         if (context)
         {
+            context->SetPredication(nullptr, FALSE);
             context->SwapDeviceContextState(previous, nullptr);
+            context->SetPredication(predicate, predicateValue);
         }
         if (previous)
         {
             previous->Release();
         }
+        if (predicate) predicate->Release();
     }
 };
 
@@ -149,6 +159,26 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
     swap_scratch(previousScratch);
     scratchCache_ = {};
     scratchCacheInsertion_ = 0u;
+    scratchAllocationCount_ = 0u;
+    blurReuseCount_ = blurChangeCount_ = blurComparisonCount_ = 0u;
+    // Alternating HDR monitor sizes need to retain at least one complete
+    // retired set: a 960x540 lens at maximum blur already occupies 25 MiB.
+    // Scale the bounded cache with adapter memory while keeping the shared
+    // memory allowance smaller on integrated GPUs.
+    scratchCacheBudget_ = 32u * 1024u * 1024u;
+    ComPtr<IDXGIDevice> dxgiDevice;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC adapterDescription {};
+    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) &&
+        SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) &&
+        SUCCEEDED(adapter->GetDesc(&adapterDescription)))
+    {
+        const bool dedicated = adapterDescription.DedicatedVideoMemory >= 1024u * 1024u * 1024u;
+        const std::uint64_t capacity = dedicated ? adapterDescription.DedicatedVideoMemory :
+            adapterDescription.SharedSystemMemory;
+        scratchCacheBudget_ = std::clamp<std::uint64_t>(capacity / 128u,
+            32u * 1024u * 1024u, (dedicated ? 96u : 48u) * 1024u * 1024u);
+    }
     std::vector<std::uint8_t> bytecode;
     if (!load_shader(shaderDirectory, L"liquid_glass_fullscreen.cso", bytecode) ||
         FAILED(device->CreateVertexShader(bytecode.data(), bytecode.size(),
@@ -174,6 +204,12 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
         }
         ++initialisationStage_;
     }
+    // Older bundles remain usable: exact temporal reuse is an optimisation,
+    // and failure to create its shader or predicates keeps the normal path.
+    compare_.Reset();
+    if (load_shader(shaderDirectory, L"liquid_glass_compare.cso", bytecode))
+        device->CreatePixelShader(bytecode.data(), bytecode.size(), nullptr,
+            compare_.ReleaseAndGetAddressOf());
 
     D3D11_SAMPLER_DESC sampler {};
     sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
@@ -298,6 +334,12 @@ bool LiquidGlassD3D11::resize_scratch(DXGI_FORMAT format,
     next.format = format;
     next.width = width;
     next.height = height;
+    if (compare_)
+    {
+        const D3D11_QUERY_DESC predicate { D3D11_QUERY_OCCLUSION_PREDICATE, 0 };
+        device_->CreatePredicate(&predicate, next.backdropChanged.GetAddressOf());
+    }
+    ++scratchAllocationCount_;
     swap_scratch(next);
     if (next.snapshot)
     {
@@ -318,6 +360,8 @@ void LiquidGlassD3D11::swap_scratch(ScratchSurfaces& surfaces) noexcept
     blurYView_.Swap(surfaces.blurYView);
     blurXTarget_.Swap(surfaces.blurXTarget);
     blurYTarget_.Swap(surfaces.blurYTarget);
+    backdropChanged_.Swap(surfaces.backdropChanged);
+    std::swap(blurHistory_, surfaces.history);
     std::swap(scratchFormat_, surfaces.format);
     std::swap(scratchWidth_, surfaces.width);
     std::swap(scratchHeight_, surfaces.height);
@@ -325,7 +369,7 @@ void LiquidGlassD3D11::swap_scratch(ScratchSurfaces& surfaces) noexcept
 
 void LiquidGlassD3D11::trim_scratch_cache() noexcept
 {
-    // Reserve at most 16 MiB for retired sets. Account for the common DWM
+    // Bound retired sets by the adapter's allowance. Account for common DWM
     // formats exactly; sixteen bytes conservatively covers all other formats.
     const auto bytes = [](const ScratchSurfaces& surfaces) {
         std::uint32_t texelBytes = 16u;
@@ -352,9 +396,8 @@ void LiquidGlassD3D11::trim_scratch_cache() noexcept
     };
     std::uint64_t retainedBytes = 0u;
     for (const auto& surfaces : scratchCache_) retainedBytes += bytes(surfaces);
-    constexpr std::uint64_t maximumRetainedBytes = 16u * 1024u * 1024u;
     for (std::size_t age = 0u;
-        retainedBytes > maximumRetainedBytes && age < scratchCache_.size(); ++age)
+        retainedBytes > scratchCacheBudget_ && age < scratchCache_.size(); ++age)
     {
         auto& oldest = scratchCache_[(scratchCacheInsertion_ + age) % scratchCache_.size()];
         retainedBytes -= bytes(oldest);
@@ -453,7 +496,10 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     const auto visibleHeight = static_cast<std::uint32_t>(visibleBottom - visibleTop);
     const auto offsetX = visibleLeft - region.x;
     const auto offsetY = visibleTop - region.y;
-    D3D11_RECT visibleClip {};
+    D3D11_RECT visibleClip {
+        static_cast<LONG>(visibleLeft), static_cast<LONG>(visibleTop),
+        static_cast<LONG>(visibleRight), static_cast<LONG>(visibleBottom)
+    };
     if (clip)
     {
         visibleClip = {
@@ -462,6 +508,28 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
             std::min<LONG>(static_cast<LONG>(visibleRight), clip->right),
             std::min<LONG>(static_cast<LONG>(visibleBottom), clip->bottom)
         };
+        if (visibleClip.right <= visibleClip.left ||
+            visibleClip.bottom <= visibleClip.top) return true;
+    }
+    if (region.viewportFade[3] != 0.0f)
+    {
+        // The optical shader rejects everything outside the viewport. Avoid
+        // copying and blurring those pixels as well. A one-pixel guard keeps
+        // fractional viewport boundaries conservative under shader rounding.
+        const double viewportX = static_cast<double>(region.x) +
+            region.markerInsetX + region.viewportRect[0];
+        const double viewportY = static_cast<double>(region.y) + region.viewportRect[1];
+        const auto targetCoordinate = [](double coordinate) {
+            return static_cast<LONG>(std::clamp(coordinate, 0.0, 32768.0));
+        };
+        visibleClip.left = std::max(visibleClip.left,
+            targetCoordinate(std::floor(viewportX - 1.0)));
+        visibleClip.top = std::max(visibleClip.top,
+            targetCoordinate(std::floor(viewportY - 1.0)));
+        visibleClip.right = std::min(visibleClip.right,
+            targetCoordinate(std::ceil(viewportX + region.viewportRect[2] + 1.0)));
+        visibleClip.bottom = std::min(visibleClip.bottom,
+            targetCoordinate(std::ceil(viewportY + region.viewportRect[3] + 1.0)));
         if (visibleClip.right <= visibleClip.left ||
             visibleClip.bottom <= visibleClip.top) return true;
     }
@@ -549,10 +617,7 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         bounds.bottom = std::clamp<LONG>(bounds.bottom + y, 1, static_cast<LONG>(height));
         return bounds;
     };
-    const D3D11_RECT outputBounds = clip ? visibleClip : D3D11_RECT {
-        static_cast<LONG>(visibleLeft), static_cast<LONG>(visibleTop),
-        static_cast<LONG>(visibleRight), static_cast<LONG>(visibleBottom)
-    };
+    const D3D11_RECT outputBounds = visibleClip;
     D3D11_RECT samplingBounds {
         static_cast<LONG>(static_cast<std::int64_t>(outputBounds.left) - sourceOriginX - left),
         static_cast<LONG>(static_cast<std::int64_t>(outputBounds.top) - sourceOriginY - top),
@@ -571,14 +636,48 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     // those horizontal results in turn need sharp pixels on either side.
     const D3D11_RECT horizontalBounds = expand(samplingBounds, 0, kernelReach);
     const D3D11_RECT snapshotBounds = expand(horizontalBounds, kernelReach, 0);
+    if (blurHistory_.pending)
+    {
+        BOOL changed = FALSE;
+        if (context->GetData(backdropChanged_.Get(), &changed, sizeof(changed),
+                D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
+        {
+            blurHistory_.pending = false;
+            if (changed)
+            {
+                ++blurChangeCount_;
+                if (++blurHistory_.changedStreak >= 2u)
+                {
+                    blurHistory_.backoff = 32u;
+                    blurHistory_.changedStreak = 0u;
+                }
+            }
+            else
+            {
+                ++blurReuseCount_;
+                blurHistory_.changedStreak = 0u;
+            }
+        }
+    }
+    if (blurHistory_.backoff > 0u) --blurHistory_.backoff;
+    const auto contains = [](const D3D11_RECT& outer, const D3D11_RECT& inner) {
+        return outer.left <= inner.left && outer.top <= inner.top &&
+            outer.right >= inner.right && outer.bottom >= inner.bottom;
+    };
+    const bool compareBackdrop = compare_ && backdropChanged_ && blurRadius > 0.0f &&
+        !blurHistory_.pending && blurHistory_.backoff == 0u &&
+        blurHistory_.radius == blurRadius &&
+        contains(blurHistory_.snapshotBounds, snapshotBounds) &&
+        contains(blurHistory_.blurBounds, samplingBounds);
 
     ComPtr<ID3D11DeviceContext1> context1;
     if (FAILED(context->QueryInterface(IID_PPV_ARGS(&context1))))
     {
         return false;
     }
-    ContextRestore restore { context1.Get(), nullptr };
+    ContextRestore restore { context1.Get() };
     context1->SwapDeviceContextState(contextState_.Get(), &restore.previous);
+    context->SetPredication(nullptr, FALSE);
 
     D3D11_BOX box {};
     box.left = static_cast<UINT>(left + snapshotBounds.left);
@@ -586,7 +685,9 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     box.right = static_cast<UINT>(left + snapshotBounds.right);
     box.bottom = static_cast<UINT>(top + snapshotBounds.bottom);
     box.back = 1;
-    context->CopySubresourceRegion(snapshot_.Get(), 0,
+    // The horizontal intermediate doubles as the new sharp input during an
+    // exact comparison. This avoids retaining a fourth full-size texture.
+    context->CopySubresourceRegion(compareBackdrop ? blurX_.Get() : snapshot_.Get(), 0,
         static_cast<UINT>(snapshotBounds.left), static_cast<UINT>(snapshotBounds.top),
         0, liveBackdrop, 0, &box);
 
@@ -601,6 +702,29 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     viewport.Height = static_cast<float>(height);
     viewport.MaxDepth = 1.0f;
     context->RSSetViewports(1, &viewport);
+    if (compareBackdrop)
+    {
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
+        context->RSSetState(clippedRasteriser_.Get());
+        context->RSSetScissorRects(1, &snapshotBounds);
+        ID3D11ShaderResourceView* inputs[2] = { blurXView_.Get(), snapshotView_.Get() };
+        context->PSSetShaderResources(0, 2, inputs);
+        context->PSSetShader(compare_.Get(), nullptr, 0);
+        context->Begin(backdropChanged_.Get());
+        context->Draw(3, 0);
+        context->End(backdropChanged_.Get());
+        ++blurComparisonCount_;
+        blurHistory_.pending = true;
+        ID3D11ShaderResourceView* empty[2] = { nullptr, nullptr };
+        context->PSSetShaderResources(0, 2, empty);
+        box.left = static_cast<UINT>(snapshotBounds.left);
+        box.top = static_cast<UINT>(snapshotBounds.top);
+        box.right = static_cast<UINT>(snapshotBounds.right);
+        box.bottom = static_cast<UINT>(snapshotBounds.bottom);
+        context->CopySubresourceRegion(snapshot_.Get(), 0, box.left, box.top,
+            0, blurX_.Get(), 0, &box);
+    }
 
     ID3D11ShaderResourceView* blurredView = snapshotView_.Get();
     if (blurRadius > 0.0f)
@@ -614,6 +738,9 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
             cachedBlurHeight_ = height;
         }
         context->PSSetConstantBuffers(0, 1, blurParameters_.GetAddressOf());
+        // A false predicate means every required source texel is identical.
+        // GPU predication skips both passes without a CPU wait or readback.
+        if (compareBackdrop) context->SetPredication(backdropChanged_.Get(), FALSE);
         context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
         ID3D11RenderTargetView* passTarget = blurXTarget_.Get();
         context->OMSetRenderTargets(1, &passTarget, nullptr);
@@ -634,7 +761,12 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         context->RSSetScissorRects(1, &samplingBounds);
         context->Draw(3, 0);
         blurredView = blurYView_.Get();
+        if (compareBackdrop) context->SetPredication(nullptr, FALSE);
+        blurHistory_.radius = blurRadius;
+        blurHistory_.snapshotBounds = snapshotBounds;
+        blurHistory_.blurBounds = samplingBounds;
     }
+    else blurHistory_.radius = -1.0f;
 
     ID3D11ShaderResourceView* passInput = nullptr;
     context->PSSetShaderResources(0, 1, &passInput);
@@ -726,7 +858,7 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     context->PSSetShaderResources(0, 2, sources);
     context->PSSetShader(optical_.Get(), nullptr, 0);
     context->RSSetState(rasteriser_.Get());
-    if (clip)
+    if (clip || region.viewportFade[3] != 0.0f)
     {
         context->RSSetState(clippedRasteriser_.Get());
         context->RSSetScissorRects(1, &visibleClip);
@@ -753,8 +885,9 @@ bool LiquidGlassD3D11::composite_ui(ID3D11DeviceContext* context,
     {
         return false;
     }
-    ContextRestore restore { context1.Get(), nullptr };
+    ContextRestore restore { context1.Get() };
     context1->SwapDeviceContextState(contextState_.Get(), &restore.previous);
+    context->SetPredication(nullptr, FALSE);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(fullscreenVertex_.Get(), nullptr, 0);
     context->PSSetShader(uiPixel_.Get(), nullptr, 0);

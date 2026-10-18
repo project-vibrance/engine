@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.hpp>
 #include <deque>
 #include <functional>
+#include <cstdint>
 
 class PipelineLayoutBuilder
 {
@@ -26,10 +27,13 @@ class PipelineLayoutBuilder
 };
 
 // Loads embedded compute shader SPIR-V before pipeline creation
+uint64_t embedded_shader_fingerprint();
+
 vk::Pipeline make_compute_pipeline(
     vk::Device logicalDevice, const char* name,
     vk::PipelineLayout pipelineLayout,
-    std::deque<std::function<void(vk::Device)>>& deletionQueue
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    vk::PipelineCache pipelineCache = {}
 );
 
 // Loads embedded graphics shader SPIR-V before pipeline creation
@@ -39,5 +43,6 @@ vk::Pipeline make_graphics_pipeline(
     vk::PipelineLayout pipelineLayout,
     vk::RenderPass renderPass,
     vk::SampleCountFlagBits rasterizationSamples,
-    std::deque<std::function<void(vk::Device)>>& deletionQueue
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    vk::PipelineCache pipelineCache = {}
 );

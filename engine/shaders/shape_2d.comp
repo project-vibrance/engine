@@ -1,4 +1,7 @@
 #version 450
+#if defined(VIBRANCE_VULKAN_SAMPLE_LOOPS)
+#extension GL_EXT_control_flow_attributes : require
+#endif
 
 const uint STYLE_GRADIENT = 1u << 0;
 const uint STYLE_OUTLINE = 1u << 1;
@@ -615,10 +618,21 @@ vec4 resolve_filtered_shape(vec2 pixelCenter) {
     float alpha = 0.0;
     float weightSum = 0.0;
 
+#if defined(VIBRANCE_VULKAN_SAMPLE_LOOPS)
+    // Retain every coverage sample without duplicating the complete shading
+    // body during driver optimisation. Metal retains its existing generated IR.
+    const vec2 offsets[4] = vec2[4](vec2(-0.375, -0.125), vec2(0.125, -0.375),
+        vec2(-0.125, 0.375), vec2(0.375, 0.125));
+    [[dont_unroll]] for (int index = 0; index < 4; ++index) {
+        accumulate_shape_sample(pixelCenter + offsets[index], 0.25,
+            premultiplied, alpha, weightSum);
+    }
+#else
     accumulate_shape_sample(pixelCenter + vec2(-0.375, -0.125), 0.25, premultiplied, alpha, weightSum);
     accumulate_shape_sample(pixelCenter + vec2( 0.125, -0.375), 0.25, premultiplied, alpha, weightSum);
     accumulate_shape_sample(pixelCenter + vec2(-0.125,  0.375), 0.25, premultiplied, alpha, weightSum);
     accumulate_shape_sample(pixelCenter + vec2( 0.375,  0.125), 0.25, premultiplied, alpha, weightSum);
+#endif
 
     return resolve_accumulated_shape(premultiplied, alpha, weightSum);
 }
@@ -640,6 +654,21 @@ vec4 resolve_blurred_shape(vec2 pixelCenter) {
     float midRadius = radius * 0.62;
     float farRadius = radius * 0.9;
 
+#if defined(VIBRANCE_VULKAN_SAMPLE_LOOPS)
+    vec2 offsets[13] = vec2[13](vec2(0.0),
+        vec2(nearRadius, 0.0), vec2(-nearRadius, 0.0),
+        vec2(0.0, nearRadius), vec2(0.0, -nearRadius),
+        vec2(midRadius, midRadius), vec2(-midRadius, midRadius),
+        vec2(midRadius, -midRadius), vec2(-midRadius, -midRadius),
+        vec2(farRadius, 0.0), vec2(-farRadius, 0.0),
+        vec2(0.0, farRadius), vec2(0.0, -farRadius));
+    const float weights[13] = float[13](0.18, 0.10, 0.10, 0.10, 0.10,
+        0.07, 0.07, 0.07, 0.07, 0.035, 0.035, 0.035, 0.035);
+    [[dont_unroll]] for (int index = 0; index < 13; ++index) {
+        accumulate_shape_sample(pixelCenter + offsets[index], weights[index],
+            premultiplied, alpha, weightSum);
+    }
+#else
     accumulate_shape_sample(pixelCenter, 0.18, premultiplied, alpha, weightSum);
     accumulate_shape_sample(pixelCenter + vec2( nearRadius, 0.0), 0.10, premultiplied, alpha, weightSum);
     accumulate_shape_sample(pixelCenter + vec2(-nearRadius, 0.0), 0.10, premultiplied, alpha, weightSum);
@@ -653,6 +682,7 @@ vec4 resolve_blurred_shape(vec2 pixelCenter) {
     accumulate_shape_sample(pixelCenter + vec2(-farRadius, 0.0), 0.035, premultiplied, alpha, weightSum);
     accumulate_shape_sample(pixelCenter + vec2(0.0,  farRadius), 0.035, premultiplied, alpha, weightSum);
     accumulate_shape_sample(pixelCenter + vec2(0.0, -farRadius), 0.035, premultiplied, alpha, weightSum);
+#endif
 
     return resolve_accumulated_shape(premultiplied, alpha, weightSum);
 }

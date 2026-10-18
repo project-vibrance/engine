@@ -33,9 +33,10 @@ namespace
 
     std::string supported_text(
         const Renderer2DFontAtlas& fontAtlas,
-        const std::string& value,
+        const std::string& rawValue,
         float fontSize)
     {
+        const std::string value = ui_normalise_notification_text(rawValue);
         std::string filtered;
         filtered.reserve(value.size());
         std::size_t offset = 0u;
@@ -151,14 +152,15 @@ namespace
         return std::string(ellipsis);
     }
 
-    std::array<std::string, 3u> wrap_to_width(
+    template<std::size_t LineCount = 3u>
+    std::array<std::string, LineCount> wrap_to_width(
         const Renderer2DFontAtlas& fontAtlas,
         std::string_view message,
         float fontSize,
         float maximumLineWidth)
     {
         const std::string value(message);
-        std::array<std::string, 3u> lines {};
+        std::array<std::string, LineCount> lines {};
         if (value.empty() || maximumLineWidth <= 0.0f)
         {
             return lines;
@@ -431,7 +433,7 @@ std::array<std::string, 3u> ui_wrap_notification_message(
     std::string_view message,
     std::size_t maximumLineCharacters)
 {
-    return wrap_by_characters(message, maximumLineCharacters);
+    return wrap_by_characters(ui_normalise_notification_text(message), maximumLineCharacters);
 }
 
 UiNotificationCardMetrics ui_measure_notification_card(
@@ -440,17 +442,32 @@ UiNotificationCardMetrics ui_measure_notification_card(
     bool hasOptions,
     bool hasIcon)
 {
+    UiNotificationCardContent content;
+    content.message = message;
+    return ui_measure_notification_card(fontAtlas, content, hasOptions, hasIcon);
+}
+
+UiNotificationCardMetrics ui_measure_notification_card(
+    const Renderer2DFontAtlas& fontAtlas,
+    const UiNotificationCardContent& content,
+    bool hasOptions,
+    bool hasIcon)
+{
     UiNotificationCardMetrics metrics = {};
     const float contentLeft = hasIcon ? metrics.contentLeft : 16.0f;
     const float contentWidth = std::max(
         metrics.size.x - contentLeft - 14.0f,
         0.0f);
-    const std::string supported = supported_text(fontAtlas, std::string(message), 14.0f);
+    const std::string supported = supported_text(fontAtlas, content.message, 14.0f);
     const auto lines = wrap_to_width(fontAtlas, supported, 14.0f, contentWidth);
     const bool usesThirdLine = !lines[2].empty();
     const bool usesSecondLine = !lines[1].empty();
     metrics.size.y = usesThirdLine ? kUiNotificationThreeLineCardHeight :
         usesSecondLine ? kUiNotificationTwoLineCardHeight : kUiNotificationCardHeight;
+    const auto title = wrap_to_width<2u>(fontAtlas, supported_text(fontAtlas,
+        content.title.empty() ? content.header : content.title, 14.5f),
+        14.5f, std::max(contentWidth - 34.0f, 0.0f));
+    if (!title[1].empty()) metrics.size.y += 18.0f;
     if (hasOptions) metrics.size.y += 32.0f;
     return metrics;
 }
@@ -632,25 +649,27 @@ UiNotificationCardHandle ui_create_notification_card(
         fontAtlas,
         options.content.title.empty() ? options.content.header : options.content.title,
         14.5f);
-    const bool titleIsRtl = fontAtlas.layout_text(
-        supportedTitle,
-        14.5f).rightToLeft;
-    const std::string displayTitle = truncate_to_width(
+    const auto titleLines = wrap_to_width<2u>(
         fontAtlas,
         supportedTitle,
         14.5f,
         std::max(contentWidth - 34.0f, 0.0f));
-    ui.create_aligned_text(
-        Text::literal(displayTitle),
-        localisation,
-        fontAtlas,
-        handle.surface,
-        titleIsRtl ? UiAlignment::eTopRight : UiAlignment::eTopLeft,
-        14.5f,
-        notification_text_style(options.theme.text, 650.0f),
-        4,
-        options.order + 2u,
-        { titleIsRtl ? -48.0f : contentLeft, 14.0f });
+    for (std::size_t index = 0u; index < titleLines.size(); ++index)
+    {
+        if (titleLines[index].empty()) continue;
+        ui.create_aligned_text(
+            Text::literal(titleLines[index]),
+            localisation,
+            fontAtlas,
+            handle.surface,
+            UiAlignment::eTopLeft,
+            14.5f,
+            notification_text_style(options.theme.text, 650.0f),
+            4,
+            options.order + 2u + static_cast<std::uint32_t>(index),
+            { contentLeft, 14.0f + 18.0f * static_cast<float>(index) });
+    }
+    const float messageTop = 35.0f + (titleLines[1].empty() ? 0.0f : 18.0f);
 
     const std::string displayMessage = supported_text(
         fontAtlas,
@@ -669,22 +688,19 @@ UiNotificationCardHandle ui_create_notification_card(
         {
             continue;
         }
-        const bool lineIsRtl = fontAtlas.layout_text(
-            lines[lineIndex],
-            14.0f).rightToLeft;
         ui.create_aligned_text(
             Text::literal(lines[lineIndex]),
             localisation,
             fontAtlas,
             handle.surface,
-            lineIsRtl ? UiAlignment::eTopRight : UiAlignment::eTopLeft,
+            UiAlignment::eTopLeft,
             14.0f,
             notification_text_style(options.theme.text, 460.0f),
             4,
-            options.order + 3u + static_cast<std::uint32_t>(lineIndex),
+            options.order + 4u + static_cast<std::uint32_t>(lineIndex),
             {
-                lineIsRtl ? -14.0f : contentLeft,
-                35.0f + 18.0f * static_cast<float>(lineIndex)
+                contentLeft,
+                messageTop + 18.0f * static_cast<float>(lineIndex)
             });
     }
 
@@ -820,6 +836,7 @@ void ui_prepare_notification_card_fan(
             card.root);
     }
     visual->offset = card.fanStartOffset;
+    if (ui_layout_is_rtl(ui.registry(), card.root)) visual->offset.x = -visual->offset.x;
     ui.scene().mark_dirty(card.root);
 }
 
@@ -845,6 +862,7 @@ void ui_update_notification_card_motion(
         (std::cos(dampedFrequency * progress) + damping * frequency /
             dampedFrequency * std::sin(dampedFrequency * progress));
     visual->offset = card.fanStartOffset * residual;
+    if (ui_layout_is_rtl(scene.registry(), card.root)) visual->offset.x = -visual->offset.x;
     scene.mark_dirty(card.root);
     if (progress >= 1.0f)
     {

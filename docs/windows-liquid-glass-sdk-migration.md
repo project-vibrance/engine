@@ -17,7 +17,7 @@ approval. A changed runtime bundle needs a new approval to deploy its binaries.
 The signed-in account must be an administrator; approval using another account
 cannot supply an elevated interactive token for the original user's session.
 
-The console broker, windowless observer, extension, five shaders, `dbghelp.dll` and `symsrv.dll` are hashed
+The console broker, windowless observer, extension, six shaders, `dbghelp.dll` and `symsrv.dll` are hashed
 together and copied to a versioned directory under `%ProgramFiles%\VibranceLiquidGlass`.
 Only Administrators and SYSTEM can modify that directory or the task's fixed
 `--watch` action. The symbol cache and reports live under
@@ -32,6 +32,10 @@ optical draw activity sampled over 500 milliseconds. It reports observed draw
 failures as degraded (exit code 20), and idle or hidden glass as unverified
 rather than claiming a visible effect is working. Per-device renderer cache
 counts, device losses and the last submission age help diagnose hybrid GPUs.
+Per-region diagnostics also identify each monitor and DWM adapter, with sampled
+CPU timings for renderer-lock waits, native flushes and optical submissions.
+Each D3D device owns an independent renderer and lock; GPU work and resource
+destruction occur outside the short shared registry lock.
 When no status mapping exists, it reports the last launcher/setup/broker
 reports and task result. Win32
 error 2 here means that the session mapping does not exist; it does not establish

@@ -55,6 +55,21 @@ struct MappingHandle
     ~MappingHandle() { if (value) CloseHandle(value); }
 };
 
+bool read_draw_diagnostics(vibrance::win32::LiquidDwmDrawDiagnostics& result)
+{
+    using namespace vibrance::win32;
+    MappingHandle mapping;
+    mapping.value = OpenFileMappingW(FILE_MAP_READ, FALSE, liquidDwmDrawDiagnosticsName);
+    const auto* view = mapping.value ? static_cast<const volatile std::uint32_t*>(
+        MapViewOfFile(mapping.value, FILE_MAP_READ, 0u, 0u, sizeof(result))) : nullptr;
+    if (!view) return false;
+    std::array<std::uint32_t, sizeof(result) / sizeof(std::uint32_t)> words {};
+    for (std::size_t index = 0u; index < words.size(); ++index) words[index] = view[index];
+    std::memcpy(&result, words.data(), sizeof(result));
+    UnmapViewOfFile(const_cast<const std::uint32_t*>(view));
+    return result.version == 1u;
+}
+
 bool enable_debug_privilege()
 {
     HANDLE token = nullptr;
@@ -753,7 +768,11 @@ int wmain(int argc, wchar_t** argv)
         for (std::uint32_t index = 0; index < before.size(); ++index)
             before[index] = static_cast<std::uint32_t>(values[index]);
         constexpr DWORD sampleMilliseconds = 500u;
+        LiquidDwmDrawDiagnostics drawBefore {}, drawAfter {};
+        const bool diagnosticsStarted = read_draw_diagnostics(drawBefore);
         Sleep(sampleMilliseconds);
+        const bool diagnosticsAvailable = read_draw_diagnostics(drawAfter) && diagnosticsStarted &&
+            drawAfter.compositorPid == drawBefore.compositorPid;
         std::array<LONG, liquidDwmStatusWords> snapshot {};
         for (std::uint32_t index = 0; index < snapshot.size(); ++index)
             snapshot[index] = values[index];
@@ -820,8 +839,35 @@ int wmain(int argc, wchar_t** argv)
                 const auto draws = static_cast<std::uint32_t>(snapshot[liquidDwmRegionStatusBase + slot]) -
                     before[liquidDwmRegionStatusBase + slot];
                 std::wcout << L"Region " << slot << L" (owner=" << region.ownerPid << L", id=" <<
-                    region.regionId << L"): " << (draws ? L"optical submissions observed" :
+                    region.regionId << L", monitor=" << region.monitorLeft << L"," << region.monitorTop <<
+                    L" " << region.monitorWidth << L"x" << region.monitorHeight << L"): " <<
+                    (draws ? L"optical submissions observed" :
                         L"unverified; no sampled optical submissions") << L", draws=" << draws << L"\n";
+                if (diagnosticsAvailable)
+                {
+                    const auto& earlier = drawBefore.regions[slot];
+                    const auto& current = drawAfter.regions[slot];
+                    const auto calls = current.calls - earlier.calls;
+                    const auto regionFailures = current.failures - earlier.failures;
+                    std::wcout << L"  DWM adapter=0x" << std::hex <<
+                        static_cast<std::uint32_t>(current.adapterLuidHigh) << L":" <<
+                        current.adapterLuidLow << std::dec << L" CPU samples=" << calls <<
+                        L" failures=" << regionFailures;
+                    if (calls)
+                        std::wcout << L" mean lock wait=" <<
+                            static_cast<double>(current.lockWaitMicroseconds - earlier.lockWaitMicroseconds) /
+                                (1000.0 * calls) << L" ms mean submission=" <<
+                            static_cast<double>(current.submitMicroseconds - earlier.submitMicroseconds) /
+                                (1000.0 * calls) << L" ms mean native flush=" <<
+                            static_cast<double>(current.flushMicroseconds - earlier.flushMicroseconds) /
+                                (1000.0 * calls) << L" ms";
+                    std::wcout << L" peak lock wait=" << current.maxLockWaitMicroseconds / 1000.0 <<
+                        L" ms peak submission=" << current.maxSubmitMicroseconds / 1000.0 <<
+                        L" ms peak native flush=" << current.maxFlushMicroseconds / 1000.0 << L" ms";
+                    if (current.lastSuccessTick)
+                        std::wcout << L" last success=" << (GetTickCount() - current.lastSuccessTick) << L" ms ago";
+                    std::wcout << L"\n";
+                }
             }
             UnmapViewOfFile(table);
         }
@@ -831,12 +877,15 @@ int wmain(int argc, wchar_t** argv)
         if (lastSuccess)
             std::wcout << L"Last optical submission: " << (GetTickCount() - lastSuccess) << L" ms ago\n";
         std::wcout << L"Renderer initialisations=" << snapshot[liquidDwmRendererInitialisations] <<
-            L" cached device restores=" << snapshot[liquidDwmRendererCacheHits] <<
+            L" device renderer reuses=" << snapshot[liquidDwmRendererCacheHits] <<
             L" device losses=" << snapshot[liquidDwmRendererDeviceLosses] << L"\n";
         if (snapshot[liquidDwmRenderFailureResult])
             std::wcout << L"Last optical failure HRESULT=0x" << std::hex <<
                 static_cast<std::uint32_t>(snapshot[liquidDwmRenderFailureResult]) << std::dec << L"\n";
         std::wcout << L"Hook readiness alone does not verify a visible Liquid Glass effect.\n";
+        if (diagnosticsAvailable)
+            std::wcout << L"Per-region timings measure CPU lock waits and driver submissions, not GPU execution. Peaks cover the compositor lifetime.\n";
+        else std::wcout << L"Per-region timing diagnostics unavailable for the loaded compositor runtime.\n";
         return health == LiquidDwmRenderHealth::unavailable ? 13 :
             health == LiquidDwmRenderHealth::degraded ? 20 : 0;
     }

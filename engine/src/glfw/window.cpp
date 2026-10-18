@@ -14,6 +14,7 @@
 #include <GLFW/glfw3native.h>
 #include <objbase.h>
 #include <shobjidl.h>
+#include "../platform/win32/glfw_event_wait.h"
 #ifndef WS_EX_NOREDIRECTIONBITMAP
 #define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
 #endif
@@ -1071,11 +1072,26 @@ void poll_glfw_events()
     glfwPollEvents();
 }
 
+uint32_t glfw_monitor_refresh_rate(GLFWmonitor* monitor)
+{
+    const GLFWvidmode* mode = monitor ? glfwGetVideoMode(monitor) : nullptr;
+    return mode ? static_cast<uint32_t>(std::clamp(mode->refreshRate, 1, 1000)) : 60u;
+}
+
 void wait_glfw_events(double timeoutSeconds)
 {
     if (timeoutSeconds > 0.0 && std::isfinite(timeoutSeconds))
     {
+#if defined(_WIN32)
+        // Per-window deadlines frequently leave less than one millisecond.
+        // Wait on both a precise timer and native input, then let GLFW retain
+        // ownership of message dispatch. No process-wide timer period changes.
+        static thread_local vibrance::win32::GlfwEventWaitTimer timer;
+        vibrance::win32::wait_for_glfw_events(timer, timeoutSeconds);
+        glfwPollEvents();
+#else
         glfwWaitEventsTimeout(timeoutSeconds);
+#endif
     }
     else
     {

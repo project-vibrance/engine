@@ -93,6 +93,9 @@ struct UiNotificationCardHandle
     bool dismissVisible = false;
 };
 
+// Normalise email padding without removing joiners inside words or emoji.
+VIBRANCE_ENGINE_API std::string ui_normalise_notification_text(std::string_view value);
+
 VIBRANCE_ENGINE_API std::string ui_supported_notification_text(
     const Renderer2DFontAtlas& fontAtlas,
     const std::string& value,
@@ -106,6 +109,13 @@ ui_wrap_notification_message(
 VIBRANCE_ENGINE_API UiNotificationCardMetrics ui_measure_notification_card(
     const Renderer2DFontAtlas& fontAtlas,
     std::string_view message,
+    bool hasOptions,
+    bool hasIcon);
+
+// Includes up to two title rows as well as the three-row message limit.
+VIBRANCE_ENGINE_API UiNotificationCardMetrics ui_measure_notification_card(
+    const Renderer2DFontAtlas& fontAtlas,
+    const UiNotificationCardContent& content,
     bool hasOptions,
     bool hasIcon);
 

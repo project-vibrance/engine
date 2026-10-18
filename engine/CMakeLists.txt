@@ -32,6 +32,7 @@ set(ENGINE_SOURCES
     src/media/presentation.cpp
     src/media/session.cpp
     src/notifications/card.cpp
+    src/notifications/text.cpp
     src/notifications/provider.cpp
     src/notifications/stack_layout.cpp
     src/platform/native_dialog.cpp
@@ -366,6 +367,21 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 VERBATIM)
             add_custom_target(vibrance_liquid_glass_shader ALL
                 DEPENDS "${VIBRANCE_LIQUID_SHADER_OBJECT}")
+            set(VIBRANCE_LIQUID_COMPARE_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_compare_win32.hlsl")
+            set(VIBRANCE_LIQUID_COMPARE_OBJECT
+                "${VIBRANCE_COMPOSITION_DIRECTORY}/liquid_glass_compare.cso")
+            add_custom_command(
+                OUTPUT "${VIBRANCE_LIQUID_COMPARE_OBJECT}"
+                COMMAND "${VIBRANCE_LIQUID_FXC_EXECUTABLE}"
+                    /nologo /T ps_4_0 /E main
+                    /Fo "${VIBRANCE_LIQUID_COMPARE_OBJECT}"
+                    "${VIBRANCE_LIQUID_COMPARE_SOURCE}"
+                DEPENDS "${VIBRANCE_LIQUID_COMPARE_SOURCE}"
+                COMMENT "Compiling the Windows Liquid Glass backdrop comparison shader"
+                VERBATIM)
+            add_custom_target(vibrance_liquid_glass_compare_shader ALL
+                DEPENDS "${VIBRANCE_LIQUID_COMPARE_OBJECT}")
             set(VIBRANCE_LIQUID_UI_SHADER_SOURCE
                 "${CMAKE_CURRENT_SOURCE_DIR}/shaders/liquid_glass_ui_win32.hlsl")
             set(VIBRANCE_LIQUID_UI_SHADER_OBJECT
@@ -501,6 +517,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_INTEROP)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/notification_activation.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/notification_payload_store.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/media/playback_quality_detection.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/media/timeline_range.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/include/vibranceUI/media/playback_quality.h"
                 "${VIBRANCE_WIN32_INTEROP_BUILD_SCRIPT}"
             BYPRODUCTS
@@ -647,7 +664,7 @@ if(WIN32)
             "-Wl,--wrap=__imp_CreateWindowExW")
     endif()
     target_link_libraries(vibrance_engine PRIVATE
-        advapi32 dwmapi mmdevapi ole32 uuid winmm user32 gdi32 shell32)
+        advapi32 dwmapi mmdevapi ole32 uuid winmm user32 gdi32 shell32 comctl32)
 elseif(APPLE)
     # Local static FreeType archives do not carry their compression dependencies.
     find_package(ZLIB REQUIRED)
@@ -710,6 +727,7 @@ if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
 endif()
 if(TARGET vibrance_liquid_glass_shader)
     install(FILES "${VIBRANCE_LIQUID_SHADER_OBJECT}"
+        "${VIBRANCE_LIQUID_COMPARE_OBJECT}"
         "${VIBRANCE_LIQUID_UI_SHADER_OBJECT}"
         "${VIBRANCE_LIQUID_FULLSCREEN_OBJECT}"
         ${VIBRANCE_LIQUID_BLUR_OBJECTS}

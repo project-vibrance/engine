@@ -64,6 +64,32 @@ int main()
         options);
     entt::registry& registry = scene.registry();
     bool passed = true;
+    const std::string zwnj = "\xe2\x80\x8c";
+    const std::string email = "artofnate.com is about to expire\n"
+        "Renew artofnate.com to keep your site online.";
+    const std::string emailPadding = "\n&#x20;" + zwnj + " " + zwnj + "  " + zwnj;
+    passed &= expect(ui_normalise_notification_text(email + emailPadding) == email &&
+        ui_supported_notification_text(fontAtlas, email + emailPadding, 14.0f) == email,
+        "HTML email padding must disappear before glyph filtering or layout");
+    passed &= expect(ui_normalise_notification_text("&#32;&zwnj;&nbsp;&#x200c;\n").empty() &&
+        ui_normalise_notification_text("one\xc2\xa0\xe2\x80\xaf\xe3\x80\x80two") == "one two" &&
+        ui_normalise_notification_text("one\r\n" + zwnj + " \n two") == "one\ntwo",
+        "numeric entities and Unicode separators must normalise without empty padding rows");
+    const std::string persian = "\xd9\x85\xdb\x8c" + zwnj + "\xd8\xb1\xd9\x88\xd9\x85";
+    const std::string emoji = "\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x92\xbb";
+    passed &= expect(ui_normalise_notification_text(persian + " " + emoji) == persian + " " + emoji &&
+        ui_normalise_notification_text("&lt;literal&gt; &#x110000; &#nope;") ==
+            "&lt;literal&gt; &#x110000; &#nope;",
+        "padding cleanup must preserve intra-word joiners, emoji and non-padding entities");
+    const auto paddingRows = ui_wrap_notification_message("Visible\n&#x20;" + zwnj + " " + zwnj);
+    passed &= expect(paddingRows[0] == "Visible" && paddingRows[1].empty() && paddingRows[2].empty(),
+        "invisible padding must not consume message rows or trigger overflow");
+    UiNotificationCardContent twoRowTitle;
+    twoRowTitle.title = "First\nSecond\nThird";
+    twoRowTitle.message = "Body";
+    const auto titleMetrics = ui_measure_notification_card(fontAtlas, twoRowTitle, false, false);
+    passed &= expect(titleMetrics.size.y == kUiNotificationCardHeight + 18.0f,
+        "a second title row must increase the card height independently of its body");
     for (const auto& palette : { ui_light_theme(), ui_dark_theme() })
     {
         auto themedOptions = options;
@@ -147,9 +173,13 @@ int main()
 
     for (const float dpi : { 1.0f, 1.5f, 2.0f })
     {
+        for (const bool rtl : { false, true })
+        {
         for (const double refreshRate : { 30.0, 60.0, 144.0 })
         {
             Renderer2DScene motionScene;
+            motionScene.registry().ctx().insert_or_assign(UiLayoutDirectionComponent {
+                rtl ? UiLayoutDirection::eRightToLeft : UiLayoutDirection::eLeftToRight });
             LayoutScale motionScale {};
             motionScale.logicalSize = { 428.0f, 400.0f };
             motionScale.factor = glm::vec2(dpi);
@@ -163,8 +193,8 @@ int main()
             ui_prepare_notification_card_fan(motionUi, moving, { 428.0f, 0.0f }, 1.0, 0.1f);
             motionScene.build_render_plan(1.0, 0u);
             const auto arriving = motionScene.resolved_shape_visual_state(moving.surface, 1.0);
-            passed &= expect(resting && arriving && close(arriving->rect.x - resting->rect.x, 428.0f * dpi),
-                "new card glass and sharp UI must begin off the right edge at every DPI");
+            passed &= expect(resting && arriving && close(arriving->rect.x - resting->rect.x, (rtl ? -1.0f : 1.0f) * 428.0f * dpi),
+                "new card glass and sharp UI must begin off the leading screen edge at every DPI");
             bool overshot = false;
             for (int frame = 0; frame < 90; ++frame)
             {
@@ -175,11 +205,12 @@ int main()
                 const auto offset = motionScene.registry().get<InteractiveVisual2DComponent>(moving.root).offset;
                 passed &= expect(state && close(state->rect.x - resting->rect.x, offset.x),
                     "native glass must follow the same horizontal motion as its card's content");
-                overshot = overshot || offset.x < 0.0f;
+                overshot = overshot || (rtl ? offset.x > 0.0f : offset.x < 0.0f);
             }
             const auto offset = motionScene.registry().get<InteractiveVisual2DComponent>(moving.root).offset;
             passed &= expect(overshot && offset == glm::vec2(0.0f) && moving.fanStartSeconds < 0.0,
                 "arrival must settle with a small bounce and no residual position offset at all refresh rates");
+        }
         }
     }
 

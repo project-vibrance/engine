@@ -2160,6 +2160,8 @@ inline UiControlHandle ui_create_icon_button(
 
     if (options.useHistory)
     {
+        if (registry.valid(handle.leadingIcon))
+            registry.emplace<UiDirectionalIconComponent>(handle.leadingIcon);
         UiNavigationHistoryComponent history = {};
         history.pages.push_back(options.initialPage);
         history.cursor = 0u;
@@ -2395,6 +2397,8 @@ inline UiControlHandle ui_create_submenu_row(
         layer,
         order,
         std::move(options.button));
+    if (ui.registry().valid(handle.trailingIcon))
+        ui.registry().emplace<UiDirectionalIconComponent>(handle.trailingIcon);
     ui.attach_stretch(
         handle.root,
         parent,
@@ -3364,6 +3368,7 @@ inline UiControlHandle ui_create_nav_cluster(
             scene,
             handle.leadingIcon,
             options.backEnabled ? options.iconTint : options.disabledIconTint);
+        registry.emplace<UiDirectionalIconComponent>(handle.leadingIcon);
     }
 
     if (options.forwardIcon.valid())
@@ -3379,6 +3384,7 @@ inline UiControlHandle ui_create_nav_cluster(
             scene,
             handle.trailingIcon,
             options.forwardEnabled ? options.iconTint : options.disabledIconTint);
+        registry.emplace<UiDirectionalIconComponent>(handle.trailingIcon);
     }
 
     if (options.useHistory)

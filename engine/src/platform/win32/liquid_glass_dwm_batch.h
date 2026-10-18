@@ -458,29 +458,40 @@ bool liquid_native_batch_region(const LiquidNativeBatchMarker& marker,
 bool render_native_marker(const LiquidNativeBatchMarker& marker, void* executionContext)
 {
     status(147);
-    std::unique_lock<std::mutex> rendererLock(rendererMutex, std::defer_lock);
-    ComPtr<ID3D11DeviceContext> retainedContext;
-    ComPtr<ID3D11Device> retainedDevice;
-    if (windows10Adapter)
-    {
-        // A transition never waits behind another optical draw. The observer
-        // retires device resources once the current draw has left this scope.
-        if (!marker.complete || !windows10_optical_render_ready() || !rendererLock.try_lock())
-        { status(230); return true; }
-        if (!windows10_optical_render_ready()) { status(230); return true; }
-        retainedContext = marker.context;
-        retainedContext->GetDevice(&retainedDevice);
-        const HRESULT reason = retainedDevice ? retainedDevice->GetDeviceRemovedReason() : E_POINTER;
-        if (FAILED(reason)) { windows10_suspend_optical_render(reason); return true; }
-    }
-    if (!marker.complete ||
-        !flush_liquid_native_batch(executionContext, marker.context))
-    {
-        status(152);
-        return true;
-    }
     try
     {
+        if (!marker.complete || !marker.context) { status(152); return true; }
+        ComPtr<ID3D11DeviceContext> retainedContext = marker.context;
+        ComPtr<ID3D11Device> retainedDevice;
+        if (windows10Adapter && !windows10_optical_render_ready())
+        { status(230); return true; }
+        retainedContext->GetDevice(&retainedDevice);
+        if (!retainedDevice) { status(152); return true; }
+        const auto waitStart = performance_tick();
+        auto state = find_renderer_state(retainedDevice.Get());
+        if (!state) { status(152); return true; }
+        std::unique_lock<std::mutex> rendererLock(state->drawMutex, std::defer_lock);
+        if (windows10Adapter)
+        {
+            // A transition never waits behind another optical draw. The
+            // observer retires resources once every device lease is released.
+            if (!rendererLock.try_lock()) { status(230); return true; }
+            if (!windows10_optical_render_ready()) { status(230); return true; }
+            const HRESULT reason = retainedDevice->GetDeviceRemovedReason();
+            if (FAILED(reason)) { windows10_suspend_optical_render(reason); return true; }
+        }
+        else rendererLock.lock();
+        const auto lockAcquired = performance_tick();
+        const auto flushStarted = performance_tick();
+        if (!flush_liquid_native_batch(executionContext, marker.context))
+        {
+            status(152);
+            record_region_draw(marker.slot, state->adapterLuid, false,
+                elapsed_microseconds(waitStart, lockAcquired), 0u, E_FAIL,
+                elapsed_microseconds(flushStarted, performance_tick()));
+            return true;
+        }
+        const auto flushMicroseconds = elapsed_microseconds(flushStarted, performance_tick());
         auto* context = marker.context;
         ID3D11RenderTargetView* boundTargets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] {};
         context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,
@@ -635,14 +646,7 @@ bool render_native_marker(const LiquidNativeBatchMarker& marker, void* execution
         }
         if (clip.right <= clip.left || clip.bottom <= clip.top)
             return true;
-        ComPtr<ID3D11Device> device;
-        context->GetDevice(&device);
-        if (!device)
-        {
-            status(152);
-            return true;
-        }
-        if (!windows10Adapter) rendererLock.lock();
+        const auto submitStart = performance_tick();
         if (windows10Adapter)
         {
             const HRESULT reason = retainedDevice->GetDeviceRemovedReason();
@@ -651,14 +655,14 @@ bool render_native_marker(const LiquidNativeBatchMarker& marker, void* execution
         }
         record_native_render_attempt();
         bool rendered = false;
-        if (ensure_renderer(device.Get()))
+        if (ensure_renderer(*state))
         {
             // The renderer takes its own cropped snapshot before writing the
             // target. Use the verified RTV format for typeless resources too,
             // avoiding a second copy of the same backdrop on every draw.
             const auto format = backdrop_copy_format(description.Format, viewDescription.Format);
             rendered = format != DXGI_FORMAT_UNKNOWN &&
-                renderer.render(context, texture.Get(), targets[0].Get(), region,
+                state->renderer.render(context, texture.Get(), targets[0].Get(), region,
                     0, 0, &clip, format);
         }
         if (rendered)
@@ -673,6 +677,10 @@ bool render_native_marker(const LiquidNativeBatchMarker& marker, void* execution
             record_native_render_failure();
             status(152);
         }
+        record_region_draw(marker.slot, state->adapterLuid, rendered,
+            elapsed_microseconds(waitStart, lockAcquired),
+            elapsed_microseconds(submitStart, performance_tick()),
+            rendered ? S_OK : E_FAIL, flushMicroseconds);
         if (windows10Adapter)
         {
             const HRESULT reason = retainedDevice->GetDeviceRemovedReason();
@@ -683,9 +691,19 @@ bool render_native_marker(const LiquidNativeBatchMarker& marker, void* execution
     return true;
 }
 
+thread_local bool nativeMarkerDrawing = false;
+
 bool render_batch_marker(void* command, void* executionContext)
 {
+    // Native flushing can re-enter the batch emitters. Forward those calls to
+    // DWM rather than recursively taking this device's optical draw lock.
+    if (nativeMarkerDrawing) return false;
     LiquidNativeBatchMarker marker {};
-    return read_liquid_native_batch_marker(command, executionContext, marker) &&
-        render_native_marker(marker, executionContext);
+    if (!read_liquid_native_batch_marker(command, executionContext, marker)) return false;
+    struct DrawScope
+    {
+        DrawScope() { nativeMarkerDrawing = true; }
+        ~DrawScope() { nativeMarkerDrawing = false; }
+    } scope;
+    return render_native_marker(marker, executionContext);
 }

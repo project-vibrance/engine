@@ -211,7 +211,12 @@ inline void ui_update_text_input_caret_layout(
     }
 
     const float availableWidth = ui_text_input_available_width(registry, entity, input);
-    const float caretX = std::min(std::max(visibleValueWidth + 1.0f, 0.0f), std::max(availableWidth, 0.0f));
+    const auto* displayed = registry.try_get<TextComponent>(input.textEntity);
+    const bool textRtl = displayed && !displayed->text.empty() &&
+        fontAtlas.layout_text(displayed->text, displayed->fontSize).rightToLeft;
+    const bool caretAtLeadingEdge = textRtl != ui_layout_is_rtl(registry, entity);
+    const float caretX = caretAtLeadingEdge ? -1.0f :
+        std::min(std::max(visibleValueWidth + 1.0f, 0.0f), std::max(availableWidth, 0.0f));
     if (Layout2DComponent* caretLayout = registry.try_get<Layout2DComponent>(input.caretEntity))
     {
         caretLayout->anchorMin = { 0.0f, 0.5f };

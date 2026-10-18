@@ -1,4 +1,5 @@
 #pragma once
+#include <vibranceUI/ui/layout_direction.h>
 
 #include <algorithm>
 #include <cmath>
@@ -1106,6 +1107,8 @@ inline bool ui_set_slider_value_from_point(Renderer2DScene& scene, entt::entity 
     float normalized = point.x <= left ? 0.0f : point.x >= right ? 1.0f :
         (travel > 0.0f ? (point.x - left) / travel : 0.0f);
     normalized = glm::clamp(normalized, 0.0f, 1.0f);
+
+    if (ui_layout_is_rtl(registry, entity)) normalized = 1.0f - normalized;
 
     if (slider->normalisedStep > 0.0f)
     {

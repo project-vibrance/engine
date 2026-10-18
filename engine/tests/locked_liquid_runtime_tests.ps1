@@ -69,7 +69,7 @@ Assert-True (Test-Path -LiteralPath (Join-Path $installPrefix 'bin\source.dll'))
 $bundle = Join-Path $fixture 'bundle'
 $cache = Join-Path $fixture 'cache'
 New-Item -ItemType Directory -Path $bundle | Out-Null
-$names = @('vibrance_liquid_dwm_extension.dll', 'liquid_glass_win32.cso', 'liquid_glass_ui_win32.cso', 'liquid_glass_fullscreen.cso', 'liquid_glass_blur_horizontal.cso', 'liquid_glass_blur_vertical.cso')
+$names = @('vibrance_liquid_dwm_extension.dll', 'liquid_glass_win32.cso', 'liquid_glass_ui_win32.cso', 'liquid_glass_fullscreen.cso', 'liquid_glass_blur_horizontal.cso', 'liquid_glass_blur_vertical.cso', 'liquid_glass_compare.cso')
 foreach ($name in $names) { [IO.File]::WriteAllText((Join-Path $bundle $name), $name) }
 function Stage {
     $staged = & $Broker --stage-runtime (Join-Path $bundle $names[0]) $cache

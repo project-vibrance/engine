@@ -26,7 +26,10 @@ constexpr std::uint32_t VIBRANCE_COMPOSITION_CREATE_CPU_UPLOAD = 1u << 1u;
 // cannot silently drift.
 constexpr std::uint64_t VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_KEY = 0u;
 constexpr std::uint64_t VIBRANCE_COMPOSITION_VULKAN_RELEASE_KEY = 1u;
-constexpr std::uint32_t VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_TIMEOUT_MS = 1000u;
+// The bridge probes key 0 without waiting before submitting Vulkan work.
+// Allow at most 1 ms for older ICDs to observe that hand-off, instead of
+// stalling a shared UI thread for a whole second on another display's GPU.
+constexpr std::uint32_t VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_TIMEOUT_MS = 1u;
 
 constexpr std::uint32_t VIBRANCE_COMPOSITION_PRESENT_SYNCHRONIZE = 1u << 0u;
 constexpr std::uint32_t VIBRANCE_COMPOSITION_PRESENT_FAILED = 0u;

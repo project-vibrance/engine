@@ -443,6 +443,17 @@ void Renderer2DScene::commit_presented_bounds(
 bool Renderer2DScene::requires_continuous_redraw(
     double currentTimeSeconds) const
 {
+    return requires_continuous_redraw_since(currentTimeSeconds, -1.0, frameGeneration_);
+}
+
+bool Renderer2DScene::requires_continuous_redraw_since(
+    double currentTimeSeconds, double previousRenderTimeSeconds,
+    uint64_t previousFrameGeneration) const
+{
+    if (previousFrameGeneration != frameGeneration_)
+    {
+        return true;
+    }
     const auto transitionView =
         registry_.view<const DisplayTransition2DComponent>();
     for (const entt::entity entity : transitionView)
@@ -455,8 +466,14 @@ bool Renderer2DScene::requires_continuous_redraw(
         }
         if (!display_transition_complete(transition, currentTimeSeconds) ||
             transition.removeWhenComplete ||
-            transition.destroyEntityTreeOnComplete)
+            transition.destroyEntityTreeOnComplete ||
+            (std::isfinite(previousRenderTimeSeconds) &&
+                previousRenderTimeSeconds >= 0.0 &&
+                currentTimeSeconds >= previousRenderTimeSeconds &&
+                !display_transition_complete(transition, previousRenderTimeSeconds)))
         {
+            // A retained transition may keep its completed component. Publish
+            // the final pose once even if the optical phase did not change.
             return true;
         }
     }
@@ -480,7 +497,18 @@ bool Renderer2DScene::requires_continuous_redraw(
         {
             // Optical motion follows the renderer clock. Unchanged recipes
             // retain their scene/text generations while visible rims animate.
-            return true;
+            // Only the packed phase changes when no other time-driven work is
+            // due; repeated phase buckets have exactly the same shader input.
+            if (!std::isfinite(currentTimeSeconds) ||
+                !std::isfinite(previousRenderTimeSeconds) ||
+                previousRenderTimeSeconds < 0.0 ||
+                currentTimeSeconds < previousRenderTimeSeconds ||
+                portable_liquid_rim_phase(currentTimeSeconds) !=
+                    portable_liquid_rim_phase(previousRenderTimeSeconds))
+            {
+                return true;
+            }
+            break;
         }
     }
 
@@ -584,7 +612,7 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
         if (point_in_primitive(
             shape.primitive,
             expand_rect(rect, edgePadding),
-            padded_corner_radii(shape, edgePadding),
+            ui_layout_corner_radii(registry_, entity, shape, edgePadding),
             point))
         {
             consider_hit_candidate(topmost, registry_, entity, Renderer2DRenderOpType::eShape);
@@ -758,7 +786,7 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
             if (point_in_primitive(
                 shape.primitive,
                 expand_rect(rect, edgePadding),
-                padded_corner_radii(shape, edgePadding),
+                ui_layout_corner_radii(registry_, entity, shape, edgePadding),
                 point))
             {
                 return true;
@@ -777,7 +805,7 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
             if (point_in_primitive(
                 shape.primitive,
                 expand_rect(shadowRect, shadowPadding),
-                padded_corner_radii(shape, shadow->spread + shadowPadding),
+                ui_layout_corner_radii(registry_, entity, shape, shadow->spread + shadowPadding),
                 point))
             {
                 return true;
@@ -785,7 +813,7 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
         }
 
         if (const BlurComponent* blur = registry_.try_get<BlurComponent>(entity);
-            blur && alpha_visible(blur->opacity) && point_in_primitive(shape.primitive, rect, shape.effective_corner_radii(), point))
+            blur && alpha_visible(blur->opacity) && point_in_primitive(shape.primitive, rect, ui_layout_corner_radii(registry_, entity, shape), point))
         {
             return true;
         }
@@ -1217,7 +1245,7 @@ void Renderer2DScene::build_render_plan_impl(
         }
         if ((batch.flags & eRenderer2DStyleCornerRadii) != 0u)
         {
-            batch.packedData = pack_corner_radii(shape.effective_corner_radii());
+            batch.packedData = pack_corner_radii(ui_layout_corner_radii(registry_, entity, shape));
         }
         if (transformFlags == 0u)
         {
@@ -1235,7 +1263,7 @@ void Renderer2DScene::build_render_plan_impl(
                     mask.squirclePower,
                     mask.notchAmount,
                     mask.notchDepth);
-                const auto radii = shape.effective_corner_radii();
+                const auto radii = ui_layout_corner_radii(registry_, entity, shape);
                 const bool binaryCorners = std::all_of(&radii[0], &radii[0] + 4, [&](float radius) {
                     return radius <= 0.001f || std::abs(radius - shape.cornerRadius) <= 0.001f;
                 });
@@ -1281,7 +1309,7 @@ void Renderer2DScene::build_render_plan_impl(
             shadowBatch.rect.w += 2.0f * shadow->spread;
             shadowBatch.color0 = shadow->color;
             shadowBatch.color1 = sourceRect;
-            shadowBatch.color2 = shape.effective_corner_radii();
+            shadowBatch.color2 = ui_layout_corner_radii(registry_, entity, shape);
             shadowBatch.effect0 = {
                 shape.cornerRadius + shadow->spread,
                 shadow->blurRadius,
@@ -1302,7 +1330,7 @@ void Renderer2DScene::build_render_plan_impl(
                 eRenderer2DStyleMaskedLiquidShapeParameters);
             if ((shadowBatch.flags & eRenderer2DStyleCornerRadii) != 0u)
             {
-                shadowBatch.packedData = pack_corner_radii(padded_corner_radii(shape, shadow->spread));
+                shadowBatch.packedData = pack_corner_radii(ui_layout_corner_radii(registry_, entity, shape, shadow->spread));
             }
             (cachedBatch ? plan.cachedShadows : plan.shadows).push_back(shadowBatch);
         }
@@ -1396,7 +1424,7 @@ void Renderer2DScene::build_render_plan_impl(
                 blurBatch.packedData = pack_unorm8(liquid->refraction) / 2u |
                     ((pack_unorm8(liquid->dispersion) / 2u) << 7u) |
                     ((pack_unorm8(liquid->rim) / 2u) << 14u) |
-                    (pack_unorm8(static_cast<float>(std::fmod(currentTimeSeconds * 0.12, 1.0))) << 21u);
+                    (portable_liquid_rim_phase(currentTimeSeconds) << 21u);
                 // A connected native island paints its cap in Composition
                 // instead of the UI texture. Include that same known paint
                 // beneath scene samples so child lenses still see the cap.
@@ -1516,6 +1544,8 @@ void Renderer2DScene::build_render_plan_impl(
         batch.rect = rect;
         batch.clipRect = inherited_mask_clip_rect(registry_, entity, currentTimeSeconds);
         batch.uvRect = media_uv_rect_from_component(media, rect);
+        if (registry_.all_of<UiDirectionalIconComponent>(entity) && ui_layout_is_rtl(registry_, entity))
+            std::swap(batch.uvRect.x, batch.uvRect.z);
         batch.color0 = media.tint;
         batch.color1 = media.tintFill == Renderer2DFill::eSolid ? media.tint : media.tintEnd;
         batch.color2 = { media.gradientStart.x, media.gradientStart.y, media.gradientEnd.x, media.gradientEnd.y };

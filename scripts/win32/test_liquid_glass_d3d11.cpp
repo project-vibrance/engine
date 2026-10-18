@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -19,6 +20,200 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
+bool temporal_reuse_regression(ID3D11Device* device, ID3D11DeviceContext* context,
+    const std::wstring& shaderDirectory)
+{
+    if (GetFileAttributesW((shaderDirectory + L"\\liquid_glass_compare.cso").c_str()) ==
+            INVALID_FILE_ATTRIBUTES)
+    {
+        std::cout << "Exact temporal blur reuse: unavailable in this bundle\n";
+        return true;
+    }
+    for (const auto format : { DXGI_FORMAT_R8G8B8A8_UNORM,
+            DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_FORMAT_R16G16B16A16_FLOAT })
+    {
+        vibrance::win32::LiquidGlassD3D11 temporal, reference;
+        if (!temporal.initialise(device, shaderDirectory) ||
+            !reference.initialise(device, shaderDirectory)) return false;
+        constexpr UINT width = 320, height = 192;
+        const UINT rowBytes = width * (format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8u : 4u);
+        D3D11_TEXTURE2D_DESC description {};
+        description.Width = width;
+        description.Height = height;
+        description.MipLevels = description.ArraySize = description.SampleDesc.Count = 1;
+        description.Format = format;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11Texture2D> source, actual, expected, actualReadback, expectedReadback;
+        ComPtr<ID3D11RenderTargetView> sourceTarget, actualTarget, expectedTarget;
+        if (FAILED(device->CreateTexture2D(&description, nullptr, &source)) ||
+            FAILED(device->CreateTexture2D(&description, nullptr, &actual)) ||
+            FAILED(device->CreateTexture2D(&description, nullptr, &expected)) ||
+            FAILED(device->CreateRenderTargetView(source.Get(), nullptr, &sourceTarget)) ||
+            FAILED(device->CreateRenderTargetView(actual.Get(), nullptr, &actualTarget)) ||
+            FAILED(device->CreateRenderTargetView(expected.Get(), nullptr, &expectedTarget)))
+            return false;
+        description.Usage = D3D11_USAGE_STAGING;
+        description.BindFlags = 0;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(device->CreateTexture2D(&description, nullptr, &actualReadback)) ||
+            FAILED(device->CreateTexture2D(&description, nullptr, &expectedReadback))) return false;
+        const D3D11_QUERY_DESC predicateDescription { D3D11_QUERY_OCCLUSION_PREDICATE, 0 };
+        ComPtr<ID3D11Predicate> nativePredicate, outerQuery;
+        if (FAILED(device->CreatePredicate(&predicateDescription, &nativePredicate)) ||
+            FAILED(device->CreatePredicate(&predicateDescription, &outerQuery))) return false;
+        context->Begin(nativePredicate.Get());
+        context->End(nativePredicate.Get());
+        const FLOAT targetColour[4] = { 0.1f, 0.2f, 0.3f, 0.75f };
+        std::uint64_t earlierReuses = 0, earlierChanges = 0, earlierComparisons = 0;
+        for (UINT frame = 0; frame < 32u; ++frame)
+        {
+            if (frame == 24u)
+            {
+                earlierReuses = temporal.blur_reuse_count();
+                earlierChanges = temporal.blur_change_count();
+                earlierComparisons = temporal.blur_comparison_count();
+                if (earlierReuses == 0 || earlierChanges == 0 ||
+                    !temporal.initialise(device, shaderDirectory)) return false;
+            }
+            if (frame == 0 || frame == 24u || (frame >= 8u && frame < 16u))
+            {
+                const FLOAT colour[4] = { (frame & 1u) ? 0.75f : 1.5f,
+                    (frame & 1u) ? 0.2f : 0.5f, 0.125f,
+                    frame >= 12u ? 0.0f : ((frame & 1u) ? 0.5f : 1.0f) };
+                context->ClearRenderTargetView(sourceTarget.Get(), colour);
+            }
+            if (frame == 26u)
+            {
+                // The changed texel is outside the visible lens but inside
+                // the Gaussian input halo. It must invalidate retained blur.
+                const D3D11_BOX halo { 31, 96, 0, 32, 97, 1 };
+                const std::uint64_t pixel = format == DXGI_FORMAT_R16G16B16A16_FLOAT ?
+                    0x3c00340038004000ull : 0xffe04020u;
+                context->UpdateSubresource(source.Get(), 0, &halo, &pixel,
+                    format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4, 0);
+            }
+            if (frame == 29u || frame == 30u)
+            {
+                const FLOAT signedColour[4] = { -0.5f, frame == 29u ? -0.0f : 0.0f, 2.0f, 1.0f };
+                context->ClearRenderTargetView(sourceTarget.Get(), signedColour);
+            }
+            vibrance::win32::LiquidGlassRenderRegion region;
+            region.x = 32;
+            region.y = 24;
+            region.width = 256;
+            region.height = 144;
+            region.lightPhase = frame * 0.17f;
+            region.blurRadius = frame == 16u ? 0.0f : frame >= 17u ? 30.0f : 7.0f;
+            const D3D11_RECT clip { 68, 41, 191, 119 };
+            const D3D11_RECT* activeClip = frame == 7u || frame == 10u ? &clip : nullptr;
+            if (frame >= 20u && frame < 24u)
+            {
+                region.viewportRect = { 0, 40.25f, 256, 56.5f };
+                region.viewportFade = { 8, 12, 0, 1 };
+            }
+            if (frame >= 24u) region.refractionStrength = 0.0f;
+            const LONG sourceOriginX = frame == 27u ? 1 : frame == 28u ? -1 : 0;
+            // Fresh resources make this independent of the optimisation
+            // under test, including its per-scratch-set history.
+            if (!reference.initialise(device, shaderDirectory)) return false;
+            context->ClearRenderTargetView(expectedTarget.Get(), targetColour);
+            context->ClearRenderTargetView(actualTarget.Get(), targetColour);
+            if (!reference.render(context, source.Get(), expectedTarget.Get(), region,
+                    sourceOriginX, 0, activeClip)) return false;
+            const bool nativeState = frame == 5u || frame == 6u;
+            const BOOL predicateValue = frame == 5u ? FALSE : TRUE;
+            if (nativeState) context->SetPredication(nativePredicate.Get(), predicateValue);
+            if (frame == 4u) context->Begin(outerQuery.Get());
+            if (!temporal.render(context, source.Get(), actualTarget.Get(), region,
+                    sourceOriginX, 0, activeClip)) return false;
+            if (frame == 4u) context->End(outerQuery.Get());
+            if (nativeState)
+            {
+                ComPtr<ID3D11Predicate> restored;
+                BOOL restoredValue = FALSE;
+                context->GetPredication(&restored, &restoredValue);
+                context->SetPredication(nullptr, FALSE);
+                if (restored.Get() != nativePredicate.Get() || restoredValue != predicateValue)
+                    return false;
+            }
+            context->CopyResource(actualReadback.Get(), actual.Get());
+            context->CopyResource(expectedReadback.Get(), expected.Get());
+            D3D11_MAPPED_SUBRESOURCE actualMap {}, expectedMap {};
+            if (FAILED(context->Map(actualReadback.Get(), 0, D3D11_MAP_READ, 0, &actualMap)))
+                return false;
+            if (FAILED(context->Map(expectedReadback.Get(), 0, D3D11_MAP_READ, 0, &expectedMap)))
+            {
+                context->Unmap(actualReadback.Get(), 0);
+                return false;
+            }
+            bool same = true;
+            for (UINT y = 0; y < height; ++y)
+                if (std::memcmp(static_cast<const std::uint8_t*>(actualMap.pData) + y * actualMap.RowPitch,
+                        static_cast<const std::uint8_t*>(expectedMap.pData) + y * expectedMap.RowPitch,
+                        rowBytes) != 0) same = false;
+            context->Unmap(actualReadback.Get(), 0);
+            context->Unmap(expectedReadback.Get(), 0);
+            if (!same)
+            {
+                std::cerr << "Temporal blur differs from fresh reference: format "
+                          << format << ", frame " << frame << '\n';
+                return false;
+            }
+        }
+        std::cout << "Temporal blur format " << format << ": "
+                  << earlierReuses + temporal.blur_reuse_count() << " unchanged, "
+                  << earlierChanges + temporal.blur_change_count() << " changed, "
+                  << earlierComparisons + temporal.blur_comparison_count() << " comparisons\n";
+        if (temporal.blur_reuse_count() == 0 || temporal.blur_change_count() == 0) return false;
+    }
+    return true;
+}
+
+bool scratch_cache_regression(vibrance::win32::LiquidGlassD3D11& lens,
+    ID3D11Device* device, ID3D11DeviceContext* context)
+{
+    ComPtr<ID3D11Texture2D> sources[2];
+    ComPtr<ID3D11Texture2D> outputs[2];
+    ComPtr<ID3D11RenderTargetView> targets[2];
+    vibrance::win32::LiquidGlassRenderRegion regions[2];
+    for (UINT monitor = 0; monitor < 2u; ++monitor)
+    {
+        D3D11_TEXTURE2D_DESC description {};
+        description.Width = 1920;
+        description.Height = 1080;
+        description.MipLevels = description.ArraySize = description.SampleDesc.Count = 1;
+        description.Format = monitor == 0 ? DXGI_FORMAT_R16G16B16A16_FLOAT :
+            DXGI_FORMAT_R8G8B8A8_UNORM;
+        description.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        ComPtr<ID3D11RenderTargetView> sourceTarget;
+        if (FAILED(device->CreateTexture2D(&description, nullptr, &sources[monitor])) ||
+            FAILED(device->CreateRenderTargetView(sources[monitor].Get(), nullptr, &sourceTarget)) ||
+            FAILED(device->CreateTexture2D(&description, nullptr, &outputs[monitor])) ||
+            FAILED(device->CreateRenderTargetView(outputs[monitor].Get(), nullptr, &targets[monitor])))
+            return false;
+        const FLOAT backdrop[4] = { 0.5f, 0.75f, 1.0f, 1.0f };
+        context->ClearRenderTargetView(sourceTarget.Get(), backdrop);
+        regions[monitor].x = 480;
+        regions[monitor].y = 270;
+        regions[monitor].width = monitor == 0 ? 960 : 800;
+        regions[monitor].height = monitor == 0 ? 540 : 400;
+        regions[monitor].blurRadius = monitor == 0 ? 30.0f : 7.0f;
+    }
+    std::uint64_t warmAllocations = 0;
+    for (UINT frame = 0; frame < 6u; ++frame)
+    {
+        for (UINT monitor = 0; monitor < 2u; ++monitor)
+            if (!lens.render(context, sources[monitor].Get(), targets[monitor].Get(),
+                    regions[monitor])) return false;
+        if (frame == 0) warmAllocations = lens.scratch_allocation_count();
+    }
+    const auto extraAllocations = lens.scratch_allocation_count() - warmAllocations;
+    std::cout << "Alternating HDR/SDR scratch allocations after warm-up: "
+              << extraAllocations << '\n';
+    return extraAllocations == 0 && SUCCEEDED(device->GetDeviceRemovedReason());
+}
+
 bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
     ID3D11Device* device, ID3D11DeviceContext* context)
 {
@@ -58,23 +253,48 @@ bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
     if (FAILED(device->CreateQuery(&queryDesc, &start)) ||
         FAILED(device->CreateQuery(&queryDesc, &end))) return fail("timestamp query creation");
 
+    for (const bool changing : { false, true })
+    for (const bool compact : { false, true })
+    for (const bool masked : { false, true })
     for (const bool clipped : { false, true })
     for (const float radius : { 0.0f, 7.0f, 30.0f })
     {
         vibrance::win32::LiquidGlassRenderRegion region;
         region.x = 480;
         region.y = 270;
-        region.width = 960u;
-        region.height = 540u;
+        region.width = compact ? 400u : 960u;
+        region.height = compact ? 96u : 540u;
         region.blurRadius = radius;
-        const D3D11_RECT clip { 960, 540, 1008, 588 };
+        if (masked)
+        {
+            region.viewportRect = { 0.0f, region.height * 0.4f,
+                static_cast<float>(region.width), region.height * 0.2f };
+            region.viewportFade = { 0, 0, 1, 1 };
+        }
+        const D3D11_RECT clip { region.x + static_cast<LONG>(region.width / 2),
+            region.y + static_cast<LONG>(region.height / 2),
+            region.x + static_cast<LONG>(region.width / 2) + 48,
+            region.y + static_cast<LONG>(region.height / 2) + 48 };
+        const D3D11_BOX dirtyBox { static_cast<UINT>(clip.left), static_cast<UINT>(clip.top), 0,
+            static_cast<UINT>(clip.left + 16), static_cast<UINT>(clip.top + 16), 1 };
+        const auto changeBackdrop = [&](UINT frame) {
+            if (!changing) return;
+            std::array<std::uint32_t, 16 * 16> changedPixels;
+            changedPixels.fill((frame & 1u) ? 0xffd06020u : 0xff40a0f0u);
+            context->UpdateSubresource(source.Get(), 0, &dirtyBox,
+                changedPixels.data(), 16 * sizeof(std::uint32_t), 0);
+        };
         for (UINT warm = 0u; warm < 8u; ++warm)
+        {
+            changeBackdrop(warm);
             if (!lens.render(context, source.Get(), target.Get(), region,
                     0, 0, clipped ? &clip : nullptr)) return fail("warm-up render");
+        }
         std::vector<double> gpuMilliseconds;
         std::vector<double> cpuMilliseconds;
         for (UINT sample = 0u; sample < 31u; ++sample)
         {
+            changeBackdrop(sample + 8u);
             context->Begin(disjoint.Get());
             context->End(start.Get());
             const auto cpuStart = std::chrono::steady_clock::now();
@@ -116,8 +336,10 @@ bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
         std::sort(gpuMilliseconds.begin(), gpuMilliseconds.end());
         std::sort(cpuMilliseconds.begin(), cpuMilliseconds.end());
         std::cout << std::fixed << std::setprecision(3)
-                  << "Benchmark 960x540, radius " << radius
+                  << "Benchmark " << region.width << 'x' << region.height << ", radius " << radius
                   << (clipped ? ", 48x48 clip" : ", full draw")
+                  << (masked ? ", 20% viewport" : "")
+                  << (changing ? ", changing backdrop" : "")
                   << ": GPU median " << gpuMilliseconds[gpuMilliseconds.size() / 2u]
                   << " ms, CPU submission median "
                   << cpuMilliseconds[cpuMilliseconds.size() / 2u] << " ms\n";
@@ -129,6 +351,7 @@ bool benchmark(vibrance::win32::LiquidGlassD3D11& lens,
 int wmain(int argc, wchar_t** argv)
 {
     bool runBenchmark = false;
+    bool benchmarkOnly = false;
     unsigned adapterIndex = std::numeric_limits<unsigned>::max();
     const wchar_t* previewPath = nullptr;
     const wchar_t* capturePath = nullptr;
@@ -138,6 +361,7 @@ int wmain(int argc, wchar_t** argv)
     {
         const std::wstring option(argv[argument]);
         if (option == L"--benchmark") runBenchmark = true;
+        else if (option == L"--benchmark-only") runBenchmark = benchmarkOnly = true;
         else if (option == L"--adapter" && argument + 1 < argc)
         {
             const std::wstring index(argv[++argument]);
@@ -161,7 +385,7 @@ int wmain(int argc, wchar_t** argv)
     if (!validArguments || (capturePath && comparisonPath))
     {
         std::wcerr << L"Usage: test_liquid_glass_d3d11 shader-directory [preview.ppm] "
-            L"[--benchmark] [--adapter index] [--capture file | --compare file]\n";
+            L"[--benchmark | --benchmark-only] [--adapter index] [--capture file | --compare file]\n";
         return 2;
     }
     std::ofstream capture;
@@ -278,6 +502,7 @@ int wmain(int argc, wchar_t** argv)
         std::cerr << "Lens initialisation failed\n";
         return 6;
     }
+    if (benchmarkOnly) return benchmark(lens, device.Get(), context.Get()) ? 0 : 54;
     vibrance::win32::LiquidGlassRenderRegion region;
     region.x = 64;
     region.y = 32;
@@ -1092,6 +1317,17 @@ int wmain(int argc, wchar_t** argv)
     if (!(near_channel(centre & 0xffu, 77) &&
         near_channel((centre >> 8u) & 0xffu, 102) &&
         near_channel((centre >> 16u) & 0xffu, 128))) return 15;
+    for (const float viewportY : { -80.0f, -60.0f, -20.0f, 0.0f,
+            80.25f, 180.0f, 192.0f, 250.0f })
+    {
+        auto viewportRegion = frostedRegion;
+        viewportRegion.blurRadius = 7.0f;
+        viewportRegion.refractionStrength = 24.0f;
+        viewportRegion.viewportRect = { 0, viewportY,
+            static_cast<float>(viewportRegion.width), 60 };
+        viewportRegion.viewportFade = { 12, 18, 0.1f, 1 };
+        if (!renderSample(stripedBackdrop.Get(), viewportRegion)) return 80;
+    }
     if (comparisonPath)
     {
         if (comparison.peek() != std::char_traits<char>::eof()) return 57;
@@ -1297,5 +1533,7 @@ int wmain(int argc, wchar_t** argv)
     std::cout << "Clipped sampling neighbourhood reference failures: "
               << samplingClipFailures << '\n';
     if (samplingClipFailures) return 65;
+    if (!scratch_cache_regression(lens, device.Get(), context.Get())) return 79;
+    if (!temporal_reuse_regression(device.Get(), context.Get(), argv[1])) return 81;
     return runBenchmark && !benchmark(lens, device.Get(), context.Get()) ? 54 : 0;
 }

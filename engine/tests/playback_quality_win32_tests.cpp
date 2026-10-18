@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <winrt/base.h>
 #include "../src/platform/win32/playback_quality_probe.h"
+#include <atomic>
 #include <iostream>
 
 int main()
@@ -31,7 +32,13 @@ int main()
     UpdateWindow(window);
     int failures = 0;
     {
-        Win32PlaybackQualityProbe probe([window](const auto&) { return window; });
+        std::atomic<unsigned> ineligibleWindowQueries { 0u };
+        Win32PlaybackQualityProbe probe([&](const auto& metadata) {
+            if (media_quality_detection::normalise(metadata.title).empty() ||
+                media_quality_detection::normalise(metadata.artist).empty())
+                ++ineligibleWindowQueries;
+            return window;
+        });
         Win32PlaybackQualityProbe::Request request { GetCurrentProcessId(),
             L"Fixture", L"Current track", L"Current artist", true };
         const auto waitFor = [&](MediaPlaybackQuality expected, const char* message) {
@@ -52,6 +59,41 @@ int main()
         };
         waitFor(MediaPlaybackQuality::eLossless,
             "The real UI Automation cache must detect a matching playback badge");
+        const auto expectIdentitySkipped = [&](const wchar_t* title, const wchar_t* artist) {
+            request.title = title;
+            request.artist = artist;
+            if (probe.refresh(request) != MediaPlaybackQuality::eUnknown) ++failures;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
+            const auto before = ineligibleWindowQueries.load();
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                MSG event;
+                while (PeekMessageW(&event, nullptr, 0, 0, PM_REMOVE))
+                {
+                    TranslateMessage(&event);
+                    DispatchMessageW(&event);
+                }
+                if (probe.refresh(request) != MediaPlaybackQuality::eUnknown) ++failures;
+                Sleep(10);
+            }
+            if (ineligibleWindowQueries.load() != before)
+            {
+                std::cerr << "Empty normalised metadata must not resolve a window or request a UIA snapshot\n";
+                ++failures;
+            }
+        };
+        expectIdentitySkipped(L"", L"Current artist");
+        expectIdentitySkipped(L"Current track", L" \t\r\n");
+        request.title = L"Current track";
+        request.artist = L"Current artist";
+        waitFor(MediaPlaybackQuality::eLossless,
+            "Restoring eligible metadata must promptly resume native quality detection");
+        ShowWindow(playback, SW_HIDE);
+        waitFor(MediaPlaybackQuality::eUnknown,
+            "An offscreen ancestor must exclude all of its cached playback evidence");
+        ShowWindow(playback, SW_SHOWNA);
+        waitFor(MediaPlaybackQuality::eLossless,
+            "Restoring a visible playback subtree must resume native quality detection");
         const HWND atmos = label(L"Dolby Atmos", 86);
         waitFor(MediaPlaybackQuality::eDolbyAtmos,
             "The native probe must prefer Atmos when both badges are exposed");

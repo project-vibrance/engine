@@ -29,6 +29,10 @@ int main()
         "Track changes must reject old playback evidence immediately");
     expect(detect(player, L"", L"") == MediaPlaybackQuality::eUnknown,
         "Missing metadata must not accept a capability badge");
+    for (const auto missing : { L"", L" ", L"\t\r\n " })
+        expect(detect(player, missing, L"Current artist") == MediaPlaybackQuality::eUnknown &&
+            detect(player, L"Current track", missing) == MediaPlaybackQuality::eUnknown,
+            "Either empty normalised identity field must reject playback quality evidence");
     auto namedTrack = player;
     namedTrack[2].name = L"Dolby Atmos";
     expect(detect(namedTrack, L"Dolby Atmos", L"Current artist") == MediaPlaybackQuality::eLossless,

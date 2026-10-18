@@ -4,9 +4,7 @@
 // existing Windows 10 worker thread and owns no display or rendering device.
 bool retire_windows10_gpu_resources() noexcept
 {
-    std::unique_lock<std::mutex> lock(rendererMutex, std::try_to_lock);
-    if (!lock.owns_lock()) return false;
-    reset_renderers();
+    if (!retire_renderers()) return false;
     displayBackgrounds = {};
     captureBackgrounds = {};
     ddaBackgrounds = {};

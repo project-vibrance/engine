@@ -165,6 +165,9 @@ public:
     void rebuild();
 
 private:
+#if defined(_WIN32)
+    friend struct GlfwPanelWindowWin32Drag;
+#endif
     enum ResizeEdge : uint32_t
     {
         eResizeNone = 0u,
@@ -209,7 +212,7 @@ private:
     void handle_scroll(double xoffset, double yoffset);
     void handle_key(int key, int scancode, int action, int mods);
     void handle_char(unsigned int codepoint);
-    void update_window_action();
+    void update_window_action(bool finishMove = false);
     void update_hover_cursor();
 
     bool cursor_framebuffer_point(glm::vec2& point) const;
@@ -250,6 +253,13 @@ private:
     uint32_t activeResizeEdges = eResizeNone;
     glm::vec2 actionStartCursorScreen { 0.0f };
     glm::ivec2 actionStartWindowPosition { 0 };
+    glm::ivec2 actionLastWindowPosition { 0 };
+#if defined(_WIN32)
+    void* actionMonitor = nullptr;
+    double actionMonitorCheckSeconds = -1.0;
+    double nextWindowMoveSeconds = -1.0;
+    uint32_t windowMoveFrameRate = 60u;
+#endif
     glm::ivec2 actionStartWindowSize { 0 };
     int lastRenderWidth = 0;
     int lastRenderHeight = 0;

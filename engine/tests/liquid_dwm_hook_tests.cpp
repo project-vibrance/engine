@@ -81,34 +81,22 @@ int main()
         const auto testExecutable = module_path(nullptr);
         const auto testSeparator = testExecutable.find_last_of(L"\\/");
         const auto shaderDirectory = testExecutable.substr(0, testSeparator) + L"\\..\\win32-composition";
-        check(renderer.initialise(firstDevice.Get(), shaderDirectory),
+        auto firstState = find_renderer_state(firstDevice.Get());
+        auto secondState = find_renderer_state(secondDevice.Get());
+        check(firstState && ensure_renderer(*firstState, &shaderDirectory),
             "The hybrid-device fixture must load the optical renderer on its first WARP device");
-        rendererDevice = firstDevice;
-        park_renderer();
-        check(renderer.initialise(secondDevice.Get(), shaderDirectory),
+        check(secondState && ensure_renderer(*secondState, &shaderDirectory),
             "The hybrid-device fixture must load the optical renderer on its second WARP device");
-        rendererDevice = secondDevice;
         for (unsigned frame = 0u; frame < 128u; ++frame)
         {
             auto* expected = frame % 2u ? secondDevice.Get() : firstDevice.Get();
-            check(ensure_renderer(expected) && rendererDevice.Get() == expected,
+            auto state = find_renderer_state(expected);
+            check(state && ensure_renderer(*state) && state->device.Get() == expected,
                 "Alternating hybrid display devices must restore the correct cached optical renderer");
         }
         check(deviceStatus[liquidDwmRendererCacheHits] == 128 &&
-            deviceStatus[liquidDwmRendererInitialisations] == 0,
+            deviceStatus[liquidDwmRendererInitialisations] == 2,
             "Hybrid display and capture draws must reuse compiled shaders without reinitialising each frame");
-        reset_renderers();
-        const auto savedModule = extensionModule;
-        extensionModule = reinterpret_cast<HMODULE>(1u);
-        check(!ensure_renderer(firstDevice.Get()) && !ensure_renderer(firstDevice.Get()) &&
-            deviceStatus[liquidDwmRendererInitialisations] == 1 &&
-            deviceStatus[liquidDwmRendererFailures] == 1,
-            "Repeated shader-initialisation failures must wait before retrying on the compositor thread");
-        extensionModule = savedModule;
-        reset_renderers();
-        statusView = nullptr;
-        rendererDevice = firstDevice;
-        rendererCache[0].device = secondDevice;
         D3D11_TEXTURE2D_DESC textureDescription {};
         textureDescription.Width = 32u; textureDescription.Height = 32u;
         textureDescription.MipLevels = 1u; textureDescription.ArraySize = 1u;
@@ -122,18 +110,45 @@ int main()
         ddaBackgrounds[0].texture = background;
         std::latch acquired(1), released(1);
         std::thread activeDraw([&] {
-            std::lock_guard<std::mutex> busy(rendererMutex);
+            std::lock_guard<std::mutex> busy(firstState->drawMutex);
             acquired.count_down();
             released.wait();
         });
         acquired.wait();
-        check(!retire_windows10_gpu_resources() && rendererDevice,
+        {
+            // An adapter stalled in its driver must never retain a global
+            // optical lock that serialises the other monitor's draw thread.
+            auto independentState = find_renderer_state(secondDevice.Get());
+            std::unique_lock<std::mutex> independent(independentState->drawMutex, std::try_to_lock);
+            check(independent.owns_lock() && ensure_renderer(*independentState),
+                "A slow first adapter must leave the second adapter's optical renderer immediately usable");
+        }
+        check(!retire_windows10_gpu_resources() && firstState->initialised,
             "Resource retirement must defer without blocking an active draw");
         released.count_down();
         activeDraw.join();
-        check(retire_windows10_gpu_resources() && !rendererDevice && !rendererCache[0].device && !displayBackgrounds[0].texture &&
+        firstState.reset();
+        secondState.reset();
+        check(retire_windows10_gpu_resources() &&
+            std::none_of(rendererStates.begin(), rendererStates.end(), [](const auto& state) { return bool(state); }) &&
+            !displayBackgrounds[0].texture &&
             !captureBackgrounds[0].texture && !ddaBackgrounds[0].texture,
             "Quiescent retirement must release all cached native GPU resources");
+        deviceStatus.fill(0);
+        firstState = find_renderer_state(firstDevice.Get());
+        secondState = find_renderer_state(secondDevice.Get());
+        const std::wstring missingShaders = shaderDirectory + L"\\missing-fixture-directory";
+        check(!ensure_renderer(*firstState, &missingShaders) &&
+            ensure_renderer(*secondState, &shaderDirectory) &&
+            !ensure_renderer(*firstState, &missingShaders) &&
+            ensure_renderer(*secondState, &shaderDirectory) &&
+            deviceStatus[liquidDwmRendererInitialisations] == 2 &&
+            deviceStatus[liquidDwmRendererFailures] == 1,
+            "A failed adapter's retry deadline must neither reinitialise every draw nor throttle a working adapter");
+        firstState.reset();
+        secondState.reset();
+        check(retire_renderers(), "The retry fixture must release its renderer leases");
+        statusView = nullptr;
     }
     const auto now = GetTickCount64();
     if (now >= LiquidDwmWindows10RenderGate::settlingMilliseconds)
@@ -315,6 +330,10 @@ int main()
         marker.context == context && marker.entry == entry.data() && marker.slot == 0u,
         "Windows 11 must retain its existing rendering-command decoder");
     check(std::equal(matrix.begin(), matrix.end(), marker.matrix), "The Windows 11 matrix must come from its command object");
+    nativeMarkerDrawing = true;
+    check(!render_batch_marker(command.data(), executionContext.data()),
+        "Re-entrant Windows 11 native flushes must forward without reacquiring the optical device lock");
+    nativeMarkerDrawing = false;
     for (auto& tag : nativeMarkerTags) tag.lastSeenTick = 0u;
     marker = {};
     check(preserve_native_marker_entry(entry.data()) &&

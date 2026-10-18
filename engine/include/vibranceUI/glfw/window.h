@@ -186,6 +186,7 @@ VIBRANCE_GLFW_API void destroy_glfw_window(GLFWwindow* window);
 VIBRANCE_GLFW_API void terminate_glfw();
 VIBRANCE_GLFW_API std::vector<GlfwMonitorInfo> glfw_connected_monitors();
 VIBRANCE_GLFW_API std::string glfw_monitor_identifier(GLFWmonitor* monitor);
+VIBRANCE_GLFW_API uint32_t glfw_monitor_refresh_rate(GLFWmonitor* monitor);
 // Pure geometry helper for tests and callers that already own an area.
 VIBRANCE_GLFW_API glm::ivec2 glfw_aligned_window_position(
     glm::ivec2 areaPosition,

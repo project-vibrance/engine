@@ -883,23 +883,29 @@ public:
 
     bool acquire(std::uint32_t index)
     {
-        if (index >= queries_.size() || !queryPending_[index])
+        if (index >= queries_.size())
         {
-            return index < queries_.size();
+            return false;
         }
-        const HRESULT result = context_->GetData(
-            queries_[index].get(),
-            nullptr,
-            0u,
-            D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        if (result == S_OK)
+        if (queryPending_[index])
         {
+            const HRESULT result = context_->GetData(queries_[index].get(),
+                nullptr, 0u, D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if (result != S_OK) return false;
             queryPending_[index] = false;
-            return true;
         }
-        // D3D still owns this shared buffer. The Vulkan renderer can skip the
-        // Composition copy for this frame instead of stalling its render loop.
-        return false;
+        if (cpuUpload_) return true;
+        if (index >= sharedMutexes_.size() || !sharedMutexes_[index]) return false;
+        // A completed D3D query alone does not prove that a hybrid driver's
+        // keyed-mutex hand-off is visible to Vulkan. Probe the exact key and
+        // return it immediately so Vulkan's bounded acquire cannot wait
+        // behind another display. The renderer reserves this buffer until its
+        // next hand-off; no producer competes for it between these operations.
+        if (sharedMutexes_[index]->AcquireSync(
+                VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_KEY, 0u) != S_OK)
+            return false;
+        return SUCCEEDED(sharedMutexes_[index]->ReleaseSync(
+            VIBRANCE_COMPOSITION_VULKAN_ACQUIRE_KEY));
     }
 
     bool upload(
@@ -928,9 +934,18 @@ public:
         // Vulkan's portable composition target is RGBA8. The DXGI Composition
         // swapchain is BGRA8, so swizzle while copying. Nearest scaling is used
         // only when maxRenderPixels reduced the Vulkan working extent.
+        const bool sameExtent = uploadInfo->width == width_ && uploadInfo->height == height_;
+        std::vector<std::uint32_t> sourceColumns;
+        if (!sameExtent)
+        {
+            sourceColumns.resize(width_);
+            for (std::uint32_t x = 0u; x < width_; ++x)
+                sourceColumns[x] = static_cast<std::uint32_t>(
+                    (static_cast<std::uint64_t>(x) * uploadInfo->width) / width_);
+        }
         for (std::uint32_t y = 0u; y < height_; ++y)
         {
-            const std::uint32_t sourceY = static_cast<std::uint32_t>(
+            const std::uint32_t sourceY = sameExtent ? y : static_cast<std::uint32_t>(
                 (static_cast<std::uint64_t>(y) * uploadInfo->height) /
                 height_);
             const std::uint8_t* sourceRow =
@@ -941,9 +956,7 @@ public:
                 static_cast<std::size_t>(y) * destinationRowPitch;
             for (std::uint32_t x = 0u; x < width_; ++x)
             {
-                const std::uint32_t sourceX = static_cast<std::uint32_t>(
-                    (static_cast<std::uint64_t>(x) * uploadInfo->width) /
-                    width_);
+                const std::uint32_t sourceX = sameExtent ? x : sourceColumns[x];
                 const std::uint8_t* sourcePixel = sourceRow + sourceX * 4u;
                 std::uint8_t* destinationPixel = destinationRow + x * 4u;
                 destinationPixel[0] = sourcePixel[2];
@@ -976,17 +989,22 @@ public:
             return VIBRANCE_COMPOSITION_PRESENT_FAILED;
         }
 
-        const bool synchronize =
-            (presentInfo->flags & VIBRANCE_COMPOSITION_PRESENT_SYNCHRONIZE) != 0u;
-        return presentRetry_.deliver(index,
-            [&] { return prepare_present(index, presentInfo, synchronize); },
-            [&] { return finish_present(synchronize); });
+        const auto result = presentRetry_.deliver(index,
+            [&] { return prepare_present(index, presentInfo); },
+            [&] { return finish_present(); });
+        if (presentStall_.needs_recovery(result,
+                IsWindowVisible(window_) && !IsIconic(window_), GetTickCount64()))
+        {
+            lastCompositionError =
+                "visible Windows Composition target did not accept a frame for 1000 ms";
+            return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+        }
+        return result;
     }
 
     std::uint32_t prepare_present(
         std::uint32_t index,
-        const VibranceCompositionPresentInfo* presentInfo,
-        bool synchronize)
+        const VibranceCompositionPresentInfo* presentInfo)
     {
         // Avoid recording a full-size D3D copy when DWM has not consumed the
         // previous frame. The newest completed Vulkan frame will be offered on
@@ -995,16 +1013,16 @@ public:
         {
             const DWORD waitResult = WaitForSingleObject(
                 frameLatencyWaitableObject_,
-                synchronize ? 100u : 0u);
-            if (waitResult == WAIT_TIMEOUT)
-            {
-                return VIBRANCE_COMPOSITION_PRESENT_DEFERRED;
-            }
+                0u);
             if (waitResult == WAIT_FAILED)
             {
                 lastCompositionError =
                     "Composition frame-latency wait failed";
                 return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+            }
+            if (!latencyHint_.may_prepare(waitResult == WAIT_OBJECT_0, GetTickCount64()))
+            {
+                return VIBRANCE_COMPOSITION_PRESENT_DEFERRED;
             }
             // A deferred keyed-mutex acquire must retain this opportunity;
             // another wait could consume a second slot without presenting.
@@ -1123,7 +1141,7 @@ public:
         {
             const HRESULT acquireResult = sharedMutexes_[index]->AcquireSync(
                 VIBRANCE_COMPOSITION_VULKAN_RELEASE_KEY,
-                synchronize ? 100u : 0u);
+                0u);
             if (acquireResult == WAIT_TIMEOUT)
             {
                 return VIBRANCE_COMPOSITION_PRESENT_DEFERRED;
@@ -1383,7 +1401,7 @@ public:
     }
 
 private:
-    std::uint32_t finish_present(bool synchronize)
+    std::uint32_t finish_present()
     {
         const bool hasDamage = pendingPresentDamage_.right >
                 pendingPresentDamage_.left &&
@@ -1392,7 +1410,7 @@ private:
         parameters.DirtyRectsCount = hasDamage ? 1u : 0u;
         parameters.pDirtyRects = hasDamage ? &pendingPresentDamage_ : nullptr;
         const HRESULT result = swapchain_->Present1(0u,
-            synchronize ? 0u : DXGI_PRESENT_DO_NOT_WAIT, &parameters);
+            DXGI_PRESENT_DO_NOT_WAIT, &parameters);
         if (result == DXGI_ERROR_WAS_STILL_DRAWING)
         {
             // Submit the copy/query even though DXGI did not queue a present.
@@ -1409,6 +1427,7 @@ private:
         lastCompositionError =
             "IDXGISwapChain1::Present1 failed (HRESULT " +
             std::to_string(static_cast<std::int32_t>(result)) + ")";
+        context_->Flush();
         return VIBRANCE_COMPOSITION_PRESENT_FAILED;
     }
 
@@ -3133,10 +3152,12 @@ private:
     std::vector<RECT> backBufferContentRects_;
     std::vector<RECT> backBufferPendingDamageRects_;
     vibrance::win32::CompositionPresentRetry presentRetry_;
+    vibrance::win32::CompositionPresentStall presentStall_;
     std::uint32_t pendingPresentBackBuffer_ = 0u;
     RECT pendingPresentDamage_ {};
     HANDLE frameLatencyWaitableObject_ = nullptr;
     bool frameLatencyReady_ = false;
+    vibrance::win32::CompositionLatencyHint latencyHint_;
     std::vector<winrt::com_ptr<ID3D11Texture2D>> sharedTextures_;
     std::vector<winrt::com_ptr<IDXGIKeyedMutex>> sharedMutexes_;
     std::vector<HANDLE> sharedHandles_;

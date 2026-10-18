@@ -13,6 +13,7 @@
 #include <vibranceUI/renderer/renderer2d_components.h>
 #include <vibranceUI/ui/input.h>
 #include <vibranceUI/ui/layout.h>
+#include <vibranceUI/ui/layout_direction.h>
 #include <vibranceUI/ui/text.h>
 
 class UiPlacement;

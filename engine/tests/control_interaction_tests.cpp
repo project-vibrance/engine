@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -1137,6 +1138,112 @@ int main()
         passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&
             !scene_damage_pending(opticalScene, lens, 1.0),
             "a liquid rim beneath a hidden ancestor must let the renderer sleep");
+    }
+
+    {
+        Renderer2DScene scene;
+        const auto lens = scene.create_shape({ 20.0f, 20.0f }, { 100.0f, 40.0f });
+        auto& registry = scene.registry();
+        registry.emplace<LiquidGlassComponent>(lens, LiquidGlassComponent {
+            GlassMaterial::eLiquid, LiquidGlassBackend::eEngineRenderer,
+            true, 0.7f, 0.15f, 0.6f, 0.35f });
+        const auto phase = [&](double time) {
+            const auto plan = scene.build_render_plan(time, 0u);
+            for (const auto& batch : plan.blurs)
+                if (batch.entity == lens && (batch.flags & eRenderer2DStyleLiquidGlass) != 0u)
+                    return (batch.packedData >> 21u) & 255u;
+            return std::numeric_limits<uint32_t>::max();
+        };
+        const auto generation = scene.frame_generation();
+        const auto firstPhase = phase(0.0);
+        passed &= expect(firstPhase == phase(0.001) &&
+            !scene.requires_continuous_redraw_since(0.001, 0.0, generation) &&
+            scene.requires_continuous_redraw_since(0.02, 0.0, generation),
+            "a portable rim must submit only when its exact packed shader phase changes");
+
+        // Compare retained decisions with real render-plan phase payloads at
+        // several host cadences, including a full optical cycle and long uptime.
+        for (const auto rate : { 60u, 144u, 200u })
+        {
+            for (const double origin : { 0.0, 8.2, 1000000.0 })
+            {
+                double submitted = origin;
+                uint32_t submittedPhase = phase(submitted);
+                for (uint32_t tick = 1u; tick <= rate; ++tick)
+                {
+                    const double time = origin + static_cast<double>(tick) / rate;
+                    const auto nextPhase = phase(time);
+                    const auto originalPacking = static_cast<uint32_t>(std::round(std::clamp(
+                        static_cast<float>(std::fmod(time * 0.12, 1.0)), 0.0f, 1.0f) * 255.0f));
+                    const bool redraw = scene.requires_continuous_redraw_since(time, submitted, generation);
+                    passed &= expect(nextPhase == originalPacking && redraw == (nextPhase != submittedPhase),
+                        "retained optical frames must match the existing shader input at every host cadence");
+                    if (redraw)
+                    {
+                        submitted = time;
+                        submittedPhase = nextPhase;
+                    }
+                }
+            }
+        }
+        passed &= expect(phase(8.33) == 255u && phase(8.34) == 0u &&
+            scene.requires_continuous_redraw_since(8.34, 8.33, generation),
+            "the optical phase wrap must publish its new shader input");
+        passed &= expect(scene.requires_continuous_redraw_since(0.001, -1.0, generation) &&
+            scene.requires_continuous_redraw_since(0.001, 0.002, generation) &&
+            scene.requires_continuous_redraw_since(0.001, std::numeric_limits<double>::quiet_NaN(), generation),
+            "unknown or reset renderer clocks must not suppress the first optical frame");
+        scene.mark_dirty(lens);
+        passed &= expect(scene.requires_continuous_redraw_since(0.001, 0.0, generation),
+            "a changed scene must redraw even within an unchanged optical phase");
+        const auto currentGeneration = scene.frame_generation();
+        registry.emplace<DisplayTransition2DComponent>(lens);
+        passed &= expect(scene.requires_continuous_redraw_since(0.001, 0.0, currentGeneration),
+            "a CPU-driven display transition must redraw within an unchanged optical phase");
+        auto& retainedTransition = registry.get<DisplayTransition2DComponent>(lens);
+        retainedTransition.hasStarted = true;
+        retainedTransition.startSeconds = 0.0;
+        retainedTransition.durationSeconds = 0.0095f;
+        retainedTransition.removeWhenComplete = false;
+        retainedTransition.destroyEntityTreeOnComplete = false;
+        passed &= expect(scene.requires_continuous_redraw_since(0.01, 0.009, currentGeneration) &&
+            !scene.requires_continuous_redraw_since(0.011, 0.01, currentGeneration),
+            "a retained transition must publish its final pose once within an unchanged optical phase");
+        registry.remove<DisplayTransition2DComponent>(lens);
+
+        Media2DHandle handle;
+        handle.id = 1u;
+        handle.drawable = true;
+        const auto player = scene.create_media({}, { 20.0f, 20.0f }, handle);
+        auto& media = registry.get<Media2DComponent>(player);
+        media.animated = true;
+        media.playing = true;
+        passed &= expect(scene.requires_continuous_redraw_since(0.001, 0.0, scene.frame_generation()),
+            "animated media must redraw within an unchanged optical phase");
+        media.playing = false;
+        auto& cache = registry.get_or_emplace<Renderer2DCacheComponent>(player);
+        cache.mode = Renderer2DCacheMode::eTimed;
+        cache.pendingActiveSeconds = 0.1f;
+        const auto timedGeneration = scene.frame_generation();
+        passed &= expect(scene.requires_continuous_redraw_since(0.001, 0.0, timedGeneration),
+            "pending timed cache activation must redraw within an unchanged optical phase");
+        cache.pendingActiveSeconds = 0.0f;
+        cache.wasActive = true;
+        cache.activeUntilSeconds = 0.0005;
+        passed &= expect(scene.requires_continuous_redraw_since(0.001, 0.0, timedGeneration),
+            "timed cache expiry must redraw within an unchanged optical phase");
+        cache.wasActive = false;
+        cache.activeUntilSeconds = 1.0;
+        cache.lastDynamicSeconds = -1.0;
+        passed &= expect(scene.requires_continuous_redraw_since(0.001, 0.0, timedGeneration),
+            "due active cache ticks must redraw within an unchanged optical phase");
+        cache.activeUntilSeconds = 0.0;
+        cache.idleTickRate = 1.0f;
+        passed &= expect(scene.requires_continuous_redraw_since(0.001, 0.0, timedGeneration),
+            "due idle cache ticks must redraw within an unchanged optical phase");
+        cache.idleTickRate = 0.0f;
+        passed &= expect(!scene.requires_continuous_redraw_since(0.001, 0.0, timedGeneration),
+            "settled media and cache policies must allow identical optical frames to be retained");
     }
 
     return passed ? 0 : 1;

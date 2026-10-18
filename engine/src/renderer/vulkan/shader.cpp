@@ -2,6 +2,7 @@
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/factories/mesh_factory.h>
 #include "embedded_shaders.h"
+#include "pipeline_cache_store.h"
 #include <array>
 #include <cstring>
 #include <filesystem>
@@ -27,6 +28,26 @@ namespace
         std::memcpy(spirv.data(), bytes.data(), bytes.size());
         return spirv;
     }
+}
+
+uint64_t embedded_shader_fingerprint()
+{
+    static const uint64_t fingerprint = [] {
+        constexpr std::array<std::string_view, 13> names {
+            "blur_2d.comp", "clear_screen.comp", "composite_2d.comp",
+            "hosted_3d_composite.comp", "media_2d.comp", "media_2d_nvidia.comp", "model_3d.frag",
+            "model_3d.vert", "rasterise_small.comp", "shadow_2d.comp",
+            "shape_2d.comp", "text_msdf.comp", "text_msdf_batch.comp" };
+        uint64_t hash = 14695981039346656037ull;
+        for (const auto name : names)
+        {
+            hash = vibrance::vulkan::pipeline_cache_hash(
+                std::as_bytes(std::span(name.data(), name.size())), hash);
+            hash = vibrance::vulkan::pipeline_cache_hash(vibrance_embedded_shader_spirv(name), hash);
+        }
+        return hash;
+    }();
+    return fingerprint;
 }
 
 PipelineLayoutBuilder::PipelineLayoutBuilder(vk::Device& logicalDevice) : logicalDevice(logicalDevice) {}
@@ -83,7 +104,8 @@ void PipelineLayoutBuilder::reset()
 
 vk::Pipeline make_compute_pipeline(
     vk::Device logicalDevice, const char* name, vk::PipelineLayout pipelineLayout,
-    std::deque<std::function<void(vk::Device)>>& deletionQueue
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    vk::PipelineCache pipelineCache
 ) {
     Logger* logger = Logger::fetch_logger();
 
@@ -123,7 +145,7 @@ vk::Pipeline make_compute_pipeline(
     pipelineInfo.stage = stageInfo;
     pipelineInfo.layout = pipelineLayout;
 
-    auto pipelineResult = logicalDevice.createComputePipeline(nullptr, pipelineInfo);
+    auto pipelineResult = logicalDevice.createComputePipeline(pipelineCache, pipelineInfo);
     logicalDevice.destroyShaderModule(shaderModule);
 
     if (pipelineResult.result == vk::Result::eSuccess)
@@ -150,7 +172,8 @@ vk::Pipeline make_graphics_pipeline(
     vk::PipelineLayout pipelineLayout,
     vk::RenderPass renderPass,
     vk::SampleCountFlagBits rasterizationSamples,
-    std::deque<std::function<void(vk::Device)>>& deletionQueue
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    vk::PipelineCache pipelineCache
 ) {
     Logger* logger = Logger::fetch_logger();
 
@@ -320,7 +343,7 @@ vk::Pipeline make_graphics_pipeline(
     pipelineInfo.basePipelineHandle = nullptr;
     pipelineInfo.basePipelineIndex = -1;
 
-    auto pipelineResult = logicalDevice.createGraphicsPipeline(nullptr, pipelineInfo);
+    auto pipelineResult = logicalDevice.createGraphicsPipeline(pipelineCache, pipelineInfo);
 
     logicalDevice.destroyShaderModule(vertexModule);
     logicalDevice.destroyShaderModule(fragmentModule);

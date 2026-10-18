@@ -28,6 +28,31 @@ inline constexpr std::uint32_t liquidDwmRenderAttemptTick = 246;
 inline constexpr std::uint32_t liquidDwmRenderSuccessTick = 247;
 inline constexpr std::uint32_t liquidDwmRenderFailureTick = 248;
 inline constexpr std::uint32_t liquidDwmRenderFailureResult = 249;
+inline constexpr wchar_t liquidDwmDrawDiagnosticsName[] =
+    L"Local\\VibranceLiquidGlassDwmDrawDiagnosticsV1";
+
+struct LiquidDwmRegionDrawDiagnostics
+{
+    std::uint32_t calls = 0u;
+    std::uint32_t failures = 0u;
+    std::uint32_t lockWaitMicroseconds = 0u;
+    std::uint32_t submitMicroseconds = 0u;
+    std::uint32_t flushMicroseconds = 0u;
+    std::uint32_t maxLockWaitMicroseconds = 0u;
+    std::uint32_t maxSubmitMicroseconds = 0u;
+    std::uint32_t maxFlushMicroseconds = 0u;
+    std::uint32_t lastSuccessTick = 0u;
+    std::uint32_t lastFailureResult = 0u;
+    std::uint32_t adapterLuidLow = 0u;
+    std::int32_t adapterLuidHigh = 0;
+};
+
+struct LiquidDwmDrawDiagnostics
+{
+    std::uint32_t version = 1u;
+    std::uint32_t compositorPid = 0u;
+    LiquidDwmRegionDrawDiagnostics regions[liquidDwmRegionSlots];
+};
 
 enum class LiquidDwmRenderHealth
 {

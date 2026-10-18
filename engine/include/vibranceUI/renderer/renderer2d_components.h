@@ -1693,6 +1693,10 @@ public:
     // media, or a timed cache refresh). Ordinary component changes are tracked
     // by frame_generation().
     bool requires_continuous_redraw(double currentTimeSeconds) const;
+    // Retain an unchanged image while shader-only optical animation has the
+    // same quantised phase. Unknown timestamps and scene mutations redraw.
+    bool requires_continuous_redraw_since(double currentTimeSeconds,
+        double previousRenderTimeSeconds, uint64_t previousFrameGeneration) const;
     // Lowest opt-in submission ceiling among currently active cache policies.
     // Used for expensive pointer-driven redraws without globally limiting UI.
     uint32_t active_frame_rate_limit(double currentTimeSeconds) const;

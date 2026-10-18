@@ -1,4 +1,7 @@
 #version 450
+#if defined(VIBRANCE_VULKAN_SAMPLE_LOOPS)
+#extension GL_EXT_control_flow_attributes : require
+#endif
 
 const uint STYLE_GRADIENT = 1u << 0;
 const uint STYLE_OUTLINE = 1u << 1;
@@ -502,7 +505,13 @@ vec4 resolve_text(
     // previous four-sample resolve exposed visible coverage steps on curves.
     vec3 premultiplied = vec3(0.0);
     float alpha = 0.0;
+#if defined(VIBRANCE_VULKAN_SAMPLE_LOOPS)
+    [[dont_unroll]]
+#endif
     for (int y = 0; y < 4; ++y) {
+#if defined(VIBRANCE_VULKAN_SAMPLE_LOOPS)
+        [[dont_unroll]]
+#endif
         for (int x = 0; x < 4; ++x) {
             vec2 offset = (vec2(x, y) + vec2(0.5)) * 0.25 - vec2(0.5);
             vec4 sampleColor = shade_text_sample(
@@ -556,6 +565,24 @@ vec4 resolve_blurred_text(
     float midRadius = radius * 0.58;
     float farRadius = radius * 0.88;
 
+#if defined(VIBRANCE_VULKAN_SAMPLE_LOOPS)
+    // Keep the same samples and accumulation order in one loop. Repeating the
+    // full shading body here multiplies the work in the driver's optimiser.
+    vec2 offsets[13] = vec2[13](vec2(0.0),
+        vec2(nearRadius, 0.0), vec2(-nearRadius, 0.0),
+        vec2(0.0, nearRadius), vec2(0.0, -nearRadius),
+        vec2(midRadius, midRadius), vec2(-midRadius, midRadius),
+        vec2(midRadius, -midRadius), vec2(-midRadius, -midRadius),
+        vec2(farRadius, 0.0), vec2(-farRadius, 0.0),
+        vec2(0.0, farRadius), vec2(0.0, -farRadius));
+    const float weights[13] = float[13](0.18, 0.10, 0.10, 0.10, 0.10,
+        0.07, 0.07, 0.07, 0.07, 0.035, 0.035, 0.035, 0.035);
+    [[dont_unroll]] for (int index = 0; index < 13; ++index) {
+        accumulate_text_sample(pixelCenter + offsets[index], weights[index],
+            atlasText, renderUnderlay, renderForeground, renderGlow,
+            premultiplied, alpha, weightSum);
+    }
+#else
     accumulate_text_sample(pixelCenter, 0.18, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
     accumulate_text_sample(pixelCenter + vec2( nearRadius, 0.0), 0.10, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
     accumulate_text_sample(pixelCenter + vec2(-nearRadius, 0.0), 0.10, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
@@ -569,6 +596,7 @@ vec4 resolve_blurred_text(
     accumulate_text_sample(pixelCenter + vec2(-farRadius, 0.0), 0.035, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
     accumulate_text_sample(pixelCenter + vec2(0.0,  farRadius), 0.035, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
     accumulate_text_sample(pixelCenter + vec2(0.0, -farRadius), 0.035, atlasText, renderUnderlay, renderForeground, renderGlow, premultiplied, alpha, weightSum);
+#endif
 
     alpha /= max(weightSum, 0.0001);
     premultiplied /= max(weightSum, 0.0001);

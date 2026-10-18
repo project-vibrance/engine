@@ -51,11 +51,9 @@ class VIBRANCE_ENGINE_API Engine
     // Draws the current renderer scene once
     void draw();
 
-#if defined(__APPLE__)
     // The application schedules a window independently at this UI cadence.
     static void begin_externally_paced_frame(uint32_t frameRate);
     static void end_externally_paced_frame();
-#endif
 
     // Updates frame timing and returns a measured FPS sample once per second
     int update_timing(double currentTimeSeconds);

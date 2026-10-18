@@ -17,6 +17,61 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <commctrl.h>
+
+// Keep window placement on the native input path. GLFW cursor callbacks can
+// suppress equal client co-ordinates as a moving window follows the cursor.
+struct GlfwPanelWindowWin32Drag
+{
+    static LRESULT CALLBACK process(HWND window, UINT message, WPARAM wParam,
+        LPARAM lParam, UINT_PTR id, DWORD_PTR reference)
+    {
+        if (message == WM_NCDESTROY)
+            RemoveWindowSubclass(window, process, id);
+        auto* panel = reinterpret_cast<GlfwPanelWindow*>(reference);
+        if (message == WM_MOUSEMOVE &&
+            panel->windowPointerAction == GlfwPanelWindow::WindowPointerAction::eMove)
+            panel->update_window_action();
+        if (message == WM_LBUTTONUP &&
+            panel->windowPointerAction == GlfwPanelWindow::WindowPointerAction::eMove)
+            panel->update_window_action(true);
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+
+    static void update_frame_rate(GlfwPanelWindow& panel, double now)
+    {
+        if (now < panel.actionMonitorCheckSeconds) return;
+        panel.actionMonitorCheckSeconds = now + 0.1;
+        const HMONITOR monitor = MonitorFromWindow(
+            static_cast<HWND>(glfw_native_window_handle(panel.window)), MONITOR_DEFAULTTONEAREST);
+        if (monitor == panel.actionMonitor) return;
+        panel.actionMonitor = monitor;
+        MONITORINFOEXW info {};
+        info.cbSize = sizeof(info);
+        DEVMODEW mode {};
+        mode.dmSize = sizeof(mode);
+        panel.windowMoveFrameRate = GetMonitorInfoW(monitor, &info) &&
+            EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+            mode.dmDisplayFrequency > 1u ? std::clamp(mode.dmDisplayFrequency, 1ul, 1000ul) : 60u;
+        panel.nextWindowMoveSeconds = -1.0;
+    }
+
+    static void attach(GlfwPanelWindow& panel)
+    {
+        SetWindowSubclass(static_cast<HWND>(glfw_native_window_handle(panel.window)),
+            process, reinterpret_cast<UINT_PTR>(&panel), reinterpret_cast<DWORD_PTR>(&panel));
+    }
+
+    static void detach(GlfwPanelWindow& panel)
+    {
+        RemoveWindowSubclass(static_cast<HWND>(glfw_native_window_handle(panel.window)),
+            process, reinterpret_cast<UINT_PTR>(&panel));
+    }
+};
+#endif
+
 namespace
 {
     constexpr int kFallbackMaxWindowSize = 1000000;
@@ -358,6 +413,9 @@ GlfwPanelWindow::GlfwPanelWindow(GLFWwindow* window, Engine* engine, GlfwPanelWi
     load_traffic_light_icons();
     apply_initial_size();
     build_scene();
+#if defined(_WIN32)
+    if (window) GlfwPanelWindowWin32Drag::attach(*this);
+#endif
 }
 
 GlfwPanelWindow::~GlfwPanelWindow()
@@ -368,6 +426,9 @@ GlfwPanelWindow::~GlfwPanelWindow()
     }
     if (window)
     {
+#if defined(_WIN32)
+        GlfwPanelWindowWin32Drag::detach(*this);
+#endif
         clear_glfw_cursor(window);
         set_glfw_callbacks(window, {});
         set_glfw_window_user_pointer(window, nullptr);
@@ -414,6 +475,14 @@ void GlfwPanelWindow::tick()
     const double now = glfw_time_seconds();
     engine->update_timing(now);
 
+    // Window placement is independent of UI/layout and GPU frame admission.
+    // Retain polling as a fallback when a cursor event has not arrived.
+    if (windowPointerAction == WindowPointerAction::eMove)
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eWindowAction);
+        update_window_action();
+    }
+
     const uint32_t uiUpdateRate = engine->recommended_ui_update_rate();
     const double uiUpdateInterval = 1.0 / static_cast<double>(uiUpdateRate);
     if (hasUiUpdateSample &&
@@ -424,6 +493,7 @@ void GlfwPanelWindow::tick()
     }
     lastUiUpdateSeconds = now;
     hasUiUpdateSample = true;
+    if (windowPointerAction != WindowPointerAction::eMove)
     {
         const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eWindowAction);
         update_window_action();
@@ -1248,6 +1318,12 @@ bool GlfwPanelWindow::begin_window_action(glm::vec2 framebufferPoint)
         return false;
     }
 
+    actionLastWindowPosition = actionStartWindowPosition;
+#if defined(_WIN32)
+    actionMonitor = nullptr;
+    actionMonitorCheckSeconds = -1.0;
+    nextWindowMoveSeconds = -1.0;
+#endif
     windowPointerAction = resize ? WindowPointerAction::eResize : WindowPointerAction::eMove;
     return true;
 }
@@ -1258,18 +1334,31 @@ void GlfwPanelWindow::clear_window_action()
     activeResizeEdges = eResizeNone;
 }
 
-void GlfwPanelWindow::update_window_action()
+void GlfwPanelWindow::update_window_action(bool finishMove)
 {
     if (windowPointerAction == WindowPointerAction::eNone)
     {
         return;
     }
 
-    if (!glfw_left_mouse_pressed(window))
+    if (!finishMove && !glfw_left_mouse_pressed(window))
     {
         clear_window_action();
         return;
     }
+
+#if defined(_WIN32)
+    const double now = glfw_time_seconds();
+    if (windowPointerAction == WindowPointerAction::eMove)
+    {
+        GlfwPanelWindowWin32Drag::update_frame_rate(*this, now);
+        // High-polling mice must not turn 1,000 samples into 1,000 native
+        // window moves per second. Coalesce to this window's display clock.
+        if (!finishMove && now < nextWindowMoveSeconds) return;
+    }
+#else
+    (void)finishMove;
+#endif
 
     glm::vec2 currentScreen(0.0f);
     if (!cursor_screen_point(currentScreen))
@@ -1280,10 +1369,27 @@ void GlfwPanelWindow::update_window_action()
     const glm::vec2 delta = currentScreen - actionStartCursorScreen;
     if (windowPointerAction == WindowPointerAction::eMove)
     {
-        set_glfw_window_position(
-            window,
+        const glm::ivec2 position {
             actionStartWindowPosition.x + static_cast<int>(std::round(delta.x)),
-            actionStartWindowPosition.y + static_cast<int>(std::round(delta.y)));
+            actionStartWindowPosition.y + static_cast<int>(std::round(delta.y)) };
+        if (position != actionLastWindowPosition)
+        {
+#if defined(_WIN32)
+            const double interval = 1.0 / static_cast<double>(windowMoveFrameRate);
+            if (nextWindowMoveSeconds < 0.0 || now - nextWindowMoveSeconds > 2.0 * interval)
+                nextWindowMoveSeconds = now + interval;
+            else
+            {
+                nextWindowMoveSeconds += interval;
+                if (nextWindowMoveSeconds <= now)
+                    nextWindowMoveSeconds += (std::floor((now - nextWindowMoveSeconds) / interval) + 1.0) * interval;
+            }
+#endif
+            // Cache before the native call: moving a window can synchronously
+            // deliver more events. Repeated samples must not move it again.
+            actionLastWindowPosition = position;
+            set_glfw_window_position(window, position.x, position.y);
+        }
         return;
     }
 
@@ -1634,7 +1740,10 @@ glm::vec2 GlfwPanelWindow::traffic_light_center(TrafficLightKind kind) const
             1 :
             2;
 
-    return traffic_light_center_at_index(options.trafficLights, index, panelGeometry);
+    auto centre = traffic_light_center_at_index(options.trafficLights, index, panelGeometry);
+    if (engine && ui_layout_is_rtl(engine->renderer2d_scene().registry()))
+        centre.x = panelGeometry.position.x * 2.0f + panelGeometry.size.x - centre.x;
+    return centre;
 }
 
 bool GlfwPanelWindow::traffic_light_enabled(TrafficLightKind kind) const
