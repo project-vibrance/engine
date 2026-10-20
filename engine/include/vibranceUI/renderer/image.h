@@ -12,6 +12,10 @@
 class StorageImage {
 
 public:
+	// The prepared uploader records its initial image transition together with
+	// the pixel copy, without waiting for a graphics queue to become idle.
+	StorageImage() : descriptor {}, extent {}, image(nullptr), memory(nullptr),
+		view(nullptr), format(vk::Format::eUndefined) {}
 	// General-purpose sampled/storage image used by renderer targets and media uploads
 	StorageImage(VmaAllocator& allocator,
 		vk::Format format,

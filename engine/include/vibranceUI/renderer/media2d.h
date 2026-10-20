@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <vector>
 #include <vibranceUI/renderer/image.h>
@@ -39,6 +40,44 @@ struct Media2DLoadOptions
     // Trim transparent outer pixels from static images before upload, keeping
     // a one-pixel filtering gutter. Animated images retain their full canvas.
     bool trimTransparentBorders = false;
+    // Optional safety limit for decoded RGBA frames. Oversized media fails
+    // preparation rather than reducing its resolution, frames or timing.
+    std::size_t maxDecodedBytes = 0;
+};
+
+// CPU-only decoded media. Preparation is safe on a worker; renderer uploads
+// and cancellation must remain on the Engine's owning thread.
+class VIBRANCE_ENGINE_API PreparedMedia2D
+{
+public:
+    struct Data;
+    PreparedMedia2D() = default;
+    bool valid() const;
+    uint32_t frame_count() const;
+    std::size_t decoded_byte_count() const;
+    const std::filesystem::path& path() const;
+    const Media2DLoadOptions& options() const;
+    const std::string& cache_key() const;
+
+private:
+    std::shared_ptr<const Data> data_;
+    friend struct Media2DPreparedAccess;
+};
+
+VIBRANCE_ENGINE_API PreparedMedia2D prepare_media_2d(
+    const std::filesystem::path& path,
+    const Media2DLoadOptions& options = {},
+    std::stop_token cancellation = {});
+
+// Shared by synchronous and prepared loads, including the source file stamp.
+VIBRANCE_ENGINE_API std::string media_2d_cache_key(
+    const std::filesystem::path& path, const Media2DLoadOptions& options);
+
+struct Media2DUploadResult
+{
+    Media2DHandle handle;
+    // True for completion or failure; a failed upload has an invalid handle.
+    bool finished = false;
 };
 
 struct Media2DAsset
@@ -105,3 +144,21 @@ Media2DHandle load_media_2d_asset(
 #endif
     Media2DAsset& outAsset
 );
+
+Media2DUploadResult upload_prepared_media_2d_asset(
+    const PreparedMedia2D& prepared,
+    uint32_t maxFrameUploads,
+    uint32_t mediaId,
+#if defined(__APPLE__)
+    const MetalTextureUpload& upload,
+#else
+    VmaAllocator& allocator,
+    std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
+    std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue,
+    vk::CommandBuffer commandBuffer,
+    vk::Queue queue,
+    vk::Device logicalDevice,
+    vk::DescriptorPool descriptorPool,
+    vk::DescriptorSetLayout descriptorSetLayout,
+#endif
+    Media2DAsset& outAsset);

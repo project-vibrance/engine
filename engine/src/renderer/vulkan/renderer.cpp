@@ -13,6 +13,7 @@
 #include "../../platform/composition_presenter.h"
 #include "pipeline_cache.h"
 #include "media_pipeline_policy.h"
+#include "../common/media_prepared_upload.h"
 #if defined(_WIN32)
 #include "../../platform/win32/composition_bridge_abi.h"
 #endif
@@ -928,6 +929,10 @@ struct Engine::Impl
 	void resize(uint32_t width, uint32_t height);
 	Model3DHandle load_model_3d(const std::filesystem::path& path);
 	Media2DHandle load_media_2d(const std::filesystem::path& path, const Media2DLoadOptions& options);
+	Media2DUploadResult upload_media_2d(const PreparedMedia2D& prepared, uint32_t maxFrameUploads);
+	void cancel_media_2d_upload(const PreparedMedia2D& prepared);
+	void clear_pending_media_uploads();
+	void poll_retired_media_uploads();
 	AudioClipHandle load_audio_clip(const std::filesystem::path& path);
 	AudioEngine& audio();
 	const AudioEngine& audio() const;
@@ -1098,6 +1103,9 @@ private:
 	uint32_t nextModelId = 1;
 	std::unordered_map<uint32_t, Media2DAsset> mediaAssets;
 	std::unordered_map<std::string, uint32_t> mediaIdsByPath;
+    std::unordered_map<std::string, PreparedMedia2DAsyncUpload> pendingMediaUploads;
+    PreparedMediaUploadBudget preparedMediaBudget;
+    bool hasRetiredPreparedMediaUploads = false;
 	uint32_t nextMediaId = 1;
 	AudioEngine audioEngine;
 	Localisation localisation_;
@@ -1201,6 +1209,21 @@ Media2DHandle Engine::load_media_2d(const std::filesystem::path& path, const Med
 {
     const LogOperation diagnosticOperation("vulkan: Engine::load_media_2d");
 	return impl->load_media_2d(path, options);
+}
+
+Media2DUploadResult Engine::upload_media_2d(const PreparedMedia2D& prepared, uint32_t maxFrameUploads)
+{
+    try { return impl->upload_media_2d(prepared, maxFrameUploads); }
+    catch (...)
+    {
+        impl->cancel_media_2d_upload(prepared);
+        return { {}, true };
+    }
+}
+
+void Engine::cancel_media_2d_upload(const PreparedMedia2D& prepared)
+{
+    impl->cancel_media_2d_upload(prepared);
 }
 
 AudioClipHandle Engine::load_audio_clip(const std::filesystem::path& path)
@@ -2483,6 +2506,7 @@ void Engine::Impl::publish_completed_composition_frames()
 
 void Engine::Impl::draw()
 {
+    poll_retired_media_uploads();
 	RendererDrawActivity activity;
 	if (renderDiagnosticsEnabled)
 	{
@@ -3435,20 +3459,7 @@ Media2DHandle Engine::Impl::load_media_2d(const std::filesystem::path& path, con
 	}
 
 	const std::filesystem::path absolutePath = std::filesystem::absolute(path).lexically_normal();
-	std::stringstream cacheKeyBuilder;
-	cacheKeyBuilder << absolutePath.string() << "|"
-		<< resource_file_cache_version(absolutePath) << "|"
-		<< options.rasterWidth << "x" << options.rasterHeight << "|"
-		<< (options.srgb ? "srgb" : "linear") << "|"
-		<< (options.generateMipmaps ? "mips" : "nomips") << "|"
-		<< (options.premultiplyAlpha ? "premul" : "straight") << "|"
-		<< "maxFrames=" << options.maxAnimationFrames << "|"
-		<< "svgFrames=" << options.svgAnimationFrames << "|"
-		<< "svgRate=" << options.svgAnimationFrameRate << "|"
-		<< "videoFrames=" << options.maxVideoFrames << "|"
-		<< "videoPixels=" << options.maxVideoPixels << "|"
-		<< "trim=" << options.trimTransparentBorders;
-	const std::string cacheKey = cacheKeyBuilder.str();
+	const std::string cacheKey = media_2d_cache_key(absolutePath, options);
 	if (const auto existing = mediaIdsByPath.find(cacheKey); existing != mediaIdsByPath.end())
 	{
 		const auto mediaIt = mediaAssets.find(existing->second);
@@ -3488,6 +3499,105 @@ Media2DHandle Engine::Impl::load_media_2d(const std::filesystem::path& path, con
 	mediaIdsByPath.emplace(cacheKey, mediaId);
 	renderer2DScene.mark_dirty();
 	return handle;
+}
+
+Media2DUploadResult Engine::Impl::upload_media_2d(
+    const PreparedMedia2D& prepared, uint32_t maxFrameUploads)
+{
+    poll_retired_media_uploads();
+    if (!prepared.valid() || !logicalDevice || !allocator || !graphicsQueue)
+        return { {}, true };
+    const auto& key = prepared.cache_key();
+    if (const auto cached = mediaIdsByPath.find(key); cached != mediaIdsByPath.end())
+    {
+        if (const auto asset = mediaAssets.find(cached->second); asset != mediaAssets.end())
+        {
+            const auto handle = asset->second.handle();
+            // A synchronous caller may have completed the same media while
+            // its prepared twin was still waiting for a submission to retire.
+            cancel_media_2d_upload(prepared);
+            return { handle, true };
+        }
+    }
+    if (maxFrameUploads == 0u) return {};
+    auto position = pendingMediaUploads.find(key);
+    if (position == pendingMediaUploads.end())
+    {
+        const auto bytes = prepared_media_2d_upload_bytes(prepared);
+        if (bytes > PreparedMediaUploadBudget::limit) return { {}, true };
+        // Cancelled submissions retain their reservation until their fences
+        // retire; repeated navigation cannot accumulate unlimited GPU work.
+        if (preparedMediaBudget.activeUploads >= PreparedMediaUploadBudget::maximumActiveUploads ||
+            bytes > PreparedMediaUploadBudget::limit - preparedMediaBudget.reservedBytes) return {};
+        position = pendingMediaUploads.try_emplace(key).first;
+        position->second.reservedBytes = bytes;
+        (void)preparedMediaBudget.reserve(bytes);
+    }
+    auto& pending = position->second;
+    if (pending.cancelled) return {};
+    const uint32_t id = pending.asset.id != 0u ? pending.asset.id : nextMediaId++;
+    const auto result = upload_prepared_media_2d_asset_async(prepared, maxFrameUploads, id,
+        allocator, logicalDevice, graphicsQueue, graphicsQueueFamilyIndex,
+        descriptorSetLayouts[DescriptorScope::eMediaTexture], pending);
+    if (!result.finished) return result;
+    if (!result.handle.valid())
+    {
+        cancel_media_2d_upload(prepared);
+        return result;
+    }
+    const auto asset = mediaAssets.emplace(result.handle.id, std::move(pending.asset)).first;
+    pending.publishedAsset = &asset->second;
+    mediaIdsByPath.emplace(key, result.handle.id);
+    pending.published = true;
+    preparedMediaBudget.release(pending.reservedBytes);
+    pending.reservedBytes = 0u;
+    // Resource ownership stays here beside the normal Engine media cache.
+    // Only the asset wrapper moves; its descriptor pool/images remain alive.
+    renderer2DScene.mark_dirty();
+    return result;
+}
+
+void Engine::Impl::cancel_media_2d_upload(const PreparedMedia2D& prepared)
+{
+    const auto found = pendingMediaUploads.find(prepared.cache_key());
+    if (found == pendingMediaUploads.end() || found->second.published) return;
+    found->second.cancelled = true;
+    hasRetiredPreparedMediaUploads = true;
+    poll_retired_media_uploads();
+}
+
+void Engine::Impl::poll_retired_media_uploads()
+{
+    if (!hasRetiredPreparedMediaUploads) return;
+    hasRetiredPreparedMediaUploads = false;
+    for (auto position = pendingMediaUploads.begin(); position != pendingMediaUploads.end();)
+    {
+        auto& pending = position->second;
+        if (!pending.cancelled) { ++position; continue; }
+        if (!prepared_media_2d_upload_retired(logicalDevice, pending))
+        {
+            hasRetiredPreparedMediaUploads = true;
+            ++position;
+            continue;
+        }
+        const auto publishedId = pending.publishedAsset ? pending.publishedAsset->id : 0u;
+        const auto reserved = pending.reservedBytes;
+        release_prepared_media_2d_upload(allocator, logicalDevice, pending);
+        if (publishedId != 0u) mediaAssets.erase(publishedId);
+        preparedMediaBudget.release(reserved);
+        position = pendingMediaUploads.erase(position);
+    }
+}
+
+void Engine::Impl::clear_pending_media_uploads()
+{
+    // Engine teardown already waited for its graphics queue. Completed assets
+    // and any last cancelled submissions can now be released together.
+    for (auto& [key, pending] : pendingMediaUploads)
+        release_prepared_media_2d_upload(allocator, logicalDevice, pending);
+    pendingMediaUploads.clear();
+    preparedMediaBudget = {};
+    hasRetiredPreparedMediaUploads = false;
 }
 
 bool Engine::Impl::set_present_mode(RendererPresentMode mode)
@@ -3891,6 +4001,8 @@ Engine::Impl::~Impl()
 	destroy_composition_readback();
 
     logger->vulkan("Exiting application.");
+
+    clear_pending_media_uploads();
 
     while (vmaDeletionQueue.size() > 0) 
     {

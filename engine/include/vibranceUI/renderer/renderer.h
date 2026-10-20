@@ -87,6 +87,12 @@ class VIBRANCE_ENGINE_API Engine
         const Media2DLoadOptions& options = {}
     );
 
+    // Call on the renderer's owning thread. Each call uploads at most the
+    // requested number of frames and publishes only a complete animation.
+    Media2DUploadResult upload_media_2d(
+        const PreparedMedia2D& prepared, uint32_t maxFrameUploads = 1);
+    void cancel_media_2d_upload(const PreparedMedia2D& prepared);
+
     AudioClipHandle load_audio_clip(const std::filesystem::path& path);
 
     // Audio is optional in EngineCreateInfo for lightweight UI-only windows

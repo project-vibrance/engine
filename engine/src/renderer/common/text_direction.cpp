@@ -101,11 +101,16 @@ namespace
             (codepoint >= 0x2066u && codepoint <= 0x2069u);
     }
 
+    bool bidi_digit(std::uint32_t codepoint)
+    {
+        return (codepoint >= 0x0030u && codepoint <= 0x0039u) ||
+            (codepoint >= 0x0660u && codepoint <= 0x0669u) ||
+            (codepoint >= 0x06F0u && codepoint <= 0x06F9u);
+    }
+
     TextDirection codepoint_direction(std::uint32_t codepoint)
     {
-        if ((codepoint >= 0x0030u && codepoint <= 0x0039u) ||
-            (codepoint >= 0x0660u && codepoint <= 0x0669u) ||
-            (codepoint >= 0x06F0u && codepoint <= 0x06F9u))
+        if (bidi_digit(codepoint))
         {
             return TextDirection::eLeftToRight;
         }
@@ -269,6 +274,10 @@ namespace
     {
         for (const std::uint32_t codepoint : codepoints)
         {
+            // Numbers retain LTR order inside a run, but are weak characters
+            // when choosing the paragraph direction. In "14د", the Arabic
+            // unit establishes RTL, placing it left of the intact number.
+            if (bidi_digit(codepoint)) continue;
             const TextDirection direction = codepoint_direction(codepoint);
             if (direction != TextDirection::eNeutral)
             {
@@ -473,13 +482,5 @@ std::vector<std::uint32_t> renderer2d_visual_codepoints(std::string_view text)
 
 bool renderer2d_text_is_right_to_left(std::string_view text)
 {
-    for (const std::uint32_t codepoint : renderer2d_decode_utf8(text))
-    {
-        const TextDirection direction = codepoint_direction(codepoint);
-        if (direction != TextDirection::eNeutral)
-        {
-            return direction == TextDirection::eRightToLeft;
-        }
-    }
-    return false;
+    return base_direction(renderer2d_decode_utf8(text)) == TextDirection::eRightToLeft;
 }

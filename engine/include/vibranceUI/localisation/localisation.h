@@ -99,64 +99,67 @@ inline Text ui_tr(std::string_view key, std::string_view fallback = {})
 
 inline std::string ui_locale_label_fallback(std::string_view locale)
 {
-    // Known locale names stay readable before their language files have loaded
+    // Language selectors use native names so users can recognise their language
+    // regardless of the current interface language. App and installer share these.
     if (locale == "en_us")
     {
-        return "English (US)";
+        return "English (United States)";
     }
     if (locale == "en_gb")
     {
-        return "English (UK)";
+        return "English (United Kingdom)";
     }
     if (locale == "es_es")
     {
-        return "Spanish";
+        return "Español";
     }
     if (locale == "zh_cn")
     {
-        return "Mandarin Chinese";
+        return "简体中文";
     }
     if (locale == "ja_jp")
     {
-        return "Japanese";
+        return "日本語";
     }
     if (locale == "de_de")
     {
-        return "German";
+        return "Deutsch";
     }
     if (locale == "fr_fr")
     {
-        return "French";
+        return "Français";
     }
     if (locale == "pt_br")
     {
-        return "Portuguese";
+        return "Português (Brasil)";
     }
     if (locale == "hi_in")
     {
-        return "Hindi";
+        return "हिन्दी";
     }
     if (locale == "ar_sa")
     {
-        return "Arabic";
+        return "العربية";
     }
     if (locale == "ko_kr")
     {
-        return "Korean";
+        return "한국어";
     }
     if (locale == "ru_ru")
     {
-        return "Russian";
+        return "Русский";
     }
     return std::string(locale);
 }
 
 inline Text ui_locale_label_text(std::string_view locale)
 {
-    // Locale files can override their display name through settings.language.<locale>
+    const auto nativeName = ui_locale_label_fallback(locale);
+    if (nativeName != locale) return Text::literal(nativeName);
+    // Additional user-supplied locales can provide a display name as before.
     return ui_tr(
         std::string("settings.language.") + std::string(locale),
-        ui_locale_label_fallback(locale));
+        nativeName);
 }
 
 inline std::string ui_resolve_locale_label(const Localisation& localisation, std::string_view locale)

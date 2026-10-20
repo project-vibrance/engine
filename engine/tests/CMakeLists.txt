@@ -1,4 +1,9 @@
 if(WIN32)
+    add_executable(vibrance_liquid_runtime_identity_tests liquid_runtime_identity_tests.cpp)
+    target_compile_features(vibrance_liquid_runtime_identity_tests PRIVATE cxx_std_20)
+    target_link_libraries(vibrance_liquid_runtime_identity_tests PRIVATE bcrypt)
+    add_test(NAME vibrance_liquid_runtime_identity_tests COMMAND vibrance_liquid_runtime_identity_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/liquid-runtime-identity-fixture")
     if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
         add_test(NAME vibrance_locked_liquid_runtime_tests
             COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
@@ -31,8 +36,27 @@ function(vibrance_add_engine_test test_name source_file)
 endfunction()
 
 vibrance_add_engine_test(vibrance_logger_tests logger_tests.cpp)
+vibrance_add_engine_test(vibrance_media_preparation_tests media_preparation_tests.cpp)
+add_test(NAME vibrance_media_preparation_renderer_tests COMMAND vibrance_media_preparation_tests --renderer)
+set_tests_properties(vibrance_media_preparation_renderer_tests PROPERTIES SKIP_RETURN_CODE 77)
+add_executable(vibrance_media_upload_retirement_tests media_upload_retirement_tests.cpp)
+target_compile_features(vibrance_media_upload_retirement_tests PRIVATE cxx_std_20)
+add_test(NAME vibrance_media_upload_retirement_tests COMMAND vibrance_media_upload_retirement_tests)
+if(NOT APPLE)
+    vibrance_add_engine_test(vibrance_media_upload_fence_tests media_upload_fence_tests.cpp)
+    target_link_libraries(vibrance_media_upload_fence_tests PRIVATE Vulkan::Vulkan)
+    if(WIN32)
+        # VMA's function table includes Win32 external-memory functions when
+        # the engine enables this platform. Keep the fixture allocator ABI equal.
+        target_compile_definitions(vibrance_media_upload_fence_tests PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+    endif()
+    set_tests_properties(vibrance_media_upload_fence_tests PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 vibrance_add_engine_test(vibrance_media_timeline_range_tests media_timeline_range_tests.cpp)
 vibrance_add_engine_test(vibrance_layout_direction_tests layout_direction_tests.cpp)
+add_executable(vibrance_text_direction_tests text_direction_tests.cpp
+    ../src/renderer/common/text_direction.cpp)
+add_test(NAME vibrance_text_direction_tests COMMAND vibrance_text_direction_tests)
 add_executable(vibrance_runtime_log_storage_tests runtime_log_storage_tests.cpp)
 target_include_directories(vibrance_runtime_log_storage_tests PRIVATE ../include)
 add_test(NAME vibrance_runtime_log_storage_tests COMMAND vibrance_runtime_log_storage_tests)
@@ -141,6 +165,15 @@ if(VIBRANCE_RENDER_BACKEND STREQUAL "Vulkan")
     add_dependencies(vibrance_viewport_fade_shader_tests vibrance_engine)
     add_test(NAME vibrance_viewport_fade_shader_tests COMMAND vibrance_viewport_fade_shader_tests
         "${CMAKE_CURRENT_BINARY_DIR}/../generated/spirv/composite_2d.comp.spv")
+    add_executable(vibrance_panel_clip_shader_tests panel_clip_shader_tests.cpp)
+    target_compile_features(vibrance_panel_clip_shader_tests PRIVATE cxx_std_20)
+    target_link_libraries(vibrance_panel_clip_shader_tests PRIVATE Vulkan::Vulkan)
+    add_dependencies(vibrance_panel_clip_shader_tests vibrance_engine)
+    add_test(NAME vibrance_panel_clip_shader_tests COMMAND vibrance_panel_clip_shader_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/../generated/spirv/shape_2d.comp.spv"
+        "${CMAKE_CURRENT_BINARY_DIR}/../generated/spirv/shadow_2d.comp.spv"
+        "${CMAKE_CURRENT_BINARY_DIR}/../generated/spirv/blur_2d.comp.spv")
+    set_tests_properties(vibrance_panel_clip_shader_tests PROPERTIES TIMEOUT 90)
 endif()
 vibrance_add_engine_test(vibrance_digit_spacing_tests digit_spacing_tests.cpp
     "${_vibrance_test_fonts}/Inter.ttc"

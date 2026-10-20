@@ -64,6 +64,7 @@ struct GlfwPanelWindowTrafficLightOptions
     std::string outlineColor = "rgba(0, 0, 0, 0)";
     float outlineWidth = 0.0f;
     float edgeSoftness = 0.5f;
+    // Hovering any traffic light reveals the icons across the whole group.
     bool showIconsOnHover = true;
     // Each list is ordered from user override to packaged fallback.
     std::vector<std::filesystem::path> closeIconCandidates {};

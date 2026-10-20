@@ -27,6 +27,36 @@ and defers new injection during fullscreen applications. It never restarts DWM.
 Uninstall removes the startup task; loaded immutable runtimes remain pinned
 until the Windows session ends.
 
+### Runtime updates and Windows sign-out
+
+A ready compositor event confirms hooks are installed; it does not identify
+the loaded runtime generation. The first Liquid Glass surface therefore checks
+the desired helper bundle asynchronously even when an extension is already ready.
+The protected observer validates that bundle once per compositor process. The
+broker verifies and stages the requested immutable extension and all six shaders
+before comparing their combined SHA-256 fingerprint with the loaded bundle.
+Identical bundles reuse their hooks. A different loaded bundle is preserved and
+the replacement stays staged for the updated automatic task at the next sign-in;
+the broker never injects duplicate hooks or restarts DWM to apply an update.
+
+`liquid_glass_dwm_broker.exe --runtime-update-status` reports the requested and
+active generations and the staged path. It returns exit code 25 for a verified
+staged replacement that requires Windows sign-out. `--status` preserves that exit
+code alongside its optical diagnostics. An incomplete bundle, missing identity
+report, different app generation or previous compositor process is unavailable,
+rather than proof that sign-out is required. The observer records exit code 25
+and waits for a new compositor process instead of retrying the pinned extension.
+
+Applications can include `vibranceUI/core/liquid_glass_runtime.h` and query
+`vibrance::liquid_glass_runtime_restart_required()`. Its render-loop cost is an
+atomic read. A background monitor fingerprints the desired runtime once, checks
+the small protected identity report every two seconds, and verifies the staged
+bundle only when that report changes. It returns true only for the current app
+generation, a verified staged replacement and the current compositor process;
+temporary setup failures do not trigger a sign-out prompt. Non-Windows hosts
+return false. Vibrance offers an explicit sign-out action or deferral in its
+runtime update subpanel.
+
 `liquid_glass_dwm_broker.exe --status` reports hook readiness separately from
 optical draw activity sampled over 500 milliseconds. It reports observed draw
 failures as degraded (exit code 20), and idle or hidden glass as unverified
@@ -84,6 +114,19 @@ a matching PDB with unsupported rendering symbols from a PDB retrieval failure.
    across the complete background, including the lens centre. Native geometry,
    transforms, viewport, and scissor determine the lens's position and clipping.
    The DX11 state is restored before DWM continues drawing.
+   The optical layer stays transparent over black placeholders in otherwise
+   valid DWM textures. Only exactly empty sharp and filtered RGB together use
+   that fallback. Dim blur remains fully effective: a brightness threshold
+   would reveal the original sharp text in dark windows. The existing sharp
+   and filtered samples establish availability without depending on DWM's
+   sometimes unused source alpha. When refraction moves visible content onto
+   exactly black input, a conditional undisplaced sample preserves that black
+   output instead of revealing the original, unbent content. Ordinary pixels
+   use the existing samples. Tint and cap gradients compose as independent material
+   layers, so they remain continuous without forcing an unavailable background
+   opaque. Missing backgrounds do not draw a synthetic rim. This retains the
+   existing blend state, with no added captures, allocations
+   or passes.
 6. DWM renders the island's sharp controls and text once through its normal
    window content. The native optical pass supplies the cap gradient for a
    connected contour union. There is no late Present pass that

@@ -3,6 +3,24 @@
 #include <algorithm>
 #include <cstdint>
 
+// Reject the spare lanes in an 8x8 compute workgroup without extending the
+// 128-byte push constants or limiting draw extents. Origins remain unchanged.
+inline uint32_t renderer2d_dispatch_tail(uint32_t width, uint32_t height)
+{
+    return ((8u - width % 8u) % 8u) | (((8u - height % 8u) % 8u) << 3u);
+}
+
+inline uint32_t renderer2d_primitive_dispatch_data(uint32_t primitive, uint32_t width, uint32_t height)
+{
+    return (primitive & 255u) | (renderer2d_dispatch_tail(width, height) << 8u);
+}
+
+inline uint32_t renderer2d_blur_dispatch_flags(uint32_t flags, uint32_t width, uint32_t height)
+{
+    // Bits 1..6 are unused by the blur shader. Its cap colour occupies data.x.
+    return (flags & ~126u) | (renderer2d_dispatch_tail(width, height) << 1u);
+}
+
 // Shader-visible extent excludes spare invocations in the last workgroup.
 inline uint32_t renderer2d_dispatch_axis_extent(
     uint32_t origin, uint32_t length, uint32_t surfaceLength)

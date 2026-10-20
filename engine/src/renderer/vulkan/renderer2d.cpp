@@ -30,6 +30,13 @@ namespace {
         }
     }
 
+    void push_blur_constants(vk::CommandBuffer commandBuffer, vk::PipelineLayout layout,
+        Renderer2DPushConstants constants, const DispatchBounds& bounds)
+    {
+        constants.data.y = renderer2d_blur_dispatch_flags(constants.data.y, bounds.width, bounds.height);
+        commandBuffer.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+    }
+
     bool bind_pipeline(
         vk::CommandBuffer commandBuffer,
         PipelineType pipelineType,
@@ -130,13 +137,14 @@ namespace {
 
         for (const Renderer2DBatch& batch : batches)
         {
-            const DispatchBounds bounds = make_dispatch_bounds(swapchain, batch, dispatchMode);
+            const DispatchBounds bounds = make_dispatch_bounds(swapchain, batch, dispatchMode, false);
             if (bounds.empty())
             {
                 continue;
             }
 
             Renderer2DPushConstants constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
+            constants.data.x = renderer2d_primitive_dispatch_data(constants.data.x, bounds.width, bounds.height);
             commandBuffer.pushConstants(pipelineLayouts[pipelineType],
                 vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
             dispatch_bounds(commandBuffer, bounds);
@@ -175,13 +183,14 @@ void ShadowPipeline::record_batch(
     }
 
     bind_frame_set(commandBuffer, PipelineType::eShadow2D, descriptorSets, pipelineLayouts, frameScope);
-    const DispatchBounds bounds = make_dispatch_bounds(swapchain, batch, DispatchBoundsMode::eShadow);
+    const DispatchBounds bounds = make_dispatch_bounds(swapchain, batch, DispatchBoundsMode::eShadow, false);
     if (bounds.empty())
     {
         return;
     }
 
     Renderer2DPushConstants constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
+    constants.data.x = renderer2d_primitive_dispatch_data(constants.data.x, bounds.width, bounds.height);
     commandBuffer.pushConstants(pipelineLayouts[PipelineType::eShadow2D],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
     dispatch_bounds(commandBuffer, bounds);
@@ -228,8 +237,8 @@ void BlurPipeline::record_batch(
 
     const bool liquid = (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
     const DispatchBounds bounds = liquid ?
-        make_liquid_output_dispatch_bounds(swapchain, batch) :
-        make_blur_dispatch_bounds(swapchain, batch);
+        make_liquid_output_dispatch_bounds(swapchain, batch, false) :
+        make_blur_dispatch_bounds(swapchain, batch, false);
     if (bounds.empty())
     {
         return;
@@ -242,7 +251,7 @@ void BlurPipeline::record_batch(
         static_cast<float>(swapchain.extent.width),
         static_cast<float>(swapchain.extent.height) };
     const DispatchBounds sourceBounds = liquid ?
-        make_blur_dispatch_bounds(swapchain, sourceBatch) : bounds;
+        make_blur_dispatch_bounds(swapchain, sourceBatch, false) : bounds;
 
     bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, postScope);
@@ -260,8 +269,7 @@ void BlurPipeline::record_batch(
         0u,
         pack_dispatch_origin(bounds.x, bounds.y)
     };
-    commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-        vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+    push_blur_constants(commandBuffer, pipelineLayouts[pipelineType], constants, bounds);
     dispatch_bounds(commandBuffer, bounds);
     insert_compute_memory_barrier(commandBuffer);
 
@@ -287,24 +295,21 @@ void BlurPipeline::record_batch(
         constants = make_push_constants(passBatch, passData, sourceBounds.x, sourceBounds.y);
         constants.data.x |= batch.backdropCapColour << 8u;
         constants.data.y |= eRenderer2DStyleBlurHorizontal;
-        commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-            vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+        push_blur_constants(commandBuffer, pipelineLayouts[pipelineType], constants, sourceBounds);
         dispatch_bounds(commandBuffer, sourceBounds);
         insert_compute_memory_barrier(commandBuffer);
 
         constants = make_push_constants(passBatch, passData, bounds.x, bounds.y);
         constants.data.x |= batch.backdropCapColour << 8u;
         constants.data.y |= eRenderer2DStyleBlurVertical;
-        commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-            vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+        push_blur_constants(commandBuffer, pipelineLayouts[pipelineType], constants, bounds);
         dispatch_bounds(commandBuffer, bounds);
         insert_compute_memory_barrier(commandBuffer);
     }
 
     constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
     constants.data.y |= eRenderer2DStyleBlurComposite;
-    commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-        vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+    push_blur_constants(commandBuffer, pipelineLayouts[pipelineType], constants, bounds);
     dispatch_bounds(commandBuffer, bounds);
     insert_compute_memory_barrier(commandBuffer);
 }
@@ -323,7 +328,7 @@ void BlurPipeline::record_foreground_group(
         return;
     }
 
-    const DispatchBounds bounds = make_blur_dispatch_bounds(swapchain, batch);
+    const DispatchBounds bounds = make_blur_dispatch_bounds(swapchain, batch, false);
     if (bounds.empty())
     {
         return;
@@ -337,21 +342,18 @@ void BlurPipeline::record_foreground_group(
     Renderer2DPushConstants constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
     constants.data.y = eRenderer2DStyleClear;
     constants.data.z = 0u;
-    commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-        vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+    push_blur_constants(commandBuffer, pipelineLayouts[pipelineType], constants, bounds);
     dispatch_bounds(commandBuffer, bounds);
     insert_compute_memory_barrier(commandBuffer);
 
     constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
     constants.data.y |= eRenderer2DStyleBlurHorizontal | eRenderer2DStyleBlurForegroundGroupSource;
-    commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-        vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+    push_blur_constants(commandBuffer, pipelineLayouts[pipelineType], constants, bounds);
     dispatch_bounds(commandBuffer, bounds);
     insert_compute_memory_barrier(commandBuffer);
 
     constants.data.y = eRenderer2DStyleBlurVertical | eRenderer2DStyleBlurForegroundGroupSource;
-    commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-        vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+    push_blur_constants(commandBuffer, pipelineLayouts[pipelineType], constants, bounds);
     dispatch_bounds(commandBuffer, bounds);
     insert_compute_memory_barrier(commandBuffer);
 
@@ -359,8 +361,7 @@ void BlurPipeline::record_foreground_group(
         DescriptorScope::eFrame);
     constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
     constants.data.y = eRenderer2DStyleBlurComposite;
-    commandBuffer.pushConstants(pipelineLayouts[pipelineType],
-        vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
+    push_blur_constants(commandBuffer, pipelineLayouts[pipelineType], constants, bounds);
     dispatch_bounds(commandBuffer, bounds);
     insert_compute_memory_barrier(commandBuffer);
 }
@@ -394,13 +395,14 @@ void ShapePipeline::record_batch(
     }
 
     bind_frame_set(commandBuffer, PipelineType::eShape2D, descriptorSets, pipelineLayouts, frameScope);
-    const DispatchBounds bounds = make_dispatch_bounds(swapchain, batch, DispatchBoundsMode::eShape);
+    const DispatchBounds bounds = make_dispatch_bounds(swapchain, batch, DispatchBoundsMode::eShape, false);
     if (bounds.empty())
     {
         return;
     }
 
     Renderer2DPushConstants constants = make_push_constants(batch, 0u, bounds.x, bounds.y);
+    constants.data.x = renderer2d_primitive_dispatch_data(constants.data.x, bounds.width, bounds.height);
     commandBuffer.pushConstants(pipelineLayouts[PipelineType::eShape2D],
         vk::ShaderStageFlagBits::eCompute, 0, sizeof(constants), &constants);
     dispatch_bounds(commandBuffer, bounds);
@@ -466,7 +468,7 @@ void MediaPipeline::record_batch(
         return;
     }
 
-    const DispatchBounds bounds = make_dispatch_bounds(swapchain, batch, DispatchBoundsMode::eExact);
+    const DispatchBounds bounds = make_dispatch_bounds(swapchain, batch, DispatchBoundsMode::eExact, false);
     if (bounds.empty())
     {
         return;
@@ -496,11 +498,7 @@ void MediaPipeline::record_batch(
         0,
         nullptr);
 
-    // Media primitive values occupy four bits. Carry the exact dispatch extent
-    // in the remaining bits so the shader can reject spare invocations in the
-    // final 8x8 workgroup before running an expensive source filter. A zero
-    // extent is the fallback for an unusually large (>16K) batch.
-    constexpr uint32_t kMediaDispatchExtentMask = 0x3fffu;
+    // Keep exact clipping for every media size, including animated images.
     const auto make_media_constants = [&] (
         const DispatchBounds& dispatchBounds,
         uint32_t extraFlags) {
@@ -510,14 +508,7 @@ void MediaPipeline::record_batch(
             dispatchBounds.x,
             dispatchBounds.y);
         constants.data.y |= extraFlags;
-        if (dispatchBounds.width <= kMediaDispatchExtentMask &&
-            dispatchBounds.height <= kMediaDispatchExtentMask)
-        {
-            constants.data.x =
-                (static_cast<uint32_t>(batch.primitive) & 0x0fu) |
-                ((dispatchBounds.width & kMediaDispatchExtentMask) << 4u) |
-                ((dispatchBounds.height & kMediaDispatchExtentMask) << 18u);
-        }
+        constants.data.x = renderer2d_primitive_dispatch_data(constants.data.x, dispatchBounds.width, dispatchBounds.height);
         return constants;
     };
 

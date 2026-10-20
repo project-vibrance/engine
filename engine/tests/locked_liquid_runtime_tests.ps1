@@ -78,6 +78,16 @@ function Stage {
 }
 $first = Stage
 Assert-True (Test-Path -LiteralPath $first) 'No cached DLL was published'
+# These comparisons are read-only and must cover every byte of the active
+# extension and its six shaders, even when a compositor is already ready.
+& $Broker --check-runtime (Join-Path $bundle $names[0]) $first
+Assert-True ($LASTEXITCODE -eq 0) 'An identical active runtime was rejected'
+foreach ($name in $names) {
+    [IO.File]::WriteAllText((Join-Path $bundle $name), "$name updated")
+    & $Broker --check-runtime (Join-Path $bundle $names[0]) $first
+    Assert-True ($LASTEXITCODE -eq 25) "Changing $name did not require a new Windows session"
+    [IO.File]::WriteAllText((Join-Path $bundle $name), $name)
+}
 $dwmSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-90-0')
 function Assert-DwmReadAccess([string]$directory) {
     foreach ($path in @($directory) + @($names | ForEach-Object { Join-Path $directory $_ })) {
@@ -115,6 +125,8 @@ Assert-True ($second -ne $first) 'A shader change must publish a new bundle'
 Assert-True (Test-Path -LiteralPath $first) 'A previously loaded bundle must be retained'
 Remove-Item -LiteralPath (Join-Path $bundle $names[2])
 $ErrorActionPreference = 'Continue'
+& $Broker --check-runtime (Join-Path $bundle $names[0]) $first
+Assert-True ($LASTEXITCODE -eq 3) 'An incomplete requested runtime must not be reported as staged or current'
 & $Broker --stage-runtime (Join-Path $bundle $names[0]) $cache
 $ErrorActionPreference = 'Stop'
 Assert-True ($LASTEXITCODE -ne 0) 'Incomplete bundles must fail staging'

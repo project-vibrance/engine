@@ -11,10 +11,8 @@ int main()
     try
     {
         AudioEngine audio;
-#if defined(__APPLE__)
         if (audio.backend_name() != "not started")
             throw std::runtime_error("An unused audio engine opened the output device");
-#endif
         audio.set_global_volume(0.25f);
         {
             std::ofstream file(path, std::ios::binary);
@@ -32,10 +30,8 @@ int main()
         if (!clip || audio.global_volume() != 0.25f ||
             audio.load_clip(path).id != clip.id)
             throw std::runtime_error("On-demand audio initialisation or clip caching failed");
-#if defined(__APPLE__)
         if (audio.backend_name() != "not started")
             throw std::runtime_error("Preloading a clip opened the output device");
-#endif
         AudioPlayOptions options;
         options.volume = 0.0f;
         options.paused = true;

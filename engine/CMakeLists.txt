@@ -15,6 +15,7 @@ set(ENGINE_SOURCES
     src/core/camera.cpp
     src/core/file.cpp
     src/core/logger.cpp
+    src/core/liquid_glass_runtime.cpp
     src/core/process.cpp
     src/core/secure_credential.cpp
     src/core/single_instance.cpp
@@ -249,6 +250,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
                 "${VIBRANCE_LIQUID_DWM_SECURITY_HEADER}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_startup.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_runtime_identity.h"
                 "${VIBRANCE_COMPOSITION_BUILD_SCRIPT}"
             BYPRODUCTS
                 "${VIBRANCE_COMPOSITION_DIRECTORY}/vibrance_win32_composition.exp"
@@ -334,6 +336,7 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
             DEPENDS "${VIBRANCE_LIQUID_DWM_BROKER_SOURCE}"
                 "${PROJECT_SOURCE_DIR}/scripts/win32/liquid_glass_runtime_cache.h"
                 "${PROJECT_SOURCE_DIR}/scripts/win32/liquid_glass_broker_startup.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_runtime_identity.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_startup.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
                 "${VIBRANCE_LIQUID_DWM_PROTOCOL_HEADER}"
@@ -664,7 +667,7 @@ if(WIN32)
             "-Wl,--wrap=__imp_CreateWindowExW")
     endif()
     target_link_libraries(vibrance_engine PRIVATE
-        advapi32 dwmapi mmdevapi ole32 uuid winmm user32 gdi32 shell32 comctl32)
+        advapi32 bcrypt dwmapi mmdevapi ole32 uuid winmm user32 gdi32 shell32 comctl32)
 elseif(APPLE)
     # Local static FreeType archives do not carry their compression dependencies.
     find_package(ZLIB REQUIRED)

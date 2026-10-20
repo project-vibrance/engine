@@ -44,6 +44,8 @@ layout (push_constant) uniform Renderer2DConstants {
     uvec4 data;
 } pc;
 
+uint primitive_type() { return pc.data.x & 255u; }
+
 struct SurfacePoint {
     bool inside;
     vec2 uv;
@@ -411,7 +413,7 @@ vec4 own_shape_parameters() {
 }
 
 float shape_sdf(vec2 pixel) {
-    if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
+    if (primitive_type() == PRIMITIVE_CIRCULAR_PROGRESS) {
         return sd_circular_progress(pixel, pc.rect, pc.uvRect);
     }
     bool useCornerRadii = (pc.data.y & STYLE_CORNER_RADII) != 0u;
@@ -423,11 +425,11 @@ float shape_sdf(vec2 pixel) {
     }
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
     vec4 shapeParams = own_shape_parameters();
-    return primitive_sdf(pixel, pc.rect, pc.data.x, pc.effect0.x, cornerRadii, useCornerRadii, shapeParams);
+    return primitive_sdf(pixel, pc.rect, primitive_type(), pc.effect0.x, cornerRadii, useCornerRadii, shapeParams);
 }
 
 float primitive_bounds_padding(vec4 shapeParams) {
-    if (pc.data.x != PRIMITIVE_NOTCHED_SQUIRCLE) {
+    if (primitive_type() != PRIMITIVE_NOTCHED_SQUIRCLE) {
         return 0.0;
     }
     return notch_flare_size(max(pc.rect.zw, vec2(1.0)), shapeParams.z, shapeParams.w) + 6.0;
@@ -458,11 +460,11 @@ vec4 fill_color(vec2 uv) {
         return pc.color0;
     }
 
-    if (pc.data.x == PRIMITIVE_LIQUID_BRIDGE) {
+    if (primitive_type() == PRIMITIVE_LIQUID_BRIDGE) {
         // uvRect carries merge progress, so use local UV for the cap gradient.
         return mix(pc.color0, pc.color1, clamp(uv.y, 0.0, 1.0));
     }
-    if (pc.data.x == PRIMITIVE_CIRCULAR_PROGRESS) {
+    if (primitive_type() == PRIMITIVE_CIRCULAR_PROGRESS) {
         vec2 pixel = pc.rect.xy + clamp(uv, vec2(0.0), vec2(1.0)) * pc.rect.zw;
         return mix(pc.color0, pc.color1, circular_progress_gradient_t(pixel));
     }
@@ -498,7 +500,7 @@ float top_outline_factor_for_notch(vec2 pixel, float outlineWidth, float softnes
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
     vec4 params = own_shape_parameters();
     if ((effect1Reserved && (pc.data.y & STYLE_MASKED_LIQUID_SHAPE_PARAMS) == 0u) ||
-        pc.data.x != PRIMITIVE_NOTCHED_SQUIRCLE ||
+        primitive_type() != PRIMITIVE_NOTCHED_SQUIRCLE ||
         params.z <= 0.01 ||
         outlineWidth <= 0.001) {
         return 1.0;
@@ -574,14 +576,14 @@ bool constant_solid_interior(vec2 pixelCenter) {
     const uint varyingStyles = STYLE_GRADIENT | STYLE_RADIAL_GRADIENT |
         STYLE_TRANSFORM_2_5D | STYLE_BLUR | STYLE_CORNER_RADII | STYLE_SHAPE_CUTOUT;
     if ((pc.data.y & varyingStyles) != 0u ||
-        (pc.data.x != PRIMITIVE_RECTANGLE &&
-            pc.data.x != PRIMITIVE_ROUNDED_RECTANGLE &&
-            pc.data.x != PRIMITIVE_SQUIRCLE)) {
+        (primitive_type() != PRIMITIVE_RECTANGLE &&
+            primitive_type() != PRIMITIVE_ROUNDED_RECTANGLE &&
+            primitive_type() != PRIMITIVE_SQUIRCLE)) {
         return false;
     }
 
     vec2 halfSize = max(pc.rect.zw * 0.5, vec2(0.5));
-    float radius = pc.data.x == PRIMITIVE_RECTANGLE ? 0.0 :
+    float radius = primitive_type() == PRIMITIVE_RECTANGLE ? 0.0 :
         clamp(pc.effect0.x, 0.0, min(halfSize.x, halfSize.y));
     float softness = max(pc.effect0.z, 0.5);
     float inset = radius + max(pc.effect0.y, 0.0) + softness + 0.5;
@@ -688,6 +690,11 @@ vec4 resolve_blurred_shape(vec2 pixelCenter) {
 }
 
 void main() {
+    // The last workgroup can extend past a scrolling or panel clip.
+    uint tail = (pc.data.x >> 8u);
+    uvec2 exactExtent = gl_NumWorkGroups.xy * gl_WorkGroupSize.xy -
+        uvec2(tail & 7u, (tail >> 3u) & 7u);
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, exactExtent))) return;
     ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
     ivec2 screenSize = imageSize(colorBuffer);
     if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {

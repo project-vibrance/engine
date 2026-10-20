@@ -129,8 +129,8 @@ bool liquid_extension_disabled()
 
 void launch_liquid_extension_once()
 {
-    if (liquid_extension_disabled()) return;
     std::call_once(liquidExtensionLaunch, [] {
+        if (liquid_extension_disabled()) return;
         std::thread([] {
         wchar_t executable[MAX_PATH] {};
         const DWORD pathLength = GetModuleFileNameW(nullptr, executable,
@@ -1233,9 +1233,12 @@ public:
         }
         const bool shaderReady = shaderCandidateSeen &&
             ensure_liquid_region_mapping() && liquid_extension_ready();
+        // Validate the desired helper bundle once even if an older pinned
+        // extension has already signalled the protocol's readiness event.
+        // The asynchronous launch performs hashes and deployment off this path.
+        if (shaderCandidateSeen) launch_liquid_extension_once();
         if (shaderCandidateSeen && !shaderReady)
         {
-            launch_liquid_extension_once();
             lastCompositionError = liquidRegionTable_ ?
                 "Liquid Glass DWM extension is starting or unavailable" :
                 "Liquid Glass region table is unavailable";

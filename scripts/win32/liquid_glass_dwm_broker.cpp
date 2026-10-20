@@ -367,7 +367,8 @@ bool resolve_windows10_config(const std::wstring& path, const std::wstring& symb
     return valid;
 }
 
-std::uintptr_t remote_module_base(DWORD pid, const wchar_t* name)
+std::uintptr_t remote_module_base(DWORD pid, const wchar_t* name,
+    std::wstring* path = nullptr)
 {
     const HANDLE snapshot = CreateToolhelp32Snapshot(
         TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -384,12 +385,45 @@ std::uintptr_t remote_module_base(DWORD pid, const wchar_t* name)
             if (_wcsicmp(entry.szModule, name) == 0)
             {
                 base = reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
+                if (path) *path = entry.szExePath;
                 break;
             }
         } while (Module32NextW(snapshot, &entry));
     }
     CloseHandle(snapshot);
     return base;
+}
+
+int runtime_update_status()
+{
+    using namespace vibrance::win32;
+    const auto directory = std::filesystem::path(module_path(nullptr)).parent_path();
+    const auto requestedKey = liquid_runtime_key(directory / liquidRuntimeNames[0]);
+    const DWORD pid = find_session_dwm();
+    const auto report = read_liquid_runtime_status(liquid_startup::cache_directory());
+    // Ordinary applications cannot enumerate DWM's modules. The elevated
+    // broker records both identities only after verifying the staged bundle.
+    // Ignore reports from another compositor lifetime or app generation.
+    if (!pid || requestedKey.empty() || report.compositorPid != pid ||
+        report.requestedKey != requestedKey || !liquid_runtime_key_valid(report.activeKey) ||
+        liquid_runtime_key(report.stagedExtension) != requestedKey)
+    {
+        std::wcout << L"Runtime update status: unavailable; no verified staged runtime identity "
+            L"for this app and compositor.\n";
+        return 13;
+    }
+    std::wcout << L"Requested runtime generation: " << requestedKey << L"\n"
+        << L"Active runtime generation: " << report.activeKey << L"\n"
+        << L"Staged runtime: " << report.stagedExtension.wstring() << L"\n";
+    if (liquid_runtime_restart_required(report, pid, requestedKey))
+    {
+        std::wcout << L"Runtime update status: restart-required; the replacement is staged. "
+            L"Sign out of Windows and sign back in to release the older pinned runtime. "
+            L"Existing compositor hooks have been preserved.\n";
+        return liquidRuntimeRestartRequired;
+    }
+    std::wcout << L"Runtime update status: current.\n";
+    return 0;
 }
 
 bool load_remote(HANDLE process, DWORD pid,
@@ -481,6 +515,18 @@ int wmain(int argc, wchar_t** argv)
         }
     }
     namespace startup = vibrance::win32::liquid_startup;
+    if (argc == 2 && _wcsicmp(argv[1], L"--runtime-update-status") == 0)
+        return runtime_update_status();
+    if (argc == 4 && _wcsicmp(argv[1], L"--check-runtime") == 0)
+    {
+        // Read-only bundle comparison; it neither stages files nor accesses DWM.
+        const auto requested = vibrance::win32::liquid_runtime_key(argv[2]);
+        const auto active = vibrance::win32::liquid_runtime_key(argv[3]);
+        if (requested.empty() || active.empty()) return 3;
+        std::wcout << L"Requested runtime generation: " << requested << L"\n"
+            << L"Active runtime generation: " << active << L"\n";
+        return requested == active ? 0 : vibrance::win32::liquidRuntimeRestartRequired;
+    }
     if (argc == 3 && _wcsicmp(argv[1], L"--bundle-key") == 0)
     {
         const auto key = startup::bundle_key(argv[2]);
@@ -738,6 +784,7 @@ int wmain(int argc, wchar_t** argv)
     }
     if (argc == 2 && _wcsicmp(argv[1], L"--status") == 0)
     {
+        const int runtimeStatus = runtime_update_status();
         const HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE,
             vibrance::win32::liquidDwmStatusName);
         if (!mapping)
@@ -751,7 +798,7 @@ int wmain(int argc, wchar_t** argv)
                 std::wcerr << L"Use a native architecture build on a supported Windows version. "
                     L"An emulated x64 broker cannot load an ARM64 compositor.\n";
             startup::report_startup_failure();
-            return 13;
+            return runtimeStatus == vibrance::win32::liquidRuntimeRestartRequired ? runtimeStatus : 13;
         }
         const auto* values = static_cast<const volatile LONG*>(MapViewOfFile(mapping,
             FILE_MAP_READ, 0, 0,
@@ -761,7 +808,7 @@ int wmain(int argc, wchar_t** argv)
             const auto error = GetLastError();
             CloseHandle(mapping);
             std::wcerr << L"Cannot read native Liquid Glass status (Win32 error " << error << L").\n";
-            return 13;
+            return runtimeStatus == vibrance::win32::liquidRuntimeRestartRequired ? runtimeStatus : 13;
         }
         using namespace vibrance::win32;
         std::array<std::uint32_t, liquidDwmStatusWords> before {};
@@ -886,6 +933,7 @@ int wmain(int argc, wchar_t** argv)
         if (diagnosticsAvailable)
             std::wcout << L"Per-region timings measure CPU lock waits and driver submissions, not GPU execution. Peaks cover the compositor lifetime.\n";
         else std::wcout << L"Per-region timing diagnostics unavailable for the loaded compositor runtime.\n";
+        if (runtimeStatus == liquidRuntimeRestartRequired) return runtimeStatus;
         return health == LiquidDwmRenderHealth::unavailable ? 13 :
             health == LiquidDwmRenderHealth::degraded ? 20 : 0;
     }
@@ -893,7 +941,7 @@ int wmain(int argc, wchar_t** argv)
     {
         std::wcerr << L"Usage: liquid_glass_dwm_broker "
             L"EXTENSION_DLL SYMBOL_CACHE_DIRECTORY\n"
-            L"  --status | --run-auto | --install-auto-run USER_SID | --remove-auto-run\n";
+            L"  --status | --runtime-update-status | --run-auto | --install-auto-run USER_SID | --remove-auto-run\n";
         return 2;
     }
     if (argc == 4 && _wcsicmp(argv[1], L"--stage-runtime") == 0)
@@ -931,14 +979,6 @@ int wmain(int argc, wchar_t** argv)
     }
     const DWORD pid = find_session_dwm();
     if (!pid) { std::wcerr << L"No DWM process in this session\n"; return 5; }
-    if (remote_module_base(pid, L"vibrance_liquid_dwm_extension.dll"))
-    {
-        const HANDLE ready = OpenEventW(SYNCHRONIZE, FALSE, vibrance::win32::liquidDwmReadyName);
-        const bool running = ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0;
-        if (ready) CloseHandle(ready);
-        std::wcout << L"The extension is already loaded; preserving its hooks and diagnostics.\n";
-        return running ? 0 : 10;
-    }
     const std::wstring sourceExtension = argv[1];
     const std::wstring symbolCache = argv[2];
     if (GetFileAttributesW(sourceExtension.c_str()) ==
@@ -955,6 +995,37 @@ int wmain(int argc, wchar_t** argv)
     {
         std::wcerr << L"Cannot stage the Liquid Glass runtime bundle\n";
         return 3;
+    }
+    const auto requestedKey = vibrance::win32::liquid_runtime_key(extension);
+    std::wstring activeExtension;
+    if (remote_module_base(pid, L"vibrance_liquid_dwm_extension.dll", &activeExtension))
+    {
+        const auto activeKey = vibrance::win32::liquid_runtime_key(activeExtension);
+        if (requestedKey.empty() || activeKey.empty())
+        {
+            std::wcerr << L"Cannot verify the active Liquid Glass runtime; existing hooks are preserved.\n";
+            return 3;
+        }
+        const vibrance::win32::LiquidRuntimeStatus report {
+            pid, requestedKey, activeKey, extension, activeExtension
+        };
+        if (!vibrance::win32::write_liquid_runtime_status(symbolCache, report))
+        {
+            std::wcerr << L"Cannot record the verified Liquid Glass runtime identity.\n";
+            return 3;
+        }
+        if (activeKey != requestedKey)
+        {
+            std::wcout << L"An older Liquid Glass runtime is pinned in the compositor. "
+                L"The replacement is staged; sign out of Windows and sign back in to apply it. "
+                L"Existing hooks and diagnostics have been preserved.\n";
+            return vibrance::win32::liquidRuntimeRestartRequired;
+        }
+        const HANDLE ready = OpenEventW(SYNCHRONIZE, FALSE, vibrance::win32::liquidDwmReadyName);
+        const bool running = ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0;
+        if (ready) CloseHandle(ready);
+        std::wcout << L"The matching runtime is already loaded; preserving its hooks and diagnostics.\n";
+        return running ? 0 : 10;
     }
     LiquidDwmHookConfig config {};
     LiquidDwmWindows10Config windows10Layout {};
@@ -1136,6 +1207,12 @@ int wmain(int argc, wchar_t** argv)
     }
     UnmapViewOfFile(const_cast<LONG*>(status));
     CloseHandle(statusMapping);
+    if (!vibrance::win32::write_liquid_runtime_status(symbolCache,
+            { pid, requestedKey, requestedKey, extension, extension }))
+    {
+        std::wcerr << L"The matching runtime is ready, but its identity report could not be written.\n";
+        return 3;
+    }
     std::wcout << L"Liquid Glass DWM extension ready in process " <<
         pid << L"\n";
     return 0;

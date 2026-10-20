@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../engine/src/platform/win32/liquid_glass_dwm_startup.h"
+#include "../../engine/src/platform/win32/liquid_glass_runtime_identity.h"
 #include <iostream>
 
 namespace vibrance::win32::liquid_startup
@@ -88,6 +89,7 @@ inline const wchar_t* exit_description(DWORD code)
     case 16: return L"Startup is deferred while a fullscreen application is active.";
     case 23: return L"This Windows build or process architecture does not support the native extension.";
     case 24: return L"The matching DWM PDB is available, but this compositor lacks required renderer symbols. See the individual lookup failures above.";
+    case liquidRuntimeRestartRequired: return L"A replacement Liquid Glass runtime is staged. Sign out of Windows and sign back in to release the older pinned runtime.";
     default: return L"Liquid Glass broker startup failed; see the output above.";
     }
 }
@@ -101,18 +103,23 @@ inline int watch_session(DWORD (*findDwm)())
     // path. Child brokers inherit the same administrator token and session.
     const auto log = cache / L"broker.log";
     DWORD lastPid = 0;
+    DWORD validatedPid = 0;
+    DWORD restartRequiredPid = 0;
     unsigned attempts = 0;
     ULONGLONG retryAt = 0;
     for (;;)
     {
         const DWORD pid = findDwm();
-        if (pid != lastPid) { lastPid = pid; attempts = 0; retryAt = 0; }
-        if (pid && attempts < 3 && GetTickCount64() >= retryAt && !fullscreen_active())
+        if (pid != lastPid)
+        { lastPid = pid; validatedPid = 0; restartRequiredPid = 0; attempts = 0; retryAt = 0; }
+        if (pid && pid != restartRequiredPid && attempts < 3 && GetTickCount64() >= retryAt && !fullscreen_active())
         {
             const HANDLE ready = OpenEventW(SYNCHRONIZE, FALSE, liquidDwmReadyName);
             const bool running = ready && WaitForSingleObject(ready, 0) == WAIT_OBJECT_0;
             if (ready) CloseHandle(ready);
-            if (!running)
+            // A protocol readiness event identifies installed hooks, not the
+            // DLL/shader generation. Validate once for each compositor lifetime.
+            if (!running || validatedPid != pid)
             {
                 ++attempts;
                 SECURITY_ATTRIBUTES inherit { sizeof(inherit), nullptr, TRUE };
@@ -150,7 +157,8 @@ inline int watch_session(DWORD (*findDwm)())
                 const std::wstring description = exit_description(code);
                 for (const wchar_t character : description) report.put(static_cast<char>(character));
                 report << "\n";
-                if (code == 0) attempts = 0;
+                if (code == 0) { attempts = 0; validatedPid = pid; }
+                if (code == liquidRuntimeRestartRequired) restartRequiredPid = pid;
                 // Offline symbol servers and temporarily denied process access
                 // can recover within the same session. Retry those failures
                 // slowly; bound actual load/hook failures to avoid crash loops.

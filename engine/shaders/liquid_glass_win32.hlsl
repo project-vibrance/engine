@@ -275,7 +275,24 @@ float4 main(PixelInput input) : SV_Target
     if (frost > 0.0)
         colour = lerp(refracted,
             blurredBackdrop.SampleLevel(backdropSampler, refractedUv, 0.0).rgb, frost);
-    colour = lerp(colour, tintColour, saturate(tintStrength));
+    // Only completely empty input needs the transparent fallback. A dim blur
+    // is still valid: fading it exposes the original sharp text underneath.
+    // Test both existing samples, including dark blur tails and sharp glyphs;
+    // DWM may leave source alpha unused, so it cannot establish availability.
+    float sourceAvailable = (any(centre != 0.0) || any(colour != 0.0)) ? 1.0 : 0.0;
+    // Refraction can move a bright glyph onto valid black background. Writing
+    // transparent black there reveals the original, unbent glyph in the target.
+    // Only this empty edge case needs the undisplaced sample; ordinary pixels
+    // retain the existing taps, and genuinely unavailable input stays clear.
+    [branch]
+    if (sourceAvailable == 0.0 && bend != 0.0)
+        sourceAvailable = any(sharpBackdrop.SampleLevel(
+            backdropSampler, backdropUv, 0.0).rgb != 0.0) ? 1.0 : 0.0;
+    // Tint is an independent translucent layer. Masking it with source
+    // availability left untinted patches; forcing full opacity hid the desktop.
+    float tintAmount = saturate(tintStrength);
+    float materialOpacity = lerp(sourceAvailable, 1.0, tintAmount);
+    float3 materialColour = lerp(colour * sourceAvailable, tintColour, tintAmount);
 
     float fresnel = 0.0;
     [branch]
@@ -288,7 +305,8 @@ float4 main(PixelInput input) : SV_Target
         float brightCore = exp(-edgeDistance * edgeDistance / 2.25);
         fresnel = brightCore * (0.25 + 0.75 * travellingLight);
     }
-    colour += rimStrength * 0.65 * fresnel;
+    // An unavailable background must not introduce a grey outline either.
+    materialColour += rimStrength * 0.65 * fresnel * sourceAvailable;
     if ((paintCapGradient & 1u) != 0)
     {
         float fraction = pixelPosition.y / max(panelSize.y, 1.0);
@@ -296,17 +314,13 @@ float4 main(PixelInput input) : SV_Target
             max(capGradient.w - capGradient.z, 0.0001));
         float3 capColour = float3((paintCapGradient >> 8u) & 255u,
             (paintCapGradient >> 16u) & 255u, (paintCapGradient >> 24u) & 255u) / 255.0;
-        colour = lerp(colour, capColour, lerp(capGradient.x, capGradient.y, progress));
+        float capOpacity = saturate(lerp(capGradient.x, capGradient.y, progress));
+        materialColour = lerp(materialColour, capColour, capOpacity);
+        materialOpacity = lerp(materialOpacity, 1.0, capOpacity);
     }
-    // An independently presented game can leave an empty black area in the
-    // DWM target even though pixels are visible behind the island. Fade the
-    // optical layer out there so missing input cannot flash opaque black.
-    // The UI and its top gradient are composited in a separate sharp pass.
-    float sourceEnergy = max(max(abs(centre.r), abs(centre.g)), abs(centre.b));
-    float sourceAvailable = smoothstep(0.003, 0.03, sourceEnergy) *
-        saturate(sharpSample.a * 8.0);
-    float rimAvailable = 0.3 * fresnel;
+    // The existing optical blend state expects straight colour; preserve the
+    // independently composed material alpha when converting back from premultiplied.
     // DWM can use scRGB render targets, so retain values above 1.0.
-    return float4(max(colour, 0.0), coverage * opacity * viewportOpacity *
-        max(sourceAvailable, rimAvailable));
+    return float4(max(materialColour / max(materialOpacity, 0.00001), 0.0),
+        coverage * opacity * viewportOpacity * materialOpacity);
 }

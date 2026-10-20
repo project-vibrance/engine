@@ -1,6 +1,7 @@
 #include <vibranceUI/renderer/media2d.h>
 #if !defined(__APPLE__)
 #include <vibranceUI/renderer/descriptors.h>
+#include "media_prepared_upload.h"
 #endif
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
@@ -12,6 +13,7 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -46,6 +48,79 @@ extern "C"
 
 namespace
 {
+    struct PreparationContext
+    {
+        std::stop_token cancellation;
+        std::size_t byteLimit = 0;
+    };
+    thread_local const PreparationContext* preparationContext = nullptr;
+
+    void check_preparation()
+    {
+        if (preparationContext && preparationContext->cancellation.stop_requested())
+            throw std::runtime_error("Media preparation cancelled");
+    }
+
+    void check_decoded_size(uint32_t width, uint32_t height, std::size_t frames = 1u)
+    {
+        check_preparation();
+        const std::size_t limit = preparationContext && preparationContext->byteLimit > 0u
+            ? preparationContext->byteLimit : std::numeric_limits<std::size_t>::max();
+        if (width == 0u || height == 0u || frames == 0u ||
+            width > limit / 4u / height / frames)
+            throw std::length_error("Decoded media exceeds its byte limit");
+    }
+
+    // Walk GIF blocks without allocating decoded pixels. stb's all-frame
+    // decoder allocates the complete source animation even when sampling was
+    // requested, so validate its full size before entering that decoder.
+    std::size_t gif_source_frame_count(const std::vector<unsigned char>& bytes)
+    {
+        if (bytes.size() < 13u ||
+            (std::memcmp(bytes.data(), "GIF87a", 6u) != 0 &&
+             std::memcmp(bytes.data(), "GIF89a", 6u) != 0)) return 0u;
+        std::size_t cursor = 13u;
+        const auto skip = [&](std::size_t count) {
+            if (count > bytes.size() - cursor) return false;
+            cursor += count;
+            return true;
+        };
+        if ((bytes[10] & 0x80u) != 0u &&
+            !skip(3u << ((bytes[10] & 7u) + 1u))) return 0u;
+        const auto skipBlocks = [&]() {
+            while (cursor < bytes.size())
+            {
+                check_preparation();
+                const std::size_t length = bytes[cursor++];
+                if (length == 0u) return true;
+                if (!skip(length)) return false;
+            }
+            return false;
+        };
+        std::size_t frames = 0u;
+        while (cursor < bytes.size())
+        {
+            check_preparation();
+            const unsigned char block = bytes[cursor++];
+            if (block == 0x3bu) return frames;
+            if (block == 0x21u)
+            {
+                if (!skip(1u) || !skipBlocks()) return 0u;
+            }
+            else if (block == 0x2cu)
+            {
+                if (bytes.size() - cursor < 9u) return 0u;
+                const unsigned char packed = bytes[cursor + 8u];
+                if (!skip(9u) || ((packed & 0x80u) != 0u &&
+                    !skip(3u << ((packed & 7u) + 1u))) ||
+                    !skip(1u) || !skipBlocks()) return 0u;
+                ++frames;
+            }
+            else return 0u;
+        }
+        return 0u;
+    }
+
     struct DecodedMediaFrame
     {
         // CPU-side RGBA frame before it is uploaded to a StorageImage
@@ -1374,6 +1449,13 @@ namespace
         int width = 0;
         int height = 0;
         int channels = 0;
+        int inspectedWidth = 0, inspectedHeight = 0, inspectedChannels = 0;
+        if (stbi_info_from_memory(bytes.data(), static_cast<int>(std::min<std::size_t>(
+                bytes.size(), static_cast<std::size_t>(std::numeric_limits<int>::max()))),
+                &inspectedWidth, &inspectedHeight, &inspectedChannels) != 0 &&
+            inspectedWidth > 0 && inspectedHeight > 0)
+            check_decoded_size(static_cast<uint32_t>(inspectedWidth), static_cast<uint32_t>(inspectedHeight));
+        check_preparation();
         stbi_uc* pixels = stbi_load_from_memory(
             bytes.data(),
             static_cast<int>(std::min<std::size_t>(bytes.size(), static_cast<std::size_t>(std::numeric_limits<int>::max()))),
@@ -1390,12 +1472,12 @@ namespace
             return frame;
         }
 
+        const std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> ownedPixels(pixels, stbi_image_free);
         frame.width = static_cast<uint32_t>(width);
         frame.height = static_cast<uint32_t>(height);
         frame.durationSeconds = durationSeconds;
         const std::size_t rgbaSize = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
         frame.rgba.assign(pixels, pixels + rgbaSize);
-        stbi_image_free(pixels);
         return frame;
     }
 
@@ -1605,6 +1687,7 @@ namespace
             return {};
         }
 
+        check_decoded_size(canvasWidth, canvasHeight, frameLimit);
         DecodedMediaFrame canvas = {};
         canvas.width = canvasWidth;
         canvas.height = canvasHeight;
@@ -1613,7 +1696,9 @@ namespace
         animation.frames.reserve(frameLimit);
         for (uint32_t frameIndex = 0; frameIndex < frameLimit; ++frameIndex)
         {
+            check_preparation();
             const ApngFrameSource& source = frameSources[frameIndex];
+            check_decoded_size(source.control.width, source.control.height);
             if (source.control.width == 0u || source.control.height == 0u)
             {
                 continue;
@@ -1788,9 +1873,11 @@ namespace
         const uint32_t frameCount = std::max(2u, std::min(requestedFrames, maxFrames));
         const double frameDuration = std::max(duration / static_cast<double>(frameCount), 1.0 / 120.0);
 
+        check_decoded_size(source.width, source.height, frameCount);
         animation.frames.reserve(frameCount);
         for (uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
         {
+            check_preparation();
             const double phase = static_cast<double>(frameIndex) / static_cast<double>(frameCount);
             animation.frames.push_back(rotate_frame(source, phase, frameDuration));
         }
@@ -1986,6 +2073,13 @@ namespace
         int width = 0;
         int height = 0;
         int channels = 0;
+        int inspectedWidth = 0, inspectedHeight = 0, inspectedChannels = 0;
+        if (stbi_info_from_memory(bytes.data(), static_cast<int>(std::min<std::size_t>(
+                bytes.size(), static_cast<std::size_t>(std::numeric_limits<int>::max()))),
+                &inspectedWidth, &inspectedHeight, &inspectedChannels) != 0 &&
+            inspectedWidth > 0 && inspectedHeight > 0)
+            check_decoded_size(static_cast<uint32_t>(inspectedWidth), static_cast<uint32_t>(inspectedHeight));
+        check_preparation();
         stbi_uc* pixels = stbi_load_from_memory(
             bytes.data(),
             static_cast<int>(std::min<std::size_t>(bytes.size(), static_cast<std::size_t>(std::numeric_limits<int>::max()))),
@@ -2002,11 +2096,11 @@ namespace
             return frame;
         }
 
+        const std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> ownedPixels(pixels, stbi_image_free);
         frame.width = static_cast<uint32_t>(width);
         frame.height = static_cast<uint32_t>(height);
         const std::size_t rgbaSize = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
         frame.rgba.assign(pixels, pixels + rgbaSize);
-        stbi_image_free(pixels);
         return frame;
     }
 
@@ -2026,6 +2120,16 @@ namespace
         int frameCount = 0;
         int channels = 0;
         int* delays = nullptr;
+        if (bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) return {};
+        if (preparationContext && preparationContext->byteLimit > 0u)
+        {
+            const std::size_t sourceFrames = gif_source_frame_count(bytes);
+            if (sourceFrames == 0u) throw std::runtime_error("Invalid GIF block stream");
+            const uint32_t sourceWidth = bytes[6] | (static_cast<uint32_t>(bytes[7]) << 8u);
+            const uint32_t sourceHeight = bytes[8] | (static_cast<uint32_t>(bytes[9]) << 8u);
+            check_decoded_size(sourceWidth, sourceHeight, sourceFrames);
+        }
+        check_preparation();
         stbi_uc* pixels = stbi_load_gif_from_memory(
             bytes.data(),
             static_cast<int>(std::min<std::size_t>(bytes.size(), static_cast<std::size_t>(std::numeric_limits<int>::max()))),
@@ -2048,6 +2152,10 @@ namespace
             return animation;
         }
 
+        const std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> ownedPixels(pixels, stbi_image_free);
+        const std::unique_ptr<int, decltype(&stbi_image_free)> ownedDelays(delays, stbi_image_free);
+        check_decoded_size(static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+            static_cast<std::size_t>(frameCount));
         const uint32_t maxFrames = options.maxAnimationFrames > 0u
             ? options.maxAnimationFrames
             : std::numeric_limits<uint32_t>::max();
@@ -2058,22 +2166,25 @@ namespace
         animation.frames.reserve(uploadFrameCount);
         for (uint32_t frameIndex = 0; frameIndex < uploadFrameCount; ++frameIndex)
         {
+            check_preparation();
+            // Sample across the complete loop rather than truncating it when
+            // the caller bounds GPU memory. Merge skipped frame delays into
+            // the retained frame so variable timing and loop duration survive.
+            const uint32_t first = static_cast<uint32_t>(
+                static_cast<std::uint64_t>(frameIndex) * frameCount / uploadFrameCount);
+            const uint32_t end = static_cast<uint32_t>(
+                static_cast<std::uint64_t>(frameIndex + 1u) * frameCount / uploadFrameCount);
             DecodedMediaFrame frame = {};
             frame.width = static_cast<uint32_t>(width);
             frame.height = static_cast<uint32_t>(height);
-            frame.durationSeconds = delays != nullptr && delays[frameIndex] > 0
-                ? static_cast<double>(delays[frameIndex]) / 1000.0
-                : 0.1;
-            const stbi_uc* frameStart = pixels + static_cast<std::size_t>(frameIndex) * frameByteSize;
+            for (uint32_t source = first; source < end; ++source)
+                frame.durationSeconds += delays != nullptr && delays[source] > 0
+                    ? static_cast<double>(delays[source]) / 1000.0 : 0.1;
+            const stbi_uc* frameStart = pixels + static_cast<std::size_t>(first) * frameByteSize;
             frame.rgba.assign(frameStart, frameStart + frameByteSize);
             animation.frames.push_back(std::move(frame));
         }
 
-        stbi_image_free(pixels);
-        if (delays != nullptr)
-        {
-            stbi_image_free(delays);
-        }
         return animation;
     }
 
@@ -2279,6 +2390,11 @@ namespace
             ? 1.0 / sourceFrameRate
             : 1.0 / 30.0;
         SwsContext* scaleContext = nullptr;
+        struct ScaleContextCleanup
+        {
+            SwsContext*& context;
+            ~ScaleContextCleanup() { sws_freeContext(context); }
+        } scaleCleanup { scaleContext };
         uint64_t decodedFrameCount = 0u;
 
         auto append_decoded_frame = [&](double durationSeconds) -> bool {
@@ -2321,6 +2437,7 @@ namespace
             {
                 frame.durationSeconds = fallbackDuration;
             }
+            check_decoded_size(frame.width, frame.height, animation.frames.size() + 1u);
             frame.rgba.assign(static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height) * 4u, 0u);
 
             uint8_t* dstData[4] = { frame.rgba.data(), nullptr, nullptr, nullptr };
@@ -2338,6 +2455,7 @@ namespace
         };
 
         auto process_decoded_frame = [&]() -> bool {
+            check_preparation();
             const uint64_t frameIndex = decodedFrameCount++;
             const double frameTime = ffmpeg_frame_time_seconds(
                 decodedFrame.get(),
@@ -2412,10 +2530,6 @@ namespace
             }
         }
 
-        if (scaleContext != nullptr)
-        {
-            sws_freeContext(scaleContext);
-        }
         if (sourceDuration > 0.0 && animation.valid())
         {
             double uploadedDuration = animation.duration_seconds();
@@ -2536,6 +2650,7 @@ namespace
 
         frame.width = static_cast<uint32_t>(*width);
         frame.height = static_cast<uint32_t>(*height);
+        check_decoded_size(frame.width, frame.height);
         frame.rgba.reserve(static_cast<std::size_t>(*width) * static_cast<std::size_t>(*height) * 4u);
 
         const auto scale_channel = [&](int value) -> unsigned char {
@@ -2547,6 +2662,7 @@ namespace
         const std::size_t pixelCount = static_cast<std::size_t>(*width) * static_cast<std::size_t>(*height);
         for (std::size_t pixel = 0; pixel < pixelCount; ++pixel)
         {
+            if ((pixel & 4095u) == 0u) check_preparation();
             const std::optional<int> r = next_ppm_int(text, cursor);
             const std::optional<int> g = next_ppm_int(text, cursor);
             const std::optional<int> b = next_ppm_int(text, cursor);
@@ -2583,12 +2699,14 @@ namespace
             return frame;
         }
 
+        const std::unique_ptr<NSVGimage, decltype(&nsvgDelete)> ownedSvg(svg, nsvgDelete);
         const float targetWidth = options.rasterWidth > 0u ? static_cast<float>(options.rasterWidth) : svg->width;
         const float scale = targetWidth / std::max(svg->width, 1.0f);
         frame.width = std::max(1u, static_cast<uint32_t>(std::round(svg->width * scale)));
         frame.height = options.rasterHeight > 0u
             ? options.rasterHeight
             : std::max(1u, static_cast<uint32_t>(std::round(svg->height * scale)));
+        check_decoded_size(frame.width, frame.height);
         frame.rgba.assign(static_cast<std::size_t>(frame.width) * static_cast<std::size_t>(frame.height) * 4u, 0u);
 
         NSVGrasterizer* rasterizer = nsvgCreateRasterizer();
@@ -2601,7 +2719,6 @@ namespace
                 static_cast<int>(frame.width * 4u));
             nsvgDeleteRasterizer(rasterizer);
         }
-        nsvgDelete(svg);
         return frame;
     }
 
@@ -2636,7 +2753,9 @@ namespace
         animation.frames.reserve(source.frames.size());
         for (const vibrance::animation::LottieSvgFrame& sourceFrame : source.frames)
         {
+            check_preparation();
             DecodedMediaFrame frame = decode_svg_text(sourceFrame.svg, options);
+            if (frame.valid()) check_decoded_size(frame.width, frame.height, source.frames.size());
             if (!frame.valid())
             {
                 animation.frames.clear();
@@ -2681,9 +2800,11 @@ namespace
         animation.frames.reserve(frameCount);
         for (uint32_t frameIndex = 0; frameIndex < frameCount; ++frameIndex)
         {
+            check_preparation();
             const double frameTime = timelineStart + static_cast<double>(frameIndex) * frameDuration;
             const std::string frameSvg = apply_css_animation_frame(svgText, cssAnimation, frameTime);
             DecodedMediaFrame frame = decode_svg_text(frameSvg, options);
+            if (frame.valid()) check_decoded_size(frame.width, frame.height, frameCount);
             if (!frame.valid())
             {
                 animation.frames.clear();
@@ -2700,12 +2821,7 @@ namespace
     bool make_media_texture(const DecodedMediaFrame& frame, const Media2DLoadOptions& options,
         const MetalTextureUpload& upload, Media2DAsset& asset)
     {
-        auto rgba = frame.rgba;
-        if (options.premultiplyAlpha) {
-            bleed_transparent_rgb(rgba, frame.width, frame.height);
-            premultiply_alpha(rgba);
-        }
-        asset.image = upload(frame.width, frame.height, rgba, options.srgb, options.generateMipmaps);
+        asset.image = upload(frame.width, frame.height, frame.rgba, options.srgb, options.generateMipmaps);
         asset.drawable = bool(asset.image);
         return asset.drawable;
     }
@@ -2786,243 +2902,382 @@ namespace
     }
 }
 
-Media2DHandle load_media_2d_asset(
-    const std::filesystem::path& path,
-    const Media2DLoadOptions& options,
-    uint32_t mediaId,
+struct PreparedMedia2D::Data
+{
+    Media2DAsset metadata;
+    DecodedMediaAnimation animation;
+    Media2DLoadOptions options;
+    std::string cacheKey;
+    std::size_t decodedByteCount = 0;
+};
+
+struct Media2DPreparedAccess
+{
+    static const PreparedMedia2D::Data* get(const PreparedMedia2D& prepared)
+    { return prepared.data_.get(); }
+    static PreparedMedia2D make(std::shared_ptr<PreparedMedia2D::Data> data)
+    {
+        PreparedMedia2D prepared;
+        prepared.data_ = std::move(data);
+        return prepared;
+    }
+};
+
+bool PreparedMedia2D::valid() const { return bool(data_); }
+uint32_t PreparedMedia2D::frame_count() const
+{ return data_ ? static_cast<uint32_t>(data_->animation.frames.size()) : 0u; }
+std::size_t PreparedMedia2D::decoded_byte_count() const
+{ return data_ ? data_->decodedByteCount : 0u; }
+const std::filesystem::path& PreparedMedia2D::path() const
+{
+    static const std::filesystem::path empty;
+    return data_ ? data_->metadata.path : empty;
+}
+const Media2DLoadOptions& PreparedMedia2D::options() const
+{
+    static const Media2DLoadOptions empty;
+    return data_ ? data_->options : empty;
+}
+const std::string& PreparedMedia2D::cache_key() const
+{
+    static const std::string empty;
+    return data_ ? data_->cacheKey : empty;
+}
+
+std::string media_2d_cache_key(const std::filesystem::path& path, const Media2DLoadOptions& options)
+{
+    const auto absolute = std::filesystem::absolute(path).lexically_normal();
+    std::error_code error;
+    const auto size = std::filesystem::file_size(absolute, error);
+    const auto safeSize = error ? 0u : size;
+    error.clear();
+    const auto writeTime = std::filesystem::last_write_time(absolute, error);
+    const auto ticks = error ? 0 : static_cast<std::int64_t>(writeTime.time_since_epoch().count());
+    std::ostringstream key;
+    key << absolute.string() << '|' << safeSize << '@' << ticks << '|'
+        << options.rasterWidth << '|' << options.rasterHeight << '|' << options.srgb << '|'
+        << options.generateMipmaps << '|' << options.premultiplyAlpha << '|'
+        << options.maxAnimationFrames << '|' << options.svgAnimationFrames << '|'
+        << options.svgAnimationFrameRate << '|' << options.lottieAnimationFrames << '|'
+        << options.maxVideoFrames << '|' << options.maxVideoPixels << '|' << options.trimTransparentBorders;
+    return key.str();
+}
+
+PreparedMedia2D prepare_media_2d(const std::filesystem::path& path,
+    const Media2DLoadOptions& options, std::stop_token cancellation)
+{
+    const PreparationContext context { cancellation, options.maxDecodedBytes };
+    struct RestoreContext
+    {
+        const PreparationContext* previous;
+        ~RestoreContext() { preparationContext = previous; }
+    } restore { preparationContext };
+    preparationContext = &context;
+    try
+    {
+        check_preparation();
+        Logger* logger = Logger::fetch_logger();
+        auto data = std::make_shared<PreparedMedia2D::Data>();
+        data->options = options;
+        auto& metadata = data->metadata;
+        metadata.path = std::filesystem::absolute(path).lexically_normal();
+        metadata.name = metadata.path.filename().string();
+        metadata.sourceType = source_type_from_path(metadata.path);
+        metadata.premultipliedAlpha = options.premultiplyAlpha;
+        data->cacheKey = media_2d_cache_key(metadata.path, options);
+        DecodedMediaFrame frame = {};
+        DecodedMediaAnimation animation = {};
+        if (metadata.sourceType == Media2DSourceType::eSvg)
+        {
+            const std::string svgText = read_text_file(metadata.path);
+            SvgCssAnimationDocument cssDocument = {};
+            if (!svgText.empty())
+            {
+                metadata.pixelSize = parse_svg_pixel_size(svgText);
+                metadata.animated = svg_looks_animated(svgText);
+                cssDocument = parse_svg_css_animations(svgText);
+                if (metadata.animated)
+                {
+                    animation = make_css_svg_animation_frames(svgText, options);
+                    if (animation.valid())
+                    {
+                        // The animation retains its first frame without an extra RGBA copy.
+                    }
+                }
+            }
+
+            if (!frame.valid() && !animation.valid())
+            {
+                const std::string staticSvgText = !cssDocument.classes.empty()
+                    ? apply_css_animation_frame(svgText, cssDocument, 0.0)
+                    : svgText;
+                frame = decode_svg_text(staticSvgText, options);
+            }
+            if (!frame.valid() && !animation.valid())
+            {
+                logger->print(
+                    "Registered SVG media metadata for " + metadata.path.string() +
+                    ". SVG rasterization is not available in this build.");
+                return Media2DPreparedAccess::make(std::move(data));
+            }
+
+            if (metadata.animated && !animation.valid())
+            {
+                animation = make_svg_animation_frames(frame, svgText, options);
+            }
+        }
+        else if (metadata.sourceType == Media2DSourceType::eLottie)
+        {
+            const std::string jsonText = read_text_file(metadata.path);
+            const vibrance::animation::LottieSvgAnimation lottie =
+                vibrance::animation::make_lottie_svg_animation(
+                    jsonText,
+                    options.lottieAnimationFrames,
+                    options.maxAnimationFrames);
+            if (!lottie.valid())
+            {
+                logger->print(
+                    "Failed to parse Lottie animation " + metadata.path.string() +
+                    (lottie.error.empty() ? "." : ": " + lottie.error));
+                return {};
+            }
+
+            if (lottie.ignoredExpressionCount > 0u)
+            {
+                logger->warning(
+                    "Lottie animation " + metadata.path.string() + " contains " +
+                    std::to_string(lottie.ignoredExpressionCount) +
+                    " After Effects expression(s); authored keyframes are used as the portable fallback.");
+            }
+            if (lottie.unsupportedFeatureCount > 0u)
+            {
+                logger->warning(
+                    "Lottie animation " + metadata.path.string() + " contains " +
+                    std::to_string(lottie.unsupportedFeatureCount) +
+                    " unsupported feature(s); supported vector layers continue rendering.");
+            }
+
+            metadata.animated = lottie.frames.size() > 1u;
+            animation = decode_lottie_animation(lottie, options);
+            if (animation.valid())
+            {
+                // The animation retains its first frame without an extra RGBA copy.
+            }
+            else
+            {
+                logger->print(
+                    "Failed to rasterize Lottie animation frames: " +
+                    metadata.path.string());
+                return {};
+            }
+        }
+        else if (metadata.sourceType == Media2DSourceType::eVideo)
+        {
+            metadata.animated = true;
+            animation = decode_video_animation(metadata.path, options);
+            if (animation.valid())
+            {
+                // The animation retains its first frame without an extra RGBA copy.
+            }
+            else
+            {
+                logger->print(
+                    "Registered video media metadata for " + metadata.path.string() +
+                    ". No available video decoder produced frames.");
+                return Media2DPreparedAccess::make(std::move(data));
+            }
+        }
+        else
+        {
+            if (path_has_extension(metadata.path, ".gif"))
+            {
+                animation = decode_gif_animation(metadata.path, options);
+                if (animation.valid())
+                {
+                    // The animation retains its first frame without an extra RGBA copy.
+                }
+            }
+            else if (path_has_extension(metadata.path, ".png"))
+            {
+                animation = decode_apng_animation(metadata.path, options);
+                if (animation.valid())
+                {
+                    // The animation retains its first frame without an extra RGBA copy.
+                }
+            }
+
+            if (!frame.valid() && !animation.valid())
+            {
+                frame = decode_raster_image(metadata.path);
+            }
+            if (!frame.valid() && path_has_extension(metadata.path, ".ppm"))
+            {
+                frame = decode_ascii_ppm(metadata.path);
+            }
+            if (!frame.valid() && !animation.valid())
+            {
+                logger->print("Failed to decode 2D media image: " + metadata.path.string());
+                return {};
+            }
+        }
+
+        check_preparation();
+        if (options.trimTransparentBorders && !animation.valid()) trim_transparent_borders(frame);
+        const bool decodedAnimation = animation.valid();
+        if (decodedAnimation) frame = {};
+        else animation.frames.push_back(std::move(frame));
+        for (DecodedMediaFrame& decoded : animation.frames)
+        {
+            check_decoded_size(decoded.width, decoded.height, animation.frames.size());
+            if (&decoded == &animation.frames.front())
+                metadata.hasBlackBackground = media_frame_has_black_background(decoded);
+            if (options.premultiplyAlpha)
+            {
+                bleed_transparent_rgb(decoded.rgba, decoded.width, decoded.height);
+                check_preparation();
+                premultiply_alpha(decoded.rgba);
+            }
+            data->decodedByteCount += decoded.rgba.size();
+        }
+        const DecodedMediaFrame& firstFrame = animation.frames.front();
+        metadata.pixelSize = { firstFrame.width, firstFrame.height };
+        if (decodedAnimation)
+        {
+            apply_animation_metadata(metadata, animation);
+            metadata.animated = metadata.frameCount > 1u;
+        }
+        else
+        {
+            metadata.frameCount = 1u;
+            metadata.durationSeconds = 0.0;
+            metadata.frameRate = 0.0;
+            metadata.animated = false;
+        }
+        data->animation = std::move(animation);
+        check_preparation();
+        if (data->cacheKey != media_2d_cache_key(metadata.path, options)) return {};
+        return Media2DPreparedAccess::make(std::move(data));
+
+    }
+    catch (...)
+    {
+        // Cancellation, corrupt resources, allocation failures and oversized
+        // media leave the caller's existing placeholder and renderer intact.
+        return {};
+    }
+}
+
+#if !defined(__APPLE__)
+#include "media_prepared_upload.inc"
+#endif
+
+Media2DUploadResult upload_prepared_media_2d_asset(
+    const PreparedMedia2D& prepared, uint32_t maxFrameUploads, uint32_t mediaId,
 #if defined(__APPLE__)
     const MetalTextureUpload& upload,
 #else
     VmaAllocator& allocator,
     std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
     std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue,
-    vk::CommandBuffer commandBuffer,
-    vk::Queue queue,
-    vk::Device logicalDevice,
-    vk::DescriptorPool descriptorPool,
-    vk::DescriptorSetLayout descriptorSetLayout,
+    vk::CommandBuffer commandBuffer, vk::Queue queue, vk::Device logicalDevice,
+    vk::DescriptorPool descriptorPool, vk::DescriptorSetLayout descriptorSetLayout,
 #endif
     Media2DAsset& outAsset)
 {
-    Logger* logger = Logger::fetch_logger();
-    outAsset = {};
-    outAsset.id = mediaId;
-    outAsset.path = std::filesystem::absolute(path).lexically_normal();
-    outAsset.name = outAsset.path.filename().string();
-    outAsset.sourceType = source_type_from_path(outAsset.path);
-    outAsset.frameCount = 1;
-    outAsset.premultipliedAlpha = options.premultiplyAlpha;
-
-    DecodedMediaFrame frame = {};
-    DecodedMediaAnimation animation = {};
-    if (outAsset.sourceType == Media2DSourceType::eSvg)
+    const auto* data = Media2DPreparedAccess::get(prepared);
+    if (!data) return { {}, true };
+    if (maxFrameUploads == 0u) return {};
+    const auto& animation = data->animation;
+    const auto& metadata = data->metadata;
+    const auto& options = data->options;
+    if (outAsset.id == 0u)
     {
-        const std::string svgText = read_text_file(outAsset.path);
-        SvgCssAnimationDocument cssDocument = {};
-        if (!svgText.empty())
-        {
-            outAsset.pixelSize = parse_svg_pixel_size(svgText);
-            outAsset.animated = svg_looks_animated(svgText);
-            cssDocument = parse_svg_css_animations(svgText);
-            if (outAsset.animated)
-            {
-                animation = make_css_svg_animation_frames(svgText, options);
-                if (animation.valid())
-                {
-                    frame = animation.frames.front();
-                }
-            }
-        }
-
-        if (!frame.valid())
-        {
-            const std::string staticSvgText = !cssDocument.classes.empty()
-                ? apply_css_animation_frame(svgText, cssDocument, 0.0)
-                : svgText;
-            frame = decode_svg_text(staticSvgText, options);
-        }
-        if (!frame.valid())
-        {
-            logger->print(
-                "Registered SVG media metadata for " + outAsset.path.string() +
-                ". SVG rasterization is not available in this build.");
-            return outAsset.handle();
-        }
-
-        if (outAsset.animated && !animation.valid())
-        {
-            animation = make_svg_animation_frames(frame, svgText, options);
-        }
+        outAsset.id = mediaId;
+        outAsset.path = metadata.path;
+        outAsset.name = metadata.name;
+        outAsset.sourceType = metadata.sourceType;
+        outAsset.pixelSize = metadata.pixelSize;
+        outAsset.durationSeconds = metadata.durationSeconds;
+        outAsset.frameRate = metadata.frameRate;
+        outAsset.frameCount = metadata.frameCount;
+        outAsset.animated = metadata.animated;
+        outAsset.hasBlackBackground = metadata.hasBlackBackground;
+        outAsset.premultipliedAlpha = metadata.premultipliedAlpha;
+        outAsset.frameDurationsSeconds = metadata.frameDurationsSeconds;
     }
-    else if (outAsset.sourceType == Media2DSourceType::eLottie)
-    {
-        const std::string jsonText = read_text_file(outAsset.path);
-        const vibrance::animation::LottieSvgAnimation lottie =
-            vibrance::animation::make_lottie_svg_animation(
-                jsonText,
-                options.lottieAnimationFrames,
-                options.maxAnimationFrames);
-        if (!lottie.valid())
-        {
-            logger->print(
-                "Failed to parse Lottie animation " + outAsset.path.string() +
-                (lottie.error.empty() ? "." : ": " + lottie.error));
-            return {};
-        }
-
-        if (lottie.ignoredExpressionCount > 0u)
-        {
-            logger->warning(
-                "Lottie animation " + outAsset.path.string() + " contains " +
-                std::to_string(lottie.ignoredExpressionCount) +
-                " After Effects expression(s); authored keyframes are used as the portable fallback.");
-        }
-        if (lottie.unsupportedFeatureCount > 0u)
-        {
-            logger->warning(
-                "Lottie animation " + outAsset.path.string() + " contains " +
-                std::to_string(lottie.unsupportedFeatureCount) +
-                " unsupported feature(s); supported vector layers continue rendering.");
-        }
-
-        outAsset.animated = lottie.frames.size() > 1u;
-        animation = decode_lottie_animation(lottie, options);
-        if (animation.valid())
-        {
-            frame = animation.frames.front();
-        }
-        else
-        {
-            logger->print(
-                "Failed to rasterize Lottie animation frames: " +
-                outAsset.path.string());
-            return {};
-        }
-    }
-    else if (outAsset.sourceType == Media2DSourceType::eVideo)
-    {
-        outAsset.animated = true;
-        animation = decode_video_animation(outAsset.path, options);
-        if (animation.valid())
-        {
-            frame = animation.frames.front();
-        }
-        else
-        {
-            logger->print(
-                "Registered video media metadata for " + outAsset.path.string() +
-                ". No available video decoder produced frames.");
-            return outAsset.handle();
-        }
-    }
-    else
-    {
-        if (path_has_extension(outAsset.path, ".gif"))
-        {
-            animation = decode_gif_animation(outAsset.path, options);
-            if (animation.valid())
-            {
-                frame = animation.frames.front();
-            }
-        }
-        else if (path_has_extension(outAsset.path, ".png"))
-        {
-            animation = decode_apng_animation(outAsset.path, options);
-            if (animation.valid())
-            {
-                frame = animation.frames.front();
-            }
-        }
-
-        if (!frame.valid())
-        {
-            frame = decode_raster_image(outAsset.path);
-        }
-        if (!frame.valid() && path_has_extension(outAsset.path, ".ppm"))
-        {
-            frame = decode_ascii_ppm(outAsset.path);
-        }
-        if (!frame.valid())
-        {
-            logger->print("Failed to decode 2D media image: " + outAsset.path.string());
-            return {};
-        }
-    }
-
-    if (options.trimTransparentBorders && !animation.valid()) trim_transparent_borders(frame);
-    const DecodedMediaFrame& firstFrame = animation.valid() ? animation.frames.front() : frame;
-    outAsset.pixelSize = { firstFrame.width, firstFrame.height };
-    outAsset.hasBlackBackground = media_frame_has_black_background(firstFrame);
-    if (!make_media_texture(
-        firstFrame,
-        options,
+    if (!animation.valid()) return { outAsset.handle(), true };
+    std::size_t uploaded =
 #if defined(__APPLE__)
-        upload,
+        outAsset.frameImages.size();
 #else
-        allocator,
-        vmaDeletionQueue,
-        deviceDeletionQueue,
-        commandBuffer,
-        queue,
-        logicalDevice,
-        descriptorPool,
-        descriptorSetLayout,
+        outAsset.frameDescriptorSets.size();
 #endif
-        outAsset))
+    const std::size_t end = uploaded + std::min<std::size_t>(
+        std::max(maxFrameUploads, 1u), animation.frames.size() - uploaded);
+    for (; uploaded < end; ++uploaded)
     {
-        logger->print("Failed to upload 2D media image: " + outAsset.path.string());
-        return {};
-    }
-
-#if defined(__APPLE__)
-    outAsset.frameImages.push_back(outAsset.image.get());
-#else
-    outAsset.frameDescriptorSets.clear();
-    outAsset.frameDescriptorSets.push_back(outAsset.descriptorSet);
-#endif
-    if (animation.valid())
-    {
-        apply_animation_metadata(outAsset, animation);
-        for (std::size_t frameIndex = 1; frameIndex < animation.frames.size(); ++frameIndex)
-        {
-            if (!make_extra_media_frame_texture(
-                animation.frames[frameIndex],
-                options,
+        const auto& frame = animation.frames[uploaded];
+        const bool successful = uploaded == 0u
+            ? make_media_texture(frame, options,
 #if defined(__APPLE__)
                 upload,
 #else
-                allocator,
-                vmaDeletionQueue,
-                deviceDeletionQueue,
-                commandBuffer,
-                queue,
-                logicalDevice,
-                descriptorPool,
-                descriptorSetLayout,
+                allocator, vmaDeletionQueue, deviceDeletionQueue, commandBuffer,
+                queue, logicalDevice, descriptorPool, descriptorSetLayout,
 #endif
-                outAsset))
-            {
-                logger->print("Stopped uploading animation frames for " + outAsset.path.string() +
-                    " at frame " + std::to_string(frameIndex) + ".");
-                break;
-            }
+                outAsset)
+            : make_extra_media_frame_texture(frame, options,
+#if defined(__APPLE__)
+                upload,
+#else
+                allocator, vmaDeletionQueue, deviceDeletionQueue, commandBuffer,
+                queue, logicalDevice, descriptorPool, descriptorSetLayout,
+#endif
+                outAsset);
+        if (!successful) return { {}, true };
+        if (uploaded == 0u)
+        {
+#if defined(__APPLE__)
+            outAsset.frameImages.push_back(outAsset.image.get());
+#else
+            outAsset.frameDescriptorSets.push_back(outAsset.descriptorSet);
+#endif
         }
-        clamp_animation_metadata_to_uploaded_frames(outAsset, animation);
     }
-    else
-    {
-        outAsset.frameCount = 1u;
-        outAsset.durationSeconds = 0.0;
-        outAsset.frameRate = 0.0;
-        outAsset.animated = false;
-        outAsset.frameDurationsSeconds.clear();
-    }
+    if (uploaded < animation.frames.size()) return {};
+    return { outAsset.handle(), true };
+}
 
-    logger->print("Registered 2D media " + outAsset.path.string() +
-        " as handle " + std::to_string(mediaId) + " (" +
-        std::to_string(outAsset.pixelSize.x) + "x" +
-        std::to_string(outAsset.pixelSize.y) + ", " +
-        std::to_string(outAsset.frameCount) + " frame" +
-        (outAsset.frameCount == 1u ? "" : "s") + ").");
-    return outAsset.handle();
+Media2DHandle load_media_2d_asset(
+    const std::filesystem::path& path, const Media2DLoadOptions& options, uint32_t mediaId,
+#if defined(__APPLE__)
+    const MetalTextureUpload& upload,
+#else
+    VmaAllocator& allocator,
+    std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
+    std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue,
+    vk::CommandBuffer commandBuffer, vk::Queue queue, vk::Device logicalDevice,
+    vk::DescriptorPool descriptorPool, vk::DescriptorSetLayout descriptorSetLayout,
+#endif
+    Media2DAsset& outAsset)
+{
+    outAsset = {};
+    const auto prepared = prepare_media_2d(path, options);
+    const auto result = upload_prepared_media_2d_asset(prepared, std::numeric_limits<uint32_t>::max(), mediaId,
+#if defined(__APPLE__)
+        upload,
+#else
+        allocator, vmaDeletionQueue, deviceDeletionQueue, commandBuffer, queue,
+        logicalDevice, descriptorPool, descriptorSetLayout,
+#endif
+        outAsset);
+    // Existing synchronous callers keep their previous best-effort fallback if
+    // a later frame cannot be uploaded. Lazy loads publish complete media only.
+    if (!result.handle.valid() && outAsset.drawable)
+    {
+        if (const auto* data = Media2DPreparedAccess::get(prepared))
+            clamp_animation_metadata_to_uploaded_frames(outAsset, data->animation);
+        return outAsset.handle();
+    }
+    return result.handle;
 }

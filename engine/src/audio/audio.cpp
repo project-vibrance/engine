@@ -347,10 +347,6 @@ AudioEngine::Impl::Impl(bool enabled) : enabled(enabled)
         }
         return;
     }
-
-#if !defined(__APPLE__)
-    initialise();
-#endif
 }
 
 bool AudioEngine::Impl::initialise() const

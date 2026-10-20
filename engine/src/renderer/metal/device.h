@@ -8,6 +8,7 @@
 #include <array>
 #include <span>
 #include <stdexcept>
+#include "media_upload_lifecycle.h"
 
 namespace vibrance::metal
 {
@@ -40,6 +41,24 @@ class SubmissionError : public std::runtime_error
 class Device
 {
   public:
+    struct TextureUploadTicket
+    {
+        Owned<MTL::CommandBuffer> commands;
+        Owned<MTL::Texture> image;
+        MediaUploadCompletion completion() const
+        {
+            if (!commands) return MediaUploadCompletion::eSucceeded;
+            const auto status = commands->status();
+            if (status == MTL::CommandBufferStatusCompleted) return MediaUploadCompletion::eSucceeded;
+            if (status == MTL::CommandBufferStatusError) return MediaUploadCompletion::eFailed;
+            return MediaUploadCompletion::ePending;
+        }
+    };
+    struct TextureUpload
+    {
+        std::unique_ptr<StorageImage> image;
+        TextureUploadTicket ticket;
+    };
     Device();
     ~Device();
     bool diagnosticsEnabled = false;
@@ -105,6 +124,10 @@ class Device
                                MTL::PixelFormat format = MTL::PixelFormatRGBA8Unorm);
     std::unique_ptr<StorageImage> upload(uint32_t width, uint32_t height,
                                          std::span<const unsigned char> bytes, bool srgb, bool mipmaps);
+    // Prepared media owns this ticket until its status retires. Existing
+    // synchronous font/model/resource uploads retain their current contract.
+    TextureUpload upload_async(uint32_t width, uint32_t height,
+                               std::span<const unsigned char> bytes, bool srgb, bool mipmaps);
     void dispatch(const char *name, const void *data, size_t size, uint32_t width, uint32_t height,
                   std::initializer_list<MTL::Texture *> textures, uint32_t count = 1);
     void flush();

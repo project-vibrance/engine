@@ -691,7 +691,8 @@ namespace
 
     DispatchBounds make_blur_dispatch_bounds(
         const auto& swapchain,
-        const Renderer2DBatch& batch)
+        const Renderer2DBatch& batch,
+        bool coverWorkgroups = true)
     {
         // Inherited masks store their rectangle in effect1, so its width is
         // not a feather radius. Otherwise a small scrolling fade filters the
@@ -707,12 +708,13 @@ namespace
                     std::max(std::max(batch.effect0.x, 0.0f), feather)) +
                     notched_squircle_dispatch_padding(batch, batch.uvRect),
                 batch.clipRect),
-            0.0f);
+            0.0f, coverWorkgroups);
     }
 
     DispatchBounds make_liquid_output_dispatch_bounds(
         const auto& swapchain,
-        const Renderer2DBatch& batch)
+        const Renderer2DBatch& batch,
+        bool coverWorkgroups = true)
     {
         // Horizontal filtering still needs the full source halo. Clear,
         // vertical optics and final composition only write the lens and its
@@ -724,7 +726,7 @@ namespace
             std::min(batch.rect.z, batch.rect.w) * 0.40f + notchPadding;
         return make_dispatch_bounds(swapchain,
             expand_and_clip_rect(batch.rect,
-                std::min(softness + notchPadding, sourcePadding), batch.clipRect), 0.0f);
+                std::min(softness + notchPadding, sourcePadding), batch.clipRect), 0.0f, coverWorkgroups);
     }
 
     DispatchBounds make_blur_replay_dispatch_bounds(

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../engine/src/platform/win32/liquid_glass_dwm_identity.h"
+#include "../../engine/src/platform/win32/liquid_glass_runtime_identity.h"
 #include <aclapi.h>
 #include <sddl.h>
 
@@ -48,12 +48,7 @@ inline std::wstring cache_liquid_runtime(const std::wstring& extension,
                                         const std::wstring& cacheRoot)
 {
     namespace fs = std::filesystem;
-    constexpr std::array<const wchar_t*, 7> names {
-        L"vibrance_liquid_dwm_extension.dll", L"liquid_glass_win32.cso",
-        L"liquid_glass_ui_win32.cso", L"liquid_glass_fullscreen.cso",
-        L"liquid_glass_blur_horizontal.cso", L"liquid_glass_blur_vertical.cso",
-        L"liquid_glass_compare.cso"
-    };
+    constexpr auto names = liquidRuntimeNames;
     std::uint8_t fingerprints[names.size()][32] {};
     const auto sourceDirectory = fs::absolute(extension).parent_path();
     for (std::size_t index = 0; index < names.size(); ++index)

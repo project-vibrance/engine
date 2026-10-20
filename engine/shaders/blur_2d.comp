@@ -443,6 +443,11 @@ vec4 sample_axis_blur(ivec2 pixel, vec2 axis, float radius, bool readScratch) {
 }
 
 void main() {
+    // The last workgroup can extend past a scrolling or panel clip.
+    uint tail = (pc.data.y >> 1u);
+    uvec2 exactExtent = gl_NumWorkGroups.xy * gl_WorkGroupSize.xy -
+        uvec2(tail & 7u, (tail >> 3u) & 7u);
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, exactExtent))) return;
     ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
     ivec2 screenSize = imageSize(uiBlurSurface);
     if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {

@@ -1793,6 +1793,10 @@ private:
 
     static HWND quality_source_window(const Win32PlaybackQualityProbe::Request& request)
     {
+        // Most players own their top-level window directly. Resolve that exact
+        // PID before collecting ancestry for browser/audio helper processes.
+        if (request.processId != 0u)
+            if (HWND window = find_source_window({}, request.processId)) return window;
         // UI ownership can be above the audio helper in Electron/browser apps.
         // Follow that process ancestry only for metadata inspection; keep the
         // original audio-session PID for capture. Track identity is rechecked
@@ -1806,7 +1810,8 @@ private:
                 !source_matches_process(request.sourceApp, processId) &&
                 (executable.empty() || !equal_aumid(
                     process_executable_path(processId), executable))) break;
-            if (HWND window = find_source_window({}, processId)) return window;
+            if (processId != request.processId)
+                if (HWND window = find_source_window({}, processId)) return window;
             const auto entry = std::find_if(processes.begin(), processes.end(),
                 [processId](const ProcessEntry& value) { return value.processId == processId; });
             if (entry == processes.end() || entry->parentProcessId == processId) break;

@@ -817,14 +817,11 @@ vec4 resolve_transformed_media(vec2 pixelCenter, float backgroundFactor) {
 }
 
 void main() {
-    uint dispatchWidth = (pc.data.x >> 4u) & 16383u;
-    uint dispatchHeight = (pc.data.x >> 18u) & 16383u;
-    if (dispatchWidth > 0u && dispatchHeight > 0u &&
-        (gl_GlobalInvocationID.x >= dispatchWidth ||
-            gl_GlobalInvocationID.y >= dispatchHeight)) {
-        return;
-    }
-
+    // The last workgroup can extend past a scrolling or panel clip.
+    uint tail = (pc.data.x >> 8u);
+    uvec2 exactExtent = gl_NumWorkGroups.xy * gl_WorkGroupSize.xy -
+        uvec2(tail & 7u, (tail >> 3u) & 7u);
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, exactExtent))) return;
     ivec2 pixel = dispatch_origin() + ivec2(gl_GlobalInvocationID.xy);
     ivec2 screenSize = imageSize(colorBuffer);
     if (pixel.x < 0 || pixel.y < 0 || pixel.x >= screenSize.x || pixel.y >= screenSize.y) {

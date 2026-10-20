@@ -1423,11 +1423,17 @@ bool Renderer2DFontAtlas::load_from_file(
     {
         std::vector<LoadedFontFace> faces;
         faces.reserve(fontPaths.size());
+        int fallbackFontWeight = requestedFontWeight;
         for (const std::filesystem::path& fontPath : fontPaths)
         {
             LoadedFontFace loadedFace = {};
-            if (load_font_face(library, fontPath, requestedFontWeight, bakedPixelHeight, loadedFace))
+            if (load_font_face(library, fontPath, fallbackFontWeight, bakedPixelHeight, loadedFace))
             {
+                // Keep the primary face's default when no weight was requested,
+                // then apply that weight to its script fallbacks. Variable CJK
+                // faces can otherwise default to Thin beside Regular digits.
+                if (fallbackFontWeight == 0 && !FT_HAS_COLOR(loadedFace.face))
+                    fallbackFontWeight = clamped_font_weight(inferred_face_weight(loadedFace.face));
                 faces.push_back(std::move(loadedFace));
             }
         }
@@ -1747,7 +1753,10 @@ bool Renderer2DFontAtlas::load_from_file(
                     }
 
                     FT_Vector kerning = {};
-                    if (FT_Get_Kerning(face, leftGlyph, rightGlyph, FT_KERNING_DEFAULT, &kerning) == 0)
+                    // Absent pairs already resolve to zero. Do not allocate a
+                    // hash-table entry for every unkerned glyph combination.
+                    if (FT_Get_Kerning(face, leftGlyph, rightGlyph, FT_KERNING_DEFAULT, &kerning) == 0 &&
+                        kerning.x != 0)
                     {
                         kerningTable[kerning_key(left, right)] = ft_26_6_to_float(kerning.x);
                     }

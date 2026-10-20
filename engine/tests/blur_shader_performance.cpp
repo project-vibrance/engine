@@ -960,6 +960,7 @@ namespace
     }
 }
 
+#ifndef VIBRANCE_SHADER_HARNESS_NO_MAIN
 int main(int argc, char** argv)
 {
     const bool shape = argc == 4 && std::string(argv[3]) == "shape";
@@ -1779,3 +1780,4 @@ int main(int argc, char** argv)
         return 2;
     }
 }
+#endif

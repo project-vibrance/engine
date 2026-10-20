@@ -99,6 +99,16 @@ struct Engine::Impl
     std::unordered_map<entt::entity, std::string> checkedText;
     uint64_t checkedTextGeneration = UINT64_MAX;
     std::unordered_map<uint32_t, Media2DAsset> media;
+    struct PendingMediaUpload
+    {
+        Media2DAsset asset;
+        MediaUploadLifecycle<Device::TextureUploadTicket> lifecycle;
+        Media2DUploadResult result;
+        std::size_t reservedBytes = 0;
+    };
+    using PendingMediaUploads = std::unordered_map<std::string, PendingMediaUpload>;
+    PendingMediaUploads pendingMediaUploads;
+    MediaUploadBudget mediaUploadBudget;
     std::unordered_map<uint32_t, MetalModel> models;
     std::unordered_map<uint32_t, Owned<MTL::Buffer>> modelBuffers;
     std::unordered_map<std::string, uint32_t> modelCache, mediaCache;
@@ -179,6 +189,23 @@ struct Engine::Impl
         diagnosticsStart = now;
     }
 
+    PendingMediaUploads::iterator erase_pending_media_upload(PendingMediaUploads::iterator position)
+    {
+        mediaUploadBudget.release(position->second.reservedBytes);
+        return pendingMediaUploads.erase(position);
+    }
+    void reap_cancelled_media_uploads()
+    {
+        for (auto position = pendingMediaUploads.begin(); position != pendingMediaUploads.end();)
+        {
+            const auto& state = position->second;
+            if (state.lifecycle.cancelled && state.lifecycle.retired())
+                position = erase_pending_media_upload(position);
+            else
+                ++position;
+        }
+    }
+
     explicit Impl(const EngineCreateInfo &info)
         : device(), window(info.nativeWindowHandle),
           audio(info.enableAudio), cap(info.maxRenderPixels),
@@ -215,6 +242,13 @@ struct Engine::Impl
     }
     ~Impl()
     {
+        // Teardown may drain the queue. Navigation cancellation and frame
+        // pumping only poll, retaining every unpublished image until retirement.
+        for (auto& [key, state] : pendingMediaUploads)
+            if (state.lifecycle.ticket.commands)
+                state.lifecycle.ticket.commands->waitUntilCompleted();
+        pendingMediaUploads.clear();
+        mediaUploadBudget.reservedBytes = 0;
         try
         {
             device.flush();
@@ -353,7 +387,13 @@ struct Engine::Impl
             return;
         auto constants = make_push_constants(batch, pass, bounds.x, bounds.y);
         if (std::string_view(name) == "blur_2d_comp")
+        {
             constants.data.x |= batch.backdropCapColour << 8u;
+            constants.data.y = renderer2d_blur_dispatch_flags(constants.data.y, bounds.width, bounds.height);
+        }
+        else if (std::string_view(name) == "shape_2d_comp" || std::string_view(name) == "shadow_2d_comp" ||
+            std::string_view(name) == "media_2d_comp")
+            constants.data.x = renderer2d_primitive_dispatch_data(constants.data.x, bounds.width, bounds.height);
         if (std::string_view(name) == "text_msdf_comp")
         {
             // Bound dependency planning for long runs. The shared planner keeps
@@ -590,6 +630,7 @@ struct Engine::Impl
     }
     void render()
     {
+        reap_cancelled_media_uploads();
         const bool drawableAvailable = valid && extent.width && extent.height;
         // CAMetalLayer presentation does not pace the CPU reliably when the
         // glass view presents inside a Core Animation transaction. A zero
@@ -875,7 +916,7 @@ struct Engine::Impl
                 0.0f, 0.0f, float(extent.width), float(extent.height)};
             foregroundBlurBatch.primitive = Renderer2DPrimitive::eRectangle;
             foregroundBlurBatch.effect0 = {foregroundBlurRadius, 1.0f, 0.0f, 1.0f};
-            foregroundBlurBounds = make_blur_dispatch_bounds(*this, foregroundBlurBatch);
+            foregroundBlurBounds = make_blur_dispatch_bounds(*this, foregroundBlurBatch, false);
         }
         paintItems.clear();
         bool hasBlur = false;
@@ -987,7 +1028,8 @@ struct Engine::Impl
             case Renderer2DRenderOpType::eBlur: {
                 auto bounds = make_blur_replay_dispatch_bounds(*this, batch);
                 const bool liquid = (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
-                const auto outputBounds = liquid ? make_liquid_output_dispatch_bounds(*this, batch) : bounds;
+                const auto outputBounds = liquid ? make_liquid_output_dispatch_bounds(*this, batch, false) :
+                    make_blur_dispatch_bounds(*this, batch, false);
                 // The Metal path never populates a separate static layer.
                 auto bindings = {colour.get(), colour.get(), backdrop ? texture(backdrop.get()) : colour.get(),
                                  temporary.get(), blur.get()};
@@ -1018,11 +1060,11 @@ struct Engine::Impl
             }
             case Renderer2DRenderOpType::eShape:
                 dispatch("shape_2d_comp", batch,
-                         make_dispatch_bounds(*this, batch, DispatchBoundsMode::eShape), 0, {colour.get()});
+                         make_dispatch_bounds(*this, batch, DispatchBoundsMode::eShape, false), 0, {colour.get()});
                 break;
             case Renderer2DRenderOpType::eShadow:
                 dispatch("shadow_2d_comp", batch,
-                         make_dispatch_bounds(*this, batch, DispatchBoundsMode::eShadow), 0, {colour.get()});
+                         make_dispatch_bounds(*this, batch, DispatchBoundsMode::eShadow, false), 0, {colour.get()});
                 break;
             case Renderer2DRenderOpType::eTextUnderlay:
                 if (batch.flags & eRenderer2DStyleShadow)
@@ -1056,7 +1098,7 @@ struct Engine::Impl
                 const auto &asset = it->second;
                 auto source = texture(
                     asset.frameImages[std::min<size_t>(batch.frameIndex, asset.frameImages.size() - 1)]);
-                const auto bounds = make_dispatch_bounds(*this, batch, DispatchBoundsMode::eExact);
+                const auto bounds = make_dispatch_bounds(*this, batch, DispatchBoundsMode::eExact, false);
                 const uint32_t radius = uint32_t(std::clamp(std::lround(batch.effect0.z), 0l, 32l));
                 if (!temporary && ((batch.flags & (eRenderer2DStyleMediaBlurHorizontal |
                                                      eRenderer2DStyleMediaBlurVertical)) ||
@@ -1388,14 +1430,8 @@ Model3DHandle Engine::load_model_3d(const std::filesystem::path &path)
 Media2DHandle Engine::load_media_2d(const std::filesystem::path &path, const Media2DLoadOptions &options)
 {
     const LogOperation diagnosticOperation("metal: Engine::load_media_2d");
-    std::ostringstream key;
-    key << std::filesystem::absolute(path).lexically_normal().string() << '|'
-        << resource_file_cache_version(path) << '|' << options.rasterWidth << '|' << options.rasterHeight
-        << '|' << options.srgb << '|' << options.generateMipmaps << '|' << options.premultiplyAlpha << '|'
-        << options.maxAnimationFrames << '|' << options.svgAnimationFrames << '|'
-        << options.svgAnimationFrameRate << '|' << options.lottieAnimationFrames << '|'
-        << options.maxVideoFrames << '|' << options.maxVideoPixels << '|' << options.trimTransparentBorders;
-    if (auto found = impl->mediaCache.find(key.str()); found != impl->mediaCache.end())
+    const std::string key = media_2d_cache_key(path, options);
+    if (auto found = impl->mediaCache.find(key); found != impl->mediaCache.end())
         return impl->media.at(found->second).handle();
     Media2DAsset asset;
     const uint32_t id = impl->nextMedia++;
@@ -1403,11 +1439,111 @@ Media2DHandle Engine::load_media_2d(const std::filesystem::path &path, const Med
     if (handle.valid())
     {
         impl->media.emplace(id, std::move(asset));
-        impl->mediaCache[key.str()] = id;
+        impl->mediaCache[key] = id;
         impl->scene.mark_dirty();
     }
     return handle;
 }
+Media2DUploadResult Engine::upload_media_2d(const PreparedMedia2D& prepared, uint32_t maxFrameUploads)
+{
+    try
+    {
+        impl->reap_cancelled_media_uploads();
+        if (!prepared.valid()) return { {}, true };
+        if (maxFrameUploads == 0u) return {};
+        const auto& key = prepared.cache_key();
+        if (const auto cached = impl->mediaCache.find(key); cached != impl->mediaCache.end())
+        {
+            // A synchronous caller may have filled this cache while its lazy
+            // twin was pending. Retire that unpublished twin and its budget.
+            cancel_media_2d_upload(prepared);
+            return { impl->media.at(cached->second).handle(), true };
+        }
+        auto position = impl->pendingMediaUploads.find(key);
+        if (position == impl->pendingMediaUploads.end())
+        {
+            const auto reservedBytes = MediaUploadBudget::reservation(prepared.decoded_byte_count());
+            const auto admission = impl->mediaUploadBudget.admit(reservedBytes, impl->pendingMediaUploads.size());
+            // Transient pressure keeps the caller's decoded request eligible;
+            // an individually oversized image fails without changing quality.
+            if (admission == MediaUploadAdmission::ePending) return {};
+            if (admission == MediaUploadAdmission::eRejected) return { {}, true };
+            try
+            {
+                const auto inserted = impl->pendingMediaUploads.try_emplace(key);
+                position = inserted.first;
+                if (inserted.second) position->second.reservedBytes = reservedBytes;
+                else impl->mediaUploadBudget.release(reservedBytes);
+            }
+            catch (...)
+            {
+                impl->mediaUploadBudget.release(reservedBytes);
+                throw;
+            }
+        }
+        auto& state = position->second;
+        if (state.lifecycle.cancelled || !state.lifecycle.retired()) return {};
+        if (state.lifecycle.ticket.completion() == MediaUploadCompletion::eFailed)
+        {
+            impl->erase_pending_media_upload(position);
+            return { {}, true };
+        }
+        const auto publish = [&]() -> Media2DUploadResult {
+            const auto result = state.result;
+            if (result.handle.valid())
+            {
+                impl->media.emplace(result.handle.id, std::move(state.asset));
+                try { impl->mediaCache.emplace(key, result.handle.id); }
+                catch (...)
+                {
+                    impl->media.erase(result.handle.id);
+                    throw;
+                }
+                impl->scene.mark_dirty();
+            }
+            impl->erase_pending_media_upload(position);
+            return result;
+        };
+        if (state.lifecycle.can_publish()) return publish();
+        if (!state.lifecycle.can_upload()) return {};
+
+        state.lifecycle.ticket = {};
+        const uint32_t id = state.asset.id != 0u ? state.asset.id : impl->nextMedia++;
+        const MetalTextureUpload upload = [&](auto width, auto height, auto bytes, bool srgb, bool mipmaps) {
+            auto uploaded = impl->device.upload_async(width, height, bytes, srgb, mipmaps);
+            state.lifecycle.ticket = std::move(uploaded.ticket);
+            return std::move(uploaded.image);
+        };
+        // Admit one frame even if the caller supplies a larger allowance. Its
+        // ticket must retire before another frame or the final handle escapes.
+        state.result = upload_prepared_media_2d_asset(prepared, 1u, id, upload, state.asset);
+        state.lifecycle.finalFrame = state.result.finished;
+        if (!state.lifecycle.retired()) return {};
+        if (state.lifecycle.ticket.completion() == MediaUploadCompletion::eFailed)
+        {
+            impl->erase_pending_media_upload(position);
+            return { {}, true };
+        }
+        if (state.lifecycle.can_publish()) return publish();
+        return {};
+    }
+    catch (...)
+    {
+        cancel_media_2d_upload(prepared);
+        return { {}, true };
+    }
+}
+
+void Engine::cancel_media_2d_upload(const PreparedMedia2D& prepared)
+{
+    if (const auto found = impl->pendingMediaUploads.find(prepared.cache_key());
+        found != impl->pendingMediaUploads.end())
+        found->second.lifecycle.cancelled = true;
+    // Cancelling a menu never waits for the GPU and never allocates a retired
+    // list node. The existing map entry owns its texture/ticket until completion.
+    impl->reap_cancelled_media_uploads();
+}
+
 AudioClipHandle Engine::load_audio_clip(const std::filesystem::path &path)
 {
     return impl->audio.load_clip(path);

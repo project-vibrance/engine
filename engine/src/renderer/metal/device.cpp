@@ -127,6 +127,40 @@ std::unique_ptr<StorageImage> Device::upload(uint32_t width, uint32_t height,
         std::shared_ptr<void>(image->retain(), [](void *p) { static_cast<MTL::Texture *>(p)->release(); });
     return result;
 }
+Device::TextureUpload Device::upload_async(uint32_t width, uint32_t height,
+                                             std::span<const unsigned char> bytes, bool srgb, bool mipmaps)
+{
+    TextureUpload result;
+    if (!width || !height || uint64_t(width) * height > SIZE_MAX / 4 ||
+        bytes.size() != uint64_t(width) * height * 4)
+        return result;
+    auto pool = own(NS::AutoreleasePool::alloc()->init());
+    auto descriptor = MTL::TextureDescriptor::texture2DDescriptor(
+        srgb ? MTL::PixelFormatRGBA8Unorm_sRGB : MTL::PixelFormatRGBA8Unorm, width, height, mipmaps);
+    descriptor->setStorageMode(gpu->hasUnifiedMemory() ? MTL::StorageModeShared : MTL::StorageModeManaged);
+    descriptor->setUsage(MTL::TextureUsageShaderRead);
+    auto image = own(gpu->newTexture(descriptor));
+    if (!image) return result;
+    image->replaceRegion(MTL::Region(0, 0, width, height), 0, bytes.data(), size_t(width) * 4);
+    result.image = std::make_unique<StorageImage>();
+    result.image->extent = { width, height };
+    result.image->native =
+        std::shared_ptr<void>(image->retain(), [](void* p) { static_cast<MTL::Texture*>(p)->release(); });
+    // Retain the texture independently of the asset. A later metadata/vector
+    // allocation can fail after submission without releasing an in-flight image.
+    result.ticket.image = image;
+    if (mipmaps && image->mipmapLevelCount() > 1)
+    {
+        result.ticket.commands = NS::RetainPtr(queue->commandBuffer());
+        require(bool(result.ticket.commands), "Cannot allocate Metal media upload command buffer");
+        auto blit = result.ticket.commands->blitCommandEncoder();
+        require(blit != nullptr, "Cannot allocate Metal media upload encoder");
+        blit->generateMipmaps(image.get());
+        blit->endEncoding();
+        result.ticket.commands->commit();
+    }
+    return result;
+}
 std::pair<MTL::Buffer *, size_t> Device::write_constants(const void *data, size_t size)
 {
     const size_t alignedSize = (size + 255u) & ~size_t(255u);

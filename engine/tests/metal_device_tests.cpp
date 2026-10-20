@@ -337,6 +337,59 @@ void check_two_frames_in_flight(Device &device)
         throw std::runtime_error("Encoding the second frame waited for the first GPU submission");
 }
 
+void check_async_media_upload(Device& device)
+{
+    constexpr uint32_t width = 32u, height = 32u, rowBytes = 256u;
+    std::array<unsigned char, width * height * 4u> rgba {};
+    for (std::size_t pixel = 0; pixel < rgba.size(); pixel += 4u)
+    {
+        rgba[pixel] = 23u; rgba[pixel + 1u] = 57u;
+        rgba[pixel + 2u] = 91u; rgba[pixel + 3u] = 255u;
+    }
+    auto gate = own(device.gpu->newSharedEvent());
+    auto blocker = NS::RetainPtr(device.queue->commandBuffer());
+    blocker->encodeWait(gate.get(), 1u);
+    blocker->commit();
+    std::promise<void> admitted;
+    auto release = std::async(std::launch::async,
+        [gate, ready = admitted.get_future()]() mutable {
+            ready.wait_for(std::chrono::seconds(2));
+            gate->setSignaledValue(1u);
+        });
+    auto uploaded = device.upload_async(width, height, rgba, false, true);
+    const bool returnedWhilePending = gate->signaledValue() == 0u && uploaded.image &&
+        uploaded.ticket.commands && uploaded.ticket.image &&
+        uploaded.ticket.completion() == MediaUploadCompletion::ePending;
+    // Even if publishing the asset failed, its retained ticket must keep the
+    // texture alive while mip generation remains behind another GPU command.
+    uploaded.image.reset();
+    admitted.set_value();
+    release.get();
+    if (!returnedWhilePending)
+        throw std::runtime_error("Prepared Metal texture upload waited for GPU completion");
+    uploaded.ticket.commands->waitUntilCompleted();
+    if (uploaded.ticket.completion() != MediaUploadCompletion::eSucceeded)
+        throw std::runtime_error("Prepared Metal texture upload failed after retirement");
+    auto readback = own(device.gpu->newBuffer(rowBytes * 8u, MTL::ResourceStorageModeShared));
+    auto command = NS::RetainPtr(device.queue->commandBuffer());
+    auto blit = command->blitCommandEncoder();
+    blit->copyFromTexture(uploaded.ticket.image.get(), 0u, 2u, MTL::Origin(0, 0, 0),
+        MTL::Size(8u, 8u, 1u), readback.get(), 0u, rowBytes, rowBytes * 8u);
+    blit->endEncoding();
+    command->commit();
+    command->waitUntilCompleted();
+    if (command->status() == MTL::CommandBufferStatusError)
+        throw std::runtime_error("Prepared Metal texture mip readback failed");
+    const auto* pixels = static_cast<const unsigned char*>(readback->contents());
+    for (std::size_t y = 0; y < 8u; ++y)
+        for (std::size_t x = 0; x < 8u; ++x)
+        {
+            const auto* pixel = pixels + y * rowBytes + x * 4u;
+            if (pixel[0] != 23u || pixel[1] != 57u || pixel[2] != 91u || pixel[3] != 255u)
+                throw std::runtime_error("Prepared Metal upload lost pixels or mip generation");
+        }
+}
+
 void check_submission_resource_lifetime(Device &device)
 {
     constexpr uint32_t width = 16, height = 16, rowBytes = 256;
@@ -512,6 +565,7 @@ int main()
         check_foreground_blur_transitions(device);
         check_async_constants(device);
         check_two_frames_in_flight(device);
+        check_async_media_upload(device);
         check_submission_resource_lifetime(device);
         check_failed_submission_retirement(device);
         // Consecutive submissions reuse storage only after the GPU completes.

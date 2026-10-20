@@ -1288,35 +1288,245 @@ int wmain(int argc, wchar_t** argv)
     if (lens.render(context.Get(), neutralBackdrop.Get(), target.Get(), invalidMask))
         return 53;
 
-    // Missing compositor pixels must not replace an existing surface with
-    // opaque black. The island's UI is composited separately by DWM.
-    std::fill(pixels.begin(), pixels.end(), 0xff000000u);
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    desc.CPUAccessFlags = 0;
-    D3D11_SUBRESOURCE_DATA blackData { pixels.data(),
-        width * sizeof(std::uint32_t), 0 };
-    ComPtr<ID3D11Texture2D> emptyBackdrop;
-    if (FAILED(device->CreateTexture2D(&desc, &blackData,
-            &emptyBackdrop))) return 12;
-    const FLOAT grey[4] = { 0.3f, 0.4f, 0.5f, 1.0f };
-    context->ClearRenderTargetView(target.Get(), grey);
-    if (!lens.render(context.Get(), emptyBackdrop.Get(), target.Get(),
-            region)) return 13;
-    context->CopyResource(readback.Get(), backdrop.Get());
-    if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0,
-            &mapped))) return 14;
-    const auto* middle = reinterpret_cast<const std::uint32_t*>(
-        static_cast<const std::uint8_t*>(mapped.pData) +
-            (height / 2u) * mapped.RowPitch);
-    const std::uint32_t centre = middle[width / 2u];
-    context->Unmap(readback.Get(), 0);
-    const auto near_channel = [](std::uint32_t actual, int expected) {
-        return std::abs(static_cast<int>(actual) - expected) <= 2;
+    // Model several real windows crossing one lens, including black panels
+    // and DWM targets whose alpha channel is unused. The destination already
+    // contains those windows; tint must cover all of them continuously.
+    constexpr std::uint32_t windowColours[] = {
+        0x000000u, 0x010101u, 0x040404u, 0x070707u,
+        0x101010u, 0x303030u, 0xf0f0f0u, 0x2070b0u
     };
-    if (!(near_channel(centre & 0xffu, 77) &&
-        near_channel((centre >> 8u) & 0xffu, 102) &&
-        near_channel((centre >> 16u) & 0xffu, 128))) return 15;
+    std::size_t backdropCoverageFailures = 0u;
+    std::size_t backdropBlurFailures = 0u;
+    std::array<std::vector<std::uint32_t>, 4u> opaqueWindowReferences;
+    for (const std::uint32_t sourceAlpha : { 0xff000000u, 0x10000000u, 0u })
+    {
+        for (UINT y = 0u; y < height; ++y)
+            for (UINT x = 0u; x < width; ++x)
+                pixels[y * width + x] = sourceAlpha | windowColours[(x / 32u + y / 32u) % 8u];
+        D3D11_SUBRESOURCE_DATA windowData { pixels.data(), width * sizeof(std::uint32_t), 0 };
+        ComPtr<ID3D11Texture2D> windowBackdrop;
+        if (FAILED(device->CreateTexture2D(&whiteDesc, &windowData, &windowBackdrop))) return 12;
+        for (const float tint : { 0.0f, 0.5f, 1.0f })
+        for (const float opacity : { 0.5f, 1.0f })
+        for (const bool clipped : { false, true })
+        {
+            auto windowRegion = coverageRegion;
+            windowRegion.tintRed = 0.2f;
+            windowRegion.tintGreen = 0.55f;
+            windowRegion.tintBlue = 0.8f;
+            windowRegion.tintAlpha = tint;
+            windowRegion.opacity = opacity;
+            const D3D11_RECT windowClip { 192, 64, 384, 192 };
+            context->CopyResource(backdrop.Get(), windowBackdrop.Get());
+            if (!lens.render(context.Get(), windowBackdrop.Get(), target.Get(), windowRegion,
+                    0, 0, clipped ? &windowClip : nullptr)) return 13;
+            context->CopyResource(readback.Get(), backdrop.Get());
+            if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return 14;
+            // Stay inside the silhouette so expected coverage is exactly one.
+            for (UINT y = 72u; y < 184u; ++y)
+            {
+                const auto* row = reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+                for (UINT x = 96u; x < 416u; ++x)
+                {
+                    const bool inside = !clipped || (x >= 192u && x < 384u);
+                    const float tintChannels[] = { windowRegion.tintRed, windowRegion.tintGreen, windowRegion.tintBlue };
+                    for (UINT channel = 0u; channel < 3u; ++channel)
+                    {
+                        const float source = float((pixels[y * width + x] >> (8u * channel)) & 255u);
+                        const float tinted = source * (1.0f - tint) + 255.0f * tintChannels[channel] * tint;
+                        const float expected = inside ? tinted * opacity + source * (1.0f - opacity) : source;
+                        const auto actual = (row[x] >> (8u * channel)) & 255u;
+                        if (std::abs(float(actual) - expected) > 2.0f) ++backdropCoverageFailures;
+                    }
+                }
+            }
+            context->Unmap(readback.Get(), 0);
+        }
+        std::size_t referenceIndex = 0u;
+        for (const float radius : { 7.0f, 30.0f })
+        for (const float tint : { 0.0f, 0.6f })
+        {
+            auto windowRegion = coverageRegion;
+            windowRegion.blurRadius = radius;
+            windowRegion.tintAlpha = tint;
+            if (!renderSample(windowBackdrop.Get(), windowRegion)) return 13;
+            auto& reference = opaqueWindowReferences[referenceIndex++];
+            if (sourceAlpha == 0xff000000u) reference = samplePixels;
+            else
+                for (std::size_t pixel = 0u; pixel < samplePixels.size(); ++pixel)
+                    if (!nearlySamePixel(samplePixels[pixel], reference[pixel])) ++backdropBlurFailures;
+        }
+    }
+    std::cout << "Dark and mixed-window backdrop coverage failures: " << backdropCoverageFailures << '\n';
+    std::cout << "Mixed-window blurred source-alpha reference failures: " << backdropBlurFailures << '\n';
+    if (backdropCoverageFailures != 0u || backdropBlurFailures != 0u) return 15;
+    // A valid DWM texture can still contain unavailable black areas. Its
+    // separate destination models the desktop composited behind that surface.
+    // No tint must preserve that desktop exactly, including at the lens rim;
+    // tint must remain continuous without replacing it with opaque black.
+    std::size_t unavailableBackdropFailures = 0u;
+    std::vector<std::uint32_t> desktopPixels(width * height);
+    for (UINT y = 0u; y < height; ++y)
+        for (UINT x = 0u; x < width; ++x)
+            desktopPixels[y * width + x] = 0xff000000u | windowColours[(x / 32u + y / 32u) % 8u];
+    D3D11_SUBRESOURCE_DATA desktopData { desktopPixels.data(), width * sizeof(std::uint32_t), 0 };
+    ComPtr<ID3D11Texture2D> desktopBackdrop;
+    if (FAILED(device->CreateTexture2D(&whiteDesc, &desktopData, &desktopBackdrop))) return 12;
+    for (const std::uint32_t emptyPixel : { 0u, 0xff000000u })
+    for (const bool partiallyAvailable : { false, true })
+    {
+        std::fill(pixels.begin(), pixels.end(), emptyPixel);
+        if (partiallyAvailable)
+            for (UINT y = 0u; y < height; ++y)
+                for (UINT x = 0u; x < width / 2u; ++x)
+                    pixels[y * width + x] = (emptyPixel & 0xff000000u) | (desktopPixels[y * width + x] & 0xffffffu);
+        D3D11_SUBRESOURCE_DATA emptyData { pixels.data(), width * sizeof(std::uint32_t), 0 };
+        ComPtr<ID3D11Texture2D> unavailableBackdrop;
+        if (FAILED(device->CreateTexture2D(&whiteDesc, &emptyData, &unavailableBackdrop))) return 12;
+        for (const float tint : { 0.0f, 0.5f, 1.0f })
+        for (const float radius : { 0.0f, 7.0f, 30.0f })
+        {
+            // Isolate tint continuity across the available/unavailable seam.
+            // Full-source tests above cover the blur across real windows.
+            if (partiallyAvailable && radius != 0.0f) continue;
+            auto fallbackRegion = coverageRegion;
+            fallbackRegion.tintAlpha = tint;
+            fallbackRegion.rimStrength = partiallyAvailable ? 0.0f : 0.6f;
+            fallbackRegion.blurRadius = radius;
+            context->CopyResource(backdrop.Get(), desktopBackdrop.Get());
+            if (!lens.render(context.Get(), unavailableBackdrop.Get(), target.Get(), fallbackRegion)) return 13;
+            context->CopyResource(readback.Get(), backdrop.Get());
+            if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return 14;
+            for (UINT y = 0u; y < height; ++y)
+            {
+                const auto* row = reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+                for (UINT x = 0u; x < width; ++x)
+                {
+                    if (tint == 0.0f)
+                    {
+                        if (row[x] != desktopPixels[y * width + x]) ++unavailableBackdropFailures;
+                    }
+                    else if (x >= 96u && x < 416u && y >= 72u && y < 184u)
+                    {
+                        const float tintChannels[] = { fallbackRegion.tintRed, fallbackRegion.tintGreen, fallbackRegion.tintBlue };
+                        for (UINT channel = 0u; channel < 3u; ++channel)
+                        {
+                            const float desktop = float((desktopPixels[y * width + x] >> (8u * channel)) & 255u);
+                            const float expected = desktop * (1.0f - tint) + 255.0f * tintChannels[channel] * tint;
+                            const auto actual = (row[x] >> (8u * channel)) & 255u;
+                            if (std::abs(float(actual) - expected) > 2.0f) ++unavailableBackdropFailures;
+                        }
+                    }
+                }
+            }
+            context->Unmap(readback.Get(), 0);
+        }
+    }
+    std::cout << "Unavailable backdrop transparency and rim failures: " << unavailableBackdropFailures << '\n';
+    if (unavailableBackdropFailures != 0u) return 15;
+    // Real opaque windows often contain sparse white text over black. Draw
+    // into that same desktop target: a faded optical pass otherwise retains
+    // the original sharp white pixels even though its blurred input is valid.
+    std::fill(pixels.begin(), pixels.end(), 0xff000000u);
+    for (UINT y = 80u; y < 176u; y += 24u)
+        for (UINT x = 112u; x < 400u; x += 24u)
+            for (UINT stroke = 0u; stroke < 6u; ++stroke)
+                pixels[(y + stroke) * width + x] = 0xffffffffu;
+    context->UpdateSubresource(backdrop.Get(), 0, nullptr, pixels.data(), width * sizeof(std::uint32_t), 0);
+    auto sparseTextRegion = coverageRegion;
+    sparseTextRegion.blurRadius = 30.0f;
+    if (!lens.render(context.Get(), backdrop.Get(), target.Get(), sparseTextRegion)) return 13;
+    context->CopyResource(readback.Get(), backdrop.Get());
+    if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return 14;
+    std::size_t retainedSharpText = 0u;
+    for (UINT y = 80u; y < 176u; y += 24u)
+    {
+        const auto* row = reinterpret_cast<const std::uint32_t*>(
+            static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+        for (UINT x = 112u; x < 400u; x += 24u)
+            if ((row[x] & 255u) > 32u) ++retainedSharpText;
+    }
+    context->Unmap(readback.Get(), 0);
+    std::cout << "Sparse white text retained after full blur: " << retainedSharpText << '\n';
+    if (retainedSharpText != 0u) return 82;
+
+    // A refracted tap can land on perfectly black source pixels while the
+    // original desktop pixel contains a bright glyph. Treating that tap as
+    // unavailable blends the original glyph back in, breaking refraction at
+    // exactly those dark transitions. Check both edges on the live target,
+    // including unused source alpha and disjoint native compositor clips.
+    std::size_t refractionGlyphFailures = 0u;
+    std::size_t refractionOutsideFailures = 0u;
+    std::size_t refractionGlyphSamples = 0u;
+    for (const std::uint32_t sourceAlpha : { 0u, 0xff000000u })
+    {
+        std::fill(pixels.begin(), pixels.end(), sourceAlpha);
+        const UINT glyphColumns[] = { static_cast<UINT>(region.x) + 6u,
+            static_cast<UINT>(region.x) + region.width - 7u };
+        for (UINT y = 80u; y < 176u; y += 24u)
+            for (const UINT x : glyphColumns)
+                for (UINT stroke = 0u; stroke < 6u; ++stroke)
+                    pixels[(y + stroke) * width + x] = sourceAlpha | 0xffffffu;
+        for (const UINT x : { 30u, 480u })
+            pixels[100u * width + x] = sourceAlpha | 0xffffffu;
+        D3D11_SUBRESOURCE_DATA glyphData { pixels.data(), width * sizeof(std::uint32_t), 0 };
+        ComPtr<ID3D11Texture2D> glyphBackdrop;
+        if (FAILED(device->CreateTexture2D(&whiteDesc, &glyphData, &glyphBackdrop))) return 12;
+        auto refractedTextRegion = coverageRegion;
+        refractedTextRegion.shape = 0u;
+        refractedTextRegion.edgeThickness = 28.0f;
+        refractedTextRegion.refractionStrength = 24.0f;
+        for (const unsigned clipSide : { 0u, 1u, 2u })
+        {
+            const LONG centreX = region.x + static_cast<LONG>(region.width / 2u);
+            const D3D11_RECT glyphClip {
+                clipSide == 2u ? centreX : region.x, region.y,
+                clipSide == 1u ? centreX : region.x + static_cast<LONG>(region.width),
+                region.y + static_cast<LONG>(region.height) };
+            context->CopyResource(backdrop.Get(), glyphBackdrop.Get());
+            if (!lens.render(context.Get(), glyphBackdrop.Get(), target.Get(),
+                    refractedTextRegion, 0, 0, clipSide ? &glyphClip : nullptr)) return 13;
+            context->CopyResource(readback.Get(), backdrop.Get());
+            if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return 14;
+            for (UINT y = 80u; y < 176u; y += 24u)
+                for (UINT stroke = 0u; stroke < 6u; ++stroke)
+                {
+                    const auto* row = reinterpret_cast<const std::uint32_t*>(
+                        static_cast<const std::uint8_t*>(mapped.pData) +
+                        (y + stroke) * mapped.RowPitch);
+                    for (const UINT x : glyphColumns)
+                    {
+                        const bool affected = !clipSide ||
+                            (x >= static_cast<UINT>(glyphClip.left) &&
+                                x < static_cast<UINT>(glyphClip.right));
+                        const UINT expected = affected ? 0u : 255u;
+                        if (std::abs(static_cast<int>(row[x] & 255u) -
+                                static_cast<int>(expected)) > 1) ++refractionGlyphFailures;
+                        ++refractionGlyphSamples;
+                    }
+                }
+            for (UINT y = 0u; y < height; ++y)
+            {
+                const auto* row = reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+                for (UINT x = 0u; x < width; ++x)
+                    if (x < static_cast<UINT>(region.x) ||
+                        x >= static_cast<UINT>(region.x) + region.width ||
+                        y < static_cast<UINT>(region.y) ||
+                        y >= static_cast<UINT>(region.y) + region.height)
+                        if (row[x] != pixels[y * width + x]) ++refractionOutsideFailures;
+            }
+            context->Unmap(readback.Get(), 0);
+        }
+    }
+    std::cout << "Sparse text refraction failures: " << refractionGlyphFailures
+              << " / " << refractionGlyphSamples << ", outside lens: "
+              << refractionOutsideFailures << '\n';
+    if (refractionGlyphFailures != 0u || refractionOutsideFailures != 0u) return 83;
+    // A genuinely unavailable resource is rejected before any GPU submission.
+    if (lens.render(context.Get(), nullptr, target.Get(), coverageRegion)) return 15;
     for (const float viewportY : { -80.0f, -60.0f, -20.0f, 0.0f,
             80.25f, 180.0f, 192.0f, 250.0f })
     {

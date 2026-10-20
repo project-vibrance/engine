@@ -2,6 +2,7 @@
 /build/
 /install/
 /install-*/
+/media-fence-logs
 .env.cmake
 .DS_Store
 

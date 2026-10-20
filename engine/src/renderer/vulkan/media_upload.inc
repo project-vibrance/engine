@@ -214,12 +214,7 @@
             return false;
         }
 
-        std::vector<unsigned char> rgba = frame.rgba;
-        if (options.premultiplyAlpha)
-        {
-            bleed_transparent_rgb(rgba, frame.width, frame.height);
-            premultiply_alpha(rgba);
-        }
+        const std::vector<unsigned char>& rgba = frame.rgba;
 
         const uint32_t mipLevels = options.generateMipmaps
             ? mip_count_for_extent(vk::Extent2D { frame.width, frame.height })
@@ -292,12 +287,7 @@
             return false;
         }
 
-        std::vector<unsigned char> rgba = frame.rgba;
-        if (options.premultiplyAlpha)
-        {
-            bleed_transparent_rgb(rgba, frame.width, frame.height);
-            premultiply_alpha(rgba);
-        }
+        const std::vector<unsigned char>& rgba = frame.rgba;
 
         const uint32_t mipLevels = options.generateMipmaps
             ? mip_count_for_extent(vk::Extent2D { frame.width, frame.height })

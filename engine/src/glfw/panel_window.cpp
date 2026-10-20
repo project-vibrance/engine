@@ -1061,7 +1061,7 @@ void GlfwPanelWindow::build_scene()
                         media->set_mask_tint(options.trafficLights.iconTint);
                     }
                     RenderLayer2DComponent& iconLayer = ui.set_layer(icon, 101, static_cast<uint32_t>(i), true);
-                    iconLayer.visible = hoveredTrafficLight == kind;
+                    iconLayer.visible = hoveredTrafficLight != TrafficLightKind::eNone;
                     ui.attach_aligned(icon, dot, UiAlignment::eCentre, glm::vec2(0.0f), iconSize);
                     trafficLightIconEntities[i] = icon;
                 }
@@ -1788,54 +1788,31 @@ void GlfwPanelWindow::set_hovered_traffic_light(TrafficLightKind kind)
         return;
     }
 
-    auto traffic_light_index = [](TrafficLightKind light) -> std::optional<std::size_t> {
-        switch (light)
-        {
-        case TrafficLightKind::eClose:
-            return 0u;
-        case TrafficLightKind::eMinimise:
-            return 1u;
-        case TrafficLightKind::eMaximise:
-            return 2u;
-        default:
-            return std::nullopt;
-        }
-    };
+    const bool previouslyVisible = hoveredTrafficLight != TrafficLightKind::eNone;
+    hoveredTrafficLight = kind;
+    const bool visible = kind != TrafficLightKind::eNone;
+    // Moving between members keeps the group visible without invalidating
+    // the retained icons on every pointer update.
+    if (!engine || previouslyVisible == visible) return;
 
-    auto set_icon_visible = [&](TrafficLightKind light, bool visible) {
-        if (!engine)
-        {
-            return;
-        }
-
-        const std::optional<std::size_t> index = traffic_light_index(light);
-        if (!index)
-        {
-            return;
-        }
-
-        Renderer2DScene& scene = engine->renderer2d_scene();
-        entt::registry& registry = scene.registry();
-        const entt::entity icon = trafficLightIconEntities[*index];
+    Renderer2DScene& scene = engine->renderer2d_scene();
+    entt::registry& registry = scene.registry();
+    for (const entt::entity icon : trafficLightIconEntities)
+    {
         if (icon == entt::null || !registry.valid(icon))
         {
-            return;
+            continue;
         }
 
         RenderLayer2DComponent* layer = registry.try_get<RenderLayer2DComponent>(icon);
         if (!layer || layer->visible == visible)
         {
-            return;
+            continue;
         }
 
         layer->visible = visible;
         scene.mark_dirty(icon);
-    };
-
-    const TrafficLightKind previous = hoveredTrafficLight;
-    hoveredTrafficLight = kind;
-    set_icon_visible(previous, false);
-    set_icon_visible(hoveredTrafficLight, true);
+    }
 }
 
 void GlfwPanelWindow::perform_traffic_light_action(TrafficLightKind kind)
