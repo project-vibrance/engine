@@ -114,4 +114,3 @@ fragment model_3d_frag_out model_3d_frag(model_3d_frag_in in [[stage_in]], const
     out.outColor = float4(_425, outputAlpha);
     return out;
 }
-

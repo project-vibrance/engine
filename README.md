@@ -550,6 +550,16 @@ Native MSL is embedded in the engine and compiled by Metal for the selected GPU;
 Metal 3 command buffers retain encoded resources until GPU completion.
 Cocoa owns the `CAMetalLayer` only.
 
+Native panel dragging owns the closed-hand cursor for the entire AppKit
+tracking loop. Cursor rectangles and UI cursor changes from other windows are
+suspended during that drag; the previous cursor and rectangle state are
+restored on release or cancellation. Ordinary cursor updates also respect
+the front window: Cocoa's GLFW cursor setter otherwise lets overlapping
+background windows replace the global cursor. Captured controls retain their
+text, pointer or resize cursor while moving beyond their hit region.
+`vibrance_macos_panel_drag_cursor_tests` checks overlapping windows, control
+capture and native drag transitions without moving the user's mouse.
+
 ```sh
 ./unixBuild.sh Debug '' all
 ctest --test-dir build/macos-silicon/Debug --output-on-failure
@@ -630,6 +640,15 @@ with the matching engine headers and runtime.
 For shader maintainers, `python3 scripts/generate_metal_shaders.py` regenerates
 `engine/src/renderer/metal/shaders/*.metal` from the shared GLSL maths. This
 optional authoring step requires `glslc` and `spirv-cross`; generated MSL belongs
-in source control. Run the Metal GPU tests after changing shader bindings.
+in source control. Regenerate after shared shader or dispatch packing changes,
+then run `python3 scripts/generate_metal_shaders.py --check` and the Metal GPU
+tests. When the authoring tools are installed, CTest registers
+`vibrance_metal_shader_sync` to reject stale generated sources. The device tests
+compare actual shape, shadow and media pixels for packed, clipped dispatches,
+including ellipses and notches at every 8-pixel workgroup tail size. The generator
+prefixes the shared `primitive_type` helper to avoid the Metal SDK type name.
+Metal-only compositor specialisation lives behind `VIBRANCE_METAL` in the shared
+GLSL, so regeneration preserves native foreground alpha without changing the
+Vulkan path.
 
 Runtime and full compilation diagnostics are documented in [LOGGING.md](LOGGING.md).

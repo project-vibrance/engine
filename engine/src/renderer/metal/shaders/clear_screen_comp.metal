@@ -51,4 +51,3 @@ kernel void clear_screen_comp(constant ClearScreenConstants& pc [[buffer(0)]], t
     }
     colorBuffer.write(float4(0.0), uint2(screen_pos));
 }
-

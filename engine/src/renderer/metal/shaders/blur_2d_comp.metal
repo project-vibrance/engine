@@ -764,39 +764,45 @@ float primitive_bounds_padding(constant Renderer2DConstants& pc)
     return notch_flare_size(param, param_1, param_2) + 6.0;
 }
 
-kernel void blur_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture2d<float, access::read_write> sceneColorBuffer [[texture(0)]], texture2d<float> uiStaticSurface [[texture(1)]], texture2d<float> uiExternalBackdropSurface [[texture(2)]], texture2d<float, access::read_write> tempSurface [[texture(3)]], texture2d<float, access::read_write> uiBlurSurface [[texture(4)]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
+kernel void blur_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture2d<float, access::read_write> sceneColorBuffer [[texture(0)]], texture2d<float> uiStaticSurface [[texture(1)]], texture2d<float> uiExternalBackdropSurface [[texture(2)]], texture2d<float, access::read_write> tempSurface [[texture(3)]], texture2d<float, access::read_write> uiBlurSurface [[texture(4)]], uint3 gl_NumWorkGroups [[threadgroups_per_grid]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
 {
+    uint tail = pc.data.y >> 1u;
+    uint2 exactExtent = (gl_NumWorkGroups.xy * uint2(8u)) - uint2(tail & 7u, (tail >> 3u) & 7u);
+    if (any(gl_GlobalInvocationID.xy >= exactExtent))
+    {
+        return;
+    }
     int2 pixel = dispatch_origin(pc) + int2(gl_GlobalInvocationID.xy);
     int2 screenSize = int2(uiBlurSurface.get_width(), uiBlurSurface.get_height());
-    bool _1856 = pixel.x < 0;
-    bool _1863;
-    if (!_1856)
+    bool _1882 = pixel.x < 0;
+    bool _1889;
+    if (!_1882)
     {
-        _1863 = pixel.y < 0;
+        _1889 = pixel.y < 0;
     }
     else
     {
-        _1863 = _1856;
+        _1889 = _1882;
     }
-    bool _1872;
-    if (!_1863)
+    bool _1898;
+    if (!_1889)
     {
-        _1872 = pixel.x >= screenSize.x;
+        _1898 = pixel.x >= screenSize.x;
     }
     else
     {
-        _1872 = _1863;
+        _1898 = _1889;
     }
-    bool _1881;
-    if (!_1872)
+    bool _1907;
+    if (!_1898)
     {
-        _1881 = pixel.y >= screenSize.y;
+        _1907 = pixel.y >= screenSize.y;
     }
     else
     {
-        _1881 = _1872;
+        _1907 = _1898;
     }
-    if (_1881)
+    if (_1907)
     {
         return;
     }
@@ -824,16 +830,16 @@ kernel void blur_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture
             float4 dst = sceneColorBuffer.read(uint2(pixel));
             float alpha = mix(dst.w, src.w, coverage);
             float3 premultiplied = mix(dst.xyz * dst.w, src.xyz * src.w, float3(coverage));
-            float3 _1966;
+            float3 _1992;
             if (alpha > 9.9999997473787516355514526367188e-05)
             {
-                _1966 = premultiplied / float3(alpha);
+                _1992 = premultiplied / float3(alpha);
             }
             else
             {
-                _1966 = float3(0.0);
+                _1992 = float3(0.0);
             }
-            sceneColorBuffer.write(float4(_1966, alpha), uint2(pixel));
+            sceneColorBuffer.write(float4(_1992, alpha), uint2(pixel));
             return;
         }
         if (src.w <= 0.001000000047497451305389404296875)
@@ -878,46 +884,46 @@ kernel void blur_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture
         return;
     }
     float2 p_1 = float2(pixel) + float2(0.5);
-    float _2081;
+    float _2107;
     if ((pc.data.y & 4194304u) != 0u)
     {
-        _2081 = 0.0;
+        _2107 = 0.0;
     }
     else
     {
-        _2081 = fast::max(pc.effect1.z, 0.0);
+        _2107 = fast::max(pc.effect1.z, 0.0);
     }
-    float featherRadius = _2081;
+    float featherRadius = _2107;
     float boundsPad = featherRadius + primitive_bounds_padding(pc);
-    bool _2099 = p_1.x < (pc.rect.x - boundsPad);
-    bool _2110;
-    if (!_2099)
+    bool _2125 = p_1.x < (pc.rect.x - boundsPad);
+    bool _2136;
+    if (!_2125)
     {
-        _2110 = p_1.y < (pc.rect.y - boundsPad);
+        _2136 = p_1.y < (pc.rect.y - boundsPad);
     }
     else
     {
-        _2110 = _2099;
+        _2136 = _2125;
     }
-    bool _2124;
-    if (!_2110)
+    bool _2150;
+    if (!_2136)
     {
-        _2124 = p_1.x > ((pc.rect.x + pc.rect.z) + boundsPad);
+        _2150 = p_1.x > ((pc.rect.x + pc.rect.z) + boundsPad);
     }
     else
     {
-        _2124 = _2110;
+        _2150 = _2136;
     }
-    bool _2138;
-    if (!_2124)
+    bool _2164;
+    if (!_2150)
     {
-        _2138 = p_1.y > ((pc.rect.y + pc.rect.w) + boundsPad);
+        _2164 = p_1.y > ((pc.rect.y + pc.rect.w) + boundsPad);
     }
     else
     {
-        _2138 = _2124;
+        _2164 = _2150;
     }
-    if (_2138)
+    if (_2164)
     {
         return;
     }
@@ -974,11 +980,11 @@ kernel void blur_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture
             float phase = (float((pc.data.z >> 21u) & 255u) / 255.0) * 6.283185482025146484375;
             float light = powr(fast::clamp(0.5 + (0.5 * cos(precise::atan2(normal.y, normal.x) - phase)), 0.0, 1.0), 12.0);
             float rim = (float((pc.data.z >> 14u) & 127u) / 127.0) * 0.550000011920928955078125;
-            float4 _2353 = source;
-            float3 _2355 = _2353.xyz + float3(((rim * 0.64999997615814208984375) * exp(((-_distance) * _distance) / 2.25)) * (0.25 + (0.75 * light)));
-            source.x = _2355.x;
-            source.y = _2355.y;
-            source.z = _2355.z;
+            float4 _2379 = source;
+            float3 _2381 = _2379.xyz + float3(((rim * 0.64999997615814208984375) * exp(((-_distance) * _distance) / 2.25)) * (0.25 + (0.75 * light)));
+            source.x = _2381.x;
+            source.y = _2381.y;
+            source.z = _2381.z;
         }
     }
     else

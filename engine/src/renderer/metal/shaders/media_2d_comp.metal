@@ -1228,65 +1228,45 @@ float4 blend_over(thread const float4& dst, thread const float4& src)
     return float4(outRgb, outA);
 }
 
-kernel void media_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture2d<float> mediaTexture [[texture(0)]], texture2d<float, access::read_write> mediaBlurBuffer [[texture(1)]], texture2d<float, access::read_write> colorBuffer [[texture(2)]], sampler mediaTextureSmplr [[sampler(0)]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
+kernel void media_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture2d<float> mediaTexture [[texture(0)]], texture2d<float, access::read_write> mediaBlurBuffer [[texture(1)]], texture2d<float, access::read_write> colorBuffer [[texture(2)]], sampler mediaTextureSmplr [[sampler(0)]], uint3 gl_NumWorkGroups [[threadgroups_per_grid]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
 {
-    uint dispatchWidth = (pc.data.x >> 4u) & 16383u;
-    uint dispatchHeight = (pc.data.x >> 18u) & 16383u;
-    bool _3266 = (dispatchWidth > 0u) && (dispatchHeight > 0u);
-    bool _3285;
-    if (_3266)
-    {
-        bool _3276 = gl_GlobalInvocationID.x >= dispatchWidth;
-        bool _3284;
-        if (!_3276)
-        {
-            _3284 = gl_GlobalInvocationID.y >= dispatchHeight;
-        }
-        else
-        {
-            _3284 = _3276;
-        }
-        _3285 = _3284;
-    }
-    else
-    {
-        _3285 = _3266;
-    }
-    if (_3285)
+    uint tail = pc.data.x >> 8u;
+    uint2 exactExtent = (gl_NumWorkGroups.xy * uint2(8u)) - uint2(tail & 7u, (tail >> 3u) & 7u);
+    if (any(gl_GlobalInvocationID.xy >= exactExtent))
     {
         return;
     }
     int2 pixel = dispatch_origin(pc) + int2(gl_GlobalInvocationID.xy);
     int2 screenSize = int2(colorBuffer.get_width(), colorBuffer.get_height());
-    bool _3304 = pixel.x < 0;
-    bool _3311;
-    if (!_3304)
+    bool _3295 = pixel.x < 0;
+    bool _3302;
+    if (!_3295)
     {
-        _3311 = pixel.y < 0;
+        _3302 = pixel.y < 0;
     }
     else
     {
-        _3311 = _3304;
+        _3302 = _3295;
+    }
+    bool _3311;
+    if (!_3302)
+    {
+        _3311 = pixel.x >= screenSize.x;
+    }
+    else
+    {
+        _3311 = _3302;
     }
     bool _3320;
     if (!_3311)
     {
-        _3320 = pixel.x >= screenSize.x;
+        _3320 = pixel.y >= screenSize.y;
     }
     else
     {
         _3320 = _3311;
     }
-    bool _3329;
-    if (!_3320)
-    {
-        _3329 = pixel.y >= screenSize.y;
-    }
-    else
-    {
-        _3329 = _3320;
-    }
-    if (_3329)
+    if (_3320)
     {
         return;
     }
@@ -1299,63 +1279,63 @@ kernel void media_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], textur
     }
     bool transformed = (pc.data.y & 4096u) != 0u;
     float samplePad = 1.0;
-    bool _3357 = !transformed;
-    bool _3406;
-    if (_3357)
+    bool _3348 = !transformed;
+    bool _3397;
+    if (_3348)
     {
-        bool _3366 = p.x < (pc.rect.x - samplePad);
-        bool _3377;
-        if (!_3366)
+        bool _3357 = p.x < (pc.rect.x - samplePad);
+        bool _3368;
+        if (!_3357)
         {
-            _3377 = p.y < (pc.rect.y - samplePad);
+            _3368 = p.y < (pc.rect.y - samplePad);
         }
         else
         {
-            _3377 = _3366;
+            _3368 = _3357;
         }
-        bool _3391;
-        if (!_3377)
+        bool _3382;
+        if (!_3368)
         {
-            _3391 = p.x > ((pc.rect.x + pc.rect.z) + samplePad);
+            _3382 = p.x > ((pc.rect.x + pc.rect.z) + samplePad);
         }
         else
         {
-            _3391 = _3377;
+            _3382 = _3368;
         }
-        bool _3405;
-        if (!_3391)
+        bool _3396;
+        if (!_3382)
         {
-            _3405 = p.y > ((pc.rect.y + pc.rect.w) + samplePad);
+            _3396 = p.y > ((pc.rect.y + pc.rect.w) + samplePad);
         }
         else
         {
-            _3405 = _3391;
+            _3396 = _3382;
         }
-        _3406 = _3405;
+        _3397 = _3396;
     }
     else
     {
-        _3406 = _3357;
+        _3397 = _3348;
     }
-    if (_3406)
+    if (_3397)
     {
         return;
     }
     float backgroundFactor = media_black_background_factor(pc);
-    float4 _3414;
+    float4 _3405;
     if (transformed)
     {
         float2 param_1 = p;
         float param_2 = backgroundFactor;
-        _3414 = resolve_transformed_media(param_1, param_2, pc, mediaTexture, mediaTextureSmplr, mediaBlurBuffer);
+        _3405 = resolve_transformed_media(param_1, param_2, pc, mediaTexture, mediaTextureSmplr, mediaBlurBuffer);
     }
     else
     {
         float2 param_3 = p;
         float param_4 = backgroundFactor;
-        _3414 = resolve_filtered_media(param_3, param_4, pc, mediaTexture, mediaTextureSmplr, mediaBlurBuffer);
+        _3405 = resolve_filtered_media(param_3, param_4, pc, mediaTexture, mediaTextureSmplr, mediaBlurBuffer);
     }
-    float4 src = _3414;
+    float4 src = _3405;
     if (src.w <= 0.001000000047497451305389404296875)
     {
         return;

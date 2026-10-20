@@ -4,7 +4,9 @@
 #include "../src/renderer/common/text_batch.h"
 #include <vibranceUI/renderer/render_types.h>
 #include <vibranceUI/renderer/renderer2d_components.h>
+#include <vibranceUI/renderer/dispatch_bounds.h>
 #include <array>
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <cstring>
@@ -13,6 +15,110 @@
 #include <objc/runtime.h>
 #include <objc/message.h>
 using namespace vibrance::metal;
+
+void check_composite_sources(Device& device)
+{
+    const std::array<unsigned char, 4> sceneBytes {204, 51, 26, 128};
+    const std::array<unsigned char, 4> staticBytes {26, 179, 102, 64};
+    const std::array<unsigned char, 4> backdropBytes {51, 77, 230, 255};
+    auto scene = device.upload(1, 1, sceneBytes, false, false);
+    auto retained = device.upload(1, 1, staticBytes, false, false);
+    auto backdrop = device.upload(1, 1, backdropBytes, false, false);
+    auto output = device.target(1, 1), temporary = device.target(1, 1);
+    auto readback = own(device.gpu->newBuffer(256, MTL::ResourceStorageModeShared));
+    const auto colour = [](const auto& bytes) { return glm::vec4(bytes[0], bytes[1], bytes[2], bytes[3]) / 255.0f; };
+    const auto over = [](glm::vec4 destination, glm::vec4 source) {
+        const float alpha = source.a + destination.a * (1 - source.a);
+        return glm::vec4((glm::vec3(source) * source.a +
+            glm::vec3(destination) * destination.a * (1 - source.a)) / alpha, alpha);
+    };
+    for (uint32_t flags : {2u, 3u, 10u, 11u})
+    {
+        Renderer2DCompositeConstants constants {{flags, 0, 0, 0}};
+        device.dispatch("composite_2d_comp", &constants, sizeof(constants), 1, 1,
+            {texture(scene.get()), texture(retained.get()), texture(backdrop.get()), temporary.get(), output.get()});
+        device.flush();
+        auto command = device.queue->commandBuffer();
+        auto blit = command->blitCommandEncoder();
+        blit->copyFromTexture(output.get(), 0, 0, MTL::Origin(0, 0, 0), MTL::Size(1, 1, 1),
+            readback.get(), 0, 256, 256);
+        blit->endEncoding();
+        command->commit();
+        command->waitUntilCompleted();
+        if (command->status() == MTL::CommandBufferStatusError) throw std::runtime_error("Composite readback failed");
+        auto expected = flags & 1u ? colour(backdropBytes) : glm::vec4(0);
+        if (!(flags & 8u)) expected = over(expected, colour(staticBytes));
+        expected = over(expected, colour(sceneBytes));
+        expected = glm::vec4(glm::vec3(expected) * expected.a, expected.a);
+        const auto* pixel = static_cast<const unsigned char*>(readback->contents());
+        for (unsigned channel = 0; channel < 4; ++channel)
+            if (std::abs(int(pixel[channel]) - int(std::lround(expected[channel] * 255))) > 1)
+                throw std::runtime_error("Composite source binding or native alpha mismatch: flags " + std::to_string(flags));
+    }
+}
+
+void check_primitive_dispatch_pixels(Device& device)
+{
+    constexpr uint32_t side = 40, rowBytes = 256;
+    auto target = device.target(side, side), reference = device.target(side, side);
+    auto scratch = device.target(side, side), depth = device.target(side, side, MTL::PixelFormatR32Uint);
+    const std::array<unsigned char, 4> white {255, 255, 255, 255};
+    auto media = device.upload(1, 1, white, false, false);
+    auto readback = own(device.gpu->newBuffer(rowBytes * side * 2, MTL::ResourceStorageModeShared));
+    for (const char* shader : {"shape_2d_comp", "shadow_2d_comp", "media_2d_comp"})
+    for (auto primitive : {Renderer2DPrimitive::eRectangle, Renderer2DPrimitive::eRoundedRectangle,
+        Renderer2DPrimitive::eEllipse, Renderer2DPrimitive::eSquircle, Renderer2DPrimitive::eNotchedSquircle})
+    for (uint32_t width = 25; width <= 32; ++width)
+    {
+        const uint32_t height = 57 - width;
+        Renderer2DPushConstants constants {};
+        constants.rect = {7, 8, 18, 20};
+        constants.uvRect = {0, 0, 1, 1};
+        constants.color0 = constants.color1 = glm::vec4(1);
+        constants.effect0 = {4, 2, 1, 1};
+        constants.effect1 = {0.74f, 4.7f, 1, 18};
+        constants.data.w = 3u | (5u << 16u);
+        const auto draw = [&](MTL::Texture* output, bool packed) {
+            glm::uvec4 clear(0);
+            device.dispatch("clear_screen_comp", &clear, sizeof(clear), side, side, {output, depth.get()});
+            constants.data.x = packed ? renderer2d_primitive_dispatch_data(uint32_t(primitive), width, height) :
+                uint32_t(primitive);
+            if (std::string_view(shader) == "media_2d_comp")
+                device.dispatch(shader, &constants, sizeof(constants), packed ? width : 32, packed ? height : 32,
+                    {texture(media.get()), scratch.get(), output});
+            else device.dispatch(shader, &constants, sizeof(constants), packed ? width : 32, packed ? height : 32, {output});
+        };
+        draw(reference.get(), false);
+        draw(target.get(), true);
+        device.flush();
+        auto command = device.queue->commandBuffer();
+        auto blit = command->blitCommandEncoder();
+        for (unsigned index = 0; index < 2; ++index)
+            blit->copyFromTexture(index ? reference.get() : target.get(), 0, 0, MTL::Origin(0, 0, 0),
+                MTL::Size(side, side, 1), readback.get(), index * rowBytes * side, rowBytes, rowBytes * side);
+        blit->endEncoding();
+        command->commit();
+        command->waitUntilCompleted();
+        if (command->status() == MTL::CommandBufferStatusError) throw std::runtime_error("Primitive readback failed");
+        const auto* pixels = static_cast<const unsigned char*>(readback->contents());
+        unsigned painted = 0;
+        for (uint32_t y = 0; y < side; ++y)
+        for (uint32_t x = 0; x < side; ++x)
+        {
+            const auto* pixel = pixels + y * rowBytes + x * 4;
+            const bool inside = x >= 3 && y >= 5 && x < 3 + width && y < 5 + height;
+            if (inside && std::memcmp(pixel, pixel + rowBytes * side, 4))
+                throw std::runtime_error(std::string(shader) + " changed primitive with packed dispatch bounds: " +
+                    std::to_string(uint32_t(primitive)));
+            if (!inside && pixel[3]) throw std::runtime_error(std::string(shader) + " escaped dispatch bounds");
+            painted += pixel[3] != 0;
+        }
+        if (!painted) throw std::runtime_error(std::string(shader) + " drew no primitive pixels");
+        if (primitive == Renderer2DPrimitive::eEllipse && std::string_view(shader) != "shadow_2d_comp" &&
+            pixels[8 * rowBytes + 7 * 4 + 3] != 0)
+            throw std::runtime_error("A circular shape or avatar was rendered as a box");
+    }
+}
 
 void check_retained_frames(Device &device)
 {
@@ -559,6 +665,8 @@ int main()
         const std::array<unsigned char, 4> rgba{10, 20, 30, 255};
         if (!device.upload(1, 1, rgba, false, true) || device.upload(2, 2, rgba, false, false))
             throw std::runtime_error("Texture upload validation failed");
+        check_composite_sources(device);
+        check_primitive_dispatch_pixels(device);
         check_retained_frames(device);
         check_batched_text(device);
         check_text_dependency_waves(device);

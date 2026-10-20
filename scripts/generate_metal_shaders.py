@@ -4,6 +4,7 @@ Requires glslc and SPIRV-Cross; normal macOS builds use the checked-in MSL.
 """
 from pathlib import Path
 import argparse
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,7 @@ changed = []
 with tempfile.TemporaryDirectory() as temporary:
     for source in sources:
         binary = Path(temporary) / 'shader.spv'
-        subprocess.run(['glslc', '--target-env=vulkan1.3', '-O0', str(source), '-o', str(binary)], check=True)
+        subprocess.run(['glslc', '--target-env=vulkan1.3', '-DVIBRANCE_METAL=1', '-O0', str(source), '-o', str(binary)], check=True)
         stage = {'comp': 'comp', 'vert': 'vert', 'frag': 'frag'}[source.suffix[1:]]
         entry = source.stem + '_' + stage
         generated = Path(temporary) / (entry + '.metal')
@@ -33,6 +34,10 @@ with tempfile.TemporaryDirectory() as temporary:
             '--rename-entry-point', 'main', entry, stage, '--output', str(generated)], check=True)
         target = destination / generated.name
         content = generated.read_text().rstrip() + '\n'
+        # MSL imports metal::primitive_type through metal_stdlib. The shared
+        # GLSL helper has the same name; qualify it with a project prefix so
+        # regenerated shaders compile with current Apple SDKs.
+        content = re.sub(r'\bprimitive_type\b', 'vibrance_primitive_type', content)
         if args.check:
             if not target.exists() or target.read_text() != content:
                 changed.append(target.name)

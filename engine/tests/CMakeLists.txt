@@ -389,6 +389,15 @@ target_compile_definitions(vibrance_native_tray_portable_tests PRIVATE
 add_test(NAME vibrance_native_tray_portable_tests COMMAND vibrance_native_tray_portable_tests)
 
 if(APPLE)
+    # Maintainer machines can detect stale MSL without adding shader compiler
+    # dependencies to SDK consumers or normal macOS builds.
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    find_program(VIBRANCE_GLSLC glslc)
+    find_program(VIBRANCE_SPIRV_CROSS spirv-cross)
+    if(Python3_Interpreter_FOUND AND VIBRANCE_GLSLC AND VIBRANCE_SPIRV_CROSS)
+        add_test(NAME vibrance_metal_shader_sync
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/generate_metal_shaders.py" --check)
+    endif()
     add_executable(vibrance_metal_device_tests metal_device_tests.cpp
         ../src/renderer/metal/device.cpp "${METAL_SHADER_CPP}")
     target_include_directories(vibrance_metal_device_tests PRIVATE ../include
@@ -402,6 +411,9 @@ endif()
 
 if(APPLE)
     vibrance_add_engine_test(vibrance_metal_window_tests metal_window_tests.cpp)
+    vibrance_add_engine_test(vibrance_macos_panel_drag_cursor_tests macos_panel_drag_cursor_tests.mm)
+    target_link_libraries(vibrance_macos_panel_drag_cursor_tests PRIVATE "-framework AppKit")
+    set_tests_properties(vibrance_macos_panel_drag_cursor_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
     vibrance_add_engine_test(vibrance_native_glass_controls_tests native_glass_controls_tests.mm)
     target_compile_options(vibrance_native_glass_controls_tests PRIVATE -fobjc-arc)
     target_link_libraries(vibrance_native_glass_controls_tests PRIVATE "-framework AppKit" "-framework QuartzCore")

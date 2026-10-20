@@ -61,38 +61,77 @@ kernel void composite_2d_comp(constant Composite2DConstants& pc [[buffer(0)]], t
         return;
     }
     float4 sceneColor = sceneColorBuffer.read(uint2(pixel));
-    float4 color;
+    float4 staticColor = float4(0.0);
+    if ((pc.data.x & 8u) == 0u)
+    {
+        staticColor = uiStaticSurface.read(uint2(pixel));
+    }
+    float4 color = float4(0.0);
+    if ((pc.data.x & 1u) != 0u)
+    {
+        color = uiExternalBackdropSurface.read(uint2(pixel));
+    }
     if ((pc.data.x & 8u) != 0u)
     {
-        // The Metal renderer replays both UI layers into sceneColorBuffer.
-        // Its static surface is blank, so avoid a texture read and two
-        // straight-alpha blends across every drawable pixel.
-        color = (pc.data.x & 1u) != 0u ?
-            blend_over(uiExternalBackdropSurface.read(uint2(pixel)), sceneColor) :
-            sceneColor;
+        float4 param = color;
+        float4 param_1 = sceneColor;
+        color = blend_over(param, param_1);
     }
     else
     {
-        float4 staticColor = uiStaticSurface.read(uint2(pixel));
-        color = float4(0.0);
-        if ((pc.data.x & 1u) != 0u)
-            color = uiExternalBackdropSurface.read(uint2(pixel));
-        color = blend_over(color, staticColor);
-        color = blend_over(color, sceneColor);
+        float4 param_2 = color;
+        float4 param_3 = staticColor;
+        color = blend_over(param_2, param_3);
+        float4 param_4 = color;
+        float4 param_5 = sceneColor;
+        color = blend_over(param_4, param_5);
     }
     if ((pc.data.x & 16u) != 0u)
     {
         float2 point = float2(pixel) + float2(0.5);
         float alpha = 1.0;
-        if (point.x < pc.fadeRect.x || point.x >= pc.fadeRect.x + pc.fadeRect.z ||
-            point.y < pc.fadeRect.y || point.y >= pc.fadeRect.y + pc.fadeRect.w)
+        bool _199 = point.x < pc.fadeRect.x;
+        bool _212;
+        if (!_199)
+        {
+            _212 = point.x >= (pc.fadeRect.x + pc.fadeRect.z);
+        }
+        else
+        {
+            _212 = _199;
+        }
+        bool _221;
+        if (!_212)
+        {
+            _221 = point.y < pc.fadeRect.y;
+        }
+        else
+        {
+            _221 = _212;
+        }
+        bool _233;
+        if (!_221)
+        {
+            _233 = point.y >= (pc.fadeRect.y + pc.fadeRect.w);
+        }
+        else
+        {
+            _233 = _221;
+        }
+        if (_233)
+        {
             alpha = 0.0;
+        }
         else
         {
             if (pc.fadeParameters.x > 0.0)
-                alpha = min(alpha, smoothstep(0.0, pc.fadeParameters.x, point.y - pc.fadeRect.y));
+            {
+                alpha = fast::min(alpha, smoothstep(0.0, pc.fadeParameters.x, point.y - pc.fadeRect.y));
+            }
             if (pc.fadeParameters.y > 0.0)
-                alpha = min(alpha, smoothstep(0.0, pc.fadeParameters.y, pc.fadeRect.y + pc.fadeRect.w - point.y));
+            {
+                alpha = fast::min(alpha, smoothstep(0.0, pc.fadeParameters.y, (pc.fadeRect.y + pc.fadeRect.w) - point.y));
+            }
             alpha = mix(pc.fadeParameters.z, 1.0, alpha);
         }
         color.w *= alpha;

@@ -13,6 +13,7 @@
 namespace
 {
     std::unordered_set<GLFWwindow*> dockWindows;
+    thread_local GLFWwindow* nativeDragWindow = nullptr;
 
     NSEvent* current_left_mouse_down(NSWindow* window)
     {
@@ -29,10 +30,17 @@ namespace
                                  timestamp:[[NSProcessInfo processInfo] systemUptime]
                               windowNumber:[window windowNumber]
                                    context:nil
-                               eventNumber:event ? [event eventNumber] : 0
+                               // App-defined runloop events have no mouse
+                               // event number; this is a fresh mouse event.
+                               eventNumber:0
                                 clickCount:1
                                   pressure:1.0];
     }
+}
+
+bool glfw_macos_native_window_drag_active()
+{
+    return nativeDragWindow != nullptr;
 }
 
 void glfw_macos_refresh_application_presence()
@@ -174,7 +182,28 @@ bool begin_glfw_native_window_drag(GLFWwindow* window)
         return false;
     }
 
-    [nativeWindow performWindowDragWithEvent:event];
+    // AppKit moves the window in a nested event loop. Cursor rectangles and
+    // re-entrant UI hover updates must not replace its drag cursor mid-move.
+    const BOOL cursorRectsEnabled = nativeWindow.areCursorRectsEnabled;
+    NSCursor* previousCursor = [[NSCursor currentCursor] retain];
+    GLFWwindow* previousDragWindow = nativeDragWindow;
+    nativeDragWindow = window;
+    [nativeWindow retain];
+    if (cursorRectsEnabled) [nativeWindow disableCursorRects];
+    [[NSCursor closedHandCursor] push];
+    @try
+    {
+        [nativeWindow performWindowDragWithEvent:event];
+    }
+    @finally
+    {
+        [NSCursor pop];
+        if (cursorRectsEnabled) [nativeWindow enableCursorRects];
+        nativeDragWindow = previousDragWindow;
+        [previousCursor set];
+        [previousCursor release];
+        [nativeWindow release];
+    }
     return true;
 }
 #endif

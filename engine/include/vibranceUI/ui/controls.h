@@ -694,7 +694,11 @@ struct UiDropdownOptions
     int selectedIndex = 0;
     bool enabled = true;
     Renderer2DPrimitive buttonPrimitive = Renderer2DPrimitive::eSquircle;
+#if defined(__APPLE__)
+    float buttonCornerRadius = 8.0f;
+#else
     float buttonCornerRadius = 18.0f;
+#endif
     float buttonSquircleAmount = 0.74f;
     float buttonSquirclePower = 4.7f;
     float buttonFontSize = 13.5f;

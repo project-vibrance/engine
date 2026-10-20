@@ -34,19 +34,25 @@ int2 dispatch_origin(constant Renderer2DConstants& pc)
 }
 
 static inline __attribute__((always_inline))
+uint vibrance_primitive_type(constant Renderer2DConstants& pc)
+{
+    return pc.data.x & 255u;
+}
+
+static inline __attribute__((always_inline))
 float notch_flare_size(thread const float2& size, thread const float& amount, thread const float& depth)
 {
     float progress = fast::clamp((fast::clamp(amount, 0.0, 1.0) - 0.85000002384185791015625) / 0.1500000059604644775390625, 0.0, 1.0);
-    float _507;
+    float _515;
     if (depth > 0.5)
     {
-        _507 = depth;
+        _515 = depth;
     }
     else
     {
-        _507 = fast::clamp(size.y * 0.62000000476837158203125, 0.0, 92.0);
+        _515 = fast::clamp(size.y * 0.62000000476837158203125, 0.0, 92.0);
     }
-    float depthTarget = _507;
+    float depthTarget = _515;
     float flareTarget = fast::clamp(depthTarget * 0.180000007152557373046875, 0.0, size.y * 0.5);
     float sizeRatio = fast::clamp((size.y * 0.5) / fast::max(flareTarget, 0.001000000047497451305389404296875), 0.0, 1.0);
     float flareT = sizeRatio * progress;
@@ -56,7 +62,7 @@ float notch_flare_size(thread const float2& size, thread const float& amount, th
 static inline __attribute__((always_inline))
 float primitive_bounds_padding(constant Renderer2DConstants& pc)
 {
-    if (pc.data.x != 7u)
+    if (vibrance_primitive_type(pc) != 7u)
     {
         return 0.0;
     }
@@ -78,26 +84,26 @@ float sd_squircle_box(thread const float2& p, thread const float2& halfSize, thr
         return (roundedNorm + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
     }
     float cornerPower = mix(2.0, fast::clamp(power, 2.0, 5.0), fast::clamp(amount, 0.0, 1.0));
-    bool _352 = outside.x == 0.0;
-    bool _359;
-    if (!_352)
+    bool _360 = outside.x == 0.0;
+    bool _367;
+    if (!_360)
     {
-        _359 = outside.y == 0.0;
+        _367 = outside.y == 0.0;
     }
     else
     {
-        _359 = _352;
+        _367 = _360;
     }
-    float _360;
-    if (_359)
+    float _368;
+    if (_367)
     {
-        _360 = outside.x + outside.y;
+        _368 = outside.x + outside.y;
     }
     else
     {
-        _360 = powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+        _368 = powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
     }
-    float squircleNorm = _360;
+    float squircleNorm = _368;
     return (mix(roundedNorm, squircleNorm, fast::clamp(amount, 0.0, 1.0)) + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
 }
 
@@ -132,18 +138,18 @@ float sd_circular_progress(thread const float2& pixel, thread const float4& rect
         return ringSdf;
     }
     float angle = precise::atan2(p.y, p.x);
-    float _829;
+    float _837;
     if (arcParams.w >= 0.0)
     {
         float param = angle - arcParams.z;
-        _829 = positive_angle(param);
+        _837 = positive_angle(param);
     }
     else
     {
         float param_1 = arcParams.z - angle;
-        _829 = positive_angle(param_1);
+        _837 = positive_angle(param_1);
     }
-    float relativeAngle = _829;
+    float relativeAngle = _837;
     float sweep = 6.283185482025146484375 * progress;
     if (relativeAngle <= sweep)
     {
@@ -161,27 +167,27 @@ float corner_radius_for(thread const float2& p, thread const float4& radii)
 {
     if (p.y < 0.0)
     {
-        float _257;
+        float _265;
         if (p.x < 0.0)
         {
-            _257 = radii.x;
+            _265 = radii.x;
         }
         else
         {
-            _257 = radii.y;
+            _265 = radii.y;
         }
-        return _257;
+        return _265;
     }
-    float _270;
+    float _278;
     if (p.x < 0.0)
     {
-        _270 = radii.w;
+        _278 = radii.w;
     }
     else
     {
-        _270 = radii.z;
+        _278 = radii.z;
     }
-    return _270;
+    return _278;
 }
 
 static inline __attribute__((always_inline))
@@ -198,26 +204,26 @@ float sd_squircle_box_corners(thread const float2& p, thread const float2& halfS
         return (roundedNorm + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
     }
     float cornerPower = mix(2.0, fast::clamp(power, 2.0, 5.0), fast::clamp(amount, 0.0, 1.0));
-    bool _449 = outside.x == 0.0;
-    bool _456;
-    if (!_449)
+    bool _457 = outside.x == 0.0;
+    bool _464;
+    if (!_457)
     {
-        _456 = outside.y == 0.0;
+        _464 = outside.y == 0.0;
     }
     else
     {
-        _456 = _449;
+        _464 = _457;
     }
-    float _457;
-    if (_456)
+    float _465;
+    if (_464)
     {
-        _457 = outside.x + outside.y;
+        _465 = outside.x + outside.y;
     }
     else
     {
-        _457 = powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
+        _465 = powr(powr(outside.x, cornerPower) + powr(outside.y, cornerPower), 1.0 / cornerPower);
     }
-    float squircleNorm = _457;
+    float squircleNorm = _465;
     return (mix(roundedNorm, squircleNorm, fast::clamp(amount, 0.0, 1.0)) + fast::min(fast::max(q.x, q.y), 0.0)) - safeRadius;
 }
 
@@ -314,40 +320,40 @@ float shadow_sdf_for(thread const float2& pixel, thread const float4& rect, thre
     float2 halfSize = fast::max(rect.zw * 0.5, float2(0.5));
     float2 center = rect.xy + halfSize;
     float2 p = pixel - center;
-    if (pc.data.x == 8u)
+    if (vibrance_primitive_type(pc) == 8u)
     {
         float2 param = pixel;
         float4 param_1 = rect;
         float4 param_2 = pc.uvRect;
         return sd_circular_progress(param, param_1, param_2);
     }
-    if (pc.data.x == 3u)
+    if (vibrance_primitive_type(pc) == 3u)
     {
         float2 q = p / halfSize;
         return (length(q) - 1.0) * fast::min(halfSize.x, halfSize.y);
     }
-    float _953;
-    if (pc.data.x == 1u)
+    float _958;
+    if (vibrance_primitive_type(pc) == 1u)
     {
-        _953 = 0.0;
+        _958 = 0.0;
     }
     else
     {
-        _953 = fast::clamp(cornerRadius, 0.0, fast::min(halfSize.x, halfSize.y));
+        _958 = fast::clamp(cornerRadius, 0.0, fast::min(halfSize.x, halfSize.y));
     }
-    float radius = _953;
+    float radius = _958;
     float squircleAmount = fast::clamp(pc.effect1.x, 0.0, 1.0);
-    float _975;
+    float _980;
     if (pc.effect1.y <= 0.001000000047497451305389404296875)
     {
-        _975 = 4.0;
+        _980 = 4.0;
     }
     else
     {
-        _975 = pc.effect1.y;
+        _980 = pc.effect1.y;
     }
-    float squirclePower = fast::clamp(_975, 2.0, 5.0);
-    if (pc.data.x == 6u)
+    float squirclePower = fast::clamp(_980, 2.0, 5.0);
+    if (vibrance_primitive_type(pc) == 6u)
     {
         float2 param_3 = p;
         float2 param_4 = halfSize;
@@ -356,7 +362,7 @@ float shadow_sdf_for(thread const float2& pixel, thread const float4& rect, thre
         float param_7 = squirclePower;
         return sd_squircle_box(param_3, param_4, param_5, param_6, param_7);
     }
-    if (pc.data.x == 7u)
+    if (vibrance_primitive_type(pc) == 7u)
     {
         float2 param_8 = pixel;
         float4 param_9 = rect;
@@ -367,17 +373,17 @@ float shadow_sdf_for(thread const float2& pixel, thread const float4& rect, thre
         float param_14 = pc.effect1.w;
         return sd_notched_squircle(param_8, param_9, param_10, param_11, param_12, param_13, param_14);
     }
-    bool _1028 = pc.data.x != 1u;
-    bool _1036;
-    if (_1028)
+    bool _1030 = vibrance_primitive_type(pc) != 1u;
+    bool _1038;
+    if (_1030)
     {
-        _1036 = (pc.data.y & 65536u) != 0u;
+        _1038 = (pc.data.y & 65536u) != 0u;
     }
     else
     {
-        _1036 = _1028;
+        _1038 = _1030;
     }
-    if (_1036)
+    if (_1038)
     {
         float2 param_15 = p;
         float2 param_16 = halfSize;
@@ -393,35 +399,35 @@ float shadow_sdf_for(thread const float2& pixel, thread const float4& rect, thre
 static inline __attribute__((always_inline))
 float shadow_sdf(thread const float2& pixel, constant Renderer2DConstants& pc)
 {
-    bool _1060 = (pc.data.y & 16777216u) != 0u;
-    bool _1066;
-    if (_1060)
+    bool _1062 = (pc.data.y & 16777216u) != 0u;
+    bool _1067;
+    if (_1062)
     {
-        _1066 = pc.data.x == 7u;
+        _1067 = vibrance_primitive_type(pc) == 7u;
     }
     else
     {
-        _1066 = _1060;
+        _1067 = _1062;
     }
-    if (_1066)
+    if (_1067)
     {
         float2 halfSize = fast::max(pc.rect.zw * 0.5, float2(0.5));
         float2 p = pixel - (pc.rect.xy + halfSize);
         float radius = fast::clamp(pc.effect0.x, 0.0, fast::min(halfSize.x, halfSize.y));
-        float _1100;
+        float _1101;
         if (pc.effect1.y <= 0.001000000047497451305389404296875)
         {
-            _1100 = 4.0;
+            _1101 = 4.0;
         }
         else
         {
-            _1100 = pc.effect1.y;
+            _1101 = pc.effect1.y;
         }
         float2 param = p;
         float2 param_1 = halfSize;
         float param_2 = radius;
         float param_3 = fast::clamp(pc.effect1.x, 0.0, 1.0);
-        float param_4 = fast::clamp(_1100, 2.0, 5.0);
+        float param_4 = fast::clamp(_1101, 2.0, 5.0);
         return sd_squircle_box(param, param_1, param_2, param_3, param_4);
     }
     uint param_5 = pc.data.z;
@@ -444,74 +450,80 @@ float4 blend_over(thread const float4& dst, thread const float4& src)
     return float4(outRgb, outA);
 }
 
-kernel void shadow_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture2d<float, access::read_write> colorBuffer [[texture(0)]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
+kernel void shadow_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture2d<float, access::read_write> colorBuffer [[texture(0)]], uint3 gl_NumWorkGroups [[threadgroups_per_grid]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]])
 {
+    uint tail = pc.data.x >> 8u;
+    uint2 exactExtent = (gl_NumWorkGroups.xy * uint2(8u)) - uint2(tail & 7u, (tail >> 3u) & 7u);
+    if (any(gl_GlobalInvocationID.xy >= exactExtent))
+    {
+        return;
+    }
     int2 pixel = dispatch_origin(pc) + int2(gl_GlobalInvocationID.xy);
     int2 screenSize = int2(colorBuffer.get_width(), colorBuffer.get_height());
-    bool _1176 = pixel.x < 0;
-    bool _1183;
-    if (!_1176)
+    bool _1203 = pixel.x < 0;
+    bool _1210;
+    if (!_1203)
     {
-        _1183 = pixel.y < 0;
+        _1210 = pixel.y < 0;
     }
     else
     {
-        _1183 = _1176;
+        _1210 = _1203;
     }
-    bool _1192;
-    if (!_1183)
+    bool _1219;
+    if (!_1210)
     {
-        _1192 = pixel.x >= screenSize.x;
+        _1219 = pixel.x >= screenSize.x;
     }
     else
     {
-        _1192 = _1183;
+        _1219 = _1210;
     }
-    bool _1201;
-    if (!_1192)
+    bool _1228;
+    if (!_1219)
     {
-        _1201 = pixel.y >= screenSize.y;
+        _1228 = pixel.y >= screenSize.y;
     }
     else
     {
-        _1201 = _1192;
+        _1228 = _1219;
     }
-    if (_1201)
+    if (_1228)
     {
         return;
     }
     float2 p = float2(pixel) + float2(0.5);
     float blurRadius = fast::max(pc.effect0.y, 0.5);
     float boundsPad = blurRadius + primitive_bounds_padding(pc);
-    bool _1223 = p.x < (pc.rect.x - boundsPad);
-    bool _1234;
-    if (!_1223)
+    bool _1250 = p.x < (pc.rect.x - boundsPad);
+    bool _1261;
+    if (!_1250)
     {
-        _1234 = p.y < (pc.rect.y - boundsPad);
+        _1261 = p.y < (pc.rect.y - boundsPad);
     }
     else
     {
-        _1234 = _1223;
+        _1261 = _1250;
     }
-    bool _1248;
-    if (!_1234)
+    bool _1275;
+    if (!_1261)
     {
-        _1248 = p.x > ((pc.rect.x + pc.rect.z) + boundsPad);
+        _1275 = p.x > ((pc.rect.x + pc.rect.z) + boundsPad);
     }
     else
     {
-        _1248 = _1234;
+        _1275 = _1261;
     }
-    bool _1262;
-    if (!_1248)
+    bool _1289;
+    if (!_1275)
     {
-        _1262 = p.y > ((pc.rect.y + pc.rect.w) + boundsPad);
+        _1289 = p.y > ((pc.rect.y + pc.rect.w) + boundsPad);
     }
     else
     {
-        _1262 = _1248;
+        _1289 = _1275;
     }
-    if (_1262)
+    if (_1289)
     {
         return;
     }

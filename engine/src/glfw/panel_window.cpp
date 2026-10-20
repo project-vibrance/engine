@@ -1,4 +1,5 @@
 #include <vibranceUI/glfw/panel_window.h>
+#include "cursor_macos.h"
 
 #include <vibranceUI/ui/builder.h>
 #include <vibranceUI/ui/controls.h>
@@ -1467,6 +1468,18 @@ void GlfwPanelWindow::update_hover_cursor()
     }
 
     Renderer2DScene& scene = engine->renderer2d_scene();
+#if defined(__APPLE__)
+    if (glfw_left_mouse_pressed(window))
+    {
+        if (const auto cursor = macos_captured_cursor_kind(scene.registry(), inputState))
+        {
+            ui_update_input_hover(scene, engine->renderer2d_font_atlas(), inputState, true, point);
+            set_hovered_traffic_light(TrafficLightKind::eNone);
+            set_glfw_cursor_for_kind(window, cursors, *cursor);
+            return;
+        }
+    }
+#endif
     const auto readHit = [&] {
         const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eHoverHitTest);
         return scene.entity_at(point);

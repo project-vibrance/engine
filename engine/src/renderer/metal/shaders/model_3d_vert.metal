@@ -62,4 +62,3 @@ vertex model_3d_vert_out model_3d_vert(model_3d_vert_in in [[stage_in]], constan
     out.materialFactors3 = in.inMaterial3;
     return out;
 }
-

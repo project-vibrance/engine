@@ -36,14 +36,31 @@ void main() {
     }
 
     vec4 sceneColor = imageLoad(sceneColorBuffer, pixel);
+#if defined(VIBRANCE_METAL)
+    vec4 staticColor = vec4(0.0);
+    if ((pc.data.x & 8u) == 0u) {
+        staticColor = imageLoad(uiStaticSurface, pixel);
+    }
+#else
     vec4 staticColor = imageLoad(uiStaticSurface, pixel);
+#endif
 
     vec4 color = vec4(0.0);
     if ((pc.data.x & COMPOSITE_USE_EXTERNAL_BACKDROP_UNDERLAY) != 0u) {
         color = imageLoad(uiExternalBackdropSurface, pixel);
     }
-    color = blend_over(color, staticColor);
-    color = blend_over(color, sceneColor);
+#if defined(VIBRANCE_METAL)
+    // Metal replays static and dynamic paint into the same colour texture.
+    // Its native presentation path binds that texture in both source slots;
+    // bit 3 selects the already combined source so alpha is applied once.
+    if ((pc.data.x & 8u) != 0u) {
+        color = blend_over(color, sceneColor);
+    } else
+#endif
+    {
+        color = blend_over(color, staticColor);
+        color = blend_over(color, sceneColor);
+    }
     if ((pc.data.x & 16u) != 0u) {
         vec2 point = vec2(pixel) + vec2(0.5);
         float alpha = 1.0;

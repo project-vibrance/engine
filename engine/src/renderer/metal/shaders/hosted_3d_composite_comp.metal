@@ -104,4 +104,3 @@ kernel void hosted_3d_composite_comp(constant Hosted3DCompositeConstants& pc [[b
     float4 param_4 = modelColor;
     colorBuffer.write(blend_premultiplied_over(param_3, param_4), uint2(pixel));
 }
-

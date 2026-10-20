@@ -1,6 +1,7 @@
 #include <vibranceUI/glfw/window.h>
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/ui/controls.h>
+#include "cursor_macos.h"
 #include <algorithm>
 #include <cmath>
 #include <exception>
@@ -23,6 +24,7 @@
 #if defined(__APPLE__)
 void glfw_macos_refresh_application_presence();
 void glfw_macos_forget_window(GLFWwindow* window);
+bool glfw_macos_native_window_drag_active();
 #endif
 
 namespace
@@ -1603,9 +1605,31 @@ GLFWcursor* glfw_cursor_for_kind(const GlfwCursorSet& cursors, UiCursorKind curs
     }
 }
 
+namespace
+{
+bool can_update_glfw_cursor(GLFWwindow* window)
+{
+    if (!window) return false;
+#if defined(__APPLE__)
+    if (glfw_macos_native_window_drag_active()) return false;
+    // GLFW's Cocoa setter changes the global NSCursor whenever the pointer
+    // lies inside a window's rectangle, even if another window covers it.
+    // Background hover ticks must not overwrite the front window's cursor.
+    // Outside that rectangle GLFW only stores the cursor for the next entry.
+    double x = 0.0, y = 0.0;
+    int width = 0, height = 0;
+    glfwGetCursorPos(window, &x, &y);
+    glfwGetWindowSize(window, &width, &height);
+    if (x >= 0.0 && y >= 0.0 && x < width && y < height &&
+        !glfw_window_hovered(window)) return false;
+#endif
+    return true;
+}
+}
+
 void clear_glfw_cursor(GLFWwindow* window)
 {
-    if (window)
+    if (can_update_glfw_cursor(window))
     {
         glfwSetCursor(window, nullptr);
     }
@@ -1613,7 +1637,7 @@ void clear_glfw_cursor(GLFWwindow* window)
 
 void set_glfw_cursor_for_kind(GLFWwindow* window, const GlfwCursorSet& cursors, UiCursorKind cursorKind)
 {
-    if (window)
+    if (can_update_glfw_cursor(window))
     {
         glfwSetCursor(window, glfw_cursor_for_kind(cursors, cursorKind));
     }
@@ -1852,7 +1876,12 @@ UiHoverResult glfw_update_ui_hover(
         pointer.point);
     if (updateCursor)
     {
-        set_glfw_cursor_for_kind(window, cursors, hover.cursor);
+        UiCursorKind cursor = hover.cursor;
+#if defined(__APPLE__)
+        if (glfw_left_mouse_pressed(window))
+            cursor = macos_captured_cursor_kind(engine.renderer2d_scene().registry(), inputState).value_or(cursor);
+#endif
+        set_glfw_cursor_for_kind(window, cursors, cursor);
     }
     return hover;
 }
