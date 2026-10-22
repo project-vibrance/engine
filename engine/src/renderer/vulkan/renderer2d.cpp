@@ -251,7 +251,7 @@ void BlurPipeline::record_batch(
         static_cast<float>(swapchain.extent.width),
         static_cast<float>(swapchain.extent.height) };
     const DispatchBounds sourceBounds = liquid ?
-        make_blur_dispatch_bounds(swapchain, sourceBatch, false) : bounds;
+        make_blur_dispatch_bounds(swapchain, sourceBatch, false, false) : bounds;
 
     bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, postScope);

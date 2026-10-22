@@ -352,6 +352,7 @@ int wmain(int argc, wchar_t** argv)
 {
     bool runBenchmark = false;
     bool benchmarkOnly = false;
+    bool useWarp = false;
     unsigned adapterIndex = std::numeric_limits<unsigned>::max();
     const wchar_t* previewPath = nullptr;
     const wchar_t* capturePath = nullptr;
@@ -362,6 +363,7 @@ int wmain(int argc, wchar_t** argv)
         const std::wstring option(argv[argument]);
         if (option == L"--benchmark") runBenchmark = true;
         else if (option == L"--benchmark-only") runBenchmark = benchmarkOnly = true;
+        else if (option == L"--warp") useWarp = true;
         else if (option == L"--adapter" && argument + 1 < argc)
         {
             const std::wstring index(argv[++argument]);
@@ -382,10 +384,11 @@ int wmain(int argc, wchar_t** argv)
         else if (!previewPath && !option.starts_with(L"--")) previewPath = argv[argument];
         else validArguments = false;
     }
-    if (!validArguments || (capturePath && comparisonPath))
+    if (!validArguments || (capturePath && comparisonPath) ||
+        (useWarp && adapterIndex != std::numeric_limits<unsigned>::max()))
     {
         std::wcerr << L"Usage: test_liquid_glass_d3d11 shader-directory [preview.ppm] "
-            L"[--benchmark | --benchmark-only] [--adapter index] [--capture file | --compare file]\n";
+            L"[--benchmark | --benchmark-only] [--adapter index | --warp] [--capture file | --compare file]\n";
         return 2;
     }
     std::ofstream capture;
@@ -450,9 +453,9 @@ int wmain(int argc, wchar_t** argv)
     }
     HRESULT result = D3D11CreateDevice(
         selectedAdapter.Get(), selectedAdapter ? D3D_DRIVER_TYPE_UNKNOWN :
-            D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, requested, 1,
+            useWarp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, requested, 1,
         D3D11_SDK_VERSION, &device, &level, &context);
-    if (FAILED(result) && !selectedAdapter)
+    if (FAILED(result) && !selectedAdapter && !useWarp)
     {
         result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
                                    requested, 1, D3D11_SDK_VERSION, &device,
@@ -1223,6 +1226,105 @@ int wmain(int argc, wchar_t** argv)
               << (exclusionCorrect ? "pass" : "fail") << '\n';
     if (!exclusionCorrect) return 49;
 
+    // A backing card exposes only its bottom seven pixels. Its front-card
+    // cutout hides paint; it must not become a second refracting edge. DWM
+    // may provide an intermediate clipped to the backing's outer contour,
+    // so bending downwards from the cutout samples transparent black beyond
+    // the real bottom edge. Keep refraction enabled and compare the exposed
+    // strip with the same physical card before its front card occludes it.
+    auto backingRegion = coverageRegion;
+    backingRegion.x = 78;
+    backingRegion.y = 107;
+    backingRegion.width = 356;
+    backingRegion.height = 72;
+    backingRegion.shape = 1u;
+    backingRegion.cornerRadius = 16;
+    backingRegion.topLeftRadius = backingRegion.topRightRadius =
+        backingRegion.bottomLeftRadius = backingRegion.bottomRightRadius = 16;
+    backingRegion.refractionStrength = 20;
+    backingRegion.dispersionStrength = 2;
+    backingRegion.edgeThickness = 22;
+    backingRegion.rimStrength = 0.25f;
+    backingRegion.lightPhase = -1;
+    backingRegion.tintAlpha = 0.08f;
+    backingRegion.exclusion.x = -10;
+    backingRegion.exclusion.y = -7;
+    backingRegion.exclusion.width = 376;
+    backingRegion.exclusion.height = 72;
+    backingRegion.exclusion.cornerRadius = 16;
+    backingRegion.exclusion.topLeftRadius = backingRegion.exclusion.topRightRadius =
+        backingRegion.exclusion.bottomLeftRadius = backingRegion.exclusion.bottomRightRadius = 16;
+    backingRegion.exclusion.shape = 1u;
+    std::vector<std::uint32_t> clippedCardPixels(width * height);
+    for (UINT y = 0; y < height; ++y)
+        for (UINT x = 0; x < width; ++x)
+        {
+            const float qx = std::abs(x + 0.5f - (78 + 356 * 0.5f)) - (356 * 0.5f - 16);
+            const float qy = std::abs(y + 0.5f - (107 + 72 * 0.5f)) - (72 * 0.5f - 16);
+            const float dx = std::max(qx, 0.0f), dy = std::max(qy, 0.0f);
+            const float distance = std::sqrt(dx * dx + dy * dy) +
+                std::min(std::max(qx, qy), 0.0f) - 16;
+            clippedCardPixels[y * width + x] = distance <= 0 ? 0xff60c090u : 0u;
+        }
+    D3D11_SUBRESOURCE_DATA clippedCardData { clippedCardPixels.data(), width * 4u, 0 };
+    ComPtr<ID3D11Texture2D> clippedCardBackdrop;
+    if (FAILED(device->CreateTexture2D(&whiteDesc, &clippedCardData,
+            &clippedCardBackdrop))) return 82;
+    for (const float radius : { 7.0f, 30.0f })
+    {
+        backingRegion.blurRadius = radius;
+        backingRegion.hasExclusion = false;
+        backingRegion.viewportFade = {};
+        if (!renderSample(clippedCardBackdrop.Get(), backingRegion)) return 82;
+        const auto physicalCardReference = samplePixels;
+        backingRegion.hasExclusion = true;
+        for (const bool viewportEnabled : { false, true })
+        {
+            backingRegion.viewportRect = { -78, 33, 512, 80 };
+            backingRegion.viewportFade = { 0, 0, 1, viewportEnabled ? 1.0f : 0.0f };
+            if (!renderSample(clippedCardBackdrop.Get(), backingRegion)) return 82;
+            const auto fullStripReference = samplePixels;
+            std::size_t stripFailures = 0, darkPixels = 0;
+            for (UINT y = 172; y < 179; ++y)
+                for (UINT x = 130; x < 380; ++x)
+                {
+                    const auto index = y * width + x;
+                    if (!nearlySamePixel(samplePixels[index], physicalCardReference[index]))
+                        ++stripFailures;
+                    if (((samplePixels[index] >> 8u) & 0xffu) < 128u) ++darkPixels;
+                }
+            const auto greenAt = [&](UINT y) { return (samplePixels[y * width + 256] >> 8u) & 0xffu; };
+            const bool bottomRimRetained = greenAt(178) > greenAt(175) + 15u;
+            std::cout << "Backing-card refraction, blur " << radius
+                      << ", viewport " << viewportEnabled << ": " << stripFailures
+                      << " reference failures, " << darkPixels << " dark pixels, bottom rim "
+                      << (bottomRimRetained ? "retained" : "missing") << '\n';
+            if (stripFailures || darkPixels || !bottomRimRetained) return 83;
+
+            context->ClearRenderTargetView(target.Get(), dark);
+            for (LONG y = 0; y < static_cast<LONG>(height); y += 8)
+            {
+                const D3D11_RECT clip { 0, y, static_cast<LONG>(width),
+                    std::min(y + 8, static_cast<LONG>(height)) };
+                if (!lens.render(context.Get(), clippedCardBackdrop.Get(), target.Get(),
+                        backingRegion, 0, 0, &clip)) return 82;
+            }
+            context->CopyResource(readback.Get(), backdrop.Get());
+            if (FAILED(context->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return 82;
+            std::size_t tiledFailures = 0;
+            for (UINT y = 0; y < height; ++y)
+            {
+                const auto* row = reinterpret_cast<const std::uint32_t*>(
+                    static_cast<const std::uint8_t*>(mapped.pData) + y * mapped.RowPitch);
+                for (UINT x = 0; x < width; ++x)
+                    if (row[x] != fullStripReference[y * width + x]) ++tiledFailures;
+            }
+            context->Unmap(readback.Get(), 0);
+            std::cout << "Backing-card tiled draw differences: " << tiledFailures << '\n';
+            if (tiledFailures) return 84;
+        }
+    }
+
     const std::vector<std::uint32_t> neutralPixels(width * height, 0xff606060u);
     D3D11_SUBRESOURCE_DATA neutralData { neutralPixels.data(),
         width * sizeof(std::uint32_t), 0 };
@@ -1231,13 +1333,22 @@ int wmain(int argc, wchar_t** argv)
             &neutralBackdrop))) return 50;
     // A joined contour has one outer rim. The old main shell's edge inside
     // the neck cannot generate a second bright line through the union.
+    unionRegion.rimStrength = 0.0f;
+    if (!renderSample(neutralBackdrop.Get(), unionRegion)) return 50;
+    const auto unlitTopEdge = unionPixel(96u, 0u) & 0xffu;
+    const auto unlitBottomEdge = unionPixel(96u, 95u) & 0xffu;
     unionRegion.rimStrength = 1.0f;
     if (!renderSample(neutralBackdrop.Get(), unionRegion)) return 50;
     const auto internalEdge = unionPixel(191u, 48u) & 0xffu;
-    const auto outerEdge = unionPixel(283u, 48u) & 0xffu;
+    const auto topEdge = unionPixel(96u, 0u) & 0xffu;
+    const auto bottomEdge = unionPixel(96u, 95u) & 0xffu;
+    const auto sideEdge = unionPixel(283u, 48u) & 0xffu;
     std::cout << "Union rim, internal edge: " << internalEdge
-              << ", outer edge: " << outerEdge << '\n';
-    if (std::abs(static_cast<int>(internalEdge) - 96) > 1 || outerEdge < 160u)
+              << ", top: " << topEdge << ", bottom: " << bottomEdge
+              << ", side: " << sideEdge << '\n';
+    if (std::abs(static_cast<int>(internalEdge) - 96) > 1 ||
+        topEdge < unlitTopEdge + 30u || bottomEdge < unlitBottomEdge + 30u ||
+        sideEdge >= std::min(topEdge, bottomEdge))
         return 51;
 
     // The cap is painted once across the complete union. Overlapping main,
@@ -1590,7 +1701,10 @@ int wmain(int argc, wchar_t** argv)
         const auto directReference = samplePixels;
         const auto margin = static_cast<LONG>(std::ceil(std::max({
             radius * 5.0f, originRegion.refractionStrength +
-                originRegion.dispersionStrength + 2.0f, 4.0f })));
+                originRegion.dispersionStrength + 2.0f,
+            originRegion.rimStrength > 0.0f ? std::min(static_cast<float>(
+                std::min(originRegion.width, originRegion.height)) * 1.6f, 120.0f) + 2.0f : 0.0f,
+            4.0f })));
         const D3D11_BOX copyBox {
             static_cast<UINT>(std::max<LONG>(0, originRegion.x - margin)),
             static_cast<UINT>(std::max<LONG>(0, originRegion.y - margin)), 0,

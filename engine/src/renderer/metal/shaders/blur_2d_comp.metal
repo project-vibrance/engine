@@ -975,30 +975,70 @@ kernel void blur_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture
             bool param_35 = true;
             source.z = sample_axis_blur_at(param_32, param_33, param_34, param_35, pc, sceneColorBuffer, uiStaticSurface, uiExternalBackdropSurface, tempSurface, uiBlurSurface).z;
         }
-        if (_distance > (-16.0))
+        if (_distance > (-5.0))
         {
             float phase = (float((pc.data.z >> 21u) & 255u) / 255.0) * 6.283185482025146484375;
-            float light = powr(fast::clamp(0.5 + (0.5 * cos(precise::atan2(normal.y, normal.x) - phase)), 0.0, 1.0), 12.0);
+            float _2348;
+            if ((pc.data.y & 8192u) != 0u)
+            {
+                _2348 = 1.0;
+            }
+            else
+            {
+                _2348 = 0.699999988079071044921875 + (0.300000011920928955078125 * cos((phase + (((p_1.x - pc.rect.x) / fast::max(pc.rect.z, 1.0)) * 3.1415927410125732421875)) + (normal.y * 0.800000011920928955078125)));
+            }
+            float light = _2348;
             float rim = (float((pc.data.z >> 14u) & 127u) / 127.0) * 0.550000011920928955078125;
-            float4 _2379 = source;
-            float3 _2381 = _2379.xyz + float3(((rim * 0.64999997615814208984375) * exp(((-_distance) * _distance) / 2.25)) * (0.25 + (0.75 * light)));
-            source.x = _2381.x;
-            source.y = _2381.y;
-            source.z = _2381.z;
+            float vertical = normal.y * normal.y;
+            float core = exp(((-(_distance + 0.25)) * (_distance + 0.25)) / 0.60000002384185791015625);
+            float soft = exp(((-(_distance + 1.2999999523162841796875)) * (_distance + 1.2999999523162841796875)) / 6.0);
+            float highlight = ((rim * ((0.519999980926513671875 * core) + (0.180000007152557373046875 * soft))) * (0.07999999821186065673828125 + ((0.920000016689300537109375 * vertical) * vertical))) * light;
+            float4 _2437 = source;
+            float3 _2439 = _2437.xyz * (1.0 - ((rim * 0.2800000011920928955078125) * exp(((-_distance) * _distance) / 0.3499999940395355224609375)));
+            source.x = _2439.x;
+            source.y = _2439.y;
+            source.z = _2439.z;
+            if (highlight > 0.001000000047497451305389404296875)
+            {
+                float reach = fast::min(shortSide * 1.60000002384185791015625, 120.0);
+                float spread = fast::min(shortSide * 0.4000000059604644775390625, 24.0);
+                float2 tangent = float2(-normal.y, normal.x);
+                float3 nearby = float3(0.0);
+                for (int row = 0; row < 3; row++)
+                {
+                    float radialWeight = (row == 1) ? 0.5 : 0.25;
+                    float2 centre = float2(pixel) + ((normal * reach) * (0.1500000059604644775390625 + (0.3499999940395355224609375 * float(row))));
+                    for (int column = 0; column < 3; column++)
+                    {
+                        float weight = radialWeight * ((column == 1) ? 0.5 : 0.25);
+                        float2 param_36 = centre + ((tangent * spread) * float(column - 1));
+                        bool param_37 = false;
+                        nearby += (blur_input_color_at(param_36, param_37, pc, sceneColorBuffer, uiStaticSurface, uiExternalBackdropSurface, tempSurface, uiBlurSurface).xyz * weight);
+                    }
+                }
+                float energy = fast::max(nearby.x, fast::max(nearby.y, nearby.z));
+                float3 reflectedColour = nearby / float3(fast::max(energy, 9.9999997473787516355514526367188e-05));
+                float3 rimColour = mix(float3(1.0), reflectedColour, float3(fast::clamp(energy * 10.0, 0.0, 0.949999988079071044921875)));
+                float4 _2555 = source;
+                float3 _2557 = _2555.xyz + (rimColour * highlight);
+                source.x = _2557.x;
+                source.y = _2557.y;
+                source.z = _2557.z;
+            }
         }
     }
     else
     {
-        uint param_36 = passIndex;
-        bool param_37 = true;
-        int2 param_38 = pixel;
-        float2 param_39 = blur_axis(param_36, param_37);
-        float param_40 = radius;
-        bool param_41 = true;
-        source = sample_axis_blur(param_38, param_39, param_40, param_41, pc, sceneColorBuffer, uiStaticSurface, uiExternalBackdropSurface, tempSurface, uiBlurSurface);
+        uint param_38 = passIndex;
+        bool param_39 = true;
+        int2 param_40 = pixel;
+        float2 param_41 = blur_axis(param_38, param_39);
+        float param_42 = radius;
+        bool param_43 = true;
+        source = sample_axis_blur(param_40, param_41, param_42, param_43, pc, sceneColorBuffer, uiStaticSurface, uiExternalBackdropSurface, tempSurface, uiBlurSurface);
     }
-    float2 param_42 = p_1;
-    float gradientAlpha = blur_gradient_alpha_factor(param_42, pc);
+    float2 param_44 = p_1;
+    float gradientAlpha = blur_gradient_alpha_factor(param_44, pc);
     if (pc.effect0.z > 0.5)
     {
         uiBlurSurface.write(source, uint2(pixel));
@@ -1011,7 +1051,7 @@ kernel void blur_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], texture
     }
     spvImageFence(uiBlurSurface);
     float4 dst_2 = uiBlurSurface.read(uint2(pixel));
-    float4 param_43 = dst_2;
-    float4 param_44 = blurred_2;
-    uiBlurSurface.write(blend_over(param_43, param_44), uint2(pixel));
+    float4 param_45 = dst_2;
+    float4 param_46 = blurred_2;
+    uiBlurSurface.write(blend_over(param_45, param_46), uint2(pixel));
 }

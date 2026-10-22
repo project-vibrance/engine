@@ -1028,6 +1028,12 @@ struct Engine::Impl
             case Renderer2DRenderOpType::eBlur: {
                 auto bounds = make_blur_replay_dispatch_bounds(*this, batch);
                 const bool liquid = (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
+                if (liquid)
+                {
+                    auto sourceBatch = batch;
+                    sourceBatch.clipRect = {0.0f, 0.0f, float(extent.width), float(extent.height)};
+                    bounds = make_blur_dispatch_bounds(*this, sourceBatch, false, false);
+                }
                 const auto outputBounds = liquid ? make_liquid_output_dispatch_bounds(*this, batch, false) :
                     make_blur_dispatch_bounds(*this, batch, false);
                 // The Metal path never populates a separate static layer.

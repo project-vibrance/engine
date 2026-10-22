@@ -73,17 +73,26 @@ private:
         {
             using namespace vibrance::win32;
             const auto executable = std::filesystem::path(module_path(nullptr));
-            const auto desired = liquid_runtime_key(executable.parent_path() / liquidRuntimeNames[0]);
+            auto bundleStamp = liquid_runtime_bundle_stamp(executable.parent_path());
+            auto desired = liquid_runtime_key(executable.parent_path() / liquidRuntimeNames[0]);
             const auto directory = runtime_status_directory();
-            if (desired.empty() || directory.empty()) return;
+            if (directory.empty()) return;
             std::filesystem::file_time_type checkedWriteTime {};
             LiquidRuntimeStatus checkedReport;
             std::wstring verifiedStagedKey;
             for (;;)
             {
                 std::error_code error;
+                const auto nextStamp = liquid_runtime_bundle_stamp(executable.parent_path());
+                const bool bundleChanged = nextStamp != bundleStamp || desired.empty();
+                if (bundleChanged)
+                {
+                    desired = nextStamp.complete ? liquid_runtime_key(
+                        executable.parent_path() / liquidRuntimeNames[0]) : std::wstring {};
+                    bundleStamp = nextStamp;
+                }
                 const auto writeTime = std::filesystem::last_write_time(directory / L"runtime-status.txt", error);
-                if (!error && writeTime != checkedWriteTime)
+                if (!error && (bundleChanged || writeTime != checkedWriteTime))
                 {
                     const auto report = read_liquid_runtime_status(directory);
                     const auto stagedKey = report.requestedKey == desired ?

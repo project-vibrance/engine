@@ -8,7 +8,7 @@ namespace
         const auto* liquid = registry.try_get<LiquidGlassComponent>(entity);
         const auto* transform = registry.try_get<Transform2DComponent>(entity);
         return liquid && liquid->material == GlassMaterial::eLiquid &&
-            liquid->sceneBackdrop && liquid->rim > 0.0f && transform &&
+            liquid->sceneBackdrop && liquid->rimAnimated && liquid->rim > 0.0f && transform &&
             transform2_5d_flags(*transform) == 0u;
     }
 
@@ -1255,6 +1255,8 @@ void Renderer2DScene::build_render_plan_impl(
                 batch.effect1 = mask.rect;
                 batch.flags |= eRenderer2DStyleShapeMask;
                 if (mask.cutout) batch.flags |= eRenderer2DStyleShapeCutout;
+                if (!mask.cutout && registry_.all_of<ShapeMaskSampleCoverage2DComponent>(entity))
+                    batch.flags |= eRenderer2DStyleShapeMaskSampleCoverage;
                 batch.flags &= ~eRenderer2DStyleCornerRadii;
                 batch.packedData = pack_shape_mask_data(
                     mask.primitive,
@@ -1410,9 +1412,15 @@ void Renderer2DScene::build_render_plan_impl(
             blurBatch.packedData = 0u;
             if (sceneLiquid)
             {
+                if (liquid->sampleOwnPaint && blurBatch.order < std::numeric_limits<uint32_t>::max())
+                    ++blurBatch.order;
                 // The blur pass snapshots earlier app content before any
                 // optical reads, so displaced samples cannot feed back.
                 blurBatch.flags |= eRenderer2DStyleLiquidGlass;
+                // Bit 13 is media colour adjustment in the media pipeline and
+                // static rim selection in this blur-only optical pipeline.
+                if (!liquid->rimAnimated) blurBatch.flags |= eRenderer2DStyleLiquidStaticRim;
+                else blurBatch.flags &= ~eRenderer2DStyleLiquidStaticRim;
                 blurBatch.flags &= ~(eRenderer2DStyleGradient | eRenderer2DStyleRadialGradient |
                     eRenderer2DStyleBlurFollowsFillAlpha);
                 blurBatch.effect0.y = blurCornerRadius;
@@ -1424,7 +1432,7 @@ void Renderer2DScene::build_render_plan_impl(
                 blurBatch.packedData = pack_unorm8(liquid->refraction) / 2u |
                     ((pack_unorm8(liquid->dispersion) / 2u) << 7u) |
                     ((pack_unorm8(liquid->rim) / 2u) << 14u) |
-                    (portable_liquid_rim_phase(currentTimeSeconds) << 21u);
+                    ((liquid->rimAnimated ? portable_liquid_rim_phase(currentTimeSeconds) : 0u) << 21u);
                 // A connected native island paints its cap in Composition
                 // instead of the UI texture. Include that same known paint
                 // beneath scene samples so child lenses still see the cap.

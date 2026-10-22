@@ -101,50 +101,50 @@ float primitive_bounds_padding(thread const float4& shapeParams, constant Render
 static inline __attribute__((always_inline))
 bool constant_solid_interior(thread const float2& pixelCenter, constant Renderer2DConstants& pc)
 {
-    bool _2501 = (pc.data.y & 536942625u) != 0u;
-    bool _2517;
-    if (!_2501)
+    bool _2523 = (pc.data.y & 536942625u) != 0u;
+    bool _2539;
+    if (!_2523)
     {
-        bool _2506 = vibrance_primitive_type(pc) != 1u;
-        bool _2511;
-        if (_2506)
+        bool _2528 = vibrance_primitive_type(pc) != 1u;
+        bool _2533;
+        if (_2528)
         {
-            _2511 = vibrance_primitive_type(pc) != 2u;
+            _2533 = vibrance_primitive_type(pc) != 2u;
         }
         else
         {
-            _2511 = _2506;
+            _2533 = _2528;
         }
-        bool _2516;
-        if (_2511)
+        bool _2538;
+        if (_2533)
         {
-            _2516 = vibrance_primitive_type(pc) != 6u;
+            _2538 = vibrance_primitive_type(pc) != 6u;
         }
         else
         {
-            _2516 = _2511;
+            _2538 = _2533;
         }
-        _2517 = _2516;
+        _2539 = _2538;
     }
     else
     {
-        _2517 = _2501;
+        _2539 = _2523;
     }
-    if (_2517)
+    if (_2539)
     {
         return false;
     }
     float2 halfSize = fast::max(pc.rect.zw * 0.5, float2(0.5));
-    float _2530;
+    float _2552;
     if (vibrance_primitive_type(pc) == 1u)
     {
-        _2530 = 0.0;
+        _2552 = 0.0;
     }
     else
     {
-        _2530 = fast::clamp(pc.effect0.x, 0.0, fast::min(halfSize.x, halfSize.y));
+        _2552 = fast::clamp(pc.effect0.x, 0.0, fast::min(halfSize.x, halfSize.y));
     }
-    float radius = _2530;
+    float radius = _2552;
     float softness = fast::max(pc.effect0.z, 0.5);
     float inset = ((radius + fast::max(pc.effect0.y, 0.0)) + softness) + 0.5;
     float2 distanceFromCentre = abs(pixelCenter - (pc.rect.xy + halfSize));
@@ -160,16 +160,16 @@ bool constant_solid_interior(thread const float2& pixelCenter, constant Renderer
             return false;
         }
         float2 maskHalfSize = fast::max(pc.effect1.zw * 0.5, float2(0.5));
-        float _2607;
+        float _2629;
         if (maskPrimitive == 1u)
         {
-            _2607 = 0.0;
+            _2629 = 0.0;
         }
         else
         {
-            _2607 = fast::clamp(float(pc.data.z & 255u), 0.0, fast::min(maskHalfSize.x, maskHalfSize.y));
+            _2629 = fast::clamp(float(pc.data.z & 255u), 0.0, fast::min(maskHalfSize.x, maskHalfSize.y));
         }
-        float maskRadius = _2607;
+        float maskRadius = _2629;
         float maskInset = (maskRadius + fast::max(softness, 0.75)) + 0.5;
         float2 maskDistance = abs(pixelCenter - (pc.effect1.xy + maskHalfSize));
         if (any(maskDistance >= (maskHalfSize - float2(maskInset))))
@@ -755,6 +755,10 @@ float shape_mask_alpha(thread const float2& pixel, thread const float& softness,
     {
         return smoothstep(0.0, inwardSoftness, sdf);
     }
+    if ((pc.data.y & 16384u) != 0u)
+    {
+        return float(sdf <= 0.0);
+    }
     return 1.0 - smoothstep(-inwardSoftness, 0.0, sdf);
 }
 
@@ -763,34 +767,34 @@ float top_outline_factor_for_notch(thread const float2& pixel, thread const floa
 {
     bool effect1Reserved = (pc.data.y & 36864u) != 0u;
     float4 params = own_shape_parameters(pc);
-    bool _2207;
+    bool _2218;
     if (effect1Reserved)
     {
-        _2207 = (pc.data.y & 2147483648u) == 0u;
+        _2218 = (pc.data.y & 2147483648u) == 0u;
     }
     else
     {
-        _2207 = effect1Reserved;
+        _2218 = effect1Reserved;
     }
-    bool _2213;
-    if (!_2207)
+    bool _2224;
+    if (!_2218)
     {
-        _2213 = vibrance_primitive_type(pc) != 7u;
+        _2224 = vibrance_primitive_type(pc) != 7u;
     }
     else
     {
-        _2213 = _2207;
+        _2224 = _2218;
     }
-    bool _2220;
-    if (!_2213)
+    bool _2231;
+    if (!_2224)
     {
-        _2220 = params.z <= 0.00999999977648258209228515625;
+        _2231 = params.z <= 0.00999999977648258209228515625;
     }
     else
     {
-        _2220 = _2213;
+        _2231 = _2224;
     }
-    if (_2220 || (outlineWidth <= 0.001000000047497451305389404296875))
+    if (_2231 || (outlineWidth <= 0.001000000047497451305389404296875))
     {
         return 1.0;
     }
@@ -896,36 +900,36 @@ float4 shade_shape_sample(thread const float2& samplePoint, constant Renderer2DC
         return float4(0.0);
     }
     bool smoothEdges = (pc.data.y & 4u) != 0u;
-    float _2306;
+    float _2317;
     if (smoothEdges)
     {
-        _2306 = smoothstep(softness, -softness, sdf);
+        _2317 = smoothstep(softness, -softness, sdf);
     }
     else
     {
-        _2306 = float(sdf <= 0.0);
+        _2317 = float(sdf <= 0.0);
     }
-    float fillAlpha = _2306;
+    float fillAlpha = _2317;
     float outlineWidth = fast::max(pc.effect0.y, 0.0);
-    float _2326;
+    float _2337;
     if (outlineWidth > 0.0)
     {
-        float _2330;
+        float _2341;
         if (smoothEdges)
         {
-            _2330 = smoothstep(softness, -softness, sdf + outlineWidth);
+            _2341 = smoothstep(softness, -softness, sdf + outlineWidth);
         }
         else
         {
-            _2330 = float((sdf + outlineWidth) <= 0.0);
+            _2341 = float((sdf + outlineWidth) <= 0.0);
         }
-        _2326 = _2330;
+        _2337 = _2341;
     }
     else
     {
-        _2326 = fillAlpha;
+        _2337 = fillAlpha;
     }
-    float innerAlpha = _2326;
+    float innerAlpha = _2337;
     float outlineAlpha = fast::max(fillAlpha - innerAlpha, 0.0);
     float bodyCoverage = (outlineWidth > 0.0) ? innerAlpha : fillAlpha;
     float2 param_4 = localPixel;
@@ -947,7 +951,9 @@ float4 shade_shape_sample(thread const float2& samplePoint, constant Renderer2DC
         outline.x = 1.0;
         outline.y = 1.0;
         outline.z = 1.0;
-        outline.w = fast::min(outline.w, 0.119999997317790985107421875);
+        float glassCoverage = 1.0 - fast::clamp(body.w, 0.0, 1.0);
+        outline.w = fast::min(outline.w, 0.119999997317790985107421875) * glassCoverage;
+        bodyCoverage = mix(fillAlpha, bodyCoverage, glassCoverage);
     }
     float4 param_8 = body;
     float param_9 = bodyCoverage;
@@ -973,16 +979,16 @@ float4 resolve_accumulated_shape(thread float3& premultiplied, thread float& alp
 {
     alpha /= fast::max(weightSum, 9.9999997473787516355514526367188e-05);
     premultiplied /= float3(fast::max(weightSum, 9.9999997473787516355514526367188e-05));
-    float3 _2479;
+    float3 _2501;
     if (alpha > 9.9999997473787516355514526367188e-05)
     {
-        _2479 = premultiplied / float3(alpha);
+        _2501 = premultiplied / float3(alpha);
     }
     else
     {
-        _2479 = float3(0.0);
+        _2501 = float3(0.0);
     }
-    float3 rgb = _2479;
+    float3 rgb = _2501;
     return float4(rgb, alpha);
 }
 
@@ -1037,8 +1043,8 @@ float4 resolve_filtered_shape(thread const float2& pixelCenter, constant Rendere
     float3 param_22 = premultiplied;
     float param_23 = alpha;
     float param_24 = weightSum;
-    float4 _2731 = resolve_accumulated_shape(param_22, param_23, param_24);
-    return _2731;
+    float4 _2753 = resolve_accumulated_shape(param_22, param_23, param_24);
+    return _2753;
 }
 
 static inline __attribute__((always_inline))
@@ -1183,8 +1189,8 @@ float4 resolve_blurred_shape(thread const float2& pixelCenter, constant Renderer
     float3 param_66 = premultiplied;
     float param_67 = alpha;
     float param_68 = weightSum;
-    float4 _2990 = resolve_accumulated_shape(param_66, param_67, param_68);
-    return _2990;
+    float4 _3012 = resolve_accumulated_shape(param_66, param_67, param_68);
+    return _3012;
 }
 
 static inline __attribute__((always_inline))
@@ -1209,35 +1215,35 @@ kernel void shape_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], textur
     }
     int2 pixel = dispatch_origin(pc) + int2(gl_GlobalInvocationID.xy);
     int2 screenSize = int2(colorBuffer.get_width(), colorBuffer.get_height());
-    bool _3039 = pixel.x < 0;
-    bool _3046;
-    if (!_3039)
+    bool _3061 = pixel.x < 0;
+    bool _3068;
+    if (!_3061)
     {
-        _3046 = pixel.y < 0;
+        _3068 = pixel.y < 0;
     }
     else
     {
-        _3046 = _3039;
+        _3068 = _3061;
     }
-    bool _3055;
-    if (!_3046)
+    bool _3077;
+    if (!_3068)
     {
-        _3055 = pixel.x >= screenSize.x;
+        _3077 = pixel.x >= screenSize.x;
     }
     else
     {
-        _3055 = _3046;
+        _3077 = _3068;
     }
-    bool _3064;
-    if (!_3055)
+    bool _3086;
+    if (!_3077)
     {
-        _3064 = pixel.y >= screenSize.y;
+        _3086 = pixel.y >= screenSize.y;
     }
     else
     {
-        _3064 = _3055;
+        _3086 = _3077;
     }
-    if (_3064)
+    if (_3086)
     {
         return;
     }
@@ -1247,81 +1253,81 @@ kernel void shape_2d_comp(constant Renderer2DConstants& pc [[buffer(0)]], textur
     float4 shapeParams = own_shape_parameters(pc);
     float4 param = shapeParams;
     float boundsPad = (pc.effect0.y + pc.effect0.z) + primitive_bounds_padding(param, pc);
-    bool _3095 = !transformed;
-    bool _3144;
-    if (_3095)
+    bool _3117 = !transformed;
+    bool _3166;
+    if (_3117)
     {
-        bool _3104 = p.x < (pc.rect.x - boundsPad);
-        bool _3115;
-        if (!_3104)
+        bool _3126 = p.x < (pc.rect.x - boundsPad);
+        bool _3137;
+        if (!_3126)
         {
-            _3115 = p.y < (pc.rect.y - boundsPad);
+            _3137 = p.y < (pc.rect.y - boundsPad);
         }
         else
         {
-            _3115 = _3104;
+            _3137 = _3126;
         }
-        bool _3129;
-        if (!_3115)
+        bool _3151;
+        if (!_3137)
         {
-            _3129 = p.x > ((pc.rect.x + pc.rect.z) + boundsPad);
+            _3151 = p.x > ((pc.rect.x + pc.rect.z) + boundsPad);
         }
         else
         {
-            _3129 = _3115;
+            _3151 = _3137;
         }
-        bool _3143;
-        if (!_3129)
+        bool _3165;
+        if (!_3151)
         {
-            _3143 = p.y > ((pc.rect.y + pc.rect.w) + boundsPad);
+            _3165 = p.y > ((pc.rect.y + pc.rect.w) + boundsPad);
         }
         else
         {
-            _3143 = _3129;
+            _3165 = _3151;
         }
-        _3144 = _3143;
+        _3166 = _3165;
     }
     else
     {
-        _3144 = _3095;
+        _3166 = _3117;
     }
-    if (_3144)
+    if (_3166)
     {
         return;
     }
-    bool _3153 = (pc.data.y & 32u) != 0u;
-    bool _3159;
-    if (_3153)
+    bool _3175 = (pc.data.y & 32u) != 0u;
+    bool _3181;
+    if (_3175)
     {
-        _3159 = pc.effect0.z > 0.5;
+        _3181 = pc.effect0.z > 0.5;
     }
     else
     {
-        _3159 = _3153;
+        _3181 = _3175;
     }
-    bool foregroundBlur = _3159;
-    float4 _3162;
+    bool foregroundBlur = _3181;
+    float4 _3184;
     if (transformed)
     {
         float2 param_1 = p;
-        _3162 = resolve_transformed_shape(param_1, pc);
+        _3184 = resolve_transformed_shape(param_1, pc);
     }
     else
     {
-        float4 _3170;
+        float4 _3192;
         if (foregroundBlur)
         {
             float2 param_2 = p;
-            _3170 = resolve_blurred_shape(param_2, pc);
+            _3192 = resolve_blurred_shape(param_2, pc);
         }
         else
         {
             float2 param_3 = p;
-            _3170 = resolve_filtered_shape(param_3, pc);
+            _3192 = resolve_filtered_shape(param_3, pc);
         }
-        _3162 = _3170;
+        _3184 = _3192;
     }
-    float4 src = _3162;
+    float4 src = _3184;
     if (src.w <= 0.001000000047497451305389404296875)
     {
         return;

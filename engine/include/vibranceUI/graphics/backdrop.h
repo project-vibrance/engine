@@ -105,6 +105,7 @@ struct SystemBackdropRegion
     float liquidRefraction = 0.70f;
     float liquidBlur = 0.15f;
     float liquidRim = 0.60f;
+    bool liquidRimAnimated = true;
     float liquidDispersion = 0.35f;
     SystemBackdropColor liquidTint { 213.0f / 255.0f, 231.0f / 255.0f, 1.0f, 0.0f };
     // Contours use coordinates relative to this region's framebuffer bounds.

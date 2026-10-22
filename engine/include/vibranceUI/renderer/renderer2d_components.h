@@ -101,6 +101,8 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleTransform2_5D = 1u << 12,
     eRenderer2DStyleMediaColorAdjust = 1u << 13,
     eRenderer2DStyleMediaAutoBlackLift = 1u << 14,
+    // Shape-only use of bit 14; media colour adjustment has a separate pipeline.
+    eRenderer2DStyleShapeMaskSampleCoverage = 1u << 14,
     eRenderer2DStyleShapeMask = 1u << 15,
     eRenderer2DStyleCornerRadii = 1u << 16,
     eRenderer2DStyleBlurHorizontal = 1u << 17,
@@ -111,6 +113,8 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleMediaPremultipliedAlpha = 1u << 22,
     // Shader-specific bit: optical scene sampling in the blur pipeline.
     eRenderer2DStyleLiquidGlass = 1u << 22,
+    // Blur-only alias; bit 13 means colour adjustment in the media pipeline.
+    eRenderer2DStyleLiquidStaticRim = 1u << 13,
     eRenderer2DStyleShadowOutsideOnly = 1u << 23,
     eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24,
     eRenderer2DStyleTextEdgeFade = 1u << 25,
@@ -626,6 +630,11 @@ struct Mask2DComponent
     float effectPadding = 0.0f;
 };
 
+// Resolve an inherited shape mask through the shape pipeline's existing
+// coverage samples, without feathering its boundary inwards. Used by fills
+// that meet a native compositor surface at the same window edge.
+struct ShapeMaskSampleCoverage2DComponent {};
+
 struct Layout2DComponent
 {
     // Anchor and pivot layout mirrors common UI systems while staying renderer-native
@@ -751,6 +760,8 @@ struct LiquidGlassComponent
     float blur = 0.15f;
     float rim = 0.60f;
     float dispersion = 0.35f;
+    bool rimAnimated = true;
+    bool sampleOwnPaint = false;
 };
 
 struct DragHandle2DComponent

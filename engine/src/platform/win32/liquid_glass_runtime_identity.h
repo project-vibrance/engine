@@ -24,6 +24,35 @@ inline bool liquid_runtime_key_valid(std::wstring_view key) noexcept
     return true;
 }
 
+struct LiquidRuntimeBundleStamp
+{
+    struct File
+    {
+        std::filesystem::file_time_type modified {};
+        std::uintmax_t size = 0;
+        bool operator==(const File&) const = default;
+    };
+    std::array<File, liquidRuntimeNames.size()> files {};
+    bool complete = false;
+    bool operator==(const LiquidRuntimeBundleStamp&) const = default;
+};
+
+inline LiquidRuntimeBundleStamp liquid_runtime_bundle_stamp(const std::filesystem::path& directory)
+{
+    LiquidRuntimeBundleStamp stamp;
+    for (std::size_t index = 0; index < liquidRuntimeNames.size(); ++index)
+    {
+        std::error_code error;
+        const auto path = directory / liquidRuntimeNames[index];
+        stamp.files[index].modified = std::filesystem::last_write_time(path, error);
+        if (error) return stamp;
+        stamp.files[index].size = std::filesystem::file_size(path, error);
+        if (error) return stamp;
+    }
+    stamp.complete = true;
+    return stamp;
+}
+
 inline std::wstring liquid_runtime_key(const std::filesystem::path& extension)
 {
     std::uint8_t hashes[liquidRuntimeNames.size()][32] {}, digest[32] {};

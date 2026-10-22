@@ -132,7 +132,7 @@ struct VibranceCompositionRegion
     std::uint32_t hasExclusion = 0u;
     // Bit 0 enables the cap; upper three bytes contain its RGB8 colour.
     std::uint32_t paintCapGradient = 0u;
-    std::uint32_t flags = 0u; // Bit 0 clips raw dependency paint for control lenses.
+    std::uint32_t flags = 0u; // Bit 0 clips raw paint; bit 1 selects a static rim.
     float capGradient[4] { 0.98f, 0.015f, 0.0f, 1.0f };
     VibranceCompositionContour contours[3] {};
     VibranceCompositionContour exclusion {};

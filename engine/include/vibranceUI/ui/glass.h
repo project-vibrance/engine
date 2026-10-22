@@ -25,6 +25,7 @@ struct UiGlassOptions
     float liquidRefraction = 0.70f;
     float liquidBlur = 0.15f;
     float liquidRim = 0.60f;
+    bool liquidRimAnimated = true;
     float liquidDispersion = 0.35f;
     SystemBackdropColor liquidTint { 213.0f / 255.0f, 231.0f / 255.0f, 1.0f, 0.0f };
 };
@@ -97,6 +98,7 @@ inline void ui_apply_glass_material(
         liquid.refraction = options.liquidRefraction;
         liquid.blur = options.liquidBlur;
         liquid.rim = options.liquidRim;
+        liquid.rimAnimated = options.liquidRimAnimated;
         liquid.dispersion = options.liquidDispersion;
 #if defined(_WIN32)
         // The Windows presenter uses a live Composition backdrop underlay
@@ -115,6 +117,7 @@ inline void ui_apply_glass_material(
             region.liquidRefraction = std::clamp(options.liquidRefraction, 0.0f, 1.0f);
             region.liquidBlur = std::clamp(options.liquidBlur, 0.0f, 1.0f);
             region.liquidRim = std::clamp(options.liquidRim, 0.0f, 1.0f);
+            region.liquidRimAnimated = options.liquidRimAnimated;
             region.liquidDispersion = std::clamp(options.liquidDispersion, 0.0f, 1.0f);
             region.liquidTint = options.liquidTint;
             registry.emplace_or_replace<SystemBackdropComponent>(

@@ -234,6 +234,8 @@ struct UiTheme
     std::string textMuted = "rgba(112, 112, 117, 0.91)";
     std::string trafficLightIcon = "rgba(17, 17, 17, 1)";
     std::string icon = "rgba(29, 29, 31, 0.85)";
+    std::string islandNavigationCluster = "rgba(255, 255, 255, 0.035)";
+    std::string islandNavigationSelected = "rgba(248, 248, 248, 0.94)";
     std::string accent = "rgba(0, 122, 255, 1)";
     std::string accentHover = "rgba(19, 135, 255, 1)";
     std::string accentPressed = "rgba(0, 104, 221, 1)";
@@ -314,6 +316,7 @@ inline UiTheme ui_dark_theme()
     theme.text = "rgba(246, 247, 249, 1)";
     theme.textMuted = "rgba(178, 184, 193, 0.86)";
     theme.icon = "rgba(246, 247, 249, 0.86)";
+    theme.islandNavigationSelected = "rgba(255, 255, 255, 0.157)";
     theme.accent = "rgba(51, 153, 255, 1)";
     theme.accentHover = "rgba(83, 170, 255, 1)";
     theme.accentPressed = "rgba(28, 130, 225, 1)";

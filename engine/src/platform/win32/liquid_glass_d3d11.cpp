@@ -579,6 +579,7 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
 
     const float reach = std::max({ region.blurRadius * 5.0f,
         region.refractionStrength + region.dispersionStrength + 2.0f,
+        region.rimStrength > 0.0f ? std::min(static_cast<float>(std::min(region.width, region.height)) * 1.6f, 120.0f) + 2.0f : 0.0f,
         4.0f });
     if (!std::isfinite(reach) || reach > 2048.0f)
     {
@@ -635,7 +636,13 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     // The vertical pass needs horizontal results above/below its output;
     // those horizontal results in turn need sharp pixels on either side.
     const D3D11_RECT horizontalBounds = expand(samplingBounds, 0, kernelReach);
-    const D3D11_RECT snapshotBounds = expand(horizontalBounds, kernelReach, 0);
+    const LONG reflectionReach = region.rimStrength > 0.0f ?
+        static_cast<LONG>(std::ceil(std::min(static_cast<float>(std::min(region.width, region.height)) * 1.6f, 120.0f))) + 2 : 0;
+    const LONG reflectionExtra = std::max<LONG>(0, reflectionReach - displacement - kernelReach);
+    // Reflections read only the sharp snapshot. Keep the Gaussian passes at
+    // their original bounds rather than blurring the additional colour halo.
+    const D3D11_RECT snapshotBounds = expand(expand(horizontalBounds, kernelReach, 0),
+        reflectionExtra, reflectionExtra);
     if (blurHistory_.pending)
     {
         BOOL changed = FALSE;

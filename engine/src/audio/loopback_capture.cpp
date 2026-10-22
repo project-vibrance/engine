@@ -507,7 +507,7 @@ struct AudioLoopbackCapture::Impl
         AudioLoopbackCaptureCallbacks requestedCallbacks,
         AudioLoopbackCaptureOptions requestedOptions) :
         callbacks(std::move(requestedCallbacks)),
-        options(requestedOptions),
+        mode(requestedOptions.mode),
         targetProcessId(requestedOptions.targetProcessId)
     {
     }
@@ -605,8 +605,8 @@ struct AudioLoopbackCapture::Impl
 
         while (captureRequested)
         {
-            const bool processOnly = options.mode ==
-                AudioLoopbackCaptureMode::eProcessTree;
+            const auto capturedMode = mode.load();
+            const bool processOnly = capturedMode == AudioLoopbackCaptureMode::eProcessTree;
             const std::uint32_t capturedProcessId = processOnly
                 ? targetProcessId.load()
                 : 0u;
@@ -637,7 +637,10 @@ struct AudioLoopbackCapture::Impl
                     &audioClient);
                 processFormat.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
                 processFormat.nChannels = 2u;
-                processFormat.nSamplesPerSec = 44100u;
+                // Match the macOS screen-capture format. The shared 1024-point
+                // FFT assigns different low-mid bins at 44.1 kHz, changing the
+                // third bar's response even with identical spectrum tuning.
+                processFormat.nSamplesPerSec = 48000u;
                 processFormat.wBitsPerSample = 32u;
                 processFormat.nBlockAlign = static_cast<WORD>(
                     processFormat.nChannels *
@@ -732,8 +735,8 @@ struct AudioLoopbackCapture::Impl
                 ? static_cast<float>(std::max<DWORD>(
                     mixFormat->nSamplesPerSec,
                     1u))
-                : 44100.0f;
-            while (captureRequested && captureValid &&
+                : 48000.0f;
+            while (captureRequested && mode.load() == capturedMode && captureValid &&
                 (!processOnly ||
                     targetProcessId.load() == capturedProcessId))
             {
@@ -758,7 +761,7 @@ struct AudioLoopbackCapture::Impl
                 UINT32 packetFrames = 0u;
                 HRESULT packetResult = captureClient->GetNextPacketSize(
                     &packetFrames);
-                while (captureRequested && SUCCEEDED(packetResult) &&
+                while (captureRequested && mode.load() == capturedMode && SUCCEEDED(packetResult) &&
                     packetFrames > 0u &&
                     (!processOnly ||
                         targetProcessId.load() == capturedProcessId))
@@ -833,9 +836,9 @@ struct AudioLoopbackCapture::Impl
                         }
                     }
 
-                    captureValid = publish_samples(
-                        monoSamples,
-                        sampleRateHz);
+                    if (captureRequested && mode.load() == capturedMode &&
+                        (!processOnly || targetProcessId.load() == capturedProcessId))
+                        captureValid = publish_samples(monoSamples, sampleRateHz);
                     captureClient->ReleaseBuffer(frameCount);
                     if (!captureValid)
                     {
@@ -875,7 +878,7 @@ struct AudioLoopbackCapture::Impl
                 publish_reset();
             }
 
-            if (captureRequested &&
+            if (captureRequested && mode.load() == capturedMode &&
                 (!processOnly ||
                     targetProcessId.load() == capturedProcessId))
             {
@@ -888,12 +891,12 @@ struct AudioLoopbackCapture::Impl
             CoUninitialize();
         }
 #elif defined(__APPLE__)
-        mac_audio_capture_loop(callbacks, options, targetProcessId, captureRequested);
+        mac_audio_capture_loop(callbacks, mode, targetProcessId, captureRequested);
 #endif
     }
 
     AudioLoopbackCaptureCallbacks callbacks;
-    AudioLoopbackCaptureOptions options;
+    std::atomic<AudioLoopbackCaptureMode> mode;
     std::atomic<std::uint32_t> targetProcessId { 0u };
     std::atomic_bool captureRequested { false };
     std::mutex lifecycleMutex;
@@ -960,7 +963,12 @@ bool AudioLoopbackCapture::running() const
 
 bool AudioLoopbackCapture::captures_process_tree() const
 {
-    return impl->options.mode == AudioLoopbackCaptureMode::eProcessTree;
+    return impl->mode.load() == AudioLoopbackCaptureMode::eProcessTree;
+}
+
+bool AudioLoopbackCapture::set_mode(AudioLoopbackCaptureMode mode)
+{
+    return impl->mode.exchange(mode) != mode;
 }
 
 std::uint32_t AudioLoopbackCapture::target_process_id() const

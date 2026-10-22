@@ -57,6 +57,8 @@ public:
     bool running() const;
 
     bool captures_process_tree() const;
+    // Reconfigure on the capture worker; changing scope never joins it on the UI thread.
+    bool set_mode(AudioLoopbackCaptureMode mode);
     std::uint32_t target_process_id() const;
     // Returns true when the process target changed. System-output capture
     // ignores this operation and returns false.

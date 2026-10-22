@@ -29,24 +29,22 @@ public:
 		bool storageUsage = true
 	);
 
-	vk::DescriptorImageInfo descriptor;
+	vk::DescriptorImageInfo descriptor {};
 
-	vk::Extent2D extent;
+	vk::Extent2D extent {};
 
-	vk::Image image;
+	vk::Image image {};
 
-	VmaAllocation memory;
+	VmaAllocation memory = nullptr;
 
-	vk::ImageView view;
+	vk::ImageView view {};
 
-	vk::Format format;
+	vk::Format format = vk::Format::eUndefined;
 
 	uint32_t mipLevels = 1;
 
 private:
 	void initialise(vk::CommandBuffer commandBuffer, vk::Queue queue, vk::Device logicalDevice);
-
-	void make_view(vk::Device logicalDevice);
 
 	void make_descriptor();
 };
@@ -64,11 +62,11 @@ public:
 		std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
 	);
 
-	vk::Extent2D extent;
-	vk::Image image;
-	VmaAllocation memory;
-	vk::ImageView view;
-	vk::Format format;
+	vk::Extent2D extent {};
+	vk::Image image {};
+	VmaAllocation memory = nullptr;
+	vk::ImageView view {};
+	vk::Format format = vk::Format::eUndefined;
 };
 
 class ColorAttachmentImage
@@ -84,11 +82,11 @@ public:
 		std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
 	);
 
-	vk::Extent2D extent;
-	vk::Image image;
-	VmaAllocation memory;
-	vk::ImageView view;
-	vk::Format format;
+	vk::Extent2D extent {};
+	vk::Image image {};
+	VmaAllocation memory = nullptr;
+	vk::ImageView view {};
+	vk::Format format = vk::Format::eUndefined;
 	vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e1;
 };
 

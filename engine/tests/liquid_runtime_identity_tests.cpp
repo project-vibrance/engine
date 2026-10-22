@@ -46,6 +46,14 @@ int main(int argc, char** argv)
     {
         const std::filesystem::path directory(argv[1]);
         std::filesystem::create_directories(directory);
+        for (const auto* name : liquidRuntimeNames)
+        { std::ofstream file(directory / name, std::ios::binary); file << "original"; }
+        const auto originalStamp = liquid_runtime_bundle_stamp(directory);
+        check(originalStamp.complete && originalStamp == liquid_runtime_bundle_stamp(directory),
+            "An unchanged installed bundle must retain its cached fingerprint");
+        { std::ofstream file(directory / liquidRuntimeNames[1], std::ios::binary); file << "replacement shader"; }
+        check(liquid_runtime_bundle_stamp(directory) != originalStamp,
+            "An in-place shader update must invalidate the running app's cached runtime identity");
         report.stagedExtension = L"staged/extension.dll";
         check(write_liquid_runtime_status(directory, report), "Writing a complete runtime report failed");
         const auto restored = read_liquid_runtime_status(directory);

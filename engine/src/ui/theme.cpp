@@ -390,6 +390,12 @@ namespace
         assign_theme_colour(entries, theme.icon, {
             "colors.icon", "colours.icon", "theme.colors.icon", "theme.colours.icon", "icon", "trafficLights.icon", "panelWindow.trafficLights.icon"
         });
+        assign_theme_colour(entries, theme.islandNavigationCluster, {
+            "colors.islandNavigationCluster", "colours.islandNavigationCluster", "theme.colors.islandNavigationCluster", "theme.colours.islandNavigationCluster", "islandNavigationCluster"
+        });
+        assign_theme_colour(entries, theme.islandNavigationSelected, {
+            "colors.islandNavigationSelected", "colours.islandNavigationSelected", "theme.colors.islandNavigationSelected", "theme.colours.islandNavigationSelected", "islandNavigationSelected"
+        });
         assign_theme_colour(entries, theme.trafficLightIcon, {
             "trafficLights.icon", "panelWindow.trafficLights.icon", "colors.icon", "colours.icon", "icon"
         });

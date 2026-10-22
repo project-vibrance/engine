@@ -46,6 +46,7 @@
 #include "playback_quality_probe.h"
 #include "notification_activation.h"
 #include "notification_payload_store.h"
+#include "notification_record_cache.h"
 #include "../../media/timeline_range.h"
 
 namespace
@@ -647,14 +648,7 @@ bool same_notification_item(
     const VibranceWin32NotificationItem& left,
     const VibranceWin32NotificationItem& right)
 {
-    return left.notificationId == right.notificationId &&
-        left.creationUnixMilliseconds == right.creationUnixMilliseconds &&
-        left.iconRevision == right.iconRevision &&
-        std::strcmp(left.sourceApp, right.sourceApp) == 0 &&
-        std::strcmp(left.appUserModelId, right.appUserModelId) == 0 &&
-        std::strcmp(left.title, right.title) == 0 &&
-        std::strcmp(left.message, right.message) == 0 &&
-        std::strcmp(left.iconPath, right.iconPath) == 0;
+    return vibrance::win32::same_notification_record(left, right);
 }
 
 class Win32InteropBridge
@@ -1032,6 +1026,8 @@ private:
         next.accessStatus = notification_access_status(status);
         if (status != UserNotificationListenerAccessStatus::Allowed)
         {
+            notificationRecordCache.clear();
+            notificationIconCache.clear();
             publish_notifications(next, {});
             return;
         }
@@ -1040,12 +1036,26 @@ private:
             NotificationKinds::Toast).get();
         if (notifications.Size() == 0u)
         {
+            notificationRecordCache.clear();
+            notificationIconCache.clear();
             publish_notifications(next, {});
             return;
         }
         std::vector<VibranceWin32NotificationItem> items;
         items.reserve(notifications.Size());
-        vibrance::win32::NotificationPayloadStore payloadStore;
+        const auto now = std::chrono::steady_clock::now();
+        std::unordered_set<std::uint32_t> liveIds;
+        std::unordered_set<std::string> liveIconKeys;
+        std::unique_ptr<vibrance::win32::NotificationPayloadStore> payloadStore;
+        const auto readPayload = [&](VibranceWin32NotificationItem& item) {
+            if (!payloadStore) payloadStore = std::make_unique<vibrance::win32::NotificationPayloadStore>();
+            if (const auto target = payloadStore->read(item.notificationId,
+                    item.appUserModelId, item.creationUnixMilliseconds))
+            {
+                item.activationKind = target->kind;
+                copy_utf8(item.activationArguments, target->arguments);
+            }
+        };
         for (const auto& notification : notifications)
         {
             try
@@ -1053,12 +1063,43 @@ private:
                 VibranceWin32NotificationItem item {};
                 item.structSize = sizeof(item);
                 item.notificationId = notification.Id();
+                liveIds.insert(item.notificationId);
                 constexpr std::int64_t windowsToUnixMilliseconds =
                     11'644'473'600'000ll;
                 item.creationUnixMilliseconds =
                     notification.CreationTime().time_since_epoch().count() /
                         10'000ll -
                     windowsToUnixMilliseconds;
+                const auto binding = notification.Notification().Visual().
+                    GetBinding(KnownNotificationBindings::ToastGeneric());
+                if (binding)
+                {
+                    const auto textElements = binding.GetTextElements();
+                    if (textElements.Size() > 0u)
+                        copy_utf8(item.title, textElements.GetAt(0u).Text());
+                    std::string body;
+                    for (std::uint32_t index = 1u; index < textElements.Size(); ++index)
+                    {
+                        if (!body.empty()) body += '\n';
+                        body += winrt::to_string(textElements.GetAt(index).Text());
+                    }
+                    copy_utf8(item.message, body);
+                }
+                if (auto* cached = notificationRecordCache.find(item, now))
+                {
+                    // A payload can commit shortly after its visual arrives.
+                    // Retry that lookup without repeating shell/icon work.
+                    if (cached->item.activationKind == 0u &&
+                        now - cached->payloadChecked >= 2s)
+                    {
+                        readPayload(cached->item);
+                        cached->payloadChecked = now;
+                    }
+                    items.push_back(cached->item);
+                    liveIconKeys.insert(cached->item.appUserModelId[0] ?
+                        cached->item.appUserModelId : cached->item.sourceApp);
+                    continue;
+                }
                 const auto appInfo = notification.AppInfo();
                 const auto displayInfo = appInfo.DisplayInfo();
                 copy_utf8(item.sourceApp, displayInfo.DisplayName());
@@ -1072,11 +1113,16 @@ private:
                 {
                     iconCacheKey = item.sourceApp;
                 }
+                liveIconKeys.insert(iconCacheKey);
                 const auto cachedIcon = notificationIconCache.find(
                     iconCacheKey);
-                if (cachedIcon != notificationIconCache.end() &&
+                std::error_code iconError;
+                const bool cachedFile = cachedIcon != notificationIconCache.end() &&
                     !cachedIcon->second.path.empty() &&
-                    std::filesystem::exists(cachedIcon->second.path))
+                    std::filesystem::exists(cachedIcon->second.path, iconError);
+                const bool cachedFailure = cachedIcon != notificationIconCache.end() &&
+                    cachedIcon->second.path.empty() && now < cachedIcon->second.retryAfter;
+                if (cachedFile || cachedFailure)
                 {
                     item.iconRevision = cachedIcon->second.revision;
                     copy_utf8(item.iconPath, cachedIcon->second.path);
@@ -1088,6 +1134,7 @@ private:
                         notificationIconCache.erase(cachedIcon);
                     }
                     CachedNotificationIcon icon = {};
+                    icon.retryAfter = now + 60s;
                     bool loadedIcon = false;
                     try
                     {
@@ -1119,49 +1166,27 @@ private:
                     {
                         item.iconRevision = icon.revision;
                         copy_utf8(item.iconPath, icon.path);
-                        notificationIconCache.emplace(
-                            std::move(iconCacheKey),
-                            std::move(icon));
                     }
+                    // Missing logos/registrations are common for desktop apps.
+                    // Cache failures too, instead of searching the shell and
+                    // registry again for every toast on every 500 ms poll.
+                    notificationIconCache.emplace(std::move(iconCacheKey), std::move(icon));
                 }
 
-                const auto binding = notification.Notification().Visual().
-                    GetBinding(KnownNotificationBindings::ToastGeneric());
-                if (binding)
-                {
-                    const auto textElements = binding.GetTextElements();
-                    if (textElements.Size() > 0u)
-                    {
-                        copy_utf8(item.title, textElements.GetAt(0u).Text());
-                    }
-                    std::string body;
-                    for (std::uint32_t index = 1u;
-                        index < textElements.Size(); ++index)
-                    {
-                        if (!body.empty())
-                        {
-                            body += '\n';
-                        }
-                        body += winrt::to_string(
-                            textElements.GetAt(index).Text());
-                    }
-                    copy_utf8(item.message, body);
-                }
+                notificationRecordCache.store(item, now);
+                auto* cached = notificationRecordCache.find(item, now);
                 if (item.title[0] == '\0')
                 {
                     copy_utf8(item.title, notification.AppInfo().
                         DisplayInfo().DisplayName());
                 }
-                const std::string identity = winrt::to_string(appUserModelId);
                 // Visual text is not an identity: two messages can look the
                 // same while referring to different conversations. Never use
                 // another history record to guess a missing native payload.
-                const auto target = payloadStore.read(item.notificationId, identity, item.creationUnixMilliseconds);
-                if (target)
-                {
-                    item.activationKind = target->kind;
-                    copy_utf8(item.activationArguments, target->arguments);
-                }
+                readPayload(item);
+                // Match against native text, including an empty native title;
+                // only the published copy receives the display-name fallback.
+                cached->item = item;
                 items.push_back(item);
             }
             catch (...)
@@ -1170,6 +1195,9 @@ private:
                 // the other notifications in the same snapshot.
             }
         }
+        notificationRecordCache.retain(liveIds);
+        std::erase_if(notificationIconCache,
+            [&](const auto& entry) { return !liveIconKeys.contains(entry.first); });
         std::stable_sort(
             items.begin(),
             items.end(),
@@ -2213,7 +2241,9 @@ private:
     {
         std::uint64_t revision = 0u;
         std::string path;
+        std::chrono::steady_clock::time_point retryAfter {};
     };
+    vibrance::win32::NotificationRecordCache notificationRecordCache;
     std::unordered_map<std::string, CachedNotificationIcon>
         notificationIconCache;
     bool notificationPolling = false;

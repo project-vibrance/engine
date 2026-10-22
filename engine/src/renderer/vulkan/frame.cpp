@@ -8,6 +8,7 @@
 #include "timestamp_diagnostics.h"
 #include <array>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 namespace
@@ -88,16 +89,24 @@ namespace
 			framebufferInfo.layers = 1;
 
 			auto result = frame.logicalDevice.createFramebuffer(framebufferInfo);
-			if (result.result != vk::Result::eSuccess)
+			if (result.result != vk::Result::eSuccess || !result.value)
 			{
-				Logger::fetch_logger()->vulkan("Failed to create hosted 3D framebuffer.");
-				return vk::Framebuffer {};
+				throw std::runtime_error("Could not create the frame's hosted 3D framebuffer: " +
+					vk::to_string(result.result));
 			}
 
 			VkFramebuffer framebufferHandle = result.value;
-			frame.deviceDeletionQueue.push_back([framebufferHandle](vk::Device device) {
-				device.destroyFramebuffer(framebufferHandle);
-			});
+			try
+			{
+				frame.deviceDeletionQueue.push_back([framebufferHandle](vk::Device device) {
+					device.destroyFramebuffer(framebufferHandle);
+				});
+			}
+			catch (...)
+			{
+				frame.logicalDevice.destroyFramebuffer(framebufferHandle);
+				throw;
+			}
 			return result.value;
 		};
 
@@ -185,11 +194,21 @@ Frame::Frame(
 {   
 	this->commandBuffer = commandBuffer;
 
-	imageAcquiredSemaphore = make_semaphore(logicalDevice, deletionQueue);
-	renderFinishedSemaphore = make_semaphore(logicalDevice, deletionQueue);
-	renderFinishedFence = make_fence(logicalDevice, deletionQueue);
-	create_frame_storage_images(*this);
-	update_frame_descriptor_sets(*this);
+	try
+	{
+		imageAcquiredSemaphore = make_semaphore(logicalDevice, deletionQueue);
+		renderFinishedSemaphore = make_semaphore(logicalDevice, deletionQueue);
+		renderFinishedFence = make_fence(logicalDevice, deletionQueue);
+		create_frame_storage_images(*this);
+		update_frame_descriptor_sets(*this);
+	}
+	catch (...)
+	{
+		// This frame has not entered the engine's vector yet. Release any
+		// completed images and retained failed initialisation before unwinding.
+		free_resources();
+		throw;
+	}
 }
 
 void Frame::prepare_text_batch_resources()
@@ -836,8 +855,16 @@ void Frame::resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModel
 	free_resources();
 	renderExtent = newRenderExtent;
 	modelRenderExtent = newModelRenderExtent;
-	create_frame_storage_images(*this);
-	update_frame_descriptor_sets(*this);
+	try
+	{
+		create_frame_storage_images(*this);
+		update_frame_descriptor_sets(*this);
+	}
+	catch (...)
+	{
+		free_resources();
+		throw;
+	}
 }
 
 void Frame::set_font_atlas_image(StorageImage* image)
@@ -850,10 +877,9 @@ void Frame::free_resources()
 {
 	Logger* logger = Logger::fetch_logger();
 	
-	if (queue.waitIdle() != vk::Result::eSuccess)
+	if (queue && queue.waitIdle() != vk::Result::eSuccess)
 	{
 		logger->vulkan("Failed to wait for queue to idle.");
-		return;
 	}
 
 	while (deviceDeletionQueue.size() > 0)

@@ -664,7 +664,8 @@ bool CompositionPresenter::set_regions(
         native.paintCapGradient = region.paintCapGradient ? (1u |
             (capByte(region.capColour[0]) << 8u) | (capByte(region.capColour[1]) << 16u) |
             (capByte(region.capColour[2]) << 24u)) : 0u;
-        native.flags = region.clipRawBackdropToShape ? 1u : 0u;
+        native.flags = (region.clipRawBackdropToShape ? 1u : 0u) |
+            (region.liquidRimAnimated ? 0u : 2u);
         std::copy(region.capGradient.begin(), region.capGradient.end(), native.capGradient);
         // Both contour layouts contain the same thirteen floats and uint32
         // shape, guarded by their fixed-size assertions in the public/POD ABI.

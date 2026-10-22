@@ -72,6 +72,8 @@ struct GlfwPanelWindowTrafficLightOptions
     std::vector<std::filesystem::path> maximiseIconCandidates {};
     glm::vec2 iconSize { 8.0f, 8.0f };
     std::string iconTint = "rgba(17, 17, 17, 0.85)";
+    // Derive a darker shade of each button's own colour for its symbol.
+    bool matchIconTintToButton = false;
 };
 
 struct GlfwPanelWindowTemplateOptions

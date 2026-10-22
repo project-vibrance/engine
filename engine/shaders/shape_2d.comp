@@ -9,6 +9,7 @@ const uint STYLE_SDF_EDGES = 1u << 2;
 const uint STYLE_BLUR = 1u << 5;
 const uint STYLE_RADIAL_GRADIENT = 1u << 11;
 const uint STYLE_TRANSFORM_2_5D = 1u << 12;
+const uint STYLE_SHAPE_MASK_SAMPLE_COVERAGE = 1u << 14;
 const uint STYLE_SHAPE_MASK = 1u << 15;
 const uint STYLE_SHAPE_CUTOUT = 1u << 29;
 const uint STYLE_LIQUID_RIM = 1u << 30;
@@ -452,6 +453,12 @@ float shape_mask_alpha(vec2 pixel, float softness) {
     if ((pc.data.y & STYLE_SHAPE_CUTOUT) != 0u) {
         return smoothstep(0.0, inwardSoftness, sdf);
     }
+    if ((pc.data.y & STYLE_SHAPE_MASK_SAMPLE_COVERAGE) != 0u) {
+        // The existing rotated coverage samples antialias this boundary.
+        // An additional inward feather recesses a solid column by one pixel
+        // beside a native compositor surface that reaches the same edge.
+        return sdf <= 0.0 ? 1.0 : 0.0;
+    }
     return 1.0 - smoothstep(-inwardSoftness, 0.0, sdf);
 }
 
@@ -547,7 +554,11 @@ vec4 shade_shape_sample(vec2 samplePoint) {
         // Optical shaders animate the rim at display cadence. A second glint
         // in cached UI paint steps whenever the sharp interface changes.
         outline.rgb = vec3(1.0);
-        outline.a = min(outline.a, 0.12);
+        float glassCoverage = 1.0 - clamp(body.a, 0.0, 1.0);
+        outline.a = min(outline.a, 0.12) * glassCoverage;
+        // Solid island caps also own the edge pixels. Suppressing only the
+        // stroke would otherwise leave a translucent seam around the cap.
+        bodyCoverage = mix(fillAlpha, bodyCoverage, glassCoverage);
     }
     vec4 src = compose_shape_layers(body, bodyCoverage, outline, outlineAlpha);
     src.a *= maskAlpha * pc.effect0.w;

@@ -134,12 +134,14 @@ namespace
     };
 
     bool wait_for(const std::shared_ptr<Completion>& completion, const std::atomic_bool& requested,
-        const std::atomic<std::uint32_t>& target, std::uint32_t pid, bool processOnly)
+        const std::atomic<std::uint32_t>& target, std::uint32_t pid, bool processOnly,
+        const std::atomic<AudioLoopbackCaptureMode>& mode, AudioLoopbackCaptureMode capturedMode)
     {
         const auto deadline = Clock::now() + std::chrono::seconds(4);
         while (!completion->done.load(std::memory_order_acquire))
         {
-            if (!requested || (processOnly && target.load() != pid) || Clock::now() >= deadline) return false;
+            if (!requested || mode.load() != capturedMode ||
+                (processOnly && target.load() != pid) || Clock::now() >= deadline) return false;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         return completion->success;
@@ -188,7 +190,8 @@ namespace
         dispatch_queue_t delivery = dispatch_queue_create("com.vibrance.audio.screen", DISPATCH_QUEUE_SERIAL);
 
         bool start(bool processOnly, const std::vector<int>& pids,
-            const std::atomic_bool& requested, const std::atomic<std::uint32_t>& target, std::uint32_t pid)
+            const std::atomic_bool& requested, const std::atomic<std::uint32_t>& target, std::uint32_t pid,
+            const std::atomic<AudioLoopbackCaptureMode>& mode, AudioLoopbackCaptureMode capturedMode)
         {
             if (@available(macOS 13.0, *))
             {
@@ -200,7 +203,8 @@ namespace
                         content->success = value != nil && error == nil;
                         content->done.store(true, std::memory_order_release);
                     }];
-                if (!wait_for(content, requested, target, pid, processOnly) || !content->content.displays.count) return false;
+                if (!wait_for(content, requested, target, pid, processOnly, mode, capturedMode) ||
+                    !content->content.displays.count) return false;
                 SCContentFilter* filter = nil;
                 SCDisplay* display = content->content.displays.firstObject;
                 if (processOnly)
@@ -236,7 +240,7 @@ namespace
                     if (!sink->active) [startingStream stopCaptureWithCompletionHandler:nil];
                     started->done.store(true, std::memory_order_release);
                 }];
-                return wait_for(started, requested, target, pid, processOnly);
+                return wait_for(started, requested, target, pid, processOnly, mode, capturedMode);
             }
             return false;
         }
@@ -259,10 +263,9 @@ bool mac_audio_capture_supported()
 }
 
 void mac_audio_capture_loop(const AudioLoopbackCaptureCallbacks& callbacks,
-    const AudioLoopbackCaptureOptions& options, std::atomic<std::uint32_t>& target,
+    std::atomic<AudioLoopbackCaptureMode>& mode, std::atomic<std::uint32_t>& target,
     std::atomic_bool& requested)
 {
-    const bool processOnly = options.mode == AudioLoopbackCaptureMode::eProcessTree;
     const auto reset = [&] {
         if (callbacks.onReset) { try { callbacks.onReset(); } catch (...) {} }
     };
@@ -272,6 +275,8 @@ void mac_audio_capture_loop(const AudioLoopbackCaptureCallbacks& callbacks,
         if (callbacks.onSourceVolume) callbacks.onSourceVolume(1.0f);
         while (requested)
         {
+            const auto capturedMode = mode.load();
+            const bool processOnly = capturedMode == AudioLoopbackCaptureMode::eProcessTree;
             @autoreleasepool
             {
                 const auto pid = target.load();
@@ -290,16 +295,16 @@ void mac_audio_capture_loop(const AudioLoopbackCaptureCallbacks& callbacks,
                     TapCapture tap;
                     ScreenCapture screen;
                     const bool started = useTap ? tap.start(processOnly, objects) :
-                        screen.start(processOnly, pids, requested, target, pid);
+                        screen.start(processOnly, pids, requested, target, pid, mode, capturedMode);
                     const auto queue = useTap ? tap.queue : screen.queue;
                     auto nextDiscovery = Clock::now() + std::chrono::seconds(1);
                     auto lastSamples = Clock::now();
                     bool silent = false;
                     std::array<float, 2048> mono;
-                    while (started && requested && !queue->failed && (!processOnly || target.load() == pid))
+                    while (started && requested && mode.load() == capturedMode && !queue->failed && (!processOnly || target.load() == pid))
                     {
                         const auto count = queue->pop(mono);
-                        if (count && requested && (!processOnly || target.load() == pid))
+                        if (count && requested && mode.load() == capturedMode && (!processOnly || target.load() == pid))
                         {
                             callbacks.onSamples(std::span(mono.data(), count), queue->sampleRate.load());
                             lastSamples = Clock::now();
@@ -336,7 +341,7 @@ void mac_audio_capture_loop(const AudioLoopbackCaptureCallbacks& callbacks,
                 } // Stop native callbacks before resetting/retargeting the consumer.
                 reset();
                 // Back off on denied permission/unavailable sources; remain cancellable.
-                for (int i = 0; i < 50 && requested && (!processOnly || target.load() == pid); ++i)
+                for (int i = 0; i < 50 && requested && mode.load() == capturedMode && (!processOnly || target.load() == pid); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
         }

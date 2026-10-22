@@ -563,6 +563,30 @@ int main()
             { track.x + inset + (track.z - 2.0f * inset) * 0.25f, track.y });
         passed &= expect(std::abs(slider.value - 25.0f) < 0.01f,
             "slider hit mapping must use the thumb travel range");
+        const auto groupEntity = sliderScene.create_shape({}, { 600.0f * dpi, 200.0f * dpi },
+            make_solid_style("#00000000"));
+        sliderRegistry.emplace_or_replace<Parent2DComponent>(sliderHandle.root, groupEntity);
+        auto& group = sliderRegistry.emplace<InteractiveVisual2DComponent>(groupEntity);
+        group.scaleOrigin = { 300.0f * dpi, 0.0f };
+        group.offset = { 31.0f, 7.0f };
+        for (const float factor : { 0.25f, 0.5f, 0.75f, 1.03f })
+        {
+            group.scale = glm::vec2(factor);
+            const auto visibleTrack = ui_entity_visual_framebuffer_rect(sliderRegistry, sliderHandle.root);
+            for (const float fraction : { 0.0f, 0.25f, 0.75f, 1.0f })
+            {
+                ui_set_slider_value_from_point(sliderScene, sliderHandle.root,
+                    { visibleTrack.x + inset * factor +
+                        (visibleTrack.z - inset * factor * 2.0f) * fraction, visibleTrack.y });
+                if (std::abs(slider.value - fraction * 100.0f) >= 0.01f)
+                    std::cerr << "Scaled slider: dpi=" << dpi << " factor=" << factor
+                        << " fraction=" << fraction << " value=" << slider.value
+                        << " authored-width=" << track.z << " visual-width=" << visibleTrack.z
+                        << " inset=" << inset << '\n';
+                passed &= expect(std::abs(slider.value - fraction * 100.0f) < 0.01f,
+                    "Slider input must follow its visually scaled menu, including thumb travel and translation");
+            }
+        }
     }
 
     {
@@ -714,7 +738,7 @@ int main()
 #if defined(__APPLE__)
             focused.color0 == glm::vec4(0.0f) &&
 #else
-            focused.color0 == glm::vec4(1.0f, 1.0f, 1.0f, 0.04f) &&
+            focused.color0 == glm::vec4(1.0f, 1.0f, 1.0f, 0.09f) &&
 #endif
             focused.color1 == focused.color0 && focused.outlineWidth == 0.0f &&
             registry.any_of<LiquidGlassComponent>(search.root) &&
@@ -722,10 +746,29 @@ int main()
             !registry.any_of<LiquidGlassComponent>(nav.label) &&
             !registry.any_of<LiquidGlassComponent>(nav.caret),
             "search focus and navigation must retain uniform scene glass without gradients or button lenses");
+        optics.liquidRimAnimated = false;
+        const auto authoredLens = controlsScene.create_shape({ 180.0f, 20.0f }, { 90.0f, 32.0f });
+        auto authoredOptions = ui_liquid_glass_options();
+        authoredOptions.sceneBackdrop = true;
+        UiBuilder authoredUi(controlsScene);
+        ui_apply_glass_material(authoredUi, authoredLens, authoredOptions);
         optics.liquidRefraction = 0.95f;
         optics.liquidBlur = 0.8f;
         optics.liquidTint = { 0.0f, 0.0f, 0.0f, 0.8f };
         ui_update_liquid_controls(controlsScene, true, optics);
+        passed &= expect(!registry.get<LiquidGlassComponent>(authoredLens).rimAnimated &&
+            registry.get<LiquidGlassComponent>(authoredLens).refraction == optics.liquidRefraction &&
+            !registry.get<LiquidGlassComponent>(search.root).rimAnimated,
+            "Authored lenses and managed controls must share live optical preferences");
+        optics.liquidRimAnimated = true;
+        ui_update_liquid_controls(controlsScene, true, optics);
+        passed &= expect(registry.get<LiquidGlassComponent>(authoredLens).rimAnimated &&
+            registry.get<LiquidGlassComponent>(search.root).rimAnimated,
+            "Enabling rim animation must reach existing authored and managed lenses");
+        const auto unchangedOpticsGeneration = controlsScene.frame_generation();
+        ui_update_liquid_controls(controlsScene, true, optics);
+        passed &= expect(controlsScene.frame_generation() == unchangedOpticsGeneration,
+            "Unchanged optical preferences must not invalidate retained paint");
 #if defined(__APPLE__)
         passed &= expect(registry.get<SystemBackdropComponent>(search.root).region.liquidTint.alpha == 0.8f &&
             registry.get<ShapeStyleComponent>(search.root).color0.a == 0.0f &&
@@ -735,7 +778,7 @@ int main()
         passed &= expect(registry.get<LiquidGlassComponent>(search.root).blur == 0.8f &&
             registry.get<LiquidGlassComponent>(nav.root).refraction == 0.95f &&
             registry.get<ShapeStyleComponent>(search.root).color1.a >= 0.8f &&
-            registry.get<ShapeStyleComponent>(nav.root).color0.r < 0.1f,
+            registry.get<ShapeStyleComponent>(nav.root).color0.r < 0.15f,
             "all shared controls must respond to the live optical and tint preferences");
 #endif
         UiInputState state {};
@@ -1114,6 +1157,19 @@ int main()
             !scene_damage_pending(opticalScene, lens, 1.0),
             "a portable lens with its travelling rim disabled must retain its image");
         liquid.rim = 0.6f;
+        liquid.rimAnimated = false;
+        passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&
+            !scene_damage_pending(opticalScene, lens, 1.0),
+            "A static nonzero rim must retain its image without time-driven damage");
+        const auto staticPlan = opticalScene.build_render_plan(1000.0, 0u);
+        const auto staticLens = std::find_if(staticPlan.cachedBlurs.begin(), staticPlan.cachedBlurs.end(),
+            [lens](const auto& batch) { return batch.entity == lens &&
+                (batch.flags & eRenderer2DStyleLiquidGlass) != 0u; });
+        passed &= expect(staticLens != staticPlan.cachedBlurs.end() &&
+            (staticLens->flags & eRenderer2DStyleLiquidStaticRim) != 0u &&
+            ((staticLens->packedData >> 21u) & 255u) == 0u,
+            "A static rim must carry a stable shader flag and phase through long uptime");
+        liquid.rimAnimated = true;
         liquid.sceneBackdrop = false;
         liquid.backend = LiquidGlassBackend::eWindowsCompositionShader;
         passed &= expect(!opticalScene.requires_continuous_redraw(1.0) &&

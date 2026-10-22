@@ -203,15 +203,14 @@ float rounded_box_distance(float2 pixelPosition)
             if (index < contourCount)
                 distance = min(distance, contour_distance(pixelPosition, contours[index]));
     }
-    if (hasExclusion != 0)
-        distance = max(distance, -contour_distance(pixelPosition, exclusion));
     return distance;
 }
 
 float2 surface_normal(float2 pixelPosition)
 {
-    // Derive the rim and refraction direction from the complete contour,
-    // including flattened corners and the notch's concave flares.
+    // Derive optics from the physical glass contour, including flattened
+    // corners and notch flares. A card covering another card hides pixels;
+    // that occlusion boundary is not another refracting edge of the lens.
     float2 normal = float2(
         rounded_box_distance(pixelPosition + float2(0.5, 0.0)) -
         rounded_box_distance(pixelPosition - float2(0.5, 0.0)),
@@ -238,7 +237,10 @@ float4 main(PixelInput input) : SV_Target
         viewportOpacity = lerp(saturate(viewportFade.z), 1.0, viewportOpacity);
     }
     float distance = rounded_box_distance(pixelPosition);
-    float coverage = saturate(0.5 - distance);
+    float coverageDistance = distance;
+    if (hasExclusion != 0)
+        coverageDistance = max(coverageDistance, -contour_distance(pixelPosition, exclusion));
+    float coverage = saturate(0.5 - coverageDistance);
     if (coverage <= 0.0)
         return float4(0.0, 0.0, 0.0, 0.0);
 
@@ -291,33 +293,73 @@ float4 main(PixelInput input) : SV_Target
     // Tint is an independent translucent layer. Masking it with source
     // availability left untinted patches; forcing full opacity hid the desktop.
     float tintAmount = saturate(tintStrength);
-    float materialOpacity = lerp(sourceAvailable, 1.0, tintAmount);
-    float3 materialColour = lerp(colour * sourceAvailable, tintColour, tintAmount);
 
-    float fresnel = 0.0;
-    [branch]
-    if (distance > -16.0)
-    {
-        float angle = atan2(normal.y, normal.x);
-        float travellingLight = pow(saturate(0.5 + 0.5 *
-            cos(angle - lightPhase)), 12.0);
-        float edgeDistance = max(-distance, 0.0);
-        float brightCore = exp(-edgeDistance * edgeDistance / 2.25);
-        fresnel = brightCore * (0.25 + 0.75 * travellingLight);
-    }
-    // An unavailable background must not introduce a grey outline either.
-    materialColour += rimStrength * 0.65 * fresnel * sourceAvailable;
+    float capOpacity = 0.0;
+    float3 capColour = 0.0;
     if ((paintCapGradient & 1u) != 0)
     {
         float fraction = pixelPosition.y / max(panelSize.y, 1.0);
         float progress = saturate((fraction - capGradient.z) /
             max(capGradient.w - capGradient.z, 0.0001));
-        float3 capColour = float3((paintCapGradient >> 8u) & 255u,
+        capColour = float3((paintCapGradient >> 8u) & 255u,
             (paintCapGradient >> 16u) & 255u, (paintCapGradient >> 24u) & 255u) / 255.0;
-        float capOpacity = saturate(lerp(capGradient.x, capGradient.y, progress));
+        capOpacity = saturate(lerp(capGradient.x, capGradient.y, progress));
+    }
+    // Solid paint has no glass rim. Resolve this before reflection sampling
+    // so opaque caps do not spend GPU time gathering invisible colours.
+    float rimVisibility = 1.0 - capOpacity;
+    float rimHighlight = 0.0;
+    float3 rimColour = 1.0;
+    [branch]
+    if (distance > -5.0 && rimStrength > 0.0 && rimVisibility > 0.001)
+    {
+        float light = lightPhase < 0.0 ? 1.0 : 0.7 + 0.3 *
+            cos(lightPhase + pixelPosition.x / max(panelSize.x, 1.0) * 3.14159265 + normal.y * 0.8);
+        float brightCore = exp(-(distance + 0.25) * (distance + 0.25) / 0.60);
+        float soft = exp(-(distance + 1.3) * (distance + 1.3) / 6.0);
+        float vertical = normal.y * normal.y;
+        rimHighlight = rimStrength * (0.52 * brightCore + 0.18 * soft) *
+            (0.08 + 0.92 * vertical * vertical) * light;
+        [branch]
+        if (rimHighlight > 0.001)
+        {
+            float shortSide = min(panelSize.x, panelSize.y);
+            float reach = min(shortSide * 1.6, 120.0);
+            float spread = min(shortSide * 0.65, 40.0);
+            float2 tangent = float2(-normal.y, normal.x);
+            float3 nearby = 0.0;
+            [unroll] for (int row = 0; row < 3; ++row)
+            {
+                float radialWeight = row == 1 ? 0.5 : 0.25;
+                float2 centre = backdropUv + normal * reach * (0.15 + 0.35 * row) * backdropTexelSize;
+                [unroll] for (int column = 0; column < 3; ++column)
+                {
+                    float weight = radialWeight * (column == 1 ? 0.5 : 0.25);
+                    nearby += sharpBackdrop.SampleLevel(backdropSampler,
+                        centre + tangent * spread * (column - 1) * backdropTexelSize, 0.0).rgb * weight;
+                }
+            }
+            float energy = max(nearby.r, max(nearby.g, nearby.b));
+            // Black is a valid backdrop when the surrounding reflection has
+            // colour. Do not discard that rim as an unavailable source.
+            sourceAvailable = max(sourceAvailable, energy > 0.0001 ? 1.0 : 0.0);
+            // Ease weak reflections into colour instead of immediately
+            // amplifying a dim texel into a fully saturated highlight.
+            rimColour = lerp(float3(1.0, 1.0, 1.0), nearby / max(energy, 0.12),
+                smoothstep(0.0, 0.18, energy) * 0.95);
+        }
+    }
+    float materialOpacity = lerp(sourceAvailable, 1.0, tintAmount);
+    float3 materialColour = lerp(colour * sourceAvailable, tintColour, tintAmount);
+    if ((paintCapGradient & 1u) != 0)
+    {
+        // The island's opaque cap is solid paint, not a glass surface. Its
+        // contour must not acquire the rim of the glass revealed below it.
         materialColour = lerp(materialColour, capColour, capOpacity);
         materialOpacity = lerp(materialOpacity, 1.0, capOpacity);
     }
+    materialColour *= 1.0 - rimStrength * rimVisibility * 0.28 * exp(-distance * distance / 0.35);
+    materialColour += rimColour * rimHighlight * rimVisibility * max(sourceAvailable, materialOpacity);
     // The existing optical blend state expects straight colour; preserve the
     // independently composed material alpha when converting back from premultiplied.
     // DWM can use scRGB render targets, so retain values above 1.0.

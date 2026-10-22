@@ -42,7 +42,24 @@ struct LiquidNativeMarkerTag
 };
 
 std::mutex nativeMarkerTagsMutex;
-std::array<LiquidNativeMarkerTag, 128u> nativeMarkerTags {};
+std::unordered_map<void*, LiquidNativeMarkerTag> nativeMarkerTags;
+struct LiquidNativeMarkerOwner
+{
+    std::uint64_t hwnd = 0u;
+    std::uint64_t regionId = 0u;
+    std::uint32_t pid = 0u;
+    bool operator==(const LiquidNativeMarkerOwner&) const = default;
+};
+std::array<LiquidNativeMarkerOwner, liquidDwmRegionSlots> nativeMarkerOwners {};
+struct LiquidRetiredMarkerTag
+{
+    LiquidNativeEntryIdentity identity {};
+    LiquidNativeMarkerOwner owner {};
+    std::uint32_t slot = liquidDwmRegionSlots;
+    float width = 0.0f;
+    float height = 0.0f;
+};
+std::unordered_map<void*, LiquidRetiredMarkerTag> retiredNativeMarkerTags;
 
 bool read_liquid_native_entry_identity(void* pointer,
     LiquidNativeEntryIdentity& identity) noexcept
@@ -122,8 +139,8 @@ void untag_native_marker_entry(void* entry) noexcept
     try
     {
         std::lock_guard<std::mutex> lock(nativeMarkerTagsMutex);
-        for (auto& tag : nativeMarkerTags)
-            if (tag.entry == entry) tag = {};
+        nativeMarkerTags.erase(entry);
+        retiredNativeMarkerTags.erase(entry);
     }
     catch (...) {}
 }
@@ -149,23 +166,44 @@ void tag_native_marker_entry(void* entry, std::uint32_t slot,
     {
         std::lock_guard<std::mutex> lock(nativeMarkerTagsMutex);
         const auto now = GetTickCount64();
-        LiquidNativeMarkerTag* destination = nullptr;
-        for (auto& tag : nativeMarkerTags)
+        const LiquidNativeMarkerOwner owner { published.hwnd, published.regionId, published.ownerPid };
+        if (nativeMarkerOwners[slot] != owner)
         {
-            if (tag.entry == entry)
+            LiquidDwmRegion live {};
+            const D3D11_TEXTURE2D_DESC unused {};
+            if (read_capture_region(unused, slot, live) &&
+                owner == LiquidNativeMarkerOwner { live.hwnd, live.regionId, live.ownerPid })
             {
-                destination = &tag;
-                break;
-            }
-            if (!tag.entry && !destination) destination = &tag;
-        }
-        // DWM can retain an idle entry indefinitely. Bound storage by evicting
-        // the least recently used entry only when the table is actually full.
-        if (!destination)
-            destination = &*std::min_element(nativeMarkerTags.begin(),
-                nativeMarkerTags.end(), [](const auto& first, const auto& second) {
-                    return first.lastSeenTick < second.lastSeenTick;
+                // Retire the large shape snapshot, but keep the entry's
+                // classification until its native identity is recycled. DWM
+                // may still submit an older queued draw after slot reuse; it
+                // must be recognised and suppressed rather than painted black.
+                for (auto cached = nativeMarkerTags.begin(); cached != nativeMarkerTags.end();)
+                {
+                    const auto& tag = cached->second;
+                    const LiquidNativeMarkerOwner previous {
+                        tag.shapeSnapshot.hwnd, tag.shapeSnapshot.regionId, tag.shapeSnapshot.ownerPid };
+                    if (tag.slot == slot && previous != owner)
+                    {
+                        retiredNativeMarkerTags[cached->first] =
+                            { tag.identity, previous, tag.slot, tag.width, tag.height };
+                        cached = nativeMarkerTags.erase(cached);
+                    }
+                    else ++cached;
+                }
+                // No timeout or capacity eviction can establish that a native
+                // entry has died. Reclaim only identities that no longer match.
+                std::erase_if(retiredNativeMarkerTags, [&](const auto& cached) {
+                    if (cached.second.slot != slot) return false;
+                    LiquidNativeEntryIdentity current {};
+                    return !read_liquid_native_entry_identity(cached.first, current) ||
+                        !liquid_native_entry_identity_matches(cached.second.identity, current);
                 });
+                nativeMarkerOwners[slot] = owner;
+            }
+        }
+        retiredNativeMarkerTags.erase(entry);
+        auto* destination = &nativeMarkerTags[entry];
         *destination = {};
         destination->entry = entry;
         destination->identity = identity;
@@ -189,12 +227,13 @@ bool find_liquid_native_marker_tag(void* entry,
     {
         std::lock_guard<std::mutex> lock(nativeMarkerTagsMutex);
         const auto now = GetTickCount64();
-        for (auto& tag : nativeMarkerTags)
+        const auto found = nativeMarkerTags.find(entry);
+        if (found != nativeMarkerTags.end())
         {
-            if (tag.entry != entry) continue;
+            auto& tag = found->second;
             if (!liquid_native_entry_identity_matches(tag.identity, identity))
             {
-                tag = {};
+                nativeMarkerTags.erase(found);
                 return false;
             }
             marker.slot = tag.slot;
@@ -206,6 +245,25 @@ bool find_liquid_native_marker_tag(void* entry,
             // after its content-generation callback. Identity and live slot
             // ownership validate it; elapsed time cannot establish its lifetime.
             tag.lastSeenTick = now;
+            return true;
+        }
+        const auto retired = retiredNativeMarkerTags.find(entry);
+        if (retired != retiredNativeMarkerTags.end())
+        {
+            const auto& tag = retired->second;
+            if (!liquid_native_entry_identity_matches(tag.identity, identity))
+            {
+                retiredNativeMarkerTags.erase(retired);
+                return false;
+            }
+            marker.slot = tag.slot;
+            marker.taggedWidth = tag.width;
+            marker.taggedHeight = tag.height;
+            marker.shapeSnapshot = {};
+            marker.shapeSnapshot.hwnd = tag.owner.hwnd;
+            marker.shapeSnapshot.regionId = tag.owner.regionId;
+            marker.shapeSnapshot.ownerPid = tag.owner.pid;
+            marker.hasShapeSnapshot = true;
             return true;
         }
     }
@@ -450,9 +508,41 @@ bool liquid_native_batch_region(const LiquidNativeBatchMarker& marker,
     for (std::size_t index = 0u; index < region.contourCount; ++index)
         copyContour(published.contours[index], region.contours[index]);
     if (region.hasExclusion) copyContour(published.exclusion, region.exclusion);
-    region.lightPhase = static_cast<float>(GetTickCount64() % 6000u) *
+    region.lightPhase = published.rimStatic > 0.5f ? -1.0f : static_cast<float>(GetTickCount64() % 6000u) *
         (6.2831853f / 6000.0f);
     return true;
+}
+
+void refresh_liquid_native_marker_controls(LiquidDwmRegion& shape,
+    const LiquidDwmRegion& published) noexcept
+{
+    shape.refractionStrength = published.refractionStrength;
+    shape.dispersionStrength = published.dispersionStrength;
+    shape.blurRadius = published.blurRadius;
+    shape.rimStrength = published.rimStrength;
+    shape.opacity = published.opacity;
+    shape.tintRed = published.tintRed;
+    shape.tintGreen = published.tintGreen;
+    shape.tintBlue = published.tintBlue;
+    shape.tintAlpha = published.tintAlpha;
+    shape.paintCapGradient = published.paintCapGradient;
+    std::copy(std::begin(published.capGradient), std::end(published.capGradient),
+        std::begin(shape.capGradient));
+    std::copy(std::begin(published.viewportRect), std::end(published.viewportRect), std::begin(shape.viewportRect));
+    std::copy(std::begin(published.viewportFade), std::end(published.viewportFade), std::begin(shape.viewportFade));
+    // The queued native matrix supplies the card's current position. The live
+    // viewport is already relative to that card; rebasing it onto the retained
+    // snapshot's old x/y moves the clip again when a stack expands or scrolls.
+    if (published.width == shape.width && published.height == shape.height)
+    {
+        // Retained marker geometry can stay unchanged while a neighbour
+        // moves within a union or a card's cutout changes its position.
+        shape.contourCount = published.contourCount;
+        shape.hasExclusion = published.hasExclusion;
+        std::copy(std::begin(published.contours), std::end(published.contours),
+            std::begin(shape.contours));
+        shape.exclusion = published.exclusion;
+    }
 }
 
 bool render_native_marker(const LiquidNativeBatchMarker& marker, void* executionContext)
@@ -560,32 +650,7 @@ bool render_native_marker(const LiquidNativeBatchMarker& marker, void* execution
         auto shape = marker.hasShapeSnapshot ? marker.shapeSnapshot : published;
         // Shape follows the queued native geometry. Optical controls remain
         // live even when DWM reuses that geometry's retained draw-list entry.
-        shape.refractionStrength = published.refractionStrength;
-        shape.dispersionStrength = published.dispersionStrength;
-        shape.blurRadius = published.blurRadius;
-        shape.rimStrength = published.rimStrength;
-        shape.opacity = published.opacity;
-        shape.tintRed = published.tintRed;
-        shape.tintGreen = published.tintGreen;
-        shape.tintBlue = published.tintBlue;
-        shape.tintAlpha = published.tintAlpha;
-        shape.paintCapGradient = published.paintCapGradient;
-        std::copy(std::begin(published.capGradient), std::end(published.capGradient),
-            std::begin(shape.capGradient));
-        std::copy(std::begin(published.viewportRect), std::end(published.viewportRect), std::begin(shape.viewportRect));
-        std::copy(std::begin(published.viewportFade), std::end(published.viewportFade), std::begin(shape.viewportFade));
-        shape.viewportRect[0] += static_cast<float>(published.x - shape.x);
-        shape.viewportRect[1] += static_cast<float>(published.y - shape.y);
-        if (published.width == shape.width && published.height == shape.height)
-        {
-            // Retained marker geometry can stay unchanged while a neighbour
-            // moves within a union or a card's cutout changes its position.
-            shape.contourCount = published.contourCount;
-            shape.hasExclusion = published.hasExclusion;
-            std::copy(std::begin(published.contours), std::end(published.contours),
-                std::begin(shape.contours));
-            shape.exclusion = published.exclusion;
-        }
+        refresh_liquid_native_marker_controls(shape, published);
         if (!liquid_native_batch_region(marker, shape, description, region))
         {
             status(153);

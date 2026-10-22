@@ -329,6 +329,7 @@ namespace
 			left.liquidRefraction == right.liquidRefraction &&
 			left.liquidBlur == right.liquidBlur &&
 			left.liquidRim == right.liquidRim &&
+			left.liquidRimAnimated == right.liquidRimAnimated &&
             left.liquidDispersion == right.liquidDispersion &&
             left.liquidTint.red == right.liquidTint.red &&
             left.liquidTint.green == right.liquidTint.green &&
@@ -1419,6 +1420,14 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	audioEngine(createInfo.enableAudio)
 {
     logger = Logger::fetch_logger();
+    const auto startupBegan = std::chrono::steady_clock::now();
+    const char* startupPhase = "renderer configuration";
+    const auto startupStage = [&](const char* phase) {
+        startupPhase = phase;
+        logger->info(std::string("Renderer initialisation: ") + phase + ".");
+    };
+    try
+    {
 	const char* renderDiagnostics = std::getenv(
 		"VIBRANCE_RENDER_DIAGNOSTICS");
 	renderDiagnosticsEnabled = renderDiagnostics &&
@@ -1435,12 +1444,18 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
     }
     logger->vulkan("Initialising renderer.");
 
+    startupStage("Vulkan instance");
     instance = make_instance(
         createInfo.applicationName,
         createInfo.instanceExtensionCount,
         createInfo.instanceExtensions,
         instanceDeletionQueue
     );
+    if (!instance)
+    {
+        logger->error("Renderer initialisation could not create a Vulkan instance.");
+        return;
+    }
 	dldi = vk::detail::DispatchLoaderDynamic(instance, vkGetInstanceProcAddr);
 	if (logger->is_vulkan_validation_enabled()) 
     {
@@ -1496,6 +1511,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	// contract; those devices keep DirectComposition via the host-upload path.
 	const bool attemptCompositionGpuInterop =
 		compositionRequested && !forceHostUpload;
+	startupStage("graphics device selection");
 	physicalDevice = choose_physical_device(
 		instance,
 		attemptCompositionGpuInterop,
@@ -1517,6 +1533,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	hosted3DSamples = choose_hosted3d_sample_count(physicalDevice, requestedMsaaSamples);
 	logger->vulkan(std::string("Hosted 3D MSAA sample count: ") + sample_count_name(hosted3DSamples) + ".");
 
+	startupStage("graphics device creation");
 	logicalDevice = create_logical_device(
 		physicalDevice,
 		surface,
@@ -1538,8 +1555,15 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	// Each UI window owns an allocator. Small blocks avoid reserving a large
 	// mostly empty heap for every window; larger resources still fit normally.
 	allocatorInfo.preferredLargeHeapBlockSize = 4ull * 1024ull * 1024ull;
-	vmaCreateAllocator(&allocatorInfo, &allocator);
+	const VkResult allocatorResult = vmaCreateAllocator(&allocatorInfo, &allocator);
+	if (allocatorResult != VK_SUCCESS || !allocator)
+	{
+		logger->error("Renderer initialisation could not create its graphics allocator: " +
+			vk::to_string(static_cast<vk::Result>(allocatorResult)));
+		return;
+	}
 
+	startupStage("presentation surface");
 	swapchain.presentModePreference = createInfo.presentMode;
 	swapchain.build(logicalDevice, physicalDevice, surface, framebufferWidth, framebufferHeight, transparentFramebuffer);
 	if (!swapchain.chain || swapchain.images.empty())
@@ -1591,6 +1615,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		return;
 	}
 	
+	startupStage("graphics pipelines");
 	make_pipelines();
 	const std::array requiredPipelines = {
 		PipelineType::eClear,
@@ -1657,6 +1682,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	descriptorPools[DescriptorScope::ePost] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 	descriptorPools[DescriptorScope::eUICachePost] = make_descriptor_pool(logicalDevice, frameCount, descriptorTypes.size(), descriptorTypes.data(), deviceDeletionQueue);
 
+	startupStage("font atlas and frame resources");
 	if (!createInfo.defaultRenderer2DFontPath.empty())
 	{
 		if (renderer2DFontAtlas.load_from_file(
@@ -1714,12 +1740,11 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 				descriptorPools[scope], descriptorSetLayouts[scope]);
 		}
 
-		frames.push_back(Frame(swapchain, renderExtent, modelRenderExtent, logicalDevice, pipelines, hosted3DRenderPass,
+		frames.emplace_back(swapchain, renderExtent, modelRenderExtent, logicalDevice, pipelines, hosted3DRenderPass,
 			hosted3DSamples,
 			commandBuffer, graphicsQueue, deviceDeletionQueue,
 			descriptorSets[i], pipelineLayouts,
-			allocator, &modelAssets, &mediaAssets, renderer2DScene, renderer2DFontAtlas.image()
-		));
+			allocator, &modelAssets, &mediaAssets, renderer2DScene, renderer2DFontAtlas.image());
 		if (gpuTimestampDiagnosticsEnabled)
 		{
 			gpuTimestampDiagnosticsAvailable |= frames.back().enable_gpu_timing(
@@ -1736,6 +1761,21 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	lastTime = 0.0;
 	numFrames = 0;
 	rendererReady = true;
+    logger->info("Renderer initialisation completed in " + std::to_string(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startupBegan).count()) + " ms.");
+    }
+    catch (const std::exception& error)
+    {
+        rendererReady = false;
+        logger->error(std::string("Renderer initialisation failed during ") + startupPhase +
+            ": " + error.what());
+    }
+    catch (...)
+    {
+        rendererReady = false;
+        logger->error(std::string("Renderer initialisation failed during ") + startupPhase + ".");
+    }
 }
 
 void Engine::Impl::make_descriptor_sets() 
@@ -3986,7 +4026,7 @@ const Renderer2DFontAtlas& Engine::Impl::renderer2d_font_atlas() const
 
 Engine::Impl::~Impl()
 {
-	if (logicalDevice)
+	if (logicalDevice && graphicsQueue)
 	{
 		vk::Result result = graphicsQueue.waitIdle();
 		if (result != vk::Result::eSuccess)

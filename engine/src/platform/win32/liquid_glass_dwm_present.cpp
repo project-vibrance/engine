@@ -28,6 +28,7 @@
 #include <mutex>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -586,7 +587,7 @@ bool translate_region(const LiquidDwmRegion& published,
     region.cornerExponent = published.cornerExponent;
     std::copy(std::begin(published.viewportRect), std::end(published.viewportRect), region.viewportRect.begin());
     std::copy(std::begin(published.viewportFade), std::end(published.viewportFade), region.viewportFade.begin());
-    region.lightPhase = static_cast<float>(GetTickCount64() % 6000) *
+    region.lightPhase = published.rimStatic > 0.5f ? -1.0f : static_cast<float>(GetTickCount64() % 6000) *
         (6.2831853f / 6000.0f);
     uiRectangle = { origin.x, origin.y,
         origin.x + static_cast<LONG>(published.clientWidth),

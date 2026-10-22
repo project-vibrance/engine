@@ -34,7 +34,7 @@ inline ShapeStyleComponent ui_liquid_control_paint(ShapeStyleComponent paint)
 #if defined(__APPLE__)
     paint.set_color(glm::vec4(0.0f));
 #else
-    paint.set_color(glm::vec4(1.0f, 1.0f, 1.0f, 0.04f));
+    paint.set_color(glm::vec4(1.0f, 1.0f, 1.0f, 0.09f));
 #endif
     paint.outlineWidth = 0.0f;
     paint.backdropBlurRadius = 0.0f;
@@ -43,11 +43,47 @@ inline ShapeStyleComponent ui_liquid_control_paint(ShapeStyleComponent paint)
 }
 struct UiLiquidThumbPaint { ShapeStyleComponent shape; };
 
+// Optical preferences also apply to authored glass surfaces, including native
+// cards and controls that do not use the stock control paint adapter.
+inline void ui_update_liquid_glass_optics(Renderer2DScene& scene, const UiGlassOptions& options)
+{
+    auto& registry = scene.registry();
+    for (const auto entity : registry.view<LiquidGlassComponent>())
+    {
+        auto& glass = registry.get<LiquidGlassComponent>(entity);
+        if (glass.material != GlassMaterial::eLiquid) continue;
+        if (glass.refraction == options.liquidRefraction && glass.blur == options.liquidBlur &&
+            glass.rim == options.liquidRim && glass.dispersion == options.liquidDispersion &&
+            glass.rimAnimated == options.liquidRimAnimated) continue;
+        glass.refraction = options.liquidRefraction;
+        glass.blur = options.liquidBlur;
+        glass.rim = options.liquidRim;
+        glass.dispersion = options.liquidDispersion;
+        glass.rimAnimated = options.liquidRimAnimated;
+        scene.mark_dirty(entity);
+    }
+    for (const auto entity : registry.view<SystemBackdropComponent>())
+    {
+        auto& region = registry.get<SystemBackdropComponent>(entity).region;
+        if (region.material != GlassMaterial::eLiquid) continue;
+        if (region.liquidRefraction == options.liquidRefraction && region.liquidBlur == options.liquidBlur &&
+            region.liquidRim == options.liquidRim && region.liquidDispersion == options.liquidDispersion &&
+            region.liquidRimAnimated == options.liquidRimAnimated) continue;
+        region.liquidRefraction = options.liquidRefraction;
+        region.liquidBlur = options.liquidBlur;
+        region.liquidRim = options.liquidRim;
+        region.liquidDispersion = options.liquidDispersion;
+        region.liquidRimAnimated = options.liquidRimAnimated;
+        scene.mark_dirty(entity);
+    }
+}
+
 inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
     const UiGlassOptions& options, bool desktopBackdrop = false,
     entt::entity onlySurface = entt::null)
 {
     auto& registry = scene.registry();
+    if (onlySurface == entt::null) ui_update_liquid_glass_optics(scene, options);
     const auto restoreParentPaint = [&](entt::entity entity, UiLiquidControlPaint& saved) {
         if (registry.valid(saved.cutoutParent))
         {
@@ -304,11 +340,22 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             LiquidGlassBackend::eEngineRenderer;
         if (!liquid || liquid->backend != backend || liquid->sceneBackdrop != !native ||
             liquid->refraction != options.liquidRefraction || liquid->blur != options.liquidBlur ||
-            liquid->rim != options.liquidRim || liquid->dispersion != options.liquidDispersion)
+            liquid->rim != options.liquidRim || liquid->dispersion != options.liquidDispersion ||
+            liquid->rimAnimated != options.liquidRimAnimated)
         {
             registry.emplace_or_replace<LiquidGlassComponent>(entity, LiquidGlassComponent {
                 GlassMaterial::eLiquid, backend, !native,
-                options.liquidRefraction, options.liquidBlur, options.liquidRim, options.liquidDispersion });
+                options.liquidRefraction, options.liquidBlur, options.liquidRim, options.liquidDispersion,
+                options.liquidRimAnimated });
+            scene.mark_dirty(entity);
+        }
+        // Opaque coloured control paint must precede the optical finish, or it
+        // hides the reflected rim and makes the animation preference invisible.
+        auto& appliedGlass = registry.get<LiquidGlassComponent>(entity);
+        const bool sampleOwnPaint = !native && surface && surface->preserveColour;
+        if (appliedGlass.sampleOwnPaint != sampleOwnPaint)
+        {
+            appliedGlass.sampleOwnPaint = sampleOwnPaint;
             scene.mark_dirty(entity);
         }
         if (native)
@@ -327,6 +374,7 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             region.liquidRefraction = options.liquidRefraction;
             region.liquidBlur = options.liquidBlur;
             region.liquidRim = options.liquidRim;
+            region.liquidRimAnimated = options.liquidRimAnimated;
             region.liquidDispersion = options.liquidDispersion;
             auto tint = options.liquidTint;
 #if defined(__APPLE__)

@@ -692,7 +692,8 @@ namespace
     DispatchBounds make_blur_dispatch_bounds(
         const auto& swapchain,
         const Renderer2DBatch& batch,
-        bool coverWorkgroups = true)
+        bool coverWorkgroups = true,
+        bool includeReflections = true)
     {
         // Inherited masks store their rectangle in effect1, so its width is
         // not a feather radius. Otherwise a small scrolling fade filters the
@@ -704,7 +705,10 @@ namespace
             expand_and_clip_rect(
                 batch.rect,
                 ((batch.flags & eRenderer2DStyleLiquidGlass) != 0u ?
-                    std::max(batch.effect0.x, 0.0f) + std::min(batch.rect.z, batch.rect.w) * 0.40f :
+                    std::max(batch.effect0.x, 0.0f) +
+                        (includeReflections ?
+                            std::min(std::min(batch.rect.z, batch.rect.w) * 1.6f, 120.0f) + 2.0f :
+                            std::min(batch.rect.z, batch.rect.w) * 0.40f) :
                     std::max(std::max(batch.effect0.x, 0.0f), feather)) +
                     notched_squircle_dispatch_padding(batch, batch.uvRect),
                 batch.clipRect),

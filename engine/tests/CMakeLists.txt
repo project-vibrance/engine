@@ -1,3 +1,19 @@
+add_executable(vibrance_notification_record_cache_tests notification_record_cache_tests.cpp)
+target_compile_features(vibrance_notification_record_cache_tests PRIVATE cxx_std_20)
+target_include_directories(vibrance_notification_record_cache_tests PRIVATE ../include)
+add_test(NAME vibrance_notification_record_cache_tests COMMAND vibrance_notification_record_cache_tests)
+
+if(VIBRANCE_RENDER_BACKEND STREQUAL "Vulkan")
+    add_executable(vibrance_liquid_rim_shader_tests liquid_rim_shader_tests.cpp)
+    target_compile_features(vibrance_liquid_rim_shader_tests PRIVATE cxx_std_20)
+    target_include_directories(vibrance_liquid_rim_shader_tests PRIVATE ../include "${GLM_INCLUDE_DIR}")
+    target_link_libraries(vibrance_liquid_rim_shader_tests PRIVATE Vulkan::Vulkan)
+    add_test(NAME vibrance_liquid_rim_shader_tests COMMAND vibrance_liquid_rim_shader_tests
+        "${PROJECT_BINARY_DIR}/engine/generated/spirv/blur_2d.comp.spv"
+        "${PROJECT_BINARY_DIR}/engine/generated/spirv/shape_2d.comp.spv")
+    set_tests_properties(vibrance_liquid_rim_shader_tests PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 if(WIN32)
     add_executable(vibrance_liquid_runtime_identity_tests liquid_runtime_identity_tests.cpp)
     target_compile_features(vibrance_liquid_runtime_identity_tests PRIVATE cxx_std_20)
@@ -34,6 +50,20 @@ function(vibrance_add_engine_test test_name source_file)
 
     add_test(NAME ${test_name} COMMAND ${test_name} ${ARGN})
 endfunction()
+
+if(NOT APPLE)
+    # Deterministic VMA/Vulkan failures exercise the production image owner
+    # without reserving graphics memory or creating a physical device.
+    add_executable(vibrance_image_allocation_failure_tests
+        image_allocation_failure_tests.cpp ../src/renderer/vulkan/image.cpp)
+    target_link_libraries(vibrance_image_allocation_failure_tests PRIVATE
+        vibrance::engine Vulkan::Vulkan)
+    if(WIN32)
+        target_compile_definitions(vibrance_image_allocation_failure_tests PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+        add_dependencies(vibrance_image_allocation_failure_tests vibrance_engine_test_runtime)
+    endif()
+    add_test(NAME vibrance_image_allocation_failure_tests COMMAND vibrance_image_allocation_failure_tests)
+endif()
 
 vibrance_add_engine_test(vibrance_logger_tests logger_tests.cpp)
 vibrance_add_engine_test(vibrance_media_preparation_tests media_preparation_tests.cpp)
@@ -360,12 +390,24 @@ vibrance_add_engine_test(
 vibrance_add_engine_test(
     vibrance_audio_loopback_capture_tests
     audio_loopback_capture_tests.cpp)
+if(WIN32)
+    add_test(NAME vibrance_audio_loopback_format_tests
+        COMMAND vibrance_audio_loopback_capture_tests --process-format)
+    set_tests_properties(vibrance_audio_loopback_format_tests PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 20)
+endif()
 
 vibrance_add_engine_test(vibrance_file_tests file_tests.cpp)
 if(SOLOUD_FOUND)
     vibrance_add_engine_test(vibrance_audio_engine_tests audio_engine_tests.cpp)
 endif()
 if(WIN32)
+    vibrance_add_engine_test(vibrance_glfw_panel_initialisation_tests glfw_panel_initialisation_tests.cpp)
+    target_link_libraries(vibrance_glfw_panel_initialisation_tests PRIVATE user32)
+    add_test(NAME vibrance_glfw_panel_initialisation_renderer_tests
+        COMMAND vibrance_glfw_panel_initialisation_tests --renderer)
+    set_tests_properties(vibrance_glfw_panel_initialisation_tests
+        vibrance_glfw_panel_initialisation_renderer_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     vibrance_add_engine_test(vibrance_glfw_panel_drag_tests glfw_panel_drag_tests.cpp)
     target_link_libraries(vibrance_glfw_panel_drag_tests PRIVATE user32 comctl32)
     set_tests_properties(vibrance_glfw_panel_drag_tests PROPERTIES

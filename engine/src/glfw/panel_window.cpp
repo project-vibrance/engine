@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -402,21 +403,34 @@ GlfwPanelWindow::GlfwPanelWindow(GLFWwindow* window, Engine* engine, GlfwPanelWi
     set_glfw_callbacks(window, callbacks);
     cursors = create_glfw_standard_cursors();
 
-    // Template-owned localisation lets every panel share the same language files
-    if (engine && !this->options.localisationDirectory.empty())
+    try
     {
-        engine->load_localisation_directory(this->options.localisationDirectory);
-        engine->set_locale(Engine::shared_locale());
-    }
+        // Template-owned localisation lets every panel share the same language files
+        if (engine && !this->options.localisationDirectory.empty())
+        {
+            engine->load_localisation_directory(this->options.localisationDirectory);
+            engine->set_locale(Engine::shared_locale());
+        }
 
-    load_template_font();
+        load_template_font();
 
-    load_traffic_light_icons();
-    apply_initial_size();
-    build_scene();
+        load_traffic_light_icons();
+        apply_initial_size();
+        build_scene();
 #if defined(_WIN32)
-    if (window) GlfwPanelWindowWin32Drag::attach(*this);
+        if (window) GlfwPanelWindowWin32Drag::attach(*this);
 #endif
+    }
+    catch (...)
+    {
+        // A failed constructor has no destructor. Release the native input
+        // resources before the host destroys the failed renderer and window.
+        clear_glfw_cursor(window);
+        set_glfw_callbacks(window, {});
+        set_glfw_window_user_pointer(window, nullptr);
+        destroy_glfw_standard_cursors(cursors);
+        throw;
+    }
 }
 
 GlfwPanelWindow::~GlfwPanelWindow()
@@ -951,9 +965,15 @@ void GlfwPanelWindow::build_scene()
     UiBuilder ui(scene, panelGeometry.scale);
 
     ShapeStyleComponent panelStyle = options.panelStyle.value_or(options.theme.panel_style(1.25f, 1.0f));
+    std::optional<ShapeStyleComponent> panelOutlineStyle;
     // Background layers can replace the base fill when the window is split into regions
     if (options.panelBackgroundLayersReplacePanelFill && !options.panelBackgroundLayers.empty())
     {
+        if (panelStyle.outlineWidth > 0.0f && panelStyle.outlineColor.a > 0.0f)
+        {
+            panelOutlineStyle = panelStyle;
+            panelOutlineStyle->fill = Renderer2DFill::eNone;
+        }
         panelStyle = make_solid_style("rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)", 0.0f, 0.0f);
     }
 
@@ -1059,7 +1079,14 @@ void GlfwPanelWindow::build_scene()
                         Media2DFit::eContain);
                     if (Media2DComponent* media = scene.registry().try_get<Media2DComponent>(icon))
                     {
-                        media->set_mask_tint(options.trafficLights.iconTint);
+                        if (options.trafficLights.matchIconTintToButton)
+                        {
+                            auto tint = renderer2d_hex_color(color);
+                            tint *= glm::vec4(0.35f, 0.35f, 0.35f, 1.0f);
+                            media->set_tint(tint);
+                            media->set_tint_as_mask(true);
+                        }
+                        else media->set_mask_tint(options.trafficLights.iconTint);
                     }
                     RenderLayer2DComponent& iconLayer = ui.set_layer(icon, 101, static_cast<uint32_t>(i), true);
                     iconLayer.visible = hoveredTrafficLight != TrafficLightKind::eNone;
@@ -1199,6 +1226,23 @@ void GlfwPanelWindow::build_scene()
     else
     {
         build_default_content(context);
+    }
+
+    if (panelOutlineStyle)
+    {
+        // Split backgrounds paint over the base shell. Retain one continuous
+        // hairline above those layers, using the shell's exact contour.
+        panelOutlineStyle->outlineWidth = scaled_scalar(panelOutlineStyle->outlineWidth, ui.scale());
+        panelOutlineStyle->edgeSoftness = scaled_scalar(panelOutlineStyle->edgeSoftness, ui.scale());
+        const auto outline = scene.create_shape(panelGeometry.position, panelGeometry.size,
+            *panelOutlineStyle, options.panelPrimitive);
+        ui.set_layer(outline, 99, 0u, true);
+        ui.set_shape(outline, options.cornerRadius);
+        ui.set_shape_squircle(outline, options.panelSquircleAmount, options.panelSquirclePower);
+        scene.registry().emplace<InputTransparent2DComponent>(outline);
+        // The outline already owns this contour and its antialiasing. Making
+        // it a masked child feathers it a second time and replaces its own
+        // squircle parameters with the inherited mask payload.
     }
 
     scene.mark_dirty();
@@ -2070,17 +2114,36 @@ bool GlfwPanelWindowHost::open()
         return false;
     }
 
-    hostedEngine = build_engine_for_window();
-    if (!hostedEngine)
+    try
     {
+        hostedEngine = build_engine_for_window();
+        if (!hostedEngine || !hostedEngine->ready())
+        {
+            Logger::fetch_logger()->error(
+                "Panel window host renderer initialisation did not complete.");
+            close();
+            return false;
+        }
+
+        hostedPanel = std::make_unique<GlfwPanelWindow>(
+            hostedWindow,
+            hostedEngine,
+            make_template_options());
+    }
+    catch (const std::exception& error)
+    {
+        Logger::fetch_logger()->error(
+            std::string("Panel window host could not initialise: ") + error.what());
         close();
         return false;
     }
-
-    hostedPanel = std::make_unique<GlfwPanelWindow>(
-        hostedWindow,
-        hostedEngine,
-        make_template_options());
+    catch (...)
+    {
+        Logger::fetch_logger()->error(
+            "Panel window host could not initialise: unknown exception.");
+        close();
+        return false;
+    }
     return true;
 }
 

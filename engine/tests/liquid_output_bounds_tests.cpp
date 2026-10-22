@@ -23,6 +23,9 @@ int main()
     lens.effect0.x = 4.5f;
     lens.effect1.y = 0.5f;
     const auto halo = make_blur_dispatch_bounds(surface, lens);
+    const auto filter = make_blur_dispatch_bounds(surface, lens, true, false);
+    expect(filter.width < halo.width && filter.height < halo.height,
+        "The extended reflection halo must not enlarge the Gaussian filtering work");
     const auto output = make_liquid_output_dispatch_bounds(surface, lens);
     expect(output.width < halo.width && output.height < halo.height,
         "Liquid output must avoid clearing and compositing the unused sampling halo");

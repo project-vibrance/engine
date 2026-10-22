@@ -1,6 +1,53 @@
 #include <vibranceUI/renderer/image.h>
 #include <vibranceUI/core/logger.h>
 #include <algorithm>
+#include <stdexcept>
+
+namespace
+{
+    void require_image_operation(vk::Result result, const char* operation)
+    {
+        if (result != vk::Result::eSuccess)
+            throw std::runtime_error(std::string(operation) + ": " + vk::to_string(result));
+    }
+
+    // Commit ownership before submitting any GPU work. A later initialisation
+    // failure leaves the allocation with the frame/engine cleanup queues, whose
+    // owner waits for its device before releasing submitted resources.
+    void retain_image(VmaAllocator allocator, vk::Device device,
+        vk::Image image, VmaAllocation memory, vk::ImageView view,
+        std::deque<std::function<void(VmaAllocator)>>& allocations,
+        std::deque<std::function<void(vk::Device)>>& views)
+    {
+        const auto allocationCount = allocations.size();
+        try
+        {
+            allocations.push_back([image, memory](VmaAllocator owner) {
+                vmaDestroyImage(owner, image, memory);
+            });
+            views.push_back([view](vk::Device owner) { owner.destroyImageView(view); });
+        }
+        catch (...)
+        {
+            if (allocations.size() != allocationCount) allocations.pop_back();
+            device.destroyImageView(view);
+            vmaDestroyImage(allocator, image, memory);
+            throw;
+        }
+    }
+
+    vk::ImageView make_owned_image_view(VmaAllocator allocator,
+        vk::Device device, vk::Image image, VmaAllocation memory,
+        vk::Format format, vk::ImageAspectFlags aspect, uint32_t mipLevels = 1u)
+    {
+        try { return create_image_view(device, image, format, aspect, mipLevels); }
+        catch (...)
+        {
+            vmaDestroyImage(allocator, image, memory);
+            throw;
+        }
+    }
+}
 
 StorageImage::StorageImage(
 	VmaAllocator& allocator,
@@ -32,46 +79,25 @@ StorageImage::StorageImage(
 	}
 	imageInput.memoryProperties = vk::MemoryPropertyFlagBits::eDeviceLocal;
 	make_image(allocator, imageInput, image, memory);
-
+	view = make_owned_image_view(allocator, logicalDevice, image, memory, format,
+		vk::ImageAspectFlagBits::eColor, this->mipLevels);
+	retain_image(allocator, logicalDevice, image, memory, view,
+		vmaDeletionQueue, deviceDeletionQueue);
 	initialise(commandBuffer, queue, logicalDevice);
 
 	this->extent = extent;
-
-	VkImage imageHandle = image;
-	VmaAllocation imageMemory = memory;
-	Logger* logger = Logger::fetch_logger();
-	vmaDeletionQueue.push_back([imageHandle, imageMemory, logger](VmaAllocator allocator) {
-		vmaDestroyImage(allocator, imageHandle, imageMemory);
-		logger->vulkan("Destroyed storage image.");
-	});
-
-	VkImageView imageViewHandle = view;
-	deviceDeletionQueue.push_back([imageViewHandle, logger](vk::Device device) {
-		device.destroyImageView(imageViewHandle);
-		logger->vulkan("Destroyed storage view.");
-	});
 }
 
-void StorageImage::initialise(vk::CommandBuffer commandBuffer, vk::Queue queue, vk::Device logicalDevice)
+void StorageImage::initialise(vk::CommandBuffer commandBuffer, vk::Queue queue, vk::Device)
 {
 	// Newly allocated images are moved to eGeneral because compute shaders read and write them
-	Logger* logger = Logger::fetch_logger();
-
 	vk::Result result = commandBuffer.reset();
-	if (result != vk::Result::eSuccess)
-	{
-		logger->vulkan("Failed to reset command buffer.");
-		return;
-	}
+	require_image_operation(result, "Could not reset the image initialisation command buffer");
 
 	vk::CommandBufferBeginInfo beginInfo = {};
 
 	result = commandBuffer.begin(beginInfo);
-	if (result != vk::Result::eSuccess)
-	{
-		logger->vulkan("Failed to begin command buffer.");
-		return;
-	}
+	require_image_operation(result, "Could not begin the image initialisation command buffer");
 
 	transition_image_layout(commandBuffer, image,
 		vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
@@ -80,30 +106,16 @@ void StorageImage::initialise(vk::CommandBuffer commandBuffer, vk::Queue queue, 
 		vk::ImageAspectFlagBits::eColor, 0, mipLevels);
 	
 	result = commandBuffer.end();
-	if (result != vk::Result::eSuccess)
-	{
-		logger->vulkan("Failed to end command buffer.");
-		return;
-	}
+	require_image_operation(result, "Could not end the image initialisation command buffer");
 
 	vk::SubmitInfo submitInfo;
 	submitInfo.setCommandBufferCount(1);
 	submitInfo.setPCommandBuffers(&commandBuffer);
 	result = queue.submit(1, &submitInfo, nullptr);
-	if (result != vk::Result::eSuccess)
-	{
-		logger->vulkan("Failed to submit buffer to queue.");
-		return;
-	}
+	require_image_operation(result, "Could not submit image initialisation");
 
 	result = queue.waitIdle();
-	if (result != vk::Result::eSuccess)
-	{
-		logger->vulkan("Failed to wait for queue to idle.");
-		return;
-	}
-
-	make_view(logicalDevice);
+	require_image_operation(result, "Could not complete image initialisation");
 
 	make_descriptor();
 }
@@ -129,21 +141,10 @@ DepthImage::DepthImage(
 	imageInput.samples = samples;
 	make_image(allocator, imageInput, image, memory);
 
-	view = create_image_view(logicalDevice, image, format, vk::ImageAspectFlagBits::eDepth);
-
-	VkImage imageHandle = image;
-	VmaAllocation imageMemory = memory;
-	Logger* logger = Logger::fetch_logger();
-	vmaDeletionQueue.push_back([imageHandle, imageMemory, logger](VmaAllocator allocator) {
-		vmaDestroyImage(allocator, imageHandle, imageMemory);
-		logger->vulkan("Destroyed depth image.");
-	});
-
-	VkImageView imageViewHandle = view;
-	deviceDeletionQueue.push_back([imageViewHandle, logger](vk::Device device) {
-		device.destroyImageView(imageViewHandle);
-		logger->vulkan("Destroyed depth view.");
-	});
+	view = make_owned_image_view(allocator, logicalDevice, image, memory, format,
+		vk::ImageAspectFlagBits::eDepth);
+	retain_image(allocator, logicalDevice, image, memory, view,
+		vmaDeletionQueue, deviceDeletionQueue);
 }
 
 ColorAttachmentImage::ColorAttachmentImage(
@@ -168,26 +169,10 @@ ColorAttachmentImage::ColorAttachmentImage(
 	imageInput.samples = samples;
 	make_image(allocator, imageInput, image, memory);
 
-	view = create_image_view(logicalDevice, image, format);
-
-	VkImage imageHandle = image;
-	VmaAllocation imageMemory = memory;
-	Logger* logger = Logger::fetch_logger();
-	vmaDeletionQueue.push_back([imageHandle, imageMemory, logger](VmaAllocator allocator) {
-		vmaDestroyImage(allocator, imageHandle, imageMemory);
-		logger->vulkan("Destroyed color attachment image.");
-	});
-
-	VkImageView imageViewHandle = view;
-	deviceDeletionQueue.push_back([imageViewHandle, logger](vk::Device device) {
-		device.destroyImageView(imageViewHandle);
-		logger->vulkan("Destroyed color attachment view.");
-	});
-}
-
-void StorageImage::make_view(vk::Device logicalDevice)
-{
-	view = create_image_view(logicalDevice, image, format, vk::ImageAspectFlagBits::eColor, mipLevels);
+	view = make_owned_image_view(allocator, logicalDevice, image, memory, format,
+		vk::ImageAspectFlagBits::eColor);
+	retain_image(allocator, logicalDevice, image, memory, view,
+		vmaDeletionQueue, deviceDeletionQueue);
 }
 
 void StorageImage::make_descriptor()
@@ -200,6 +185,10 @@ void StorageImage::make_descriptor()
 void make_image(VmaAllocator& allocator, ImageInputChunk input, vk::Image& image, VmaAllocation& memory)
 {
 	// VMA keeps allocation policy centralised for every renderer image
+	image = nullptr;
+	memory = nullptr;
+	if (!allocator || input.extent.width == 0u || input.extent.height == 0u)
+		throw std::runtime_error("Could not allocate a Vulkan image: invalid allocator or empty extent.");
 	vk::ImageCreateInfo imageInfo;
 	imageInfo.flags = vk::ImageCreateFlagBits() | input.flags;
 	imageInfo.imageType = vk::ImageType::e2D;
@@ -214,7 +203,7 @@ void make_image(VmaAllocator& allocator, ImageInputChunk input, vk::Image& image
 	imageInfo.samples = input.samples;
 
 	VkImageCreateInfo imageCreateInfo = imageInfo;
-	VkImage imageHandle;
+	VkImage imageHandle = VK_NULL_HANDLE;
 
 	VmaAllocationCreateInfo allocationInfo = {};
 	allocationInfo.flags = VMA_ALLOCATION_CREATE_STRATEGY_BEST_FIT_BIT;
@@ -223,27 +212,33 @@ void make_image(VmaAllocator& allocator, ImageInputChunk input, vk::Image& image
 	}
 	allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
 
-	VmaAllocationInfo imageAllocationInfo;
+	VmaAllocationInfo imageAllocationInfo {};
+	Logger* logger = Logger::fetch_logger();
 
 	auto result = vmaCreateImage(allocator, &imageCreateInfo,
 		&allocationInfo, &imageHandle, &memory,
 		&imageAllocationInfo);
 
-	Logger* logger = Logger::fetch_logger();
-
 	if (result != VK_SUCCESS) 
 	{
-		logger->vulkan("Failed to create image.");
-		return;
+		throw std::runtime_error("Could not allocate Vulkan image " +
+			std::to_string(input.extent.width) + "x" + std::to_string(input.extent.height) +
+			": " + vk::to_string(static_cast<vk::Result>(result)));
 	}
-	logger->vulkan("Successfully created image");
-
-	vmaSetAllocationName(allocator, memory, "Image");
-	vmaGetAllocationInfo(allocator, memory, &imageAllocationInfo);
-
-	logger->log(imageAllocationInfo);
-
-	image = imageHandle;
+	try
+	{
+		logger->vulkan("Successfully created image");
+		vmaSetAllocationName(allocator, memory, "Image");
+		vmaGetAllocationInfo(allocator, memory, &imageAllocationInfo);
+		logger->log(imageAllocationInfo);
+		image = imageHandle;
+	}
+	catch (...)
+	{
+		vmaDestroyImage(allocator, imageHandle, memory);
+		memory = nullptr;
+		throw;
+	}
 }
 
 vk::ImageView create_image_view(
@@ -267,7 +262,13 @@ vk::ImageView create_image_view(
     createInfo.subresourceRange.baseArrayLayer = 0;
     createInfo.subresourceRange.layerCount = 1;
 
-    return logicalDevice.createImageView(createInfo).value;
+	if (!image)
+		throw std::runtime_error("Cannot create a Vulkan view for an unallocated image.");
+	const auto result = logicalDevice.createImageView(createInfo);
+	require_image_operation(result.result, "Could not create a Vulkan image view");
+	if (!result.value)
+		throw std::runtime_error("The Vulkan driver returned an empty image view.");
+	return result.value;
 }
 
 void transition_image_layout(

@@ -162,7 +162,7 @@ struct alignas(8) LiquidDwmRegion
     float bottomLeftRadius = -1.0f;
     // Native marker bounds also cover the notch's flared leading corners.
     float markerInsetX = 0.0f;
-    float reserved = 0.0f;
+    float rimStatic = 0.0f; // Reuses the reserved word without changing the shared-memory layout.
     float tintRed = 213.0f / 255.0f;
     float tintGreen = 231.0f / 255.0f;
     float tintBlue = 1.0f;

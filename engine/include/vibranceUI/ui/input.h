@@ -1094,13 +1094,17 @@ inline bool ui_set_slider_value_from_point(Renderer2DScene& scene, entt::entity 
         return false;
     }
 
-    const glm::vec4 rect = ui_entity_framebuffer_rect(registry, entity);
-    if (rect.z <= 0.0f)
+    const glm::vec4 authoredRect = ui_entity_framebuffer_rect(registry, entity);
+    const glm::vec4 rect = ui_entity_visual_framebuffer_rect(registry, entity);
+    if (rect.z <= 0.0f || authoredRect.z <= 0.0f)
     {
         return false;
     }
 
-    const float inset = ui_slider_thumb_inset(rect.z, ui_slider_thumb_reserved_width(*slider));
+    // Pointer coordinates are visual pixels. Keep the reserved thumb inset in
+    // that same space when a complete menu/control is presented at a scale.
+    const float inset = ui_slider_thumb_inset(authoredRect.z,
+        ui_slider_thumb_reserved_width(*slider)) * (rect.z / authoredRect.z);
     const float left = rect.x + inset;
     const float right = rect.x + rect.z - inset;
     const float travel = right - left;

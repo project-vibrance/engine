@@ -4,6 +4,6 @@
 
 bool mac_audio_capture_supported();
 void mac_audio_capture_loop(const AudioLoopbackCaptureCallbacks& callbacks,
-    const AudioLoopbackCaptureOptions& options,
+    std::atomic<AudioLoopbackCaptureMode>& mode,
     std::atomic<std::uint32_t>& targetProcessId,
     std::atomic_bool& requested);

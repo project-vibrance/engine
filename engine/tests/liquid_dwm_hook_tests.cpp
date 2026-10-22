@@ -194,13 +194,17 @@ int main()
     LiquidDwmRegion region;
     region.width = 300u; region.height = 100u; region.active = 1u;
     region.hwnd = 1u; region.ownerPid = GetCurrentProcessId(); region.regionId = 42u;
+    const auto* previousRegionView = regionView;
+    auto fixtureRegions = std::make_unique<LiquidDwmRegionTable>();
+    fixtureRegions->regions[0] = region;
+    regionView = fixtureRegions.get();
     tag_native_marker_entry(entry.data(), 0u, 300.0f, 100.0f, region);
     LiquidNativeEntryIdentity emptyIdentity {};
     check(read_liquid_native_entry_identity(entry.data(), emptyIdentity),
         "An empty Windows 10 primitive queue must not invalidate the entry");
     // Simulate an arbitrarily long idle interval without sleeping. Retained
     // native entries must survive until their identity or ownership changes.
-    nativeMarkerTags[0].lastSeenTick = 0u;
+    nativeMarkerTags.at(entry.data()).lastSeenTick = 0u;
     check(preserve_native_marker_entry(entry.data()),
         "Windows 10 must preserve an unchanged marker after a long idle interval");
     check(retire_windows10_gpu_resources() && preserve_native_marker_entry(entry.data()),
@@ -232,6 +236,32 @@ int main()
     check(liquid_native_batch_region(marker, region, output, lens) &&
         lens.x == 120 && lens.y == 45 && lens.width == 300u && lens.height == 100u,
         "Windows 10 markers must use their native output transform for lens placement");
+    for (const float dpi : { 1.0f, 1.5f, 2.0f })
+    {
+        for (const int row : { 100, 260, -20, 100 })
+        {
+            auto retainedShape = region;
+            retainedShape.y = 100;
+            auto liveShape = retainedShape;
+            liveShape.y = row;
+            liveShape.viewportRect[0] = 0.0f;
+            liveShape.viewportRect[1] = 44.0f - row;
+            liveShape.viewportRect[2] = 428.0f;
+            liveShape.viewportRect[3] = 456.0f;
+            liveShape.viewportFade[0] = row < 100 ? 16.0f : 0.0f;
+            liveShape.viewportFade[1] = 20.0f;
+            liveShape.viewportFade[3] = 1.0f;
+            refresh_liquid_native_marker_controls(retainedShape, liveShape);
+            auto movedMarker = marker;
+            movedMarker.matrix[0] = movedMarker.matrix[5] = dpi;
+            movedMarker.matrix[13] = row * dpi;
+            LiquidGlassRenderRegion movedLens;
+            check(liquid_native_batch_region(movedMarker, retainedShape, output, movedLens) &&
+                std::abs(movedLens.y + movedLens.viewportRect[1] - 44.0f * dpi) < 0.01f &&
+                std::abs(movedLens.viewportRect[3] - 456.0f * dpi) < 0.01f,
+                "Retained native markers must keep the scroll viewport fixed when a stack expands or scrolls at any DPI");
+        }
+    }
     write_at(geometry, 0x48u, std::array<float, 4> { 1,0,300,100 });
     marker = {};
     check(!read_windows10_marker(entry.data() + 0x10u, executionContext.data(), marker),
@@ -334,7 +364,7 @@ int main()
     check(!render_batch_marker(command.data(), executionContext.data()),
         "Re-entrant Windows 11 native flushes must forward without reacquiring the optical device lock");
     nativeMarkerDrawing = false;
-    for (auto& tag : nativeMarkerTags) tag.lastSeenTick = 0u;
+    for (auto& [cachedEntry, tag] : nativeMarkerTags) tag.lastSeenTick = 0u;
     marker = {};
     check(preserve_native_marker_entry(entry.data()) &&
         read_liquid_native_batch_marker(command.data(), executionContext.data(), marker) && marker.complete,
@@ -344,7 +374,7 @@ int main()
     const auto subclassVtable = entryVtable + sizeof(void*);
     write_at(entry, 0u, subclassVtable);
     tag_native_marker_entry(entry.data(), 0u, 300.0f, 100.0f, region);
-    for (auto& tag : nativeMarkerTags) tag.lastSeenTick = 0u;
+    for (auto& [cachedEntry, tag] : nativeMarkerTags) tag.lastSeenTick = 0u;
     write_at(entry, 0x30u, std::array<float, 4> { 0.2f, 0.3f, 0.4f, 1.0f });
     marker = {};
     check(!preserve_native_marker_entry(entry.data()) &&
@@ -353,6 +383,59 @@ int main()
     write_at(command, 0u, std::uint32_t { 2u }); marker = {};
     check(!read_liquid_native_batch_marker(command.data(), executionContext.data(), marker),
         "Windows 11 state-only commands must remain excluded");
+    // Complex clips create multiple retained entries per card. A busy inbox
+    // must never evict an idle card's live tag and expose its dark sentinel.
+    std::vector<std::array<std::uint8_t,256>> retainedEntries(512u,entry);
+    for (std::size_t index=0;index<retainedEntries.size();++index)
+    {
+        auto& retained=retainedEntries[index];
+        const auto slot=static_cast<std::uint32_t>(index%32u);
+        auto cardRegion=region;
+        cardRegion.regionId=100u+slot;
+        cardRegion.hwnd=slot+1u;
+        fixtureRegions->regions[slot]=cardRegion;
+        write_at(retained,0u,subclassVtable);
+        auto cardColour=colour;
+        cardColour[0]=(liquidMarkerRed+slot)/255.0f;
+        write_at(retained,0x30u,cardColour);
+        tag_native_marker_entry(retained.data(),slot,300.0f,100.0f,cardRegion);
+    }
+    unsigned missingTags=0;
+    for (auto& retained : retainedEntries)
+        if (!preserve_native_marker_entry(retained.data())) ++missingTags;
+    std::cout << "Retained marker pressure: " << retainedEntries.size() << " entries; missing=" << missingTags << '\n';
+    check(missingTags==0u,"A busy inbox must preserve all live native entries beyond the former 128-tag limit");
+    const auto oldRegion=fixtureRegions->regions[0];
+    auto nextRegion=oldRegion;
+    nextRegion.regionId=1000u;
+    fixtureRegions->regions[0]=nextRegion;
+    tag_native_marker_entry(retainedEntries[0].data(),0u,300.0f,100.0f,nextRegion);
+    const auto slotTags=std::count_if(nativeMarkerTags.begin(),nativeMarkerTags.end(),
+        [](const auto& tag) { return tag.second.slot==0u; });
+    check(slotTags==1u && preserve_native_marker_entry(retainedEntries[0].data()),
+        "Reusing a region slot must retire the previous ownership generation's tags");
+    LiquidNativeEntryIdentity retiredIdentity {};
+    LiquidNativeBatchMarker retiredMarker {};
+    check(read_liquid_native_entry_identity(retainedEntries[32].data(),retiredIdentity) &&
+        find_liquid_native_marker_tag(retainedEntries[32].data(),retiredIdentity,retiredMarker) &&
+        retiredMarker.hasShapeSnapshot && retiredMarker.shapeSnapshot.regionId==oldRegion.regionId &&
+        retiredMarker.shapeSnapshot.regionId!=nextRegion.regionId,
+        "A queued retired entry must remain classified with its old owner so the live-slot guard suppresses it");
+    write_at(retainedEntries[32],0x30u,std::array<float,4>{0.2f,0.3f,0.4f,1.0f});
+    check(!preserve_native_marker_entry(retainedEntries[32].data()) &&
+        !retiredNativeMarkerTags.contains(retainedEntries[32].data()),
+        "A recycled retired marker must immediately return to ordinary rendering");
+    auto lateEntry=retainedEntries[0];
+    tag_native_marker_entry(lateEntry.data(),0u,300.0f,100.0f,oldRegion);
+    check(preserve_native_marker_entry(retainedEntries[0].data()),
+        "A late old-generation draw must not evict the current owner's live entry");
+    unsigned lostNeighbours=0;
+    for (std::size_t index=0;index<retainedEntries.size();++index)
+        if (index%32u && !preserve_native_marker_entry(retainedEntries[index].data())) ++lostNeighbours;
+    check(lostNeighbours==0u,"Retiring one slot must preserve the other thirty-one cards' native entries");
+    untag_native_marker_entry(lateEntry.data());
+    for (auto& retained : retainedEntries) untag_native_marker_entry(retained.data());
+    regionView=previousRegionView;
     std::cout << "Windows 10 native marker adapter checks completed.\n";
     return failures ? 1 : 0;
 }

@@ -679,6 +679,7 @@ class CompositionBridge
         composition::ContainerVisual materialContainer { nullptr };
         composition::SpriteVisual materialVisual { nullptr };
         composition::SpriteVisual rawBackdropVisual { nullptr };
+        composition::ContainerVisual rawBackdropContainer { nullptr };
         composition::SpriteVisual liquidSourceVisual { nullptr };
         composition::CompositionVisualSurface liquidSurface { nullptr };
         std::vector<LiquidTile> liquidTiles;
@@ -1804,6 +1805,7 @@ private:
     static float liquid_source_margin(const VibranceCompositionRegion& region) noexcept
     {
         return std::ceil(std::max({ liquid_blur(region) * 5.0f,
+            region.liquidRim > 0.0f ? std::min(std::min(region.width, region.height) * 1.6f, 120.0f) + 2.0f : 0.0f,
             liquid_refraction(region) + liquid_dispersion(region) + 2.0f, 4.0f }));
     }
 
@@ -1849,6 +1851,7 @@ private:
             next.dispersionStrength = liquid_dispersion(*region);
             next.blurRadius = liquid_blur(*region);
             next.rimStrength = std::clamp(region->liquidRim, 0.0f, 1.0f) * 0.55f;
+            next.rimStatic = (region->flags & 2u) != 0u ? 1.0f : 0.0f;
             next.opacity = std::clamp(region->opacity, 0.0f, 1.0f);
             next.tintRed = std::clamp(region->liquidTintRed, 0.0f, 1.0f);
             next.tintGreen = std::clamp(region->liquidTintGreen, 0.0f, 1.0f);
@@ -2078,6 +2081,7 @@ private:
                     previous.notchAmount != region.notchAmount ||
                     previous.notchDepth != region.notchDepth));
         const bool sourceFootprintChanged = markerGeometryChanged ||
+            previous.liquidRim != region.liquidRim ||
             previous.liquidRefraction != region.liquidRefraction ||
             previous.liquidBlur != region.liquidBlur ||
             previous.liquidDispersion != region.liquidDispersion;
@@ -2128,6 +2132,8 @@ private:
             }
             state.materialContainer.Size({ region.width, materialHeight });
         }
+        if (materialGeometryChanged && state.rawBackdropContainer)
+            state.rawBackdropContainer.Size({ region.width, materialHeight });
         const bool viewportChanged = positionChanged || materialGeometryChanged ||
             std::memcmp(previous.viewportRect, region.viewportRect, sizeof(region.viewportRect)) != 0 ||
             std::memcmp(previous.viewportFade, region.viewportFade, sizeof(region.viewportFade)) != 0;
@@ -2719,8 +2725,13 @@ private:
     {
         const bool enabled = region.viewportFade[3] != 0.0f;
         const float materialTop = std::clamp(region.verticalStart, 0.0f, 0.98f) * region.height;
-        const float originY = region.y + (state.shaderOnly ? 0.0f : materialTop);
-        auto clipped = state.shaderOnly ? state.container : state.materialContainer;
+        const float originY = region.y + materialTop;
+        // The optical shader clips and fades its own output. Clipping the
+        // marker's ancestor as well lets DWM crop/cache the sentinel into an
+        // intermediate surface as soon as an inbox overflows. Keep the marker
+        // on the original target; only its raw backdrop dependency needs a
+        // native viewport clip. Fallback materials still use their own mask.
+        auto clipped = state.shaderOnly ? state.rawBackdropContainer : state.materialContainer;
         if (clipped && (state.shaderOnly || state.materialInset))
         {
             if (enabled)
@@ -2729,7 +2740,7 @@ private:
                     std::max(region.viewportRect[0] - region.x, 0.0f),
                     std::max(region.viewportRect[1] - originY, 0.0f),
                     std::max(region.x + region.width - region.viewportRect[0] - region.viewportRect[2], 0.0f),
-                    std::max(originY + region.height - (state.shaderOnly ? 0.0f : materialTop) -
+                    std::max(originY + region.height - materialTop -
                         region.viewportRect[1] - region.viewportRect[3], 0.0f)));
             }
             else clipped.Clip(nullptr);
@@ -2862,7 +2873,7 @@ private:
         const bool rawDependency = vibrance::win32::liquid_dwm_uses_raw_backdrop_dependency(windows_build_number());
         auto clockVisual = rawDependency ? state.rawBackdropVisual : state.materialVisual;
         const bool animate = state.shaderOnly && clockVisual &&
-            region.liquidRim > 0.0f && region.opacity > 0.001f;
+            region.liquidRim > 0.0f && (region.flags & 2u) == 0u && region.opacity > 0.001f;
         if (animate == state.rimClockRunning) return;
         if (animate)
         {
@@ -2892,7 +2903,9 @@ private:
         else if (clockVisual)
         {
             clockVisual.StopAnimation(L"Opacity");
-            clockVisual.Opacity(rawDependency ? 0.99f : 1.0f);
+            // Retain a translucent marker without a clock. Unity opacity can
+            // let DWM promote away the dependency that owns the liquid effect.
+            clockVisual.Opacity(rawDependency ? 0.99f : 0.9999f);
         }
         state.rimClockRunning = animate;
     }
@@ -2920,7 +2933,6 @@ private:
             state.container.Offset({ region.x, region.y, 0.0f });
             state.container.Size({ region.width, region.height });
             state.container.Opacity(std::clamp(region.opacity, 0.0f, 1.0f));
-            sync_viewport_mask(state, region);
             const float top = std::clamp(region.verticalStart, 0.0f, 0.98f) * region.height;
             state.materialContainer = compositor_.CreateContainerVisual();
             state.materialContainer.Offset({ 0.0f, top, 0.0f });
@@ -2954,11 +2966,15 @@ private:
                     region.height - top + margin * 2.0f });
                 state.rawBackdropVisual.Brush(rawBrush);
                 sync_raw_backdrop_clip(state, region);
-                state.materialContainer.Children().InsertAtBottom(
-                    state.rawBackdropVisual);
+                state.rawBackdropContainer = compositor_.CreateContainerVisual();
+                state.rawBackdropContainer.Size(state.materialContainer.Size());
+                state.rawBackdropContainer.Children().InsertAtBottom(state.rawBackdropVisual);
+                state.materialContainer.Children().InsertAtBottom(state.rawBackdropContainer);
             }
+            sync_viewport_mask(state, region);
             const float markerPadding = liquid_marker_padding(region);
             state.materialVisual = compositor_.CreateSpriteVisual();
+            state.materialVisual.Opacity(0.9999f);
             state.materialVisual.Offset({ -markerPadding, 0.0f, 0.0f });
             state.materialVisual.Size({ region.width + markerPadding * 2.0f,
                 region.height - top });

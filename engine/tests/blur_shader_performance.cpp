@@ -298,6 +298,14 @@ namespace
             if (instance) vkDestroyInstance(instance, nullptr);
         }
 
+        void set_input_pixels(uint32_t imageIndex, std::span<const uint8_t> pixels)
+        {
+            if (imageIndex >= 5u || pixels.size() != imageBytes)
+                throw std::runtime_error("Invalid offscreen input image");
+            std::memcpy(static_cast<uint8_t*>(upload.mapped) + imageIndex * imageBytes,
+                pixels.data(), pixels.size());
+        }
+
         Result run(const Case& testCase, bool candidate, uint32_t repetitions = 1u,
             bool horizontalOnly = false, bool ordinaryHorizontal = false, bool shape = false, bool text = false,
             const std::vector<Case>* glyphs = nullptr, bool interDrawBarriers = true,
