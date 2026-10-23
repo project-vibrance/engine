@@ -59,7 +59,8 @@ public:
         const void* rgba,
         std::uint32_t width,
         std::uint32_t height,
-        std::uint32_t rowPitch);
+        std::uint32_t rowPitch,
+        glm::uvec4 sourceDamageRect = glm::uvec4(0u));
     bool set_regions(const std::vector<SystemBackdropRegion>& regions);
 
 private:

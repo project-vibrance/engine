@@ -102,6 +102,8 @@ class Frame
     glm::uvec4 compositionContentRect { 0u };
     glm::uvec4 compositionDamageRect { 0u };
     glm::uvec4 compositionSceneDamageRect { 0u };
+    // Source-pixel damage copied into the persistent host-upload buffer.
+    glm::uvec4 compositionReadbackRect { 0u };
     // Native backdrop state captured from the same scene/timestamp as this
     // command buffer. It must be applied only when this Vulkan frame presents.
     std::vector<SystemBackdropRegion> compositionBackdropRegions;

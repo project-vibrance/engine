@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #if defined(_WIN32)
@@ -77,7 +78,21 @@ struct VibranceCompositionUploadInfo
     std::uint32_t width = 0u;
     std::uint32_t height = 0u;
     std::uint32_t rowPitch = 0u;
+    // Preserve the original prefix, including its tail padding on 64-bit
+    // builds. Older bridges ignore the optional damage and still receive a
+    // valid, persistent full-image source buffer.
+#if UINTPTR_MAX > UINT32_MAX
+    std::uint32_t reserved = 0u;
+#endif
+    std::uint32_t damageX = 0u;
+    std::uint32_t damageY = 0u;
+    std::uint32_t damageWidth = 0u;
+    std::uint32_t damageHeight = 0u;
 };
+constexpr std::uint32_t VIBRANCE_COMPOSITION_UPLOAD_BASE_SIZE =
+    offsetof(VibranceCompositionUploadInfo, damageX);
+static_assert(VIBRANCE_COMPOSITION_UPLOAD_BASE_SIZE ==
+    (sizeof(void*) == 8u ? 32u : 20u));
 
 struct VibranceCompositionContour
 {

@@ -13,6 +13,7 @@
 #include "../../platform/composition_presenter.h"
 #include "pipeline_cache.h"
 #include "media_pipeline_policy.h"
+#include "composition_readback.h"
 #include "../common/media_prepared_upload.h"
 #if defined(_WIN32)
 #include "../../platform/win32/composition_bridge_abi.h"
@@ -74,6 +75,7 @@ namespace
 		eSurfaceAcquire,
 		eQueueSubmit,
 		eFenceWait,
+        eHostUpload,
 		eBackdropApply,
 		ePresent,
 		eCount
@@ -977,7 +979,7 @@ private:
 	bool rebuild_composition_presenter();
 	bool ensure_composition_readback(vk::Extent2D extent);
 	void destroy_composition_readback();
-	bool upload_software_composition(std::uint32_t bufferIndex);
+    bool upload_software_composition(std::uint32_t bufferIndex, glm::uvec4 damage);
 	std::vector<SystemBackdropRegion> collect_system_backdrop_regions(
 		double renderTimeSeconds);
 	void apply_system_backdrop_regions(
@@ -1076,6 +1078,7 @@ private:
 	std::chrono::steady_clock::time_point renderDiagnosticsStart {};
 	uint64_t diagnosticDrawCalls = 0u;
 	uint64_t diagnosticSubmissions = 0u;
+    uint64_t diagnosticReadbackBytes = 0u;
 	uint64_t diagnosticGenerationChanges = 0u;
 	uint64_t diagnosticContinuousRequests = 0u;
 	uint64_t diagnosticRetainedSyncRequests = 0u;
@@ -2089,8 +2092,9 @@ void Engine::Impl::destroy_composition_readback()
 	compositionReadbackExtent = vk::Extent2D{};
 }
 
-bool Engine::Impl::upload_software_composition(std::uint32_t bufferIndex)
+bool Engine::Impl::upload_software_composition(std::uint32_t bufferIndex, glm::uvec4 damage)
 {
+    const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eHostUpload);
 	if (!compositionPresenter.available() ||
 		compositionPresenter.gpu_interop() ||
 		!compositionReadbackAllocation || !compositionReadbackMapped ||
@@ -2099,11 +2103,14 @@ bool Engine::Impl::upload_software_composition(std::uint32_t bufferIndex)
 	{
 		return false;
 	}
-	if (vmaInvalidateAllocation(
+    const auto readback = composition_readback_region(compositionReadbackExtent.width,
+        compositionReadbackExtent.height, damage.x, damage.y, damage.z, damage.w, false);
+    if (readback.width == 0u || readback.height == 0u) return true;
+    if (vmaInvalidateAllocation(
 			allocator,
 			compositionReadbackAllocation,
-			0u,
-			VK_WHOLE_SIZE) != VK_SUCCESS)
+            readback.byteOffset,
+            readback.byteSpan) != VK_SUCCESS)
 	{
 		logger->warning(
 			"Vulkan could not invalidate the Windows Composition host readback buffer.");
@@ -2114,7 +2121,8 @@ bool Engine::Impl::upload_software_composition(std::uint32_t bufferIndex)
 		compositionReadbackMapped,
 		compositionReadbackExtent.width,
 		compositionReadbackExtent.height,
-		compositionReadbackExtent.width * 4u);
+        compositionReadbackExtent.width * 4u,
+        { readback.x, readback.y, readback.width, readback.height });
 }
 
 std::vector<SystemBackdropRegion>
@@ -2507,7 +2515,8 @@ void Engine::Impl::publish_completed_composition_frames()
 		{
 			collect_gpu_render_timings(frames[pending]);
 			if (!compositionPresenter.gpu_interop() &&
-				!upload_software_composition(compositionFrameBufferIndices[pending]))
+                !upload_software_composition(compositionFrameBufferIndices[pending],
+                    frames[pending].compositionReadbackRect))
 			{
 				compositionFramePending[pending] = false;
 				compositionRecoveryPending = true;
@@ -2602,7 +2611,7 @@ void Engine::Impl::draw()
 				static_cast<std::size_t>(RendererCpuPhase::eCount)> cpuPhaseNames {
 				"retained check", "cadence check", "redraw check", "glyph scan",
 				"Scene+command recording", "backdrop geometry", "interop acquire",
-				"surface acquire", "queue submit", "GPU fence wait", "backdrop apply", "present"
+                "surface acquire", "queue submit", "GPU fence wait", "host upload", "backdrop apply", "present"
 			};
 			std::ostringstream cpuDiagnostics;
 			cpuDiagnostics.setf(std::ios::fixed, std::ios::floatfield);
@@ -2643,10 +2652,12 @@ void Engine::Impl::draw()
 				std::to_string(diagnosticContinuousRequests) +
 				" continuous-redraw requests, " +
 				std::to_string(diagnosticRetainedSyncRequests) +
-				" retained-buffer sync requests." + gpuDiagnostics + cpuDiagnostics.str());
+                " retained-buffer sync requests; " + std::to_string(diagnosticReadbackBytes) +
+                " host-readback bytes." + gpuDiagnostics + cpuDiagnostics.str());
 			renderDiagnosticsStart = diagnosticsNow;
 			diagnosticDrawCalls = 0u;
 			diagnosticSubmissions = 0u;
+            diagnosticReadbackBytes = 0u;
 			diagnosticGenerationChanges = 0u;
 			diagnosticContinuousRequests = 0u;
 			diagnosticRetainedSyncRequests = 0u;
@@ -3213,6 +3224,8 @@ void Engine::Impl::draw()
 	if (renderDiagnosticsEnabled)
 	{
 		++diagnosticSubmissions;
+        diagnosticReadbackBytes += std::uint64_t(frame.compositionReadbackRect.z) *
+            frame.compositionReadbackRect.w * 4u;
 	}
 	if (gpuTimestampDiagnosticsEnabled)
 	{

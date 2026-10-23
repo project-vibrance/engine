@@ -21,7 +21,7 @@ bool CompositionPresenter::acquire(std::uint32_t) { return false; }
 CompositionPresenter::PresentResult CompositionPresenter::present(
     std::uint32_t, bool, glm::uvec4, glm::uvec4) { return PresentResult::eFailed; }
 bool CompositionPresenter::upload(std::uint32_t, const void*, std::uint32_t,
-    std::uint32_t, std::uint32_t) { return false; }
+    std::uint32_t, std::uint32_t, glm::uvec4) { return false; }
 bool CompositionPresenter::set_regions(const std::vector<SystemBackdropRegion>&) { return false; }
 #endif
 

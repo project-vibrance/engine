@@ -9,6 +9,7 @@
 #include "composition_bridge_abi.h"
 #include "composition_region_effects.h"
 #include "composition_present_retry.h"
+#include "composition_upload.h"
 #include "liquid_glass_d3d11.h"
 #include "liquid_glass_dwm_protocol.h"
 #include "liquid_glass_dwm_security.h"
@@ -806,7 +807,8 @@ public:
             return false;
         }
         if (!window_ || width_ == 0u || height_ == 0u ||
-            bufferCount_ < 2u || outputCount < bufferCount_)
+            bufferCount_ < 2u || bufferCount_ > VIBRANCE_COMPOSITION_MAX_BUFFERS ||
+            outputCount < bufferCount_)
         {
             lastCompositionError = "invalid creation parameters";
             return false;
@@ -916,10 +918,11 @@ public:
         lastCompositionError.clear();
         if (!cpuUpload_ || index >= sharedTextures_.size() || !context_ ||
             !uploadInfo ||
-            uploadInfo->structSize < sizeof(VibranceCompositionUploadInfo) ||
+            uploadInfo->structSize < VIBRANCE_COMPOSITION_UPLOAD_BASE_SIZE ||
             !uploadInfo->pixels || uploadInfo->width == 0u ||
             uploadInfo->height == 0u ||
-            uploadInfo->rowPitch < uploadInfo->width * 4u)
+            static_cast<std::uint64_t>(uploadInfo->rowPitch) <
+                static_cast<std::uint64_t>(uploadInfo->width) * 4u)
         {
             lastCompositionError = "invalid CPU Composition upload parameters";
             return false;
@@ -932,48 +935,37 @@ public:
         const auto* source = static_cast<const std::uint8_t*>(
             uploadInfo->pixels);
 
-        // Vulkan's portable composition target is RGBA8. The DXGI Composition
-        // swapchain is BGRA8, so swizzle while copying. Nearest scaling is used
-        // only when maxRenderPixels reduced the Vulkan working extent.
-        const bool sameExtent = uploadInfo->width == width_ && uploadInfo->height == height_;
-        std::vector<std::uint32_t> sourceColumns;
-        if (!sameExtent)
-        {
-            sourceColumns.resize(width_);
-            for (std::uint32_t x = 0u; x < width_; ++x)
-                sourceColumns[x] = static_cast<std::uint32_t>(
-                    (static_cast<std::uint64_t>(x) * uploadInfo->width) / width_);
-        }
-        for (std::uint32_t y = 0u; y < height_; ++y)
-        {
-            const std::uint32_t sourceY = sameExtent ? y : static_cast<std::uint32_t>(
-                (static_cast<std::uint64_t>(y) * uploadInfo->height) /
-                height_);
-            const std::uint8_t* sourceRow =
-                source + static_cast<std::size_t>(sourceY) *
-                    uploadInfo->rowPitch;
-            std::uint8_t* destinationRow =
-                cpuUploadPixels_.data() +
-                static_cast<std::size_t>(y) * destinationRowPitch;
-            for (std::uint32_t x = 0u; x < width_; ++x)
-            {
-                const std::uint32_t sourceX = sameExtent ? x : sourceColumns[x];
-                const std::uint8_t* sourcePixel = sourceRow + sourceX * 4u;
-                std::uint8_t* destinationPixel = destinationRow + x * 4u;
-                destinationPixel[0] = sourcePixel[2];
-                destinationPixel[1] = sourcePixel[1];
-                destinationPixel[2] = sourcePixel[0];
-                destinationPixel[3] = sourcePixel[3];
-            }
-        }
+        // Vulkan's persistent portable target is RGBA8; only convert and upload
+        // the accumulated changes for this rotating BGRA8 D3D source texture.
+        // A legacy upload without the optional damage fields is still full.
+        vibrance::win32::CompositionUploadRect sourceDamage {};
+        if (uploadInfo->structSize >= sizeof(VibranceCompositionUploadInfo))
+            sourceDamage = {uploadInfo->damageX, uploadInfo->damageY,
+                uploadInfo->damageWidth, uploadInfo->damageHeight};
+        const auto damage = cpuUploadDamage_.prepare(index,
+            uploadInfo->width, uploadInfo->height, width_, height_, sourceDamage);
+        if (damage.empty()) return true;
+        cpuUploadConverter_.convert(cpuUploadPixels_.data(), destinationRowPitch,
+            width_, height_, source, uploadInfo->rowPitch,
+            uploadInfo->width, uploadInfo->height, damage);
+
+        D3D11_BOX box {};
+        box.left = damage.x;
+        box.top = damage.y;
+        box.right = damage.x + damage.width;
+        box.bottom = damage.y + damage.height;
+        box.back = 1u;
 
         context_->UpdateSubresource(
             sharedTextures_[index].get(),
             0u,
-            nullptr,
-            cpuUploadPixels_.data(),
+            &box,
+            cpuUploadPixels_.data() +
+                static_cast<std::size_t>(damage.y) * destinationRowPitch +
+                static_cast<std::size_t>(damage.x) * 4u,
             static_cast<UINT>(destinationRowPitch),
             0u);
+        cpuUploadDamage_.commit(index);
         return true;
     }
 
@@ -3199,6 +3191,8 @@ private:
     bool contentHasShaderRegion_ = false;
     std::vector<RegionVisualState> regionVisuals_;
     std::vector<std::uint8_t> cpuUploadPixels_;
+    vibrance::win32::CompositionUploadDamage cpuUploadDamage_;
+    vibrance::win32::CompositionUploadPixels cpuUploadConverter_;
 };
 }
 

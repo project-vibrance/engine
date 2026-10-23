@@ -6,6 +6,7 @@
 #include <vibranceUI/renderer/renderer2d.h>
 #include <vibranceUI/renderer/renderer3d.h>
 #include "timestamp_diagnostics.h"
+#include "composition_readback.h"
 #include <array>
 #include <cstddef>
 #include <stdexcept>
@@ -467,13 +468,14 @@ void Frame::record_command_buffer(
 	glm::uvec4 compositionUpdateRect = union_rect(
 		damageRect,
 		pendingCompositionDamageRect);
-	if (compositionReadbackBuffer)
+    compositionReadbackRect = glm::uvec4(0u);
+    if (compositionReadbackBuffer)
 	{
-		// The portable Composition fallback reads a complete packed image back to
-		// the host. Rebuild every pixel so transparent space is deterministic even
-		// though compositionSurface itself is transient for this command buffer.
-		compositionUpdateRect = {
-			0u, 0u, renderExtent.width, renderExtent.height };
+        const auto readback = composition_readback_region(renderExtent.width,
+            renderExtent.height, compositionUpdateRect.x, compositionUpdateRect.y,
+            compositionUpdateRect.z, compositionUpdateRect.w, compositionImageFirstUse);
+        compositionReadbackRect = compositionUpdateRect = {
+            readback.x, readback.y, readback.width, readback.height };
 	}
 	if (compositionImageFirstUse)
 	{
@@ -603,7 +605,8 @@ void Frame::record_command_buffer(
 		);
 	}
 
-	if (compositionReadbackBuffer)
+    if (compositionReadbackBuffer &&
+        compositionReadbackRect.z > 0u && compositionReadbackRect.w > 0u)
 	{
 		transition_image_layout(commandBuffer, compositionSurface->image,
 			vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
@@ -612,14 +615,19 @@ void Frame::record_command_buffer(
 			vk::PipelineStageFlagBits::eTransfer);
 
 		vk::BufferImageCopy copyRegion = {};
-		copyRegion.bufferOffset = 0u;
-		copyRegion.bufferRowLength = 0u;
+        const auto readback = composition_readback_region(renderExtent.width,
+            renderExtent.height, compositionReadbackRect.x, compositionReadbackRect.y,
+            compositionReadbackRect.z, compositionReadbackRect.w, false);
+        copyRegion.bufferOffset = readback.byteOffset;
+        copyRegion.bufferRowLength = renderExtent.width;
 		copyRegion.bufferImageHeight = 0u;
 		copyRegion.imageSubresource.aspectMask =
 			vk::ImageAspectFlagBits::eColor;
 		copyRegion.imageSubresource.layerCount = 1u;
-		copyRegion.imageExtent = vk::Extent3D{
-			renderExtent.width, renderExtent.height, 1u };
+        copyRegion.imageOffset = vk::Offset3D {
+            static_cast<std::int32_t>(readback.x), static_cast<std::int32_t>(readback.y), 0 };
+        copyRegion.imageExtent = vk::Extent3D{
+            readback.width, readback.height, 1u };
 		commandBuffer.copyImageToBuffer(
 			compositionSurface->image,
 			vk::ImageLayout::eTransferSrcOptimal,
@@ -632,8 +640,8 @@ void Frame::record_command_buffer(
 		hostReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		hostReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		hostReadBarrier.buffer = compositionReadbackBuffer;
-		hostReadBarrier.offset = 0u;
-		hostReadBarrier.size = VK_WHOLE_SIZE;
+        hostReadBarrier.offset = readback.byteOffset;
+        hostReadBarrier.size = readback.byteSpan;
 		commandBuffer.pipelineBarrier(
 			vk::PipelineStageFlagBits::eTransfer,
 			vk::PipelineStageFlagBits::eHost,

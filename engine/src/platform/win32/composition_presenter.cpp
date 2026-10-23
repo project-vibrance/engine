@@ -573,7 +573,8 @@ bool CompositionPresenter::upload(
     const void* rgba,
     std::uint32_t width,
     std::uint32_t height,
-    std::uint32_t rowPitch)
+    std::uint32_t rowPitch,
+    glm::uvec4 sourceDamageRect)
 {
 #if defined(_WIN32)
     if (!available() || impl->gpuInterop || index >= impl->images.size() ||
@@ -586,6 +587,10 @@ bool CompositionPresenter::upload(
     uploadInfo.width = width;
     uploadInfo.height = height;
     uploadInfo.rowPitch = rowPitch;
+    uploadInfo.damageX = sourceDamageRect.x;
+    uploadInfo.damageY = sourceDamageRect.y;
+    uploadInfo.damageWidth = sourceDamageRect.z;
+    uploadInfo.damageHeight = sourceDamageRect.w;
     if (impl->upload(impl->bridge, index, &uploadInfo) != 0u)
     {
         return true;
@@ -603,6 +608,7 @@ bool CompositionPresenter::upload(
     (void)width;
     (void)height;
     (void)rowPitch;
+    (void)sourceDamageRect;
     return false;
 #endif
 }
