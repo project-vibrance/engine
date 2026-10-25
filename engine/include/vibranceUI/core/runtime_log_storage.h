@@ -7,6 +7,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstdlib>
+#include "path_utf8.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -144,14 +145,14 @@ inline void prune(const std::filesystem::path& directory,
             !error && iterator != end; iterator.increment(error))
         {
             const auto& entry = *iterator;
-            const auto kind = identify(entry.path().filename().string(), customPrefix);
+            const auto kind = identify(vibrance::path_utf8(entry.path().filename()), customPrefix);
             if (!kind.owned || !entry.is_regular_file(error) || entry.is_symlink(error)) continue;
             const auto size = entry.file_size(error);
             if (error) { error.clear(); continue; }
             const auto time = entry.last_write_time(error);
             if (error) { error.clear(); continue; }
-            const auto activeName = active.filename().string();
-            const auto name = entry.path().filename().string();
+            const auto activeName = vibrance::path_utf8(active.filename());
+            const auto name = vibrance::path_utf8(entry.path().filename());
             const bool current = name == activeName || name == activeName + ".crash.txt" || name == activeName + ".dmp";
             const bool protect = current || (!kind.archive && running(kind.process));
             entries.push_back({ entry.path(), size, time, protect, kind.dump });

@@ -266,6 +266,115 @@ void glyph_hit_envelopes_preserve_overhang_and_gaps()
     require(scene.entity_at({1000, 1000}) == entt::null && !scene.hit_test({1000, 1000}),
         "A distant text label remained interactive");
 }
+
+Media2DHandle animated_handle()
+{
+    Media2DHandle handle;
+    handle.id = 1;
+    handle.drawable = true;
+    handle.animated = true;
+    handle.frameCount = 4;
+    handle.frameRate = 10;
+    handle.durationSeconds = 0.4;
+    return handle;
+}
+
+void clipped_media_does_not_keep_the_renderer_active()
+{
+    Renderer2DScene scene;
+    const auto viewport = scene.create_shape({}, {100, 100}, {});
+    scene.registry().emplace<Mask2DComponent>(viewport).useContentRect = false;
+    const auto image = scene.create_media({10, 110}, {40, 40}, animated_handle());
+    scene.registry().emplace<Parent2DComponent>(image, viewport);
+    scene.build_render_plan(0, 0);
+    auto generation = scene.frame_generation();
+    require(!scene.requires_continuous_redraw_since(0.15, 0, generation),
+        "A playing GIF outside its scrolling viewport kept the renderer active");
+
+    scene.registry().get<Transform2DComponent>(image).position.y = 90;
+    scene.mark_dirty(image);
+    require(scene.requires_continuous_redraw_since(0.15, 0, generation),
+        "Scrolling a clipped animation into view did not publish the reveal");
+    auto revealed = scene.build_render_plan(0.15, scene.cache_generation());
+    require(contains(revealed.media, image) &&
+        scene.registry().get<Media2DComponent>(image).currentFrame == 1,
+        "A partially visible animation did not catch up to its current frame");
+    generation = scene.frame_generation();
+    require(scene.requires_continuous_redraw_since(0.21, 0.15, generation),
+        "A partly clipped animation failed to publish its next frame");
+
+    scene.registry().get<RenderLayer2DComponent>(viewport).visible = false;
+    scene.mark_dirty(viewport);
+    scene.build_render_plan(0.22, scene.cache_generation());
+    generation = scene.frame_generation();
+    require(!scene.requires_continuous_redraw_since(0.35, 0.22, generation),
+        "An animation on a hidden page kept the renderer active");
+    scene.registry().get<RenderLayer2DComponent>(viewport).visible = true;
+    scene.mark_dirty(viewport);
+    require(scene.requires_continuous_redraw_since(0.35, 0.22, generation),
+        "Showing an animation page did not invalidate its retained frame");
+    scene.build_render_plan(0.35, scene.cache_generation());
+    require(scene.registry().get<Media2DComponent>(image).currentFrame == 3,
+        "A revealed page restarted its animation instead of retaining its clock");
+}
+
+void animated_media_publishes_only_changed_frames()
+{
+    Renderer2DScene scene;
+    const auto image = scene.create_media({}, {40, 40}, animated_handle());
+    scene.build_render_plan(0, 0);
+    auto generation = scene.frame_generation();
+    require(!scene.requires_continuous_redraw_since(0.016, 0, generation) &&
+        !scene.requires_continuous_redraw_since(0.09, 0, generation),
+        "A 10 FPS GIF requested duplicate frames at the display refresh rate");
+    require(scene.requires_continuous_redraw_since(0.11, 0, generation),
+        "An advancing GIF frame was suppressed");
+    scene.build_render_plan(0.11, scene.cache_generation());
+    generation = scene.frame_generation();
+    require(!scene.requires_continuous_redraw_since(0.15, 0.11, generation),
+        "A previously published GIF frame requested another GPU submission");
+    require(scene.requires_continuous_redraw_since(0.41, 0.11, generation),
+        "A GIF loop did not publish its first frame again");
+    scene.build_render_plan(0.41, scene.cache_generation());
+    require(scene.registry().get<Media2DComponent>(image).currentFrame == 0,
+        "Loop admission changed the selected animation frame");
+    generation = scene.frame_generation();
+    require(scene.requires_continuous_redraw_since(0.42, -1.0, generation) &&
+        scene.requires_continuous_redraw_since(0.40, 0.41, generation),
+        "An unknown or reset playback clock suppressed its first frame");
+}
+
+void variable_duration_media_and_final_frame_keep_their_timing()
+{
+    Renderer2DScene scene;
+    auto handle = animated_handle();
+    handle.frameCount = 3;
+    handle.frameRate = 0;
+    handle.frameDurationsSeconds = {0.12, 0.04, 0.24};
+    const auto image = scene.create_media({}, {40, 40}, handle);
+    auto& media = scene.registry().get<Media2DComponent>(image);
+    media.loop = false;
+    scene.build_render_plan(0, 0);
+    auto generation = scene.frame_generation();
+    require(!scene.requires_continuous_redraw_since(0.11, 0, generation) &&
+        scene.requires_continuous_redraw_since(0.13, 0, generation),
+        "Variable frame durations no longer control redraw admission");
+    scene.build_render_plan(0.13, scene.cache_generation());
+    generation = scene.frame_generation();
+    require(!scene.requires_continuous_redraw_since(0.15, 0.13, generation) &&
+        scene.requires_continuous_redraw_since(0.17, 0.13, generation),
+        "The short middle GIF frame was skipped or repeated");
+    scene.build_render_plan(0.17, scene.cache_generation());
+    generation = scene.frame_generation();
+    require(media.currentFrame == 2 &&
+        !scene.requires_continuous_redraw_since(0.39, 0.17, generation) &&
+        scene.requires_continuous_redraw_since(0.41, 0.17, generation),
+        "The final non-looping frame did not retain its duration or completion update");
+    scene.build_render_plan(0.41, scene.cache_generation());
+    require(!media.playing && media.currentFrame == 2 &&
+        !scene.requires_continuous_redraw_since(0.5, 0.41, scene.frame_generation()),
+        "Completed media did not stop playing and settle after its final pose");
+}
 }
 
 int main()
@@ -278,6 +387,9 @@ int main()
         hidden_pages_reflow_when_input_becomes_visible();
         visible_render_layout_matches_full_paint();
         glyph_hit_envelopes_preserve_overhang_and_gaps();
+        clipped_media_does_not_keep_the_renderer_active();
+        animated_media_publishes_only_changed_frames();
+        variable_duration_media_and_final_frame_keep_their_timing();
         std::cout << "Scene ownership and glyph hit bounds passed\n";
         return 0;
     }

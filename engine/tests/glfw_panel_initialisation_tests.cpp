@@ -9,6 +9,32 @@
 
 namespace
 {
+// Exercise the production hover path at a controlled point without moving the
+// user's pointer or activating the hidden fixture window.
+struct PanelHoverAccess
+{
+    using type = void (GlfwPanelWindow::*)(glm::vec2);
+    friend type private_member(PanelHoverAccess);
+};
+struct PanelLightAccess
+{
+    using type = std::array<entt::entity, 3> GlfwPanelWindow::*;
+    friend type private_member(PanelLightAccess);
+};
+struct PanelIconAccess
+{
+    using type = std::array<entt::entity, 3> GlfwPanelWindow::*;
+    friend type private_member(PanelIconAccess);
+};
+template<class Tag, typename Tag::type Member>
+struct PrivateMemberAccess
+{
+    friend typename Tag::type private_member(Tag) { return Member; }
+};
+template struct PrivateMemberAccess<PanelHoverAccess, &GlfwPanelWindow::update_hover_cursor_at>;
+template struct PrivateMemberAccess<PanelLightAccess, &GlfwPanelWindow::trafficLightEntities>;
+template struct PrivateMemberAccess<PanelIconAccess, &GlfwPanelWindow::trafficLightIconEntities>;
+
 void require(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
@@ -40,6 +66,70 @@ HWND hide_window(EngineCreateInfo& info)
 {
     set_glfw_window_visible(static_cast<GLFWwindow*>(info.surfaceUserData), false);
     return static_cast<HWND>(info.nativeWindowHandle);
+}
+
+void stationary_traffic_light_hover_retains_the_scene(GlfwPanelWindowHost& host)
+{
+    auto& panel = *host.panel();
+    auto options = panel.template_options();
+    options.trafficLights.visible = true;
+    options.trafficLights.showIconsOnHover = true;
+    panel.set_template_options(std::move(options));
+    auto& scene = host.engine()->renderer2d_scene();
+    auto& registry = scene.registry();
+    const auto lights = panel.*private_member(PanelLightAccess {});
+    auto& icons = panel.*private_member(PanelIconAccess {});
+    for (std::size_t index = 0; index < lights.size(); ++index)
+    {
+        require(registry.valid(lights[index]), "The hover fixture must contain all traffic lights");
+        // Glyph loading is unrelated to this regression. Synthetic icon paint
+        // keeps the actual group visibility path exercised with no asset files.
+        if (!registry.valid(icons[index]))
+            icons[index] = scene.create_shape({}, {1, 1}, {});
+        registry.get<RenderLayer2DComponent>(icons[index]).visible = false;
+    }
+    scene.build_render_plan(0.0, 0u);
+    const auto point_for = [&](entt::entity light) {
+        const auto visual = scene.resolved_shape_visual_state(light, 0.0);
+        require(visual.has_value(), "Traffic-light bounds must resolve");
+        return glm::vec2(visual->rect) + glm::vec2(visual->rect.z, visual->rect.w) * 0.5f;
+    };
+    const auto hover_at = [&](glm::vec2 point) {
+        (panel.*private_member(PanelHoverAccess {}))(point);
+    };
+    const auto require_icons = [&](bool visible) {
+        for (const auto icon : icons)
+            require(registry.get<RenderLayer2DComponent>(icon).visible == visible,
+                "Traffic-light group visibility must follow its final input owner");
+    };
+    const auto require_retained = [&](glm::vec2 point, entt::entity owner) {
+        hover_at(point);
+        require(panel.input_state().hoveredButton == owner, "The expected button must own hover");
+        const auto generation = scene.frame_generation();
+        for (unsigned tick = 0; tick < 120u; ++tick) hover_at(point);
+        require(scene.frame_generation() == generation,
+            "A stationary hover must not repeatedly dirty traffic-light icons");
+    };
+
+    const auto closePoint = point_for(lights[0]);
+    require_retained(closePoint, lights[0]);
+    require_icons(true);
+    require_retained(point_for(lights[1]), lights[1]);
+    require_icons(true);
+
+    ShapeStyleComponent overlayStyle;
+    overlayStyle.set_color("#112233FF");
+    const auto overlay = scene.create_shape(closePoint - glm::vec2(10), {20, 20}, overlayStyle);
+    auto& layer = registry.get<RenderLayer2DComponent>(overlay);
+    layer.layer = 200;
+    layer.alwaysOnTop = true;
+    registry.emplace<ButtonInputComponent>(overlay).enabled = true;
+    scene.mark_dirty(overlay);
+    require_retained(closePoint, overlay);
+    require_icons(false);
+    scene.destroy_entity(overlay);
+    require_retained(closePoint, lights[0]);
+    require_icons(true);
 }
 
 int run(bool rendererChecks)
@@ -128,6 +218,7 @@ int run(bool rendererChecks)
     host.set_options(options);
     require(host.open(), "A host must recover after a failed panel construction");
     require(host.engine()->ready() && host.panel(), "Recovery must publish a complete panel");
+    stationary_traffic_light_hover_retains_the_scene(host);
     host.close();
     require_closed(host, window);
     return 0;

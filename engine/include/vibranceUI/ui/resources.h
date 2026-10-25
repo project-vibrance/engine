@@ -1,4 +1,5 @@
 #pragma once
+#include <vibranceUI/core/path_utf8.h>
 
 #include <algorithm>
 #include <chrono>
@@ -484,7 +485,7 @@ private:
                     (kind == ResourceKind::eAsset ? "asset|" : "config|") +
                     std::string(layerName) +
                     "|" +
-                    relativePath.generic_string();
+                    vibrance::generic_path_utf8(relativePath);
                 snapshot[key] = std::move(stamp);
             }
             iterator.increment(error);

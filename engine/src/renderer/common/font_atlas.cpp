@@ -1,3 +1,4 @@
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/renderer/font_atlas.h>
 #include <vibranceUI/renderer/image.h>
 #include <vibranceUI/core/file.h>
@@ -994,7 +995,7 @@ namespace
         if (fontData.empty() || fontData.size() >
             static_cast<std::size_t>(std::numeric_limits<FT_Long>::max()))
         {
-            logger->print("Failed to read Renderer2D font: " + path.string());
+            logger->print("Failed to read Renderer2D font: " + vibrance::path_utf8(path));
             return false;
         }
 
@@ -1006,7 +1007,7 @@ namespace
             choose_weighted_face_index(library, fontData, requestedFontWeight),
             &out.face) != 0)
         {
-            logger->print("Failed to initialise Renderer2D font face: " + path.string());
+            logger->print("Failed to initialise Renderer2D font face: " + vibrance::path_utf8(path));
             return false;
         }
 
@@ -1023,13 +1024,13 @@ namespace
             if (appliedVariableWeight)
             {
                 logger->print("Applied Renderer2D font variable weight " +
-                    std::to_string(requestedFontWeight) + " for " + path.string() + ".");
+                    std::to_string(requestedFontWeight) + " for " + vibrance::path_utf8(path) + ".");
             }
             else if (selectedStaticWeight > 0)
             {
                 logger->print("Selected Renderer2D font face weight " +
                     std::to_string(selectedStaticWeight) + " for requested weight " +
-                    std::to_string(requestedFontWeight) + ": " + path.string() + ".");
+                    std::to_string(requestedFontWeight) + ": " + vibrance::path_utf8(path) + ".");
             }
         }
 
@@ -1037,7 +1038,7 @@ namespace
         {
             if (out.face->num_fixed_sizes == 0)
             {
-                logger->print("Failed to set Renderer2D font size: " + path.string());
+                logger->print("Failed to set Renderer2D font size: " + vibrance::path_utf8(path));
                 FT_Done_Face(out.face); out.face = nullptr;
                 return false;
             }
@@ -1178,7 +1179,7 @@ bool renderer2d_load_font_profile_layers(
             {
                 logger->warning(
                     "Ignoring invalid font profile layer and keeping lower-priority defaults: " +
-                    profilePath.string());
+                    vibrance::path_utf8(profilePath));
             }
             continue;
         }
@@ -1383,7 +1384,7 @@ bool Renderer2DFontAtlas::load_from_file(
     isLoaded = false;
     const int requestedFontWeight = clamped_font_weight(options.fontWeight);
     const std::vector<std::filesystem::path> fontPaths = font_candidate_paths(path, options);
-    fontName = fontPaths.empty() ? path.filename().string() : fontPaths.front().filename().string();
+    fontName = fontPaths.empty() ? vibrance::path_utf8(path.filename()) : vibrance::path_utf8(fontPaths.front().filename());
     if (fontPaths.size() > 1u)
     {
         fontName += "+fallbacks";

@@ -66,6 +66,15 @@ if(NOT APPLE)
 endif()
 
 vibrance_add_engine_test(vibrance_logger_tests logger_tests.cpp)
+if(WIN32)
+    file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/windows_utf8.manifest"
+        VIBRANCE_TEST_UTF8_MANIFEST)
+    configure_file(windows_utf8.rc.in "${CMAKE_CURRENT_BINARY_DIR}/windows_utf8.rc" @ONLY)
+    vibrance_add_engine_test(vibrance_logger_utf8_tests logger_tests.cpp)
+    target_sources(vibrance_logger_utf8_tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/windows_utf8.rc")
+    target_compile_definitions(vibrance_logger_utf8_tests PRIVATE VIBRANCE_TEST_UTF8_CODE_PAGE=1)
+    set_tests_properties(vibrance_logger_utf8_tests PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 vibrance_add_engine_test(vibrance_media_preparation_tests media_preparation_tests.cpp)
 add_test(NAME vibrance_media_preparation_renderer_tests COMMAND vibrance_media_preparation_tests --renderer)
 set_tests_properties(vibrance_media_preparation_renderer_tests PROPERTIES SKIP_RETURN_CODE 77)
@@ -91,6 +100,9 @@ add_executable(vibrance_runtime_log_storage_tests runtime_log_storage_tests.cpp)
 target_include_directories(vibrance_runtime_log_storage_tests PRIVATE ../include)
 add_test(NAME vibrance_runtime_log_storage_tests COMMAND vibrance_runtime_log_storage_tests)
 if(WIN32)
+    add_executable(vibrance_liquid_blur_query_ring_tests liquid_blur_query_ring_tests.cpp)
+    target_compile_features(vibrance_liquid_blur_query_ring_tests PRIVATE cxx_std_20)
+    add_test(NAME vibrance_liquid_blur_query_ring_tests COMMAND vibrance_liquid_blur_query_ring_tests)
     add_test(NAME vibrance_crash_diagnostics_tests COMMAND ${CMAKE_COMMAND}
         "-DLOGGER_TEST=$<TARGET_FILE:vibrance_logger_tests>"
         "-DOUTPUT_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/crash-diagnostics"
@@ -192,6 +204,7 @@ if(VIBRANCE_RENDER_BACKEND STREQUAL "Vulkan")
     target_compile_features(vibrance_media_pipeline_policy_tests PRIVATE cxx_std_20)
     add_test(NAME vibrance_media_pipeline_policy_tests COMMAND vibrance_media_pipeline_policy_tests)
     add_executable(vibrance_pipeline_cache_store_tests pipeline_cache_store_tests.cpp)
+    target_include_directories(vibrance_pipeline_cache_store_tests PRIVATE ../include)
     target_compile_features(vibrance_pipeline_cache_store_tests PRIVATE cxx_std_20)
     add_test(NAME vibrance_pipeline_cache_store_tests COMMAND vibrance_pipeline_cache_store_tests
         "${CMAKE_CURRENT_BINARY_DIR}/pipeline-cache-store")

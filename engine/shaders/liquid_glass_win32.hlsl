@@ -244,13 +244,34 @@ float4 main(PixelInput input) : SV_Target
     if (coverage <= 0.0)
         return float4(0.0, 0.0, 0.0, 0.0);
 
+    float capOpacity = 0.0;
+    float3 capColour = 0.0;
+    if ((paintCapGradient & 1u) != 0)
+    {
+        float fraction = pixelPosition.y / max(panelSize.y, 1.0);
+        float progress = saturate((fraction - capGradient.z) /
+            max(capGradient.w - capGradient.z, 0.0001));
+        capColour = float3((paintCapGradient >> 8u) & 255u,
+            (paintCapGradient >> 16u) & 255u, (paintCapGradient >> 24u) & 255u) / 255.0;
+        capOpacity = saturate(lerp(capGradient.x, capGradient.y, progress));
+        [branch]
+        if (capOpacity == 1.0)
+        {
+            // Opaque island paint completely replaces the optical result.
+            // Preserve contour/cutout coverage while avoiding invisible taps.
+            return float4(capColour, coverage * opacity * viewportOpacity);
+        }
+    }
+    float rimVisibility = 1.0 - capOpacity;
+    float frost = saturate(blurRadius / 16.0);
     float band = saturate(1.0 + distance / max(edgeThickness, 1.0));
-    // Interior pixels have no displacement. Beyond sixteen pixels the rim's
-    // Gaussian underflows to zero even before multiplication; avoid four
-    // additional contour evaluations there without changing the result.
+    // Four contour evaluations are only needed when their normal contributes
+    // to refraction, visible dispersion or the existing five-pixel rim band.
     float2 normal = float2(0.0, -1.0);
     [branch]
-    if (band > 0.0 || distance > -16.0)
+    if ((band > 0.0 && (refractionStrength != 0.0 ||
+            (dispersionStrength != 0.0 && frost < 1.0))) ||
+        (distance > -5.0 && rimStrength > 0.0 && rimVisibility > 0.001))
         normal = surface_normal(pixelPosition);
     float bend = refractionStrength * band * band;
     float2 backdropUv = backdropUvOrigin + input.uv * backdropUvScale;
@@ -262,7 +283,6 @@ float4 main(PixelInput input) : SV_Target
     // independent of implicit derivatives across the lens's edge branches.
     float4 sharpSample = sharpBackdrop.SampleLevel(backdropSampler, refractedUv, 0.0);
     float3 centre = sharpSample.rgb;
-    float frost = saturate(blurRadius / 16.0);
     float3 refracted = centre;
     [branch]
     if (band > 0.0 && dispersionStrength != 0.0 && frost < 1.0)
@@ -294,20 +314,8 @@ float4 main(PixelInput input) : SV_Target
     // availability left untinted patches; forcing full opacity hid the desktop.
     float tintAmount = saturate(tintStrength);
 
-    float capOpacity = 0.0;
-    float3 capColour = 0.0;
-    if ((paintCapGradient & 1u) != 0)
-    {
-        float fraction = pixelPosition.y / max(panelSize.y, 1.0);
-        float progress = saturate((fraction - capGradient.z) /
-            max(capGradient.w - capGradient.z, 0.0001));
-        capColour = float3((paintCapGradient >> 8u) & 255u,
-            (paintCapGradient >> 16u) & 255u, (paintCapGradient >> 24u) & 255u) / 255.0;
-        capOpacity = saturate(lerp(capGradient.x, capGradient.y, progress));
-    }
     // Solid paint has no glass rim. Resolve this before reflection sampling
     // so opaque caps do not spend GPU time gathering invisible colours.
-    float rimVisibility = 1.0 - capOpacity;
     float rimHighlight = 0.0;
     float3 rimColour = 1.0;
     [branch]

@@ -33,6 +33,10 @@ using WriteDump = BOOL (WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
     PMINIDUMP_EXCEPTION_INFORMATION, PMINIDUMP_USER_STREAM_INFORMATION,
     PMINIDUMP_CALLBACK_INFORMATION);
 inline WriteDump writeDump = nullptr;
+inline std::atomic<LPTOP_LEVEL_EXCEPTION_FILTER> previousUnhandledFilter { nullptr };
+inline std::atomic_flag previousFilterSaved = ATOMIC_FLAG_INIT;
+inline std::atomic<DWORD> nativeCrashOwner { 0 };
+static_assert(std::atomic<DWORD>::is_always_lock_free);
 #else
 inline int emergencyFile = -1;
 #endif
@@ -84,14 +88,63 @@ inline BOOL CALLBACK dump_callback(PVOID context, PMINIDUMP_CALLBACK_INPUT input
     return TRUE;
 }
 
+inline bool continuable_gnu_exception(const EXCEPTION_RECORD& record) noexcept
+{
+    // MinGW's top-level filter returns these transport exceptions to libunwind,
+    // which then invokes std::terminate for an uncaught C++ exception. Treating
+    // them as native faults hides the exception's original diagnostic.
+    return (record.ExceptionCode == 0x20474343u || record.ExceptionCode == 0x22474343u) &&
+        !(record.ExceptionFlags & EXCEPTION_NONCONTINUABLE);
+}
+
+inline void write_fault_module(const void* address) noexcept
+{
+    MEMORY_BASIC_INFORMATION memory {};
+    if (!VirtualQuery(address, &memory, sizeof(memory)) || memory.Type != MEM_IMAGE) return;
+    wchar_t modulePath[MAX_PATH] {};
+    const DWORD length = GetModuleFileNameW(static_cast<HMODULE>(memory.AllocationBase),
+        modulePath, MAX_PATH);
+    if (!length || length >= MAX_PATH) return;
+    char moduleUtf8[MAX_PATH * 3 + 1] {};
+    if (!WideCharToMultiByte(CP_UTF8, 0, modulePath, static_cast<int>(length), moduleUtf8,
+        static_cast<int>(sizeof(moduleUtf8) - 1), nullptr, nullptr)) return;
+    char message[sizeof(moduleUtf8) + 96] {};
+    const auto offset = reinterpret_cast<std::uintptr_t>(address) -
+        reinterpret_cast<std::uintptr_t>(memory.AllocationBase);
+    std::snprintf(message, sizeof(message), "Fault module: %s + 0x%llX (base %p).\n",
+        moduleUtf8, static_cast<unsigned long long>(offset), memory.AllocationBase);
+    write(message);
+}
+
 inline LONG WINAPI unhandled(EXCEPTION_POINTERS* exception) noexcept
 {
+    if (!exception || !exception->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    if (continuable_gnu_exception(*exception->ExceptionRecord))
+    {
+        if (const auto previous = previousUnhandledFilter.load(std::memory_order_relaxed);
+            previous && previous != unhandled)
+        {
+            const LONG result = previous(exception);
+            if (result != EXCEPTION_CONTINUE_SEARCH) return result;
+        }
+#if defined(__MINGW32__)
+        // The runtime's filter may have been replaced before ours was installed.
+        // Only resume its known, continuable C++ transport exceptions.
+        return EXCEPTION_CONTINUE_EXECUTION;
+#endif
+    }
+    DWORD expectedOwner = 0;
+    if (!nativeCrashOwner.compare_exchange_strong(expectedOwner, GetCurrentThreadId(),
+        std::memory_order_relaxed)) return EXCEPTION_CONTINUE_SEARCH;
+    // DbgHelp is not re-entrant. A secondary fault must not reopen/truncate the
+    // first dump or recursively attempt another stack walk while it is written.
     char message[256] {};
     std::snprintf(message, sizeof(message),
         "FATAL CRASH: Windows exception 0x%08lX at %p; process %lu, thread %lu.\n",
         exception->ExceptionRecord->ExceptionCode,
         exception->ExceptionRecord->ExceptionAddress, GetCurrentProcessId(), GetCurrentThreadId());
     write(message);
+    write_fault_module(exception->ExceptionRecord->ExceptionAddress);
     if (writeDump)
     {
         HANDLE dump = CreateFileW(dumpPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
@@ -157,7 +210,12 @@ inline void initialise(const std::filesystem::path& logPath)
     dumpPath += ".dmp";
     static HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
     if (dbghelp) writeDump = reinterpret_cast<WriteDump>(GetProcAddress(dbghelp, "MiniDumpWriteDump"));
-    SetUnhandledExceptionFilter(unhandled);
+    const auto previous = SetUnhandledExceptionFilter(unhandled);
+    // The EXE and engine DLL each install this header's handler. Retain the
+    // original predecessor when logs rotate; replacing it can form DLL/EXE
+    // forwarding cycles after either module installs its handler again.
+    if (previous != unhandled && !previousFilterSaved.test_and_set(std::memory_order_relaxed))
+        previousUnhandledFilter.store(previous, std::memory_order_relaxed);
 #else
     if (emergencyFile >= 0) ::close(emergencyFile);
     emergencyFile = ::open(report.c_str(), O_CREAT | O_WRONLY | O_APPEND, 0600);

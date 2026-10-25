@@ -23,6 +23,44 @@ namespace
             expand_and_clip_rect(visual->rect, 0.0f,
                 inherited_mask_clip_rect(registry, entity)));
     }
+
+    bool animated_media_visible(const entt::registry& registry, entt::entity entity,
+        const Media2DComponent& media, double currentTimeSeconds)
+    {
+        if (!media.animated || !media.playing || !media_visible(media) ||
+            !is_visible(registry, entity)) return false;
+        const auto* transform = registry.try_get<Transform2DComponent>(entity);
+        if (!transform) return false;
+        if (!std::isfinite(currentTimeSeconds)) return true;
+        const auto transition = inherited_visual_effect(registry, entity, currentTimeSeconds);
+        const auto interactive = renderer2d_interactive_visual_effects(registry, entity);
+        if (!alpha_visible(transition.opacity * interactive.y)) return false;
+        const auto rect = apply_display_transition_scale(
+            renderer2d_apply_interactive_visual_rect(registry, entity,
+                media_bounds_from_component(*transform, media)), transition);
+        // Match the conservative extent used by the media dispatch. A tilted
+        // image may still project inside its viewport after its flat bounds leave.
+        const float padding = transform2_5d_flags(*transform) != 0u ?
+            std::sqrt(rect.z * rect.z + rect.w * rect.w) * 0.5f : 0.0f;
+        return !rect_empty(rect) && !rect_empty(expand_and_clip_rect(rect, padding,
+            inherited_mask_clip_rect(registry, entity, currentTimeSeconds)));
+    }
+
+    bool animated_media_frame_due(const Media2DComponent& media,
+        double currentTimeSeconds, double previousRenderTimeSeconds)
+    {
+        if (!std::isfinite(currentTimeSeconds) ||
+            !std::isfinite(previousRenderTimeSeconds) || previousRenderTimeSeconds < 0.0 ||
+            currentTimeSeconds < previousRenderTimeSeconds ||
+            !std::isfinite(media.lastPlaybackUpdateSeconds) || media.lastPlaybackUpdateSeconds < 0.0)
+            return true;
+        const double playback = media.playbackSeconds +
+            std::max(0.0, currentTimeSeconds - media.lastPlaybackUpdateSeconds);
+        // Publish the last non-looping pose once even if it has the same frame
+        // index, so playback and retained-cache ownership can finish normally.
+        return (!media.loop && media.durationSeconds > 0.0 && playback >= media.durationSeconds) ||
+            media_frame_for_time(media, playback) != media.currentFrame;
+    }
 }
 
 bool Renderer2DRenderPlan::empty() const
@@ -483,8 +521,8 @@ bool Renderer2DScene::requires_continuous_redraw_since(
     {
         const Media2DComponent& media =
             mediaView.get<const Media2DComponent>(entity);
-        if (media.animated && media.playing && media_visible(media) &&
-            is_visible(registry_, entity))
+        if (animated_media_visible(registry_, entity, media, currentTimeSeconds) &&
+            animated_media_frame_due(media, currentTimeSeconds, previousRenderTimeSeconds))
         {
             return true;
         }

@@ -2317,7 +2317,7 @@ namespace
         return media.visible && media.drawable && media.mediaId != 0 && alpha_visible(media.opacity * tintAlpha);
     }
 
-    uint32_t media_frame_for_time(const Media2DComponent& media)
+    uint32_t media_frame_for_time(const Media2DComponent& media, double playbackSeconds)
     {
         if (!media.animated || media.frameCount <= 1u)
         {
@@ -2346,7 +2346,7 @@ namespace
             return 0u;
         }
 
-        double playback = media.playbackSeconds;
+        double playback = playbackSeconds;
         if (media.loop)
         {
             playback = std::fmod(std::max(playback, 0.0), duration);
@@ -2372,6 +2372,11 @@ namespace
 
         const uint32_t frame = static_cast<uint32_t>(playback * media.frameRate);
         return std::min(frame, media.frameCount - 1u);
+    }
+
+    uint32_t media_frame_for_time(const Media2DComponent& media)
+    {
+        return media_frame_for_time(media, media.playbackSeconds);
     }
 
     void update_media_playback(Media2DComponent& media, double currentTimeSeconds)

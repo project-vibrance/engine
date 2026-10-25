@@ -1,4 +1,8 @@
 #include <vibranceUI/core/logger.h>
+#include <vibranceUI/core/path_utf8.h>
+#include <vibranceUI/core/file.h>
+#include <vibranceUI/localisation/localisation.h>
+#include <vibranceUI/ui/styles.h>
 #include <vibranceUI/glfw/window.h>
 #include <vibranceUI/renderer/media2d.h>
 #include <chrono>
@@ -51,7 +55,21 @@ int main(int argc, char** argv)
         if (!condition) { std::cerr << message << '\n'; passed = false; }
     };
 
-    const auto path = directory / "two-frames.gif";
+    const auto path = directory / std::filesystem::path(u8"two-frames-\u52d5\u753b.gif");
+    const auto unicodeResources = directory / std::filesystem::path(u8"\u8cc7\u6e90");
+    std::filesystem::create_directory(unicodeResources);
+    const auto localePath = unicodeResources / "en_gb.json";
+    expect(write_file_atomically(localePath, R"({"startup.test":"Ready"})"),
+        "Unicode localisation fixture could not be written");
+    Localisation localisation;
+    expect(localisation.load_file(localePath) && localisation.set_locale("en_gb") &&
+        localisation.translate("startup.test") == "Ready",
+        "Unicode localisation loading and its success diagnostic must not use the ANSI code page");
+    const auto themePath = unicodeResources / "theme.json";
+    expect(write_file_atomically(themePath, "{}"), "Unicode theme fixture could not be written");
+    UiTheme theme;
+    expect(ui_load_theme_file(themePath, theme),
+        "Unicode theme loading and its success diagnostic must not use the ANSI code page");
     const auto bytes = make_gif();
     write_bytes(path, bytes);
     Media2DLoadOptions options;
@@ -62,6 +80,8 @@ int main(int argc, char** argv)
         "The complete two-frame GIF must prepare within its exact decoded-byte budget");
     expect(prepared.path() == std::filesystem::absolute(path).lexically_normal(),
         "Prepared media must retain its normalised source path");
+    expect(prepared.cache_key().starts_with(vibrance::path_utf8(prepared.path()) + "|"),
+        "A Unicode media name must remain UTF-8 in the shared renderer cache");
     auto limited = options;
     limited.maxDecodedBytes = 7u;
     expect(!prepare_media_2d(path, limited).valid(), "An animation over budget must fail safely");

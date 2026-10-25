@@ -1,7 +1,9 @@
 #include <vibranceUI/audio/audio.h>
 #include <vibranceUI/core/logger.h>
+#include <vibranceUI/core/path_utf8.h>
 #include <algorithm>
 #include <climits>
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -11,7 +13,12 @@
 
 #if defined(VIBRANCE_HAS_SOLOUD)
 #include <soloud.h>
+#include <soloud_file.h>
 #include <soloud_wav.h>
+#endif
+
+#if defined(_WIN32) && defined(VIBRANCE_HAS_SOLOUD)
+#include <io.h>
 #endif
 
 #if defined(VIBRANCE_HAS_FFMPEG)
@@ -115,7 +122,7 @@ namespace
         DecodedFfmpegAudio decoded = {};
 
         AVFormatContext* rawFormatContext = nullptr;
-        const std::string pathString = path.string();
+        const std::string pathString = vibrance::path_utf8(path);
         if (avformat_open_input(&rawFormatContext, pathString.c_str(), nullptr, nullptr) < 0)
         {
             return decoded;
@@ -454,7 +461,7 @@ AudioClipHandle AudioEngine::Impl::load_clip(const std::filesystem::path& path)
     }
 
     const std::filesystem::path absolutePath = normalise_audio_path(path);
-    const std::string cacheKey = absolutePath.string();
+    const std::string cacheKey = vibrance::path_utf8(absolutePath);
     if (const auto existing = clipIdsByPath.find(cacheKey); existing != clipIdsByPath.end())
     {
         const auto clip = clips.find(existing->second);
@@ -486,13 +493,28 @@ AudioClipHandle AudioEngine::Impl::load_clip(const std::filesystem::path& path)
     {
         if (logger)
         {
-            logger->warning("Audio clip missing: " + absolutePath.string());
+            logger->warning("Audio clip missing: " + vibrance::path_utf8(absolutePath));
         }
         return handle;
     }
 
     auto wav = std::make_unique<SoLoud::Wav>();
-    SoLoud::result result = wav->load(absolutePath.string().c_str());
+    SoLoud::result result;
+#if defined(_WIN32)
+    // Preserve SoLoud's file decoder, opening the source through its native
+    // wide path instead of ANSI fopen. DiskFile owns and closes this FILE*.
+    result = SoLoud::FILE_LOAD_FAILED;
+    if (std::FILE* file = _wfopen(absolutePath.c_str(), L"rb"))
+    {
+        SoLoud::DiskFile input(file);
+        // DiskFile uses long-sized ftell offsets internally on Windows.
+        const auto bytes = _filelengthi64(_fileno(file));
+        if (bytes > 0 && bytes <= LONG_MAX)
+            result = wav->loadFile(&input);
+    }
+#else
+    result = wav->load(absolutePath.string().c_str());
+#endif
     bool loadedWithFfmpeg = false;
 #if defined(VIBRANCE_HAS_FFMPEG)
     if (result != SoLoud::SO_NO_ERROR)
@@ -515,7 +537,7 @@ AudioClipHandle AudioEngine::Impl::load_clip(const std::filesystem::path& path)
     {
         if (logger)
         {
-            logger->error("Failed to load audio clip " + absolutePath.string() + ": " + soloud.getErrorString(result));
+            logger->error("Failed to load audio clip " + vibrance::path_utf8(absolutePath) + ": " + soloud.getErrorString(result));
         }
         return handle;
     }
@@ -545,7 +567,7 @@ AudioClipHandle AudioEngine::Impl::load_clip(const std::filesystem::path& path)
     {
         logger->info(
             "Loaded audio clip " +
-            absolutePath.filename().string() +
+            vibrance::path_utf8(absolutePath.filename()) +
             (loadedWithFfmpeg ? " through FFmpeg" : "") +
             " as handle " +
             std::to_string(clipId) +
@@ -564,7 +586,7 @@ AudioClipHandle AudioEngine::Impl::find_clip(const std::filesystem::path& path) 
     std::lock_guard<std::mutex> lock(mutex);
     AudioClipHandle handle = {};
     const std::filesystem::path absolutePath = normalise_audio_path(path);
-    if (const auto existing = clipIdsByPath.find(absolutePath.string()); existing != clipIdsByPath.end())
+    if (const auto existing = clipIdsByPath.find(vibrance::path_utf8(absolutePath)); existing != clipIdsByPath.end())
     {
         handle.id = existing->second;
     }
@@ -589,7 +611,7 @@ void AudioEngine::Impl::unload_clip(AudioClipHandle clip)
     {
         soloud.stopAudioSource(*it->second.wav);
     }
-    clipIdsByPath.erase(it->second.path.string());
+    clipIdsByPath.erase(vibrance::path_utf8(it->second.path));
     clips.erase(it);
 #else
     (void)clip;

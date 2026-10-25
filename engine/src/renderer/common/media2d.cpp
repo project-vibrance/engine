@@ -1,3 +1,4 @@
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/renderer/media2d.h>
 #if !defined(__APPLE__)
 #include <vibranceUI/renderer/descriptors.h>
@@ -241,7 +242,7 @@ namespace
     Media2DSourceType source_type_from_path(const std::filesystem::path& path)
     {
         // Dispatch media loading by extension while exposing one Media2DHandle type
-        const std::string extension = to_lower(path.extension().string());
+        const std::string extension = to_lower(vibrance::path_utf8(path.extension()));
         if (extension == ".svg" || extension == ".svgz")
         {
             return Media2DSourceType::eSvg;
@@ -1259,7 +1260,7 @@ namespace
 
     bool path_has_extension(const std::filesystem::path& path, std::string_view extension)
     {
-        return to_lower(path.extension().string()) == extension;
+        return to_lower(vibrance::path_utf8(path.extension())) == extension;
     }
 
     struct PngChunk
@@ -2327,7 +2328,7 @@ namespace
         }
 
         AVFormatContext* rawFormatContext = nullptr;
-        const std::string pathString = path.string();
+        const std::string pathString = vibrance::path_utf8(path);
         if (avformat_open_input(&rawFormatContext, pathString.c_str(), nullptr, nullptr) < 0)
         {
             return animation;
@@ -2954,7 +2955,7 @@ std::string media_2d_cache_key(const std::filesystem::path& path, const Media2DL
     const auto writeTime = std::filesystem::last_write_time(absolute, error);
     const auto ticks = error ? 0 : static_cast<std::int64_t>(writeTime.time_since_epoch().count());
     std::ostringstream key;
-    key << absolute.string() << '|' << safeSize << '@' << ticks << '|'
+    key << vibrance::path_utf8(absolute) << '|' << safeSize << '@' << ticks << '|'
         << options.rasterWidth << '|' << options.rasterHeight << '|' << options.srgb << '|'
         << options.generateMipmaps << '|' << options.premultiplyAlpha << '|'
         << options.maxAnimationFrames << '|' << options.svgAnimationFrames << '|'
@@ -2981,7 +2982,7 @@ PreparedMedia2D prepare_media_2d(const std::filesystem::path& path,
         data->options = options;
         auto& metadata = data->metadata;
         metadata.path = std::filesystem::absolute(path).lexically_normal();
-        metadata.name = metadata.path.filename().string();
+        metadata.name = vibrance::path_utf8(metadata.path.filename());
         metadata.sourceType = source_type_from_path(metadata.path);
         metadata.premultipliedAlpha = options.premultiplyAlpha;
         data->cacheKey = media_2d_cache_key(metadata.path, options);
@@ -3016,7 +3017,7 @@ PreparedMedia2D prepare_media_2d(const std::filesystem::path& path,
             if (!frame.valid() && !animation.valid())
             {
                 logger->print(
-                    "Registered SVG media metadata for " + metadata.path.string() +
+                    "Registered SVG media metadata for " + vibrance::path_utf8(metadata.path) +
                     ". SVG rasterization is not available in this build.");
                 return Media2DPreparedAccess::make(std::move(data));
             }
@@ -3037,7 +3038,7 @@ PreparedMedia2D prepare_media_2d(const std::filesystem::path& path,
             if (!lottie.valid())
             {
                 logger->print(
-                    "Failed to parse Lottie animation " + metadata.path.string() +
+                    "Failed to parse Lottie animation " + vibrance::path_utf8(metadata.path) +
                     (lottie.error.empty() ? "." : ": " + lottie.error));
                 return {};
             }
@@ -3045,14 +3046,14 @@ PreparedMedia2D prepare_media_2d(const std::filesystem::path& path,
             if (lottie.ignoredExpressionCount > 0u)
             {
                 logger->warning(
-                    "Lottie animation " + metadata.path.string() + " contains " +
+                    "Lottie animation " + vibrance::path_utf8(metadata.path) + " contains " +
                     std::to_string(lottie.ignoredExpressionCount) +
                     " After Effects expression(s); authored keyframes are used as the portable fallback.");
             }
             if (lottie.unsupportedFeatureCount > 0u)
             {
                 logger->warning(
-                    "Lottie animation " + metadata.path.string() + " contains " +
+                    "Lottie animation " + vibrance::path_utf8(metadata.path) + " contains " +
                     std::to_string(lottie.unsupportedFeatureCount) +
                     " unsupported feature(s); supported vector layers continue rendering.");
             }
@@ -3067,7 +3068,7 @@ PreparedMedia2D prepare_media_2d(const std::filesystem::path& path,
             {
                 logger->print(
                     "Failed to rasterize Lottie animation frames: " +
-                    metadata.path.string());
+                    vibrance::path_utf8(metadata.path));
                 return {};
             }
         }
@@ -3082,7 +3083,7 @@ PreparedMedia2D prepare_media_2d(const std::filesystem::path& path,
             else
             {
                 logger->print(
-                    "Registered video media metadata for " + metadata.path.string() +
+                    "Registered video media metadata for " + vibrance::path_utf8(metadata.path) +
                     ". No available video decoder produced frames.");
                 return Media2DPreparedAccess::make(std::move(data));
             }
@@ -3116,7 +3117,7 @@ PreparedMedia2D prepare_media_2d(const std::filesystem::path& path,
             }
             if (!frame.valid() && !animation.valid())
             {
-                logger->print("Failed to decode 2D media image: " + metadata.path.string());
+                logger->print("Failed to decode 2D media image: " + vibrance::path_utf8(metadata.path));
                 return {};
             }
         }

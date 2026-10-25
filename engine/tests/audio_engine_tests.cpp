@@ -3,11 +3,13 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 
-int main()
+int main(int argc, char** argv)
 {
-    const auto path = std::filesystem::temp_directory_path() /
-        ("vibrance-audio-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav");
+    auto filename = std::filesystem::path(u8"vibrance-audio-\u97f3\u58f0-");
+    filename += std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".wav";
+    const auto path = std::filesystem::temp_directory_path() / filename;
     try
     {
         AudioEngine audio;
@@ -32,6 +34,22 @@ int main()
             throw std::runtime_error("On-demand audio initialisation or clip caching failed");
         if (audio.backend_name() != "not started")
             throw std::runtime_error("Preloading a clip opened the output device");
+        if (audio.find_clip(path).id != clip.id)
+            throw std::runtime_error("Unicode audio cache lookup failed");
+        audio.unload_clip(clip);
+        if (audio.find_clip(path))
+            throw std::runtime_error("Unicode audio cache removal failed");
+        clip = audio.load_clip(path);
+        if (!clip || audio.clip_length(clip) <= 0.0)
+            throw std::runtime_error("Unicode audio preload or decoded clip retention failed");
+        if (argc == 2 && std::string_view(argv[1]) == "--unicode-preload")
+        {
+            std::filesystem::remove(path);
+            if (audio.backend_name() != "not started" || audio.clip_length(clip) <= 0.0)
+                throw std::runtime_error("Unicode preload used playback or depended on an open source file");
+            std::cout << "Unicode WAV decoding, cache lookup/removal and silent preload passed\n";
+            return 0;
+        }
         AudioPlayOptions options;
         options.volume = 0.0f;
         options.paused = true;

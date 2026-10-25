@@ -1,4 +1,5 @@
 #pragma once
+#include <vibranceUI/core/path_utf8.h>
 
 #include <algorithm>
 #include <array>
@@ -181,7 +182,7 @@ public:
         std::filesystem::path root = pipeline_cache_directory()) :
         identity_(identity), path_(root.empty() ? std::filesystem::path{} :
             root / (pipeline_cache_key(identity) + ".bin")),
-        seedKey_(root.generic_string() + '/' + pipeline_cache_key(identity)) {}
+        seedKey_(vibrance::generic_path_utf8(root) + '/' + pipeline_cache_key(identity)) {}
 
     const PipelineCacheIdentity& identity() const { return identity_; }
     const std::filesystem::path& path() const { return path_; }

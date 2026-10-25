@@ -1,7 +1,9 @@
 #include "../src/platform/win32/composition_present_retry.h"
+#include "../src/platform/win32/composition_damage.h"
 
 #include <array>
 #include <iostream>
+#include <vector>
 
 int main()
 {
@@ -103,5 +105,70 @@ int main()
     check(retry.deliver(0u, prepare, [] { return VIBRANCE_COMPOSITION_PRESENTED; }) ==
             VIBRANCE_COMPOSITION_PRESENTED && copies == 4u,
         "A deferred preparation must be attempted again before the next present");
+
+    CompositionPresentDamageHistory history;
+    const CompositionDamageRect full {0, 0, 64, 32};
+    const CompositionDamageRect largeOptical {0, 0, 60, 30};
+    for (std::uint32_t index = 0; index < VIBRANCE_COMPOSITION_MAX_BUFFERS; ++index)
+    {
+        const auto first = history.prepare(index, 64, 32, {}, largeOptical);
+        check(first.copy == full && first.present == full,
+            "Every rotating back buffer must initialise its complete image");
+        history.commit(index);
+    }
+    const CompositionDamageRect a {10, 8, 14, 12}, b {24, 9, 28, 13};
+    const auto partial = history.prepare(0, 64, 32, a, largeOptical);
+    check(partial.copy == a && partial.present == largeOptical,
+        "A complete optical invalidation halo must not widen sharp UI copy damage");
+    // A copied frame may remain pending while DXGI is busy. Changes announced
+    // to another buffer still have to reach it before a later accepted frame.
+    history.prepare(1, 64, 32, b, {});
+    history.commit(1);
+    const auto accumulated = history.prepare(0, 64, 32, {}, {});
+    check(accumulated.copy == composition_damage_union(a, b) &&
+        accumulated.present == largeOptical,
+        "Both copy and optical histories must survive until successful present");
+    history.commit(0);
+    const auto opticalOnly = history.prepare(0, 64, 32, {}, largeOptical);
+    check(opticalOnly.copy.empty() && opticalOnly.present == largeOptical,
+        "Optical-only invalidation must retain fresh UI pixels without another GPU copy");
+    check(history.prepare(0, 80, 40, {}, {}).copy == CompositionDamageRect{0, 0, 80, 40},
+        "Resize must discard old damage history and initialise the new image");
+
+    // Compare all pixels of three retained buffers against a complete copy
+    // whilst a widget moves and shrinks under an unchanged large glass halo.
+    // This checks transparent erasure and missed updates, not only rectangles.
+    history.reset();
+    std::array<std::vector<std::uint32_t>, VIBRANCE_COMPOSITION_MAX_BUFFERS> retained;
+    for (auto& image : retained) image.assign(64u * 32u, 0xdeadbeefu);
+    std::vector<std::uint32_t> source(64u * 32u, 0u);
+    CompositionDamageRect previous {};
+    std::uint64_t copiedPixels = 0u, fullCopyPixels = 0u;
+    for (unsigned frame = 0; frame < 100u; ++frame)
+    {
+        const auto index = frame % VIBRANCE_COMPOSITION_MAX_BUFFERS;
+        std::fill(source.begin(), source.end(), 0u);
+        for (unsigned y = 3u; y < 6u; ++y)
+            for (unsigned x = 3u; x < 58u; ++x) source[y * 64u + x] = 0xff00ff00u;
+        const auto x = static_cast<std::int32_t>(8u + frame % 31u);
+        const auto extent = static_cast<std::int32_t>(4u + frame % 5u);
+        const CompositionDamageRect current {x, 14, x + extent, 14 + extent};
+        for (auto y = current.top; y < current.bottom; ++y)
+            for (auto column = current.left; column < current.right; ++column)
+                source[y * 64u + column] = 0xffff0000u;
+        const auto update = history.prepare(index, 64u, 32u,
+            composition_damage_union(previous, current), largeOptical);
+        for (auto y = update.copy.top; y < update.copy.bottom; ++y)
+            for (auto column = update.copy.left; column < update.copy.right; ++column)
+                retained[index][y * 64u + column] = source[y * 64u + column];
+        check(retained[index] == source,
+            "Partial copies must match complete copies, including erased positions and retained background");
+        copiedPixels += update.copy.pixels();
+        fullCopyPixels += full.pixels();
+        history.commit(index);
+        previous = current;
+    }
+    check(copiedPixels * 4u < fullCopyPixels,
+        "Small UI changes under a large glass halo should copy substantially fewer pixels");
     return passed ? 0 : 1;
 }

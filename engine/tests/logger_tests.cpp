@@ -6,19 +6,51 @@
 #include <thread>
 #include <vector>
 #include <csignal>
+#include <vibranceUI/core/path_utf8.h>
 #if defined(_WIN32)
 #include <windows.h>
+
+namespace
+{
+unsigned dumpCalls = 0;
+
+BOOL WINAPI reentrant_dump(HANDLE, DWORD, HANDLE dump, MINIDUMP_TYPE,
+    PMINIDUMP_EXCEPTION_INFORMATION info, PMINIDUMP_USER_STREAM_INFORMATION,
+    PMINIDUMP_CALLBACK_INFORMATION)
+{
+    if (++dumpCalls != 1) return FALSE;
+    EXCEPTION_RECORD secondary {};
+    secondary.ExceptionCode = 0xC00000FFu;
+    secondary.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+    secondary.ExceptionAddress = info->ExceptionPointers->ExceptionRecord->ExceptionAddress;
+    EXCEPTION_POINTERS nested { &secondary, info->ExceptionPointers->ContextRecord };
+    if (crash_diagnostics::unhandled(&nested) != EXCEPTION_CONTINUE_SEARCH) return FALSE;
+    constexpr char contents[] = "first crash dump fixture";
+    DWORD written = 0;
+    return WriteFile(dump, contents, sizeof(contents) - 1, &written, nullptr) &&
+        written == sizeof(contents) - 1;
+}
+}
 #endif
 
 int main(int argc, char* argv[])
 {
+#if defined(_WIN32) && defined(VIBRANCE_TEST_UTF8_CODE_PAGE)
+    if (GetACP() != CP_UTF8) return 77;
+#endif
     LoggerOutputOptions options;
     options.directory = argc > 2 ? std::filesystem::path(argv[2]) :
         std::filesystem::temp_directory_path() / ("vibrance-logger-test-" +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     options.filePrefix = "logger-test";
+    if (argc == 1)
+        options.directory /= std::filesystem::path(u8"\u6e2c\u8a66-\u0442\u0435\u0441\u0442-\U0001F31F");
     Logger::configure_output(options);
     auto* logger = Logger::fetch_logger();
+#if defined(_WIN32)
+    if (argc > 1 && std::string(argv[1]) == "--crash-worker-no-filter")
+        SetUnhandledExceptionFilter(nullptr);
+#endif
     crash_diagnostics::initialise(logger->output_path());
 #if defined(_WIN32)
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
@@ -35,17 +67,37 @@ int main(int argc, char* argv[])
             });
             worker.join();
         }
-        if (mode == "--crash-worker")
+        if (mode == "--crash-worker" || mode == "--crash-worker-reinitialise" ||
+            mode == "--crash-worker-reconfigure" || mode == "--crash-worker-no-filter")
         {
+            if (mode == "--crash-worker-reconfigure")
+            {
+                options.filePrefix = "logger-reinitialised";
+                Logger::configure_output(options);
+            }
+            if (mode == "--crash-worker-reinitialise")
+                crash_diagnostics::initialise(logger->output_path());
+            if (mode == "--crash-worker-reconfigure")
+                crash_diagnostics::initialise(logger->output_path());
             std::thread worker([] { throw std::runtime_error("worker crash fixture"); });
             worker.join();
         }
 #if defined(_WIN32)
         if (mode == "--crash-native") RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+        if (mode == "--crash-reentrant")
+        {
+            crash_diagnostics::writeDump = reentrant_dump;
+            RaiseException(EXCEPTION_ACCESS_VIOLATION, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+        }
 #endif
         return 2;
     }
     const auto path = logger->output_path();
+    bool sessionRan = false;
+    if (Logger::run_session("Unicode startup fixture", [&] {
+            sessionRan = true;
+            return 0;
+        }) != 0 || !sessionRan) return 8;
     std::vector<std::thread> workers;
     for (int worker = 0; worker < 4; ++worker)
         workers.emplace_back([logger, worker] {
@@ -57,6 +109,14 @@ int main(int argc, char* argv[])
     if (logger->output_path() != path) return 3;
     logger->set_vulkan_renderer_logging_mode(false);
     logger->vulkan(LogLevel::eError, "release renderer failure fixture");
+    try { throw std::runtime_error("caught exception fixture"); }
+    catch (const std::exception&) {}
+    auto caughtReport = path;
+    caughtReport += ".crash.txt";
+    {
+        std::ifstream emergency(caughtReport);
+        if (emergency.peek() != std::char_traits<char>::eof()) return 7;
+    }
     if (Logger::run_session("fixture", []() -> int {
         const LogOperation operation("throwing operation");
         throw std::runtime_error("session exception fixture");
@@ -99,7 +159,7 @@ int main(int argc, char* argv[])
     for (const auto& entry : std::filesystem::directory_iterator(options.directory))
     {
         passed &= entry.file_size() <= 5u * 1024u * 1024u;
-        if (entry.path().filename().string().find(".crash.txt") == std::string::npos) ++parts;
+        if (vibrance::path_utf8(entry.path().filename()).find(".crash.txt") == std::string::npos) ++parts;
     }
     passed &= parts == 5 && logger->output_path() == rotatedPath;
     std::ifstream newest(rotatedPath);

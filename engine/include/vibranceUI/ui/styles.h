@@ -1,4 +1,5 @@
 #pragma once
+#include <vibranceUI/core/path_utf8.h>
 
 #include <algorithm>
 #include <cctype>
@@ -460,7 +461,7 @@ inline std::vector<UiOptionChoice> ui_theme_choices_from_directories(
             }
             if (entry.is_regular_file(error) && entry.path().extension() == ".json")
             {
-                addCode(entry.path().stem().string());
+                addCode(vibrance::path_utf8(entry.path().stem()));
             }
         }
     }

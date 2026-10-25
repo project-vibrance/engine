@@ -98,12 +98,19 @@ public:
                       std::uint32_t width, std::uint32_t height);
 
 private:
+    friend struct LiquidGlassD3D11TestAccess;
+    struct BlurComparison
+    {
+        Microsoft::WRL::ComPtr<ID3D11Predicate> predicate;
+        bool pending = false;
+    };
     struct BlurHistory
     {
         D3D11_RECT snapshotBounds {};
         D3D11_RECT blurBounds {};
         float radius = -1.0f;
-        bool pending = false;
+        std::array<BlurComparison, 3> comparisons {};
+        std::size_t nextComparison = 0u;
         std::uint8_t changedStreak = 0u;
         std::uint8_t backoff = 0u;
     };
@@ -112,7 +119,6 @@ private:
         Microsoft::WRL::ComPtr<ID3D11Texture2D> snapshot, blurX, blurY;
         Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> snapshotView, blurXView, blurYView;
         Microsoft::WRL::ComPtr<ID3D11RenderTargetView> blurXTarget, blurYTarget;
-        Microsoft::WRL::ComPtr<ID3D11Predicate> backdropChanged;
         BlurHistory history;
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
         std::uint32_t width = 0u;
@@ -122,6 +128,57 @@ private:
                         std::uint32_t height);
     void swap_scratch(ScratchSurfaces& surfaces) noexcept;
     void trim_scratch_cache() noexcept;
+    BlurComparison* available_blur_comparison() noexcept
+    {
+        for (std::size_t offset = 0u; offset < blurHistory_.comparisons.size(); ++offset)
+        {
+            const auto index = (blurHistory_.nextComparison + offset) % blurHistory_.comparisons.size();
+            auto& comparison = blurHistory_.comparisons[index];
+            if (comparison.predicate && !comparison.pending)
+            {
+                blurHistory_.nextComparison = (index + 1u) % blurHistory_.comparisons.size();
+                return &comparison;
+            }
+        }
+        return nullptr;
+    }
+    template<typename Poll>
+    void collect_blur_comparisons(Poll poll)
+    {
+        // Poll in ring order, oldest first. CPU query availability must never
+        // force an unconditional blur while another exact predicate is free.
+        for (std::size_t offset = 0u; offset < blurHistory_.comparisons.size(); ++offset)
+        {
+            auto& comparison = blurHistory_.comparisons[
+                (blurHistory_.nextComparison + offset) % blurHistory_.comparisons.size()];
+            if (!comparison.pending) continue;
+            BOOL changed = FALSE;
+            const HRESULT result = poll(comparison.predicate.Get(), changed);
+            if (result == S_FALSE) continue;
+            comparison.pending = false;
+            if (FAILED(result))
+            {
+                // A failed query disables only this slot. Full filtering is
+                // still the exact fallback if the remaining pool is busy.
+                comparison.predicate.Reset();
+                continue;
+            }
+            if (changed)
+            {
+                ++blurChangeCount_;
+                if (++blurHistory_.changedStreak >= 2u)
+                {
+                    blurHistory_.backoff = 32u;
+                    blurHistory_.changedStreak = 0u;
+                }
+            }
+            else
+            {
+                ++blurReuseCount_;
+                blurHistory_.changedStreak = 0u;
+            }
+        }
+    }
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> fullscreenVertex_;
@@ -147,7 +204,6 @@ private:
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> blurYView_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> blurXTarget_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> blurYTarget_;
-    Microsoft::WRL::ComPtr<ID3D11Predicate> backdropChanged_;
     BlurHistory blurHistory_;
     DXGI_FORMAT scratchFormat_ = DXGI_FORMAT_UNKNOWN;
     std::uint32_t scratchWidth_ = 0;

@@ -1,3 +1,4 @@
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/core/file.h>
 #include <fstream>
@@ -21,7 +22,7 @@ std::vector<unsigned char> read_binary_file(const std::filesystem::path& path)
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file)
     {
-        Logger::fetch_logger()->warning("Could not open binary resource: " + path.string());
+        Logger::fetch_logger()->warning("Could not open binary resource: " + vibrance::path_utf8(path));
         return {};
     }
 
@@ -35,7 +36,7 @@ std::vector<unsigned char> read_binary_file(const std::filesystem::path& path)
     file.seekg(0, std::ios::beg);
     if (!file.read(reinterpret_cast<char*>(bytes.data()), size))
     {
-        Logger::fetch_logger()->error("Could not read complete binary resource: " + path.string());
+        Logger::fetch_logger()->error("Could not read complete binary resource: " + vibrance::path_utf8(path));
         return {};
     }
     return bytes;

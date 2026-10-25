@@ -14,6 +14,7 @@
 #include <exception>
 #include <vibranceUI/core/crash_diagnostics.h>
 #include <vibranceUI/core/runtime_log_storage.h>
+#include <vibranceUI/core/path_utf8.h>
 #if defined(_WIN32)
 #include <shlobj.h>
 #endif
@@ -178,7 +179,7 @@ void Logger::reopen_file()
         std::filesystem::create_directories(docsPath);
         logPath = docsPath / fileName;
         logFile.open(logPath, std::ios::out | std::ios::trunc);
-        if (!logFile) throw std::runtime_error("Could not open log file: " + logPath.string());
+        if (!logFile) throw std::runtime_error("Could not open log file: " + vibrance::path_utf8(logPath));
         crash_diagnostics::initialise(logPath);
         runtime_log_storage::prune(docsPath, logPath, prefix);
         nextRetentionCheck = std::chrono::steady_clock::now() + std::chrono::minutes(1);
@@ -768,10 +769,11 @@ suitable for use as a fragment shading rate attachment or shading rate image");
 
 int Logger::run_session(std::string component, const std::function<int()>& action)
 {
-    auto* log = fetch_logger();
-    log->info(component + ": SESSION START; log=" + log->output_path().string());
+    Logger* log = nullptr;
     try
     {
+        log = fetch_logger();
+        log->info(component + ": SESSION START; log=" + vibrance::path_utf8(log->output_path()));
         const int code = action();
         log->log(code == 0 ? LogLevel::eInfo : LogLevel::eError,
             component + ": SESSION END; exit code=" + std::to_string(code));
@@ -782,12 +784,12 @@ int Logger::run_session(std::string component, const std::function<int()>& actio
         crash_diagnostics::write("FATAL: unhandled application exception: ");
         crash_diagnostics::write(error.what());
         crash_diagnostics::write("\n");
-        log->fatal(component + ": UNHANDLED EXCEPTION: " + error.what());
+        if (log) log->fatal(component + ": UNHANDLED EXCEPTION: " + error.what());
     }
     catch (...)
     {
         crash_diagnostics::write("FATAL: unhandled non-standard application exception.\n");
-        log->fatal(component + ": UNHANDLED NON-STANDARD EXCEPTION");
+        if (log) log->fatal(component + ": UNHANDLED NON-STANDARD EXCEPTION");
     }
     return EXIT_FAILURE;
 }

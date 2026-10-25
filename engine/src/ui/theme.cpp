@@ -1,3 +1,4 @@
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/ui/styles.h>
 
 #include <vibranceUI/core/file.h>
@@ -571,7 +572,7 @@ bool ui_load_theme_file(const std::filesystem::path& path, UiTheme& theme)
     {
         if (Logger* logger = Logger::fetch_logger())
         {
-            logger->warning("Theme file missing or empty: " + path.string());
+            logger->warning("Theme file missing or empty: " + vibrance::path_utf8(path));
         }
         return false;
     }
@@ -582,7 +583,7 @@ bool ui_load_theme_file(const std::filesystem::path& path, UiTheme& theme)
     {
         if (Logger* logger = Logger::fetch_logger())
         {
-            logger->error("Failed to parse theme file: " + path.string());
+            logger->error("Failed to parse theme file: " + vibrance::path_utf8(path));
         }
         return false;
     }
@@ -590,7 +591,7 @@ bool ui_load_theme_file(const std::filesystem::path& path, UiTheme& theme)
     apply_theme_entries(entries, theme);
     if (Logger* logger = Logger::fetch_logger())
     {
-        logger->info("Loaded UI theme from " + path.string() + ".");
+        logger->info("Loaded UI theme from " + vibrance::path_utf8(path) + ".");
     }
     return true;
 }

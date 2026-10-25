@@ -337,7 +337,8 @@ bool LiquidGlassD3D11::resize_scratch(DXGI_FORMAT format,
     if (compare_)
     {
         const D3D11_QUERY_DESC predicate { D3D11_QUERY_OCCLUSION_PREDICATE, 0 };
-        device_->CreatePredicate(&predicate, next.backdropChanged.GetAddressOf());
+        for (auto& comparison : next.history.comparisons)
+            device_->CreatePredicate(&predicate, comparison.predicate.GetAddressOf());
     }
     ++scratchAllocationCount_;
     swap_scratch(next);
@@ -360,7 +361,6 @@ void LiquidGlassD3D11::swap_scratch(ScratchSurfaces& surfaces) noexcept
     blurYView_.Swap(surfaces.blurYView);
     blurXTarget_.Swap(surfaces.blurXTarget);
     blurYTarget_.Swap(surfaces.blurYTarget);
-    backdropChanged_.Swap(surfaces.backdropChanged);
     std::swap(blurHistory_, surfaces.history);
     std::swap(scratchFormat_, surfaces.format);
     std::swap(scratchWidth_, surfaces.width);
@@ -643,39 +643,22 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     // their original bounds rather than blurring the additional colour halo.
     const D3D11_RECT snapshotBounds = expand(expand(horizontalBounds, kernelReach, 0),
         reflectionExtra, reflectionExtra);
-    if (blurHistory_.pending)
-    {
-        BOOL changed = FALSE;
-        if (context->GetData(backdropChanged_.Get(), &changed, sizeof(changed),
-                D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK)
-        {
-            blurHistory_.pending = false;
-            if (changed)
-            {
-                ++blurChangeCount_;
-                if (++blurHistory_.changedStreak >= 2u)
-                {
-                    blurHistory_.backoff = 32u;
-                    blurHistory_.changedStreak = 0u;
-                }
-            }
-            else
-            {
-                ++blurReuseCount_;
-                blurHistory_.changedStreak = 0u;
-            }
-        }
-    }
+    collect_blur_comparisons([context](ID3D11Predicate* predicate, BOOL& changed) {
+        return context->GetData(predicate, &changed, sizeof(changed),
+            D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    });
     if (blurHistory_.backoff > 0u) --blurHistory_.backoff;
     const auto contains = [](const D3D11_RECT& outer, const D3D11_RECT& inner) {
         return outer.left <= inner.left && outer.top <= inner.top &&
             outer.right >= inner.right && outer.bottom >= inner.bottom;
     };
-    const bool compareBackdrop = compare_ && backdropChanged_ && blurRadius > 0.0f &&
-        !blurHistory_.pending && blurHistory_.backoff == 0u &&
+    BlurComparison* comparison = nullptr;
+    if (compare_ && blurRadius > 0.0f && blurHistory_.backoff == 0u &&
         blurHistory_.radius == blurRadius &&
         contains(blurHistory_.snapshotBounds, snapshotBounds) &&
-        contains(blurHistory_.blurBounds, samplingBounds);
+        contains(blurHistory_.blurBounds, samplingBounds))
+        comparison = available_blur_comparison();
+    const bool compareBackdrop = comparison != nullptr;
 
     ComPtr<ID3D11DeviceContext1> context1;
     if (FAILED(context->QueryInterface(IID_PPV_ARGS(&context1))))
@@ -718,11 +701,11 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         ID3D11ShaderResourceView* inputs[2] = { blurXView_.Get(), snapshotView_.Get() };
         context->PSSetShaderResources(0, 2, inputs);
         context->PSSetShader(compare_.Get(), nullptr, 0);
-        context->Begin(backdropChanged_.Get());
+        context->Begin(comparison->predicate.Get());
         context->Draw(3, 0);
-        context->End(backdropChanged_.Get());
+        context->End(comparison->predicate.Get());
         ++blurComparisonCount_;
-        blurHistory_.pending = true;
+        comparison->pending = true;
         ID3D11ShaderResourceView* empty[2] = { nullptr, nullptr };
         context->PSSetShaderResources(0, 2, empty);
         box.left = static_cast<UINT>(snapshotBounds.left);
@@ -747,7 +730,7 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         context->PSSetConstantBuffers(0, 1, blurParameters_.GetAddressOf());
         // A false predicate means every required source texel is identical.
         // GPU predication skips both passes without a CPU wait or readback.
-        if (compareBackdrop) context->SetPredication(backdropChanged_.Get(), FALSE);
+        if (compareBackdrop) context->SetPredication(comparison->predicate.Get(), FALSE);
         context->OMSetBlendState(nullptr, blendFactor, 0xffffffffu);
         ID3D11RenderTargetView* passTarget = blurXTarget_.Get();
         context->OMSetRenderTargets(1, &passTarget, nullptr);

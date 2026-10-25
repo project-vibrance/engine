@@ -1,3 +1,4 @@
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/localisation/localisation.h>
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/core/logger.h>
@@ -395,7 +396,7 @@ bool Localisation::load_directory(
     // Each JSON file is treated as one locale named after the file stem
     if (!std::filesystem::exists(directory))
     {
-        Logger::fetch_logger()->print("Localisation directory missing: " + directory.string());
+        Logger::fetch_logger()->print("Localisation directory missing: " + vibrance::path_utf8(directory));
         return false;
     }
 
@@ -418,7 +419,7 @@ bool Localisation::load_file(
 {
     if (locale.empty())
     {
-        locale = path.stem().string();
+        locale = vibrance::path_utf8(path.stem());
     }
     locale = normalise_locale(locale);
     if (locale.empty())
@@ -429,7 +430,7 @@ bool Localisation::load_file(
     const std::string source = read_text_file(path);
     if (source.empty())
     {
-        Logger::fetch_logger()->print("Failed to read localisation file: " + path.string());
+        Logger::fetch_logger()->print("Failed to read localisation file: " + vibrance::path_utf8(path));
         return false;
     }
 
@@ -437,7 +438,7 @@ bool Localisation::load_file(
     FlatJsonObjectParser parser(source);
     if (!parser.parse(parsed))
     {
-        Logger::fetch_logger()->print("Failed to parse localisation file: " + path.string());
+        Logger::fetch_logger()->print("Failed to parse localisation file: " + vibrance::path_utf8(path));
         return false;
     }
 
@@ -457,7 +458,7 @@ bool Localisation::load_file(
         std::string(mergeExisting ? "Merged localisation " : "Loaded localisation ") +
         locale +
         " from " +
-        path.string() +
+        vibrance::path_utf8(path) +
         ".");
     return true;
 }

@@ -1,5 +1,6 @@
 #include <vibranceUI/renderer/shader.h>
 #include <vibranceUI/core/logger.h>
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/factories/mesh_factory.h>
 #include "embedded_shaders.h"
 #include "pipeline_cache_store.h"
@@ -13,7 +14,7 @@ namespace
 {
     std::vector<uint32_t> load_embedded_spirv(const std::string& fileName)
     {
-        const std::string shaderName = std::filesystem::path(fileName).filename().string();
+        const std::string shaderName = vibrance::path_utf8(std::filesystem::path(fileName).filename());
         const std::span<const std::byte> bytes = vibrance_embedded_shader_spirv(shaderName);
         if (bytes.empty() || (bytes.size() % sizeof(uint32_t)) != 0u)
         {

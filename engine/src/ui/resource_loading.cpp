@@ -1,3 +1,4 @@
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/ui/resource_loading.h>
 
 #include <cstddef>
@@ -27,12 +28,12 @@ Media2DHandle ui_load_layered_media(
         {
             logger->warning(
                 "Using packaged fallback after an override failed to decode: " +
-                candidates[index].string());
+                vibrance::path_utf8(candidates[index]));
         }
-        if (logger) logger->debug("Resource loaded: " + candidates[index].string());
+        if (logger) logger->debug("Resource loaded: " + vibrance::path_utf8(candidates[index]));
         return handle;
     }
-    if (logger) logger->error("No resource candidate could be loaded: " + relativePath.string());
+    if (logger) logger->error("No resource candidate could be loaded: " + vibrance::path_utf8(relativePath));
     return {};
 }
 
@@ -56,11 +57,11 @@ AudioClipHandle ui_load_layered_audio(
         {
             logger->warning(
                 "Using packaged audio fallback after an override failed to decode: " +
-                candidates[index].string());
+                vibrance::path_utf8(candidates[index]));
         }
-        if (logger) logger->debug("Resource loaded: " + candidates[index].string());
+        if (logger) logger->debug("Resource loaded: " + vibrance::path_utf8(candidates[index]));
         return handle;
     }
-    if (logger) logger->error("No resource candidate could be loaded: " + relativePath.string());
+    if (logger) logger->error("No resource candidate could be loaded: " + vibrance::path_utf8(relativePath));
     return {};
 }

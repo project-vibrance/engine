@@ -1,3 +1,4 @@
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/glfw/panel_window.h>
 #include "cursor_macos.h"
 
@@ -881,7 +882,7 @@ void GlfwPanelWindow::load_template_font()
     }
     else if (!options.fontProfilePath.empty() && logger)
     {
-        logger->warning("Panel window could not load font profile: " + options.fontProfilePath.string());
+        logger->warning("Panel window could not load font profile: " + vibrance::path_utf8(options.fontProfilePath));
     }
     // Profiles may intentionally stay small, but literal UI text can contain a
     // script that is not part of the active locale. Add packaged and available
@@ -1511,6 +1512,11 @@ void GlfwPanelWindow::update_hover_cursor()
         return;
     }
 
+    update_hover_cursor_at(point);
+}
+
+void GlfwPanelWindow::update_hover_cursor_at(glm::vec2 point)
+{
     Renderer2DScene& scene = engine->renderer2d_scene();
 #if defined(__APPLE__)
     if (glfw_left_mouse_pressed(window))
@@ -1555,11 +1561,10 @@ void GlfwPanelWindow::update_hover_cursor()
             traffic_light_enabled(light) ? UiCursorKind::ePointer : UiCursorKind::eUnavailable);
         return;
     }
-    set_hovered_traffic_light(TrafficLightKind::eNone);
-
     const uint32_t edges = resize_edges_at(point);
     if (!blocksWindowAction && edges != eResizeNone)
     {
+        set_hovered_traffic_light(TrafficLightKind::eNone);
         ui_update_input_hover(
             engine->renderer2d_scene(),
             engine->renderer2d_font_atlas(),
@@ -1571,6 +1576,7 @@ void GlfwPanelWindow::update_hover_cursor()
     }
     if (!blocksWindowAction && title_hit_test(point))
     {
+        set_hovered_traffic_light(TrafficLightKind::eNone);
         ui_update_input_hover(
             engine->renderer2d_scene(),
             engine->renderer2d_font_atlas(),
@@ -1596,10 +1602,16 @@ void GlfwPanelWindow::update_hover_cursor()
             point,
             hit);
     }
+    // A traffic light is itself an input owner, so it normally reaches this
+    // path rather than the native chrome fallback above. Resolve its final
+    // owner before publishing visibility; clearing then restoring the group
+    // dirtied every icon on every tick while the pointer remained stationary.
+    TrafficLightKind hoveredLight = TrafficLightKind::eNone;
     for (std::size_t index = 0; index < trafficLightEntities.size(); ++index)
         if (inputState.hoveredButton == trafficLightEntities[index] && inputState.hoveredButton != entt::null)
-            set_hovered_traffic_light(index == 0 ? TrafficLightKind::eClose :
-                index == 1 ? TrafficLightKind::eMinimise : TrafficLightKind::eMaximise);
+            hoveredLight = index == 0 ? TrafficLightKind::eClose :
+                index == 1 ? TrafficLightKind::eMinimise : TrafficLightKind::eMaximise;
+    set_hovered_traffic_light(hoveredLight);
     if (hover.cursor != UiCursorKind::eDefault)
     {
         set_glfw_cursor_for_kind(window, cursors, hover.cursor);

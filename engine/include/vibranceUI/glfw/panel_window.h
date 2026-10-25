@@ -217,6 +217,7 @@ private:
     void handle_char(unsigned int codepoint);
     void update_window_action(bool finishMove = false);
     void update_hover_cursor();
+    void update_hover_cursor_at(glm::vec2 point);
 
     bool cursor_framebuffer_point(glm::vec2& point) const;
     bool cursor_screen_point(glm::vec2& point) const;

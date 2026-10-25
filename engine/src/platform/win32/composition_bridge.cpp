@@ -10,6 +10,8 @@
 #include "composition_region_effects.h"
 #include "composition_present_retry.h"
 #include "composition_upload.h"
+#include "composition_damage.h"
+#include "composition_copy_diagnostics.h"
 #include "liquid_glass_d3d11.h"
 #include "liquid_glass_dwm_protocol.h"
 #include "liquid_glass_dwm_security.h"
@@ -766,7 +768,7 @@ public:
         backBuffers_.clear();
         backBufferInitialised_.clear();
         backBufferContentRects_.clear();
-        backBufferPendingDamageRects_.clear();
+        presentDamage_.reset();
         swapchain3_ = nullptr;
         swapchain_ = nullptr;
         if (frameLatencyWaitableObject_)
@@ -966,6 +968,7 @@ public:
             static_cast<UINT>(destinationRowPitch),
             0u);
         cpuUploadDamage_.commit(index);
+        copyDiagnostics_.uploaded(static_cast<std::uint64_t>(damage.width) * damage.height * 4u);
         return true;
     }
 
@@ -1026,7 +1029,7 @@ public:
         if (backBufferIndex >= backBuffers_.size() ||
             backBufferIndex >= backBufferInitialised_.size() ||
             backBufferIndex >= backBufferContentRects_.size() ||
-            backBufferIndex >= backBufferPendingDamageRects_.size())
+            backBufferIndex >= VIBRANCE_COMPOSITION_MAX_BUFFERS)
         {
             lastCompositionError =
                 "Composition swapchain returned an invalid back-buffer index";
@@ -1093,13 +1096,16 @@ public:
             };
         };
 
+        RECT opticalDamageRect {};
         for (const auto& binding : liquidRegionBindings_)
         {
             if (!binding.view || !binding.view->active) continue;
             // The native shader samples beyond the UI's changed pixels.
             // Announce that entire source footprint to DWM so retained UI or
             // an earlier lens cannot be sampled as the next frame's backdrop.
-            // Copy the same area into this rotating back buffer before Present.
+            // Keep this invalidation separate from sharp UI copy damage. DWM
+            // paints the optical result into its own target; app-owned source
+            // textures retain the sharp pixels outside their actual UI changes.
             const auto& lens = *binding.view;
             const float reach = std::max({ lens.blurRadius * 5.0f,
                 lens.refractionStrength + lens.dispersionStrength + 2.0f,
@@ -1115,14 +1121,17 @@ public:
                 static_cast<LONG>(std::min<std::int64_t>(height_,
                     static_cast<std::int64_t>(lens.y) + lens.height + margin))
             };
-            damageRect = union_rect(damageRect, opticalDamage);
+            opticalDamageRect = union_rect(opticalDamageRect, opticalDamage);
         }
 
-        for (RECT& pendingDamage : backBufferPendingDamageRects_)
-        {
-            pendingDamage = union_rect(pendingDamage, damageRect);
-        }
-        RECT copyRect = backBufferPendingDamageRects_[backBufferIndex];
+        const auto trackedDamage = presentDamage_.prepare(backBufferIndex, width_, height_,
+            {damageRect.left, damageRect.top, damageRect.right, damageRect.bottom},
+            {opticalDamageRect.left, opticalDamageRect.top,
+                opticalDamageRect.right, opticalDamageRect.bottom});
+        RECT copyRect {trackedDamage.copy.left, trackedDamage.copy.top,
+            trackedDamage.copy.right, trackedDamage.copy.bottom};
+        const RECT presentRect {trackedDamage.present.left, trackedDamage.present.top,
+            trackedDamage.present.right, trackedDamage.present.bottom};
         if (!cpuUpload_ &&
             (index >= sharedMutexes_.size() || !sharedMutexes_[index]))
         {
@@ -1180,6 +1189,9 @@ public:
                 0u,
                 &sourceBox);
         }
+        if (has_area(copyRect))
+            copyDiagnostics_.copied(static_cast<std::uint64_t>(copyRect.right - copyRect.left) *
+                (copyRect.bottom - copyRect.top) * 4u);
         backBufferContentRects_[backBufferIndex] = contentRect;
         context_->End(queries_[index].get());
         queryPending_[index] = true;
@@ -1196,7 +1208,7 @@ public:
             }
         }
         pendingPresentBackBuffer_ = backBufferIndex;
-        pendingPresentDamage_ = copyRect;
+        pendingPresentDamage_ = union_rect(copyRect, presentRect);
         return VIBRANCE_COMPOSITION_PRESENTED;
     }
 
@@ -1417,7 +1429,8 @@ private:
         frameLatencyReady_ = false;
         if (SUCCEEDED(result))
         {
-            backBufferPendingDamageRects_[pendingPresentBackBuffer_] = RECT {};
+            presentDamage_.commit(pendingPresentBackBuffer_);
+            copyDiagnostics_.presented(window_);
             return VIBRANCE_COMPOSITION_PRESENTED;
         }
         lastCompositionError =
@@ -2330,7 +2343,7 @@ private:
         backBuffers_.resize(swapchainDescription.BufferCount);
         backBufferInitialised_.assign(swapchainDescription.BufferCount, false);
         backBufferContentRects_.assign(swapchainDescription.BufferCount, RECT {});
-        backBufferPendingDamageRects_.assign(swapchainDescription.BufferCount, RECT {});
+        presentDamage_.reset();
         for (std::uint32_t index = 0u;
             index < swapchainDescription.BufferCount; ++index)
         {
@@ -3161,7 +3174,8 @@ private:
     std::vector<winrt::com_ptr<ID3D11Texture2D>> backBuffers_;
     std::vector<bool> backBufferInitialised_;
     std::vector<RECT> backBufferContentRects_;
-    std::vector<RECT> backBufferPendingDamageRects_;
+    vibrance::win32::CompositionPresentDamageHistory presentDamage_;
+    vibrance::win32::CompositionCopyDiagnostics copyDiagnostics_;
     vibrance::win32::CompositionPresentRetry presentRetry_;
     vibrance::win32::CompositionPresentStall presentStall_;
     std::uint32_t pendingPresentBackBuffer_ = 0u;

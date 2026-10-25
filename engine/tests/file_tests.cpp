@@ -1,5 +1,6 @@
 #include <vibranceUI/core/file.h>
 #include <vibranceUI/core/process.h>
+#include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/ui/resources.h>
 #include <atomic>
 #include <chrono>
@@ -48,7 +49,7 @@ int main()
     expect(saved == documents[0] || saved == documents[1] || saved == documents[2],
         "a complete concurrent document wins");
     for (const auto& entry : std::filesystem::recursive_directory_iterator(directory))
-        expect(entry.path().filename().string().find(".tmp-") == std::string::npos,
+        expect(vibrance::path_utf8(entry.path().filename()).find(".tmp-") == std::string::npos,
             "temporary files and directories are removed");
 
     UiResourceDirectories resources;

@@ -243,6 +243,8 @@ if(WIN32 AND VIBRANCE_ENABLE_WIN32_COMPOSITION)
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_region_effects.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_present_retry.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_upload.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_damage.h"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/composition_copy_diagnostics.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_layout.h"
                 "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/win32/liquid_glass_dwm_windows10_session.h"
                 "${VIBRANCE_LIQUID_SHADER_ABI_HEADER}"
