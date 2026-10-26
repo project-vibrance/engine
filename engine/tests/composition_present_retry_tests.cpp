@@ -1,5 +1,6 @@
 #include "../src/platform/win32/composition_present_retry.h"
 #include "../src/platform/win32/composition_damage.h"
+#include "../src/renderer/vulkan/composition_frame_delivery.h"
 
 #include <array>
 #include <iostream>
@@ -105,6 +106,41 @@ int main()
     check(retry.deliver(0u, prepare, [] { return VIBRANCE_COMPOSITION_PRESENTED; }) ==
             VIBRANCE_COMPOSITION_PRESENTED && copies == 4u,
         "A deferred preparation must be attempted again before the next present");
+
+    // One completed frame can be retried after another pending frame has
+    // published a different native mask. Its pixels remain uploaded, but its
+    // own glass/cap state must be restored before the next Present attempt.
+    std::vector<bool> uploaded(2u, false);
+    std::array<unsigned, 2u> frameUploads {}, framePublishes {};
+    unsigned publishedFrame = 99u;
+    const auto deliverFrame = [&](unsigned frame, std::uint32_t result) {
+        return present_completed_composition_frame(uploaded[frame],
+            [&] { ++frameUploads[frame]; return true; },
+            [&] { ++framePublishes[frame]; publishedFrame = frame; },
+            [&] {
+                check(publishedFrame == frame,
+                    "Every completed-frame Present must use that frame's native mask and cap state");
+                return result;
+            });
+    };
+    check(deliverFrame(0u, VIBRANCE_COMPOSITION_PRESENT_DEFERRED) ==
+        VIBRANCE_COMPOSITION_PRESENT_DEFERRED,
+        "A completed frame must remain uploaded while its Present is deferred");
+    check(deliverFrame(1u, VIBRANCE_COMPOSITION_PRESENT_DEFERRED) ==
+        VIBRANCE_COMPOSITION_PRESENT_DEFERRED && publishedFrame == 1u,
+        "Another pending frame may publish a different native mask between retries");
+    check(deliverFrame(0u, VIBRANCE_COMPOSITION_PRESENTED) ==
+        VIBRANCE_COMPOSITION_PRESENTED && publishedFrame == 0u &&
+        frameUploads == std::array<unsigned, 2u>{1u, 1u} &&
+        framePublishes == std::array<unsigned, 2u>{2u, 1u},
+        "Retrying an uploaded frame must restore its own glass without another pixel upload");
+    bool failedUpload = false;
+    unsigned failedPublishCalls = 0u, failedPresentCalls = 0u;
+    check(!present_completed_composition_frame(failedUpload,
+        [] { return false; }, [&] { ++failedPublishCalls; },
+        [&] { ++failedPresentCalls; return VIBRANCE_COMPOSITION_PRESENTED; }) &&
+        !failedUpload && failedPublishCalls == 0u && failedPresentCalls == 0u,
+        "A failed upload must not replace native regions or present unprepared pixels");
 
     CompositionPresentDamageHistory history;
     const CompositionDamageRect full {0, 0, 64, 32};

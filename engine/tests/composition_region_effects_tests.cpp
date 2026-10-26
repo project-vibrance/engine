@@ -1,6 +1,8 @@
 #include "../src/platform/win32/composition_region_effects.h"
 
 #include <iostream>
+#include <cmath>
+#include <limits>
 
 int main()
 {
@@ -9,6 +11,46 @@ int main()
     const auto check = [&](bool condition, const char* message) {
         if (!condition) { std::cerr << message << '\n'; passed = false; }
     };
+    check(liquid_glass_cap_fully_opaque(true, 1.0f, 1.0f) &&
+        liquid_glass_cap_fully_opaque(true, 2.0f, 3.0f),
+        "A painted cap is fully opaque when both gradient endpoints clamp to one");
+    const float translucent = std::nextafter(1.0f, 0.0f);
+    check(!liquid_glass_cap_fully_opaque(false, 1.0f, 1.0f) &&
+        !liquid_glass_cap_fully_opaque(true, translucent, 1.0f) &&
+        !liquid_glass_cap_fully_opaque(true, 1.0f, translucent) &&
+        !liquid_glass_cap_fully_opaque(true, std::numeric_limits<float>::quiet_NaN(), 1.0f),
+        "Absent or even slightly translucent cap paint must retain its optical material");
+    VibranceCompositionRegion rim {};
+    rim.liquidRim = 0.6f;
+    rim.opacity = 1.0f;
+    check(composition_liquid_rim_clock_required(rim),
+        "A visible animated glass rim must retain its native clock");
+    rim.paintCapGradient = 0xDDEEFF01u;
+    rim.capGradient[0] = rim.capGradient[1] = 1.0f;
+    check(!composition_liquid_rim_clock_required(rim),
+        "Fully opaque cap paint must stop the invisible native rim clock");
+    rim.opacity = 0.35f;
+    check(!composition_liquid_rim_clock_required(rim),
+        "Fading a solid shell must not expose optical material or restart its rim clock");
+    rim.capGradient[1] = translucent;
+    check(composition_liquid_rim_clock_required(rim),
+        "A cap becoming translucent during expansion must restart visible rim animation");
+    rim.flags |= 2u;
+    check(!composition_liquid_rim_clock_required(rim),
+        "A static rim must remain still on a translucent cap");
+    rim.flags = 0u;
+    rim.opacity = 0.0f;
+    check(!composition_liquid_rim_clock_required(rim),
+        "An invisible shell must not animate its rim");
+    rim.opacity = 1.0f;
+    rim.liquidRim = 0.0f;
+    check(!composition_liquid_rim_clock_required(rim),
+        "A disabled rim must not schedule its native clock");
+    rim.liquidRim = 0.6f;
+    rim.paintCapGradient &= ~1u;
+    rim.capGradient[1] = 1.0f;
+    check(composition_liquid_rim_clock_required(rim),
+        "Packed cap colour without the paint flag must not suppress a visible rim");
     VibranceCompositionRegion notification {};
     notification.material = 2u;
     notification.liquidBackend = 2u;

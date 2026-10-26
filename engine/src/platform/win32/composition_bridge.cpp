@@ -2878,7 +2878,7 @@ private:
         const bool rawDependency = vibrance::win32::liquid_dwm_uses_raw_backdrop_dependency(windows_build_number());
         auto clockVisual = rawDependency ? state.rawBackdropVisual : state.materialVisual;
         const bool animate = state.shaderOnly && clockVisual &&
-            region.liquidRim > 0.0f && (region.flags & 2u) == 0u && region.opacity > 0.001f;
+            vibrance::win32::composition_liquid_rim_clock_required(region);
         if (animate == state.rimClockRunning) return;
         if (animate)
         {

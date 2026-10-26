@@ -18,6 +18,20 @@
 
 using Microsoft::WRL::ComPtr;
 
+namespace vibrance::win32
+{
+struct LiquidGlassD3D11TestAccess
+{
+    static bool opaque_sampling_suppressed(const LiquidGlassD3D11& renderer,
+        const LiquidGlassRenderRegion& region)
+    {
+        return renderer.blurHistory_.radius < 0.0f &&
+            renderer.scratchWidth_ <= region.width + 8u &&
+            renderer.scratchHeight_ <= region.height + 8u;
+    }
+};
+}
+
 namespace
 {
 bool temporal_reuse_regression(ID3D11Device* device, ID3D11DeviceContext* context,
@@ -1207,6 +1221,61 @@ int wmain(int argc, wchar_t** argv)
     }
     std::cout << "Off-screen union crop failures: " << unionCropFailures << '\n';
     if (unionCropFailures != 0u) return 47;
+
+    // Solid compact shells still use the native contour union. Their cap
+    // replaces the optical result, even while the complete surface fades.
+    // Verify exact pixels and that preparation retains no Gaussian history,
+    // no new comparison draw, and only the small snapshot guard.
+    for (const bool excluded : { false, true })
+    for (const float opacity : { 1.0f, 0.35f })
+    {
+        auto opaque = unionRegion;
+        opaque.paintCapGradient = true;
+        opaque.capGradient = { 1.0f, 1.0f, 0.2f, 0.8f };
+        opaque.capColour = { 0.2f, 0.4f, 0.6f };
+        opaque.opacity = opacity;
+        opaque.blurRadius = 30.0f;
+        opaque.refractionStrength = 36.0f;
+        opaque.dispersionStrength = 6.0f;
+        opaque.rimStrength = 1.0f;
+        opaque.hasExclusion = excluded;
+        opaque.exclusion = opaque.contours[0];
+        opaque.exclusion.x = 48.0f;
+        opaque.exclusion.y = 24.0f;
+        opaque.exclusion.width = 72.0f;
+        opaque.exclusion.height = 40.0f;
+        opaque.viewportRect = { 0.0f, 0.0f, 284.0f, 96.0f };
+        opaque.viewportFade = { 12.0f, 15.0f, 0.3f, 1.0f };
+        const auto comparisons = lens.blur_comparison_count();
+        if (!renderSample(stripedBackdrop.Get(), opaque) ||
+            lens.blur_comparison_count() != comparisons ||
+            !vibrance::win32::LiquidGlassD3D11TestAccess::opaque_sampling_suppressed(lens, opaque))
+            return 84;
+        const auto opaquePixels = samplePixels;
+        auto noOptics = opaque;
+        noOptics.blurRadius = noOptics.refractionStrength =
+            noOptics.dispersionStrength = noOptics.rimStrength = 0.0f;
+        if (!renderSample(whiteBackdrop.Get(), noOptics) || samplePixels != opaquePixels)
+            return 85;
+
+        // Reopening an expanded/translucent shell must immediately recover
+        // filtering and sample the newly changed live source.
+        auto translucent = opaque;
+        translucent.capGradient[1] = 0.5f;
+        if (!renderSample(stripedBackdrop.Get(), translucent) ||
+            vibrance::win32::LiquidGlassD3D11TestAccess::opaque_sampling_suppressed(lens, translucent))
+            return 86;
+        const auto stripedPixels = samplePixels;
+        if (!renderSample(whiteBackdrop.Get(), translucent) || samplePixels == stripedPixels)
+            return 87;
+        if (!renderSample(stripedBackdrop.Get(), opaque) || samplePixels != opaquePixels ||
+            !vibrance::win32::LiquidGlassD3D11TestAccess::opaque_sampling_suppressed(lens, opaque))
+            return 88;
+        auto invalid = opaque;
+        invalid.capGradient[0] = std::numeric_limits<float>::quiet_NaN();
+        if (lens.render(context.Get(), stripedBackdrop.Get(), target.Get(), invalid)) return 89;
+    }
+    std::cout << "Opaque union optical preparation, coverage and reopen transitions: pass\n";
 
     // Exclusion follows the front card's rounded silhouette, not its rectangle.
     // Its centre remains untouched while pixels beyond its curved corner fill.

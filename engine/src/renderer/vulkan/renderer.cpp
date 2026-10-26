@@ -14,6 +14,7 @@
 #include "pipeline_cache.h"
 #include "media_pipeline_policy.h"
 #include "composition_readback.h"
+#include "composition_frame_delivery.h"
 #include "../common/media_prepared_upload.h"
 #if defined(_WIN32)
 #include "../../platform/win32/composition_bridge_abi.h"
@@ -2511,35 +2512,36 @@ void Engine::Impl::publish_completed_composition_frames()
 			continue;
 		}
 
-		if (!compositionFrameUploaded[pending])
+		const auto presentResult = vibrance::win32::present_completed_composition_frame(
+			compositionFrameUploaded[pending],
+			[&] {
+				collect_gpu_render_timings(frames[pending]);
+				return compositionPresenter.gpu_interop() ||
+					upload_software_composition(compositionFrameBufferIndices[pending],
+						frames[pending].compositionReadbackRect);
+			},
+			[&] {
+				apply_system_backdrop_regions(frames[pending].compositionBackdropRegions);
+			},
+			[&] {
+				const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::ePresent);
+				return compositionPresenter.present(
+					compositionFrameBufferIndices[pending],
+					false,
+					frames[pending].compositionContentRect,
+					frames[pending].compositionDamageRect);
+			});
+		if (!presentResult)
 		{
-			collect_gpu_render_timings(frames[pending]);
-			if (!compositionPresenter.gpu_interop() &&
-                !upload_software_composition(compositionFrameBufferIndices[pending],
-                    frames[pending].compositionReadbackRect))
-			{
-				compositionFramePending[pending] = false;
-				compositionRecoveryPending = true;
-				continue;
-			}
-			apply_system_backdrop_regions(
-				frames[pending].compositionBackdropRegions);
-			compositionFrameUploaded[pending] = true;
+			compositionFramePending[pending] = false;
+			compositionRecoveryPending = true;
+			continue;
 		}
-		CompositionPresenter::PresentResult presentResult;
-		{
-			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::ePresent);
-			presentResult = compositionPresenter.present(
-				compositionFrameBufferIndices[pending],
-				false,
-				frames[pending].compositionContentRect,
-				frames[pending].compositionDamageRect);
-		}
-		if (presentResult == CompositionPresenter::PresentResult::eDeferred)
+		if (*presentResult == CompositionPresenter::PresentResult::eDeferred)
 		{
 			continue;
 		}
-		if (presentResult == CompositionPresenter::PresentResult::eFailed)
+		if (*presentResult == CompositionPresenter::PresentResult::eFailed)
 		{
 			logger->warning(
 				"Windows Composition could not present a completed Vulkan frame.");

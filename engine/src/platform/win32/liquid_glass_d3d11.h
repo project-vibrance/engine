@@ -72,6 +72,8 @@ static_assert(sizeof(LiquidGlassRenderRegion::Contour) == 56u);
 
 // GPU-only DX11 pass. It copies just the island and its sampling margin from
 // the compositor target, blurs that copy twice, then refracts the sharp copy.
+// Fully opaque cap paint retains only the small snapshot needed by the common
+// draw path and skips invisible optical sampling margins and Gaussian work.
 // The caller owns and restores its D3D11 context state around render().
 class LiquidGlassD3D11 final
 {

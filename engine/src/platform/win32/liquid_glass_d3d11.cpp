@@ -1,4 +1,5 @@
 #include "liquid_glass_d3d11.h"
+#include "liquid_glass_cap_policy.h"
 
 #if defined(_WIN32)
 
@@ -577,9 +578,18 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         return false;
     }
 
-    const float reach = std::max({ region.blurRadius * 5.0f,
-        region.refractionStrength + region.dispersionStrength + 2.0f,
-        region.rimStrength > 0.0f ? std::min(static_cast<float>(std::min(region.width, region.height)) * 1.6f, 120.0f) + 2.0f : 0.0f,
+    // Fully opaque cap paint never samples the optical material. Keep the
+    // existing final draw and contour coverage, but avoid its invisible blur,
+    // comparison and reflection/refraction sampling neighbourhood.
+    const bool opaqueCap = liquid_glass_cap_fully_opaque(region.paintCapGradient,
+        region.capGradient[0], region.capGradient[1]);
+    const float blurRadius = opaqueCap ? 0.0f : std::clamp(region.blurRadius, 0.0f, 30.0f);
+    const float refractionStrength = opaqueCap ? 0.0f : region.refractionStrength;
+    const float dispersionStrength = opaqueCap ? 0.0f : region.dispersionStrength;
+    const float rimStrength = opaqueCap ? 0.0f : region.rimStrength;
+    const float reach = std::max({ (opaqueCap ? 0.0f : region.blurRadius) * 5.0f,
+        refractionStrength + dispersionStrength + 2.0f,
+        rimStrength > 0.0f ? std::min(static_cast<float>(std::min(region.width, region.height)) * 1.6f, 120.0f) + 2.0f : 0.0f,
         4.0f });
     if (!std::isfinite(reach) || reach > 2048.0f)
     {
@@ -600,7 +610,6 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         return false;
     }
 
-    const float blurRadius = std::clamp(region.blurRadius, 0.0f, 30.0f);
     if (blurRadius > 0.0f && cachedBlurRadius_ != blurRadius)
     {
         prepare_blur_kernel(blurRadius, blurKernel_);
@@ -628,15 +637,15 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     // One pixel for bilinear support, plus one for UV rounding. Clamp the
     // margin before converting it, including for extreme finite parameters.
     const auto displacement = static_cast<LONG>(std::min(static_cast<double>(std::max(width, height)),
-        std::ceil(static_cast<double>(std::max(region.refractionStrength, 0.0f)) +
-            std::max(region.dispersionStrength, 0.0f) + 2.0)));
+        std::ceil(static_cast<double>(std::max(refractionStrength, 0.0f)) +
+            std::max(dispersionStrength, 0.0f) + 2.0)));
     samplingBounds = expand(samplingBounds, displacement, displacement);
     const LONG kernelReach = blurRadius > 0.0f && blurKernel_.pairCount > 0u ?
         static_cast<LONG>(std::ceil(blurKernel_.pairs[blurKernel_.pairCount - 1u][0])) + 1 : 0;
     // The vertical pass needs horizontal results above/below its output;
     // those horizontal results in turn need sharp pixels on either side.
     const D3D11_RECT horizontalBounds = expand(samplingBounds, 0, kernelReach);
-    const LONG reflectionReach = region.rimStrength > 0.0f ?
+    const LONG reflectionReach = rimStrength > 0.0f ?
         static_cast<LONG>(std::ceil(std::min(static_cast<float>(std::min(region.width, region.height)) * 1.6f, 120.0f))) + 2 : 0;
     const LONG reflectionExtra = std::max<LONG>(0, reflectionReach - displacement - kernelReach);
     // Reflections read only the sharp snapshot. Keep the Gaussian passes at

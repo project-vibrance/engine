@@ -1,6 +1,7 @@
 #pragma once
 
 #include "composition_bridge_abi.h"
+#include "liquid_glass_cap_policy.h"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,15 @@
 
 namespace vibrance::win32
 {
+inline bool composition_liquid_rim_clock_required(
+    const VibranceCompositionRegion& region) noexcept
+{
+    return region.liquidRim > 0.0f && (region.flags & 2u) == 0u &&
+        region.opacity > 0.001f && !liquid_glass_cap_fully_opaque(
+            (region.paintCapGradient & 1u) != 0u,
+            region.capGradient[0], region.capGradient[1]);
+}
+
 inline std::array<float, 4> composition_fallback_tint(
     const VibranceCompositionRegion& region) noexcept
 {
