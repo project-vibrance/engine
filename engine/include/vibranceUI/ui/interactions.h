@@ -1450,6 +1450,22 @@ inline void ui_handle_drop(
     scene.activate_dynamic(dropOwner, 0.5f);
 }
 
+inline void ui_update_hover_regions(Renderer2DScene& scene, bool hasPoint,
+    glm::vec2 point, double currentTimeSeconds)
+{
+    auto& registry = scene.registry();
+    for (const auto entity : registry.view<UiHoverRegionComponent>())
+    {
+        auto& region = registry.get<UiHoverRegionComponent>(entity);
+        const bool hovered = region.enabled && hasPoint &&
+            ui_entity_visible_by_hierarchy(registry, entity) &&
+            ui_point_in_rect(ui_entity_framebuffer_rect(registry, entity), point);
+        if (hovered == region.hovered) continue;
+        region.hovered = hovered;
+        if (region.onHoverChanged) region.onHoverChanged(hovered, currentTimeSeconds);
+    }
+}
+
 inline UiHoverResult ui_update_input_hover_from_hit(
     Renderer2DScene& scene,
     const Renderer2DFontAtlas& fontAtlas,

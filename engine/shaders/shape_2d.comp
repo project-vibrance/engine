@@ -13,6 +13,7 @@ const uint STYLE_SHAPE_MASK_SAMPLE_COVERAGE = 1u << 14;
 const uint STYLE_SHAPE_MASK = 1u << 15;
 const uint STYLE_SHAPE_CUTOUT = 1u << 29;
 const uint STYLE_LIQUID_RIM = 1u << 30;
+const uint STYLE_LIQUID_OUTER_STROKE = 1u << 27;
 const uint STYLE_MASKED_LIQUID_SHAPE_PARAMS = 1u << 31;
 const uint STYLE_CORNER_RADII = 1u << 16;
 
@@ -313,23 +314,24 @@ float sd_circular_progress(vec2 pixel, vec4 rect, vec4 arcParams) {
     return min(length(p - startPoint), length(p - endPoint)) - halfStroke;
 }
 
-// Polynomial smooth union of the main island's right cap and the detached
-// island's circular shell. The source cap continues left inside the main
-// island, so no separate source circle can appear during separation.
+// Symmetric surface-tension neck for any pair of rounded surfaces. Distance
+// narrows the neck, then releases two round caps without a lingering thread.
 float sd_liquid_bridge(vec2 p, vec2 halfSize, float amount) {
     float radius = max(halfSize.y, 0.5);
     float centerOffset = max(halfSize.x - radius, 0.0);
     vec2 source = p - vec2(-centerOffset, 0.0);
-    float left = length(vec2(max(source.x, 0.0), source.y)) - radius;
+    float left = length(source) - radius;
     float right = length(p - vec2(centerOffset, 0.0)) - radius;
     float centerDistance = centerOffset * 2.0;
     float surfaceGap = max(centerDistance - radius * 2.0, 0.0);
     float easedAmount = smoothstep(0.0, 1.0, clamp(amount, 0.0, 1.0));
     float separationFactor = smoothstep(0.0, radius * 0.9, centerDistance);
-    float smoothing = mix(
-        surfaceGap * 2.0 + 0.5,
-        surfaceGap * 2.0 + radius * 0.95,
-        easedAmount) * separationFactor;
+    float proximity = 1.0 - smoothstep(0.0, radius * 0.9, surfaceGap);
+    // Restrict tension to the facing edges: the outer caps stay round and
+    // the contour cannot bulge outside its declared vertical bounds.
+    float neckBand = 1.0 - smoothstep(radius * 0.65, radius, abs(p.y));
+    float smoothing = radius * 1.6 * easedAmount * separationFactor *
+        proximity * neckBand;
     if (smoothing <= 0.001) {
         return min(left, right);
     }
@@ -561,6 +563,26 @@ vec4 shade_shape_sample(vec2 samplePoint) {
         bodyCoverage = mix(fillAlpha, bodyCoverage, glassCoverage);
     }
     vec4 src = compose_shape_layers(body, bodyCoverage, outline, outlineAlpha);
+#if !defined(VIBRANCE_METAL)
+    if ((pc.data.y & STYLE_LIQUID_OUTER_STROKE) != 0u && sdf > -2.0 && sdf < 4.0 && body.a < 1.0) {
+        // A fixed framebuffer hairline lies outside the fill. The optical rim
+        // stays at its authored position and colour, including at low scales.
+        vec2 gradient = vec2(
+            shape_sdf(localPixel + vec2(0.5, 0.0)) - shape_sdf(localPixel - vec2(0.5, 0.0)),
+            shape_sdf(localPixel + vec2(0.0, 0.5)) - shape_sdf(localPixel - vec2(0.0, 0.5)));
+        float edgeDistance = sdf / max(length(gradient), 0.25);
+        float outerCoverage = smoothstep(0.5, -0.5, edgeDistance - 1.0);
+        float innerCoverage = smoothstep(0.5, -0.5, edgeDistance);
+        float luminance = dot(body.rgb, vec3(0.2126, 0.7152, 0.0722));
+        if (pc.effect0.y <= 0.001) {
+            luminance = (pc.data.y & STYLE_MASKED_LIQUID_SHAPE_PARAMS) != 0u ?
+                float((pc.data.z >> 12u) & 255u) / 255.0 : pc.color2.a;
+        }
+        float contrast = mix(0.20, 0.08, smoothstep(0.12, 0.82, luminance));
+        float stroke = max(outerCoverage - innerCoverage, 0.0) * contrast * (1.0 - body.a);
+        src = blend_over(vec4(0.0, 0.0, 0.0, stroke), src);
+    }
+#endif
     src.a *= maskAlpha * pc.effect0.w;
     return src.a > 0.001 ? src : vec4(0.0);
 }
@@ -717,6 +739,9 @@ void main() {
     bool effect1Reserved = (pc.data.y & (STYLE_TRANSFORM_2_5D | STYLE_SHAPE_MASK)) != 0u;
     vec4 shapeParams = own_shape_parameters();
     float boundsPad = pc.effect0.y + pc.effect0.z + primitive_bounds_padding(shapeParams);
+#if !defined(VIBRANCE_METAL)
+    if ((pc.data.y & STYLE_LIQUID_OUTER_STROKE) != 0u) boundsPad += 1.0;
+#endif
     if (!transformed &&
         (p.x < pc.rect.x - boundsPad ||
         p.y < pc.rect.y - boundsPad ||

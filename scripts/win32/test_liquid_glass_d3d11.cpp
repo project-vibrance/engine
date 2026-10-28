@@ -1,4 +1,6 @@
 #include "../../engine/src/platform/win32/liquid_glass_d3d11.h"
+#include "../../engine/src/platform/win32/composition_raw_backdrop_clip.h"
+#include "../../engine/src/platform/win32/liquid_glass_output_bounds.h"
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -1113,12 +1115,11 @@ int wmain(int argc, wchar_t** argv)
     std::cout << "Tint endpoint failures: " << tintEndpointFailures << '\n';
     if (tintEndpointFailures != 0u) return 35;
 
-    // The merge amount opens a curved neck between two caps. Its source cap
-    // continues left into the main island; its detached end stays circular.
+    // The shared primitive opens a curved neck between two round caps.
     auto bridgeRegion = coverageRegion;
     bridgeRegion.x = 136;
     bridgeRegion.y = 96;
-    bridgeRegion.width = 192u;
+    bridgeRegion.width = 132u;
     bridgeRegion.height = 64u;
     bridgeRegion.shape = 5u;
     bridgeRegion.notchAmount = 0.0f;
@@ -1126,19 +1127,50 @@ int wmain(int argc, wchar_t** argv)
     const auto bridgePixel = [&](UINT localX, UINT localY) {
         return samplePixels[(96u + localY) * width + 136u + localX];
     };
-    const bool unmergedNeckEmpty = bridgePixel(96u, 12u) == 0xff101010u;
+    const bool unmergedNeckEmpty = bridgePixel(66u, 12u) == 0xff101010u;
+    // At a real gap even the centreline must disconnect. Previously a
+    // residual half-pixel smoothing term left a dark/translucent thread here.
+    const bool unmergedCentreEmpty = bridgePixel(66u, 32u) == 0xff101010u;
+    unsigned previousNeckCoverage = 0u;
+    for (unsigned step = 0u; step <= 40u; ++step)
+    {
+        bridgeRegion.notchAmount = float(step) / 40.0f;
+        if (!renderSample(whiteBackdrop.Get(), bridgeRegion)) return 36;
+        unsigned coverage = 0u;
+        for (UINT y = 0u; y < 64u; ++y)
+            coverage += bridgePixel(66u, y) & 0xffu;
+        if (coverage < previousNeckCoverage) return 37;
+        previousNeckCoverage = coverage;
+        if (step <= 4u && bridgePixel(66u, 32u) != 0xff101010u) return 37;
+    }
     bridgeRegion.notchAmount = 1.0f;
     if (!renderSample(whiteBackdrop.Get(), bridgeRegion)) return 36;
-    const bool bridgeCoverageCorrect = unmergedNeckEmpty &&
-        bright(bridgePixel(96u, 12u)) &&
+    const bool bridgeCoverageCorrect = unmergedNeckEmpty && unmergedCentreEmpty &&
+        bright(bridgePixel(66u, 12u)) &&
         bright(bridgePixel(32u, 32u)) &&
-        bright(bridgePixel(160u, 32u)) &&
-        bright(bridgePixel(0u, 4u)) &&
-        bridgePixel(191u, 3u) == 0xff101010u;
+        bright(bridgePixel(100u, 32u)) &&
+        bridgePixel(0u, 4u) == 0xff101010u &&
+        bridgePixel(131u, 3u) == 0xff101010u;
     const auto bridgeReference = samplePixels;
     std::cout << "Liquid bridge neck and cap coverage: "
               << (bridgeCoverageCorrect ? "pass" : "fail") << '\n';
     if (!bridgeCoverageCorrect) return 37;
+
+    // Pull the same surfaces apart at full material opacity. The neck must
+    // narrow, while both outer caps remain round, until a genuine gap opens.
+    unsigned previousNeck = 255u;
+    for (UINT extent = 132u; extent <= 172u; extent += 2u)
+    {
+        bridgeRegion.width = extent;
+        if (!renderSample(whiteBackdrop.Get(), bridgeRegion)) return 36;
+        const auto neck = bridgePixel(extent / 2u, 32u) & 0xffu;
+        if (neck > previousNeck || bridgePixel(0u, 4u) != 0xff101010u ||
+            bridgePixel(extent - 1u, 4u) != 0xff101010u ||
+            !bright(bridgePixel(32u, 32u)) || !bright(bridgePixel(extent - 32u, 32u))) return 37;
+        previousNeck = neck;
+    }
+    if (previousNeck != 16u) return 37;
+    bridgeRegion.width = 132u;
 
     bridgeRegion.x = -40;
     bridgeRegion.y = -20;
@@ -1177,11 +1209,11 @@ int wmain(int argc, wchar_t** argv)
     unionRegion.contours[0].shape = 1u;
     unionRegion.contours[1].x = 128.0f;
     unionRegion.contours[1].y = 16.0f;
-    unionRegion.contours[1].width = 156.0f;
+    unionRegion.contours[1].width = 140.0f;
     unionRegion.contours[1].height = 64.0f;
     unionRegion.contours[1].notchAmount = 1.0f;
     unionRegion.contours[1].shape = 5u;
-    unionRegion.contours[2].x = 220.0f;
+    unionRegion.contours[2].x = 204.0f;
     unionRegion.contours[2].y = 16.0f;
     unionRegion.contours[2].width = 64.0f;
     unionRegion.contours[2].height = 64.0f;
@@ -1324,6 +1356,22 @@ int wmain(int argc, wchar_t** argv)
     backingRegion.exclusion.topLeftRadius = backingRegion.exclusion.topRightRadius =
         backingRegion.exclusion.bottomLeftRadius = backingRegion.exclusion.bottomRightRadius = 16;
     backingRegion.exclusion.shape = 1u;
+    {
+        auto backing = backingRegion;
+        backing.hasExclusion = true;
+        const D3D11_RECT fullOutput { backing.x, backing.y,
+            backing.x + LONG(backing.width), backing.y + LONG(backing.height) };
+        const auto exposed = vibrance::win32::liquid_glass_output_bounds(backing, fullOutput);
+        if (exposed.left != fullOutput.left || exposed.right != fullOutput.right ||
+            exposed.bottom != fullOutput.bottom || exposed.top <= fullOutput.top + 40)
+            return 92;
+        backing.hasExclusion = false;
+        const auto complete = vibrance::win32::liquid_glass_output_bounds(backing, fullOutput);
+        if (std::memcmp(&complete, &fullOutput, sizeof(fullOutput)) != 0) return 92;
+        std::cout << "Backing-card output rows: " << exposed.bottom - exposed.top
+                  << " instead of " << fullOutput.bottom - fullOutput.top
+                  << "; source sampling halo retained\n";
+    }
     std::vector<std::uint32_t> clippedCardPixels(width * height);
     for (UINT y = 0; y < height; ++y)
         for (UINT x = 0; x < width; ++x)
@@ -1339,6 +1387,52 @@ int wmain(int argc, wchar_t** argv)
     ComPtr<ID3D11Texture2D> clippedCardBackdrop;
     if (FAILED(device->CreateTexture2D(&whiteDesc, &clippedCardData,
             &clippedCardBackdrop))) return 82;
+
+    // Model the Composition raw dependency before the optical shader runs.
+    // Subtracting the front card here removes source texels that the exposed
+    // backing strip still refracts. The exclusion belongs to output coverage.
+    VibranceCompositionRegion dependencyRegion {};
+    dependencyRegion.width = backingRegion.width;
+    dependencyRegion.height = backingRegion.height;
+    dependencyRegion.hasExclusion = 1u;
+    dependencyRegion.exclusion.x = backingRegion.exclusion.x;
+    dependencyRegion.exclusion.y = backingRegion.exclusion.y;
+    dependencyRegion.exclusion.width = backingRegion.exclusion.width;
+    dependencyRegion.exclusion.height = backingRegion.exclusion.height;
+    dependencyRegion.exclusion.cornerRadius = backingRegion.exclusion.cornerRadius;
+    const auto rawDependency = vibrance::win32::composition_raw_backdrop_source_region(
+        dependencyRegion);
+    const auto dependencyPixels = [&](bool subtractExclusion) {
+        auto result = clippedCardPixels;
+        if (!subtractExclusion) return result;
+        const auto& cutout = dependencyRegion.exclusion;
+        for (UINT y = 0; y < height; ++y)
+            for (UINT x = 0; x < width; ++x)
+            {
+                const float qx = std::abs(x + 0.5f - backingRegion.x -
+                    cutout.x - cutout.width * 0.5f) -
+                    (cutout.width * 0.5f - cutout.cornerRadius);
+                const float qy = std::abs(y + 0.5f - backingRegion.y -
+                    cutout.y - cutout.height * 0.5f) -
+                    (cutout.height * 0.5f - cutout.cornerRadius);
+                const float dx = std::max(qx, 0.0f), dy = std::max(qy, 0.0f);
+                const float distance = std::hypot(dx, dy) +
+                    std::min(std::max(qx, qy), 0.0f) - cutout.cornerRadius;
+                if (distance <= 0.0f) result[y * width + x] = 0u;
+            }
+        return result;
+    };
+    const auto oldDependencyPixels = dependencyPixels(true);
+    const auto retainedDependencyPixels = dependencyPixels(rawDependency.hasExclusion != 0u);
+    const D3D11_SUBRESOURCE_DATA oldDependencyData {
+        oldDependencyPixels.data(), width * 4u, 0 };
+    const D3D11_SUBRESOURCE_DATA retainedDependencyData {
+        retainedDependencyPixels.data(), width * 4u, 0 };
+    ComPtr<ID3D11Texture2D> oldDependencyBackdrop, retainedDependencyBackdrop;
+    if (FAILED(device->CreateTexture2D(&whiteDesc, &oldDependencyData,
+            &oldDependencyBackdrop)) ||
+        FAILED(device->CreateTexture2D(&whiteDesc, &retainedDependencyData,
+            &retainedDependencyBackdrop))) return 90;
     for (const float radius : { 7.0f, 30.0f })
     {
         backingRegion.blurRadius = radius;
@@ -1370,6 +1464,26 @@ int wmain(int argc, wchar_t** argv)
                       << (bottomRimRetained ? "retained" : "missing") << '\n';
             if (stripFailures || darkPixels || !bottomRimRetained) return 83;
 
+            if (!renderSample(oldDependencyBackdrop.Get(), backingRegion)) return 90;
+            const auto starvedPixels = samplePixels;
+            if (!renderSample(retainedDependencyBackdrop.Get(), backingRegion)) return 90;
+            std::size_t starvedStripPixels = 0, retainedStripFailures = 0;
+            for (UINT y = 172; y < 179; ++y)
+                for (UINT x = 130; x < 380; ++x)
+                {
+                    const auto index = y * width + x;
+                    if (((starvedPixels[index] >> 8u) & 0xffu) + 16u <
+                            ((fullStripReference[index] >> 8u) & 0xffu))
+                        ++starvedStripPixels;
+                    if (!nearlySamePixel(samplePixels[index], fullStripReference[index]))
+                        ++retainedStripFailures;
+                }
+            std::cout << "Raw backing dependency, blur " << radius
+                      << ", viewport " << viewportEnabled << ": " << starvedStripPixels
+                      << " darkened pixels with exclusion, " << retainedStripFailures
+                      << " corrected-source differences\n";
+            if (starvedStripPixels == 0u || retainedStripFailures != 0u) return 91;
+
             context->ClearRenderTargetView(target.Get(), dark);
             for (LONG y = 0; y < static_cast<LONG>(height); y += 8)
             {
@@ -1394,6 +1508,34 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // A thin strip still refracts into pixels behind its predecessor. With
+    // reflection disabled, allocation must include displacement PLUS Gaussian
+    // support; the old full-height lens hid a missing combined margin.
+    std::size_t thinStripFailures = 0u;
+    for (const float radius : { 5.0f, 9.0f, 12.0f })
+    for (const float strength : { 20.0f, 40.0f, 80.0f })
+    {
+        auto thin = backingRegion;
+        thin.viewportFade = {};
+        thin.rimStrength = 0.0f;
+        thin.blurRadius = radius;
+        thin.refractionStrength = strength;
+        thin.hasExclusion = false;
+        if (!renderSample(stripedBackdrop.Get(), thin)) return 93;
+        const auto complete = samplePixels;
+        thin.hasExclusion = true;
+        thin.exclusion.shape = 0u;
+        thin.exclusion.height = float(thin.height) + 6.0f;
+        if (!renderSample(stripedBackdrop.Get(), thin)) return 93;
+        const UINT y = thin.y + thin.height - 1u;
+        for (UINT x = 130u; x < 380u; ++x)
+            if (!nearlySamePixel(samplePixels[y * width + x], complete[y * width + x]))
+                ++thinStripFailures;
+    }
+    std::cout << "Thin backing strip, no rim, displaced Gaussian reference failures: "
+              << thinStripFailures << '\n';
+    if (thinStripFailures != 0u) return 94;
+
     const std::vector<std::uint32_t> neutralPixels(width * height, 0xff606060u);
     D3D11_SUBRESOURCE_DATA neutralData { neutralPixels.data(),
         width * sizeof(std::uint32_t), 0 };
@@ -1406,12 +1548,13 @@ int wmain(int argc, wchar_t** argv)
     if (!renderSample(neutralBackdrop.Get(), unionRegion)) return 50;
     const auto unlitTopEdge = unionPixel(96u, 0u) & 0xffu;
     const auto unlitBottomEdge = unionPixel(96u, 95u) & 0xffu;
+    const auto unlitSideEdge = unionPixel(0u, 48u) & 0xffu;
     unionRegion.rimStrength = 1.0f;
     if (!renderSample(neutralBackdrop.Get(), unionRegion)) return 50;
     const auto internalEdge = unionPixel(191u, 48u) & 0xffu;
     const auto topEdge = unionPixel(96u, 0u) & 0xffu;
     const auto bottomEdge = unionPixel(96u, 95u) & 0xffu;
-    const auto sideEdge = unionPixel(283u, 48u) & 0xffu;
+    const auto sideEdge = unionPixel(0u, 48u) & 0xffu;
     std::cout << "Union rim, internal edge: " << internalEdge
               << ", top: " << topEdge << ", bottom: " << bottomEdge
               << ", side: " << sideEdge << '\n';

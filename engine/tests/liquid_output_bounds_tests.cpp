@@ -56,5 +56,45 @@ int main()
     expect(contains(notched, 300.0f - flare, 100.0f) &&
         contains(notched, 500.0f + flare, 100.0f),
         "Notched flares must retain their full optical output bounds");
+    Renderer2DBatch header {};
+    header.rect = { 16.0f, 16.0f, 200.0f, 70.0f };
+    header.clipRect = { 16.0f, 16.0f, 200.0f, 112.0f };
+    header.flags = eRenderer2DStyleBlurDynamicContentOnly;
+    header.effect0.x = 18.0f;
+    const auto headerOutput = make_content_blur_output_dispatch_bounds(surface, header, false);
+    const auto headerSource = make_blur_replay_dispatch_bounds(surface, header);
+    expect(headerOutput.x == 16u && headerOutput.y == 16u &&
+        headerOutput.width == 200u && headerOutput.height == 70u,
+        "Content-only blur must end at the authored header boundary without a sampling fringe");
+    expect(headerSource.x < headerOutput.x && headerSource.y < headerOutput.y &&
+        contains(headerSource, 225.0f, 100.0f),
+        "Content-only blur must populate its source halo beyond the inherited output clip");
+    header.flags = 0u;
+    const auto ordinaryHeader = make_blur_replay_dispatch_bounds(surface, header);
+    expect(ordinaryHeader.x == 16u && ordinaryHeader.y == 16u,
+        "Existing ordinary blur source policies must retain their clipping");
+    header.flags = eRenderer2DStyleBlurClampToClip;
+    header.rect = { 16.25f, 16.25f, 200.0f, 70.05f };
+    header.clipRect = { 16.25f, 16.25f, 300.0f, 300.0f };
+    header.effect0.x = 12.4f;
+    const auto fractionalSource = make_blur_source_dispatch_bounds(surface, header, false, false);
+    expect(contains(fractionalSource, 30.0f, 99.0f),
+        "Fractional header/radius filtering must populate the final bilinear source texel");
+    entt::registry registry;
+    const auto column = registry.create();
+    auto& columnTransform = registry.emplace<Transform2DComponent>(column);
+    columnTransform.position = { 100.25f, 16.5f };
+    registry.emplace<ShapeComponent>(column).size = { 200.5f, 140.0f };
+    auto& columnMask = registry.emplace<Mask2DComponent>(column);
+    columnMask.useContentRect = false;
+    const auto child = registry.create();
+    registry.emplace<Parent2DComponent>(child, column);
+    const auto normalClip = inherited_mask_clip_rect(registry, child);
+    expect(normalClip == glm::vec4(100.25f, 16.5f, 200.5f, 140.0f),
+        "Existing masks must retain their fractional clipping policy by default");
+    columnMask.insetToWholePixels = true;
+    const auto alignedClip = inherited_mask_clip_rect(registry, child);
+    expect(alignedClip == glm::vec4(101.0f, 17.0f, 199.0f, 139.0f),
+        "Opted-in descendants must preserve the column's partially covered boundary pixels");
     return passed ? 0 : 1;
 }

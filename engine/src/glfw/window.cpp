@@ -16,6 +16,7 @@
 #include <objbase.h>
 #include <shobjidl.h>
 #include "../platform/win32/glfw_event_wait.h"
+#include "../platform/win32/monitor_names.h"
 #ifndef WS_EX_NOREDIRECTIONBITMAP
 #define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
 #endif
@@ -48,6 +49,37 @@ namespace
 #endif
 
 #if defined(_WIN32)
+    std::unordered_map<GLFWmonitor*, std::string> monitorHardwareNames;
+    bool monitorNamesDirty = true;
+    bool monitorNamesCallbackInstalled = false;
+    GLFWmonitorfun previousMonitorCallback = nullptr;
+
+    void monitor_names_changed(GLFWmonitor* monitor, int event)
+    {
+        monitorHardwareNames.clear();
+        monitorNamesDirty = true;
+        if (previousMonitorCallback) previousMonitorCallback(monitor, event);
+    }
+
+    void refresh_monitor_hardware_names(GLFWmonitor** monitors, int count)
+    {
+        if (!monitorNamesCallbackInstalled)
+        {
+            previousMonitorCallback = glfwSetMonitorCallback(monitor_names_changed);
+            monitorNamesCallbackInstalled = true;
+        }
+        if (!monitorNamesDirty && monitorHardwareNames.size() == static_cast<std::size_t>(count) &&
+            std::all_of(monitors, monitors + count, [](GLFWmonitor* monitor) {
+                return monitorHardwareNames.contains(monitor);
+            })) return;
+        const auto names = vibrance::win32::active_monitor_hardware_names();
+        monitorHardwareNames.clear();
+        for (int index = 0; index < count; ++index)
+            monitorHardwareNames.emplace(monitors[index], vibrance::win32::hardware_name_for_monitor(
+                names, glfwGetWin32Adapter(monitors[index]), glfwGetWin32Monitor(monitors[index])));
+        monitorNamesDirty = false;
+    }
+
     void apply_embedded_application_icon(GLFWwindow* window)
     {
         if (!window)
@@ -570,6 +602,12 @@ void destroy_glfw_window(GLFWwindow* window)
 
 void terminate_glfw()
 {
+#if defined(_WIN32)
+    monitorHardwareNames.clear();
+    monitorNamesDirty = true;
+    monitorNamesCallbackInstalled = false;
+    previousMonitorCallback = nullptr;
+#endif
 #if defined(__APPLE__)
     glfw_macos_forget_window(nullptr);
 #endif
@@ -586,6 +624,9 @@ std::vector<GlfwMonitorInfo> glfw_connected_monitors()
     int count = 0;
     GLFWmonitor** monitors = glfwGetMonitors(&count);
     GLFWmonitor* primary = glfwGetPrimaryMonitor();
+#if defined(_WIN32)
+    if (monitors && count > 0) refresh_monitor_hardware_names(monitors, count);
+#endif
     std::unordered_map<std::string, std::uint32_t> idOccurrences;
     result.reserve(static_cast<std::size_t>(std::max(count, 0)));
     for (int index = 0; monitors && index < count; ++index)
@@ -604,6 +645,11 @@ std::vector<GlfwMonitorInfo> glfw_connected_monitors()
         {
             info.name = name;
         }
+#if defined(_WIN32)
+        if (const auto name = monitorHardwareNames.find(monitor);
+            name != monitorHardwareNames.end() && !name->second.empty())
+            info.name = name->second;
+#endif
         glfwGetMonitorPos(
             monitor,
             &info.position.x,

@@ -1,5 +1,6 @@
 #include "liquid_glass_d3d11.h"
 #include "liquid_glass_cap_policy.h"
+#include "liquid_glass_output_bounds.h"
 
 #if defined(_WIN32)
 
@@ -159,7 +160,8 @@ bool LiquidGlassD3D11::initialise(ID3D11Device* device,
     ScratchSurfaces previousScratch;
     swap_scratch(previousScratch);
     scratchCache_ = {};
-    scratchCacheInsertion_ = 0u;
+    scratchLastUsed_ = 0u;
+    scratchCacheClock_ = 0u;
     scratchAllocationCount_ = 0u;
     blurReuseCount_ = blurChangeCount_ = blurComparisonCount_ = 0u;
     // Alternating HDR monitor sizes need to retain at least one complete
@@ -310,6 +312,7 @@ bool LiquidGlassD3D11::resize_scratch(DXGI_FORMAT format,
     if (snapshot_ && scratchFormat_ == format &&
         scratchWidth_ == width && scratchHeight_ == height)
     {
+        scratchLastUsed_ = ++scratchCacheClock_;
         return true;
     }
     for (auto& cached : scratchCache_)
@@ -318,6 +321,7 @@ bool LiquidGlassD3D11::resize_scratch(DXGI_FORMAT format,
             cached.width == width && cached.height == height)
         {
             swap_scratch(cached);
+            scratchLastUsed_ = ++scratchCacheClock_;
             trim_scratch_cache();
             return true;
         }
@@ -343,10 +347,21 @@ bool LiquidGlassD3D11::resize_scratch(DXGI_FORMAT format,
     }
     ++scratchAllocationCount_;
     swap_scratch(next);
+    scratchLastUsed_ = ++scratchCacheClock_;
     if (next.snapshot)
     {
-        scratchCache_[scratchCacheInsertion_] = std::move(next);
-        scratchCacheInsertion_ = (scratchCacheInsertion_ + 1u) % scratchCache_.size();
+        const auto empty = std::find_if(scratchCache_.begin(), scratchCache_.end(),
+            [](const ScratchSurfaces& cached) { return !cached.snapshot; });
+        if (empty != scratchCache_.end()) *empty = std::move(next);
+        else if (scratchCache_.size() < 64u) scratchCache_.push_back(std::move(next));
+        else
+        {
+            // Metadata is bounded as well, including workloads that animate
+            // through many unique lens dimensions between stable card draws.
+            const auto oldest = std::min_element(scratchCache_.begin(), scratchCache_.end(),
+                [](const ScratchSurfaces& a, const ScratchSurfaces& b) { return a.lastUsed < b.lastUsed; });
+            *oldest = std::move(next);
+        }
         trim_scratch_cache();
     }
     return true;
@@ -366,6 +381,7 @@ void LiquidGlassD3D11::swap_scratch(ScratchSurfaces& surfaces) noexcept
     std::swap(scratchFormat_, surfaces.format);
     std::swap(scratchWidth_, surfaces.width);
     std::swap(scratchHeight_, surfaces.height);
+    std::swap(scratchLastUsed_, surfaces.lastUsed);
 }
 
 void LiquidGlassD3D11::trim_scratch_cache() noexcept
@@ -397,12 +413,15 @@ void LiquidGlassD3D11::trim_scratch_cache() noexcept
     };
     std::uint64_t retainedBytes = 0u;
     for (const auto& surfaces : scratchCache_) retainedBytes += bytes(surfaces);
-    for (std::size_t age = 0u;
-        retainedBytes > scratchCacheBudget_ && age < scratchCache_.size(); ++age)
+    while (retainedBytes > scratchCacheBudget_)
     {
-        auto& oldest = scratchCache_[(scratchCacheInsertion_ + age) % scratchCache_.size()];
-        retainedBytes -= bytes(oldest);
-        oldest = {};
+        auto oldest = scratchCache_.end();
+        for (auto cached = scratchCache_.begin(); cached != scratchCache_.end(); ++cached)
+            if (cached->snapshot &&
+                (oldest == scratchCache_.end() || cached->lastUsed < oldest->lastUsed)) oldest = cached;
+        if (oldest == scratchCache_.end()) break;
+        retainedBytes -= bytes(*oldest);
+        *oldest = {};
     }
 }
 
@@ -501,13 +520,19 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
         static_cast<LONG>(visibleLeft), static_cast<LONG>(visibleTop),
         static_cast<LONG>(visibleRight), static_cast<LONG>(visibleBottom)
     };
+    // Keep allocation/UV dimensions independent of DWM's tiled draw clips.
+    // A backing card needs only its exposed output plus the complete optical
+    // sampling margin, including pixels hidden behind the card in front.
+    const D3D11_RECT canonicalOutput = liquid_glass_output_bounds(region, visibleClip);
+    if (canonicalOutput.right <= canonicalOutput.left || canonicalOutput.bottom <= canonicalOutput.top) return true;
+    visibleClip = canonicalOutput;
     if (clip)
     {
         visibleClip = {
-            std::max<LONG>(static_cast<LONG>(visibleLeft), clip->left),
-            std::max<LONG>(static_cast<LONG>(visibleTop), clip->top),
-            std::min<LONG>(static_cast<LONG>(visibleRight), clip->right),
-            std::min<LONG>(static_cast<LONG>(visibleBottom), clip->bottom)
+            std::max<LONG>(visibleClip.left, clip->left),
+            std::max<LONG>(visibleClip.top, clip->top),
+            std::min<LONG>(visibleClip.right, clip->right),
+            std::min<LONG>(visibleClip.bottom, clip->bottom)
         };
         if (visibleClip.right <= visibleClip.left ||
             visibleClip.bottom <= visibleClip.top) return true;
@@ -587,34 +612,41 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     const float refractionStrength = opaqueCap ? 0.0f : region.refractionStrength;
     const float dispersionStrength = opaqueCap ? 0.0f : region.dispersionStrength;
     const float rimStrength = opaqueCap ? 0.0f : region.rimStrength;
-    const float reach = std::max({ (opaqueCap ? 0.0f : region.blurRadius) * 5.0f,
-        refractionStrength + dispersionStrength + 2.0f,
-        rimStrength > 0.0f ? std::min(static_cast<float>(std::min(region.width, region.height)) * 1.6f, 120.0f) + 2.0f : 0.0f,
-        4.0f });
+    if (blurRadius > 0.0f && cachedBlurRadius_ != blurRadius)
+    {
+        prepare_blur_kernel(blurRadius, blurKernel_);
+        cachedBlurRadius_ = blurRadius;
+        cachedBlurWidth_ = 0u;
+    }
+    const LONG kernelReach = blurRadius > 0.0f && blurKernel_.pairCount > 0u ?
+        static_cast<LONG>(std::ceil(blurKernel_.pairs[blurKernel_.pairCount - 1u][0])) + 1 : 0;
+    const double requestedDisplacement = std::ceil(double(std::max(refractionStrength, 0.0f)) +
+        std::max(dispersionStrength, 0.0f) + 2.0);
+    // Displaced blurred pixels need the Gaussian neighbourhood around their
+    // displaced location, including when reflections/rims are disabled.
+    const double reach = std::max({ double(opaqueCap ? 0.0f : region.blurRadius) * 5.0,
+        requestedDisplacement + kernelReach,
+        rimStrength > 0.0f ? double(std::min(static_cast<float>(std::min(region.width, region.height)) * 1.6f, 120.0f)) + 2.0 : 0.0,
+        4.0 });
     if (!std::isfinite(reach) || reach > 2048.0f)
     {
         return false;
     }
     const std::int64_t margin = static_cast<std::int64_t>(std::ceil(reach));
-    const std::int64_t left = std::max<std::int64_t>(0, localX - margin);
-    const std::int64_t top = std::max<std::int64_t>(0, localY - margin);
+    const std::int64_t left = std::max<std::int64_t>(0,
+        static_cast<std::int64_t>(canonicalOutput.left) - sourceOriginX - margin);
+    const std::int64_t top = std::max<std::int64_t>(0,
+        static_cast<std::int64_t>(canonicalOutput.top) - sourceOriginY - margin);
     const std::int64_t cropRight = std::min<std::int64_t>(source.Width,
-                                                          right + margin);
+        static_cast<std::int64_t>(canonicalOutput.right) - sourceOriginX + margin);
     const std::int64_t cropBottom = std::min<std::int64_t>(source.Height,
-                                                           bottom + margin);
+        static_cast<std::int64_t>(canonicalOutput.bottom) - sourceOriginY + margin);
     if (cropRight <= left || cropBottom <= top) return false;
     const auto width = static_cast<std::uint32_t>(cropRight - left);
     const auto height = static_cast<std::uint32_t>(cropBottom - top);
     if (!resize_scratch(backdropFormat, width, height))
     {
         return false;
-    }
-
-    if (blurRadius > 0.0f && cachedBlurRadius_ != blurRadius)
-    {
-        prepare_blur_kernel(blurRadius, blurKernel_);
-        cachedBlurRadius_ = blurRadius;
-        cachedBlurWidth_ = 0u;
     }
 
     // DWM frequently paints one island through several small native clips.
@@ -637,11 +669,8 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     // One pixel for bilinear support, plus one for UV rounding. Clamp the
     // margin before converting it, including for extreme finite parameters.
     const auto displacement = static_cast<LONG>(std::min(static_cast<double>(std::max(width, height)),
-        std::ceil(static_cast<double>(std::max(refractionStrength, 0.0f)) +
-            std::max(dispersionStrength, 0.0f) + 2.0)));
+        requestedDisplacement));
     samplingBounds = expand(samplingBounds, displacement, displacement);
-    const LONG kernelReach = blurRadius > 0.0f && blurKernel_.pairCount > 0u ?
-        static_cast<LONG>(std::ceil(blurKernel_.pairs[blurKernel_.pairCount - 1u][0])) + 1 : 0;
     // The vertical pass needs horizontal results above/below its output;
     // those horizontal results in turn need sharp pixels on either side.
     const D3D11_RECT horizontalBounds = expand(samplingBounds, 0, kernelReach);
@@ -857,7 +886,9 @@ bool LiquidGlassD3D11::render(ID3D11DeviceContext* context,
     context->PSSetShaderResources(0, 2, sources);
     context->PSSetShader(optical_.Get(), nullptr, 0);
     context->RSSetState(rasteriser_.Get());
-    if (clip || region.viewportFade[3] != 0.0f)
+    if (clip || region.viewportFade[3] != 0.0f ||
+        canonicalOutput.left != visibleLeft || canonicalOutput.top != visibleTop ||
+        canonicalOutput.right != visibleRight || canonicalOutput.bottom != visibleBottom)
     {
         context->RSSetState(clippedRasteriser_.Get());
         context->RSSetScissorRects(1, &visibleClip);

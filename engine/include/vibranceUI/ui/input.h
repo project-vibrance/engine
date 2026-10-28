@@ -191,6 +191,14 @@ struct ButtonVisualComponent
     bool hasDisabled = false;
 };
 
+struct UiHoverRegionComponent
+{
+    // Observe a panel area without owning pointer hits, clicks or window drag.
+    bool enabled = true;
+    bool hovered = false;
+    std::function<void(bool, double)> onHoverChanged;
+};
+
 struct TextInputComponent
 {
     // Text fields keep both the full value and the visible byte offset

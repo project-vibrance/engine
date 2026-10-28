@@ -50,8 +50,14 @@ public:
                 static_cast<std::int32_t>(height)};
             copy_.fill(full);
             present_.fill(full);
+            previousOptical_ = {};
+            preparedOptical_.fill({});
         }
-        const auto invalidation = composition_damage_union(ui, optical);
+        // Moving or removing a lens must repaint its former sampling halo as
+        // well. Otherwise DWM can retain optical pixels in the exposed desktop.
+        const auto invalidation = composition_damage_union(ui,
+            composition_damage_union(previousOptical_, optical));
+        preparedOptical_[index] = optical;
         for (auto& pending : copy_) pending = composition_damage_union(pending, ui);
         for (auto& pending : present_) pending = composition_damage_union(pending, invalidation);
         return {copy_[index], present_[index]};
@@ -59,12 +65,19 @@ public:
 
     void commit(std::uint32_t index) noexcept
     {
-        if (index < copy_.size()) { copy_[index] = {}; present_[index] = {}; }
+        if (index < copy_.size())
+        {
+            copy_[index] = {};
+            present_[index] = {};
+            previousOptical_ = preparedOptical_[index];
+        }
     }
     void reset() noexcept { *this = {}; }
 
 private:
     std::uint32_t width_ = 0u, height_ = 0u;
     std::array<CompositionDamageRect, VIBRANCE_COMPOSITION_MAX_BUFFERS> copy_ {}, present_ {};
+    std::array<CompositionDamageRect, VIBRANCE_COMPOSITION_MAX_BUFFERS> preparedOptical_ {};
+    CompositionDamageRect previousOptical_ {};
 };
 }

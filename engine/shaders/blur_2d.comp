@@ -16,6 +16,7 @@ const uint BLUR_USE_STATIC_BACKDROP = 1u << 31;
 const uint BLUR_USE_EXTERNAL_BACKDROP = 1u << 30;
 const uint LIQUID_USE_PARENT_CAP = 1u << 29;
 const uint STYLE_BLUR_FOREGROUND_GROUP_SOURCE = 1u << 26;
+const uint STYLE_BLUR_CLAMP_TO_CLIP = 1u << 24;
 const uint PASS_INDEX_MASK = 65535u;
 const uint PRIMITIVE_RECTANGLE = 1u;
 const uint PRIMITIVE_ROUNDED_RECTANGLE = 2u;
@@ -367,6 +368,14 @@ vec4 blur_input_color(ivec2 pixel, bool readScratch) {
 vec4 blur_input_color_at(vec2 coord, bool readScratch) {
     ivec2 screenSize = imageSize(uiBlurSurface);
     vec2 clamped = clamp(coord, vec2(0.0), vec2(screenSize - ivec2(1)));
+    if ((pc.data.y & STYLE_BLUR_CLAMP_TO_CLIP) != 0u) {
+        // Extend only fully covered texels from this pane. Extending a
+        // partially covered join texel would smear the adjacent pane's colour.
+        vec2 lo = clamp(ceil(pc.uvRect.xy), vec2(0.0), vec2(screenSize - ivec2(1)));
+        vec2 hi = clamp(floor(pc.uvRect.xy + pc.uvRect.zw) - vec2(1.0),
+            lo, vec2(screenSize - ivec2(1)));
+        clamped = clamp(clamped, lo, hi);
+    }
     ivec2 p0 = ivec2(floor(clamped));
     ivec2 p1 = min(p0 + ivec2(1), screenSize - ivec2(1));
     vec2 f = fract(clamped);
@@ -461,6 +470,13 @@ void main() {
     }
 
     if ((pc.data.y & STYLE_BLUR_COMPOSITE) != 0u) {
+        if ((pc.data.y & STYLE_BLUR_CLAMP_TO_CLIP) != 0u &&
+            (pixel.x < int(ceil(pc.uvRect.x)) ||
+                pixel.x >= int(floor(pc.uvRect.x + pc.uvRect.z)))) {
+            // Keep the original column's antialiasing, rather than replacing
+            // it with filtered opaque coverage a second time.
+            return;
+        }
         vec4 src = imageLoad(uiBlurSurface, pixel);
         if (pc.effect0.z > 0.5) {
             // Coverage is independent of the blurred image's alpha. Using

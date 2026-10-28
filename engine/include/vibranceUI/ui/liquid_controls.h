@@ -331,6 +331,9 @@ inline void ui_update_liquid_controls(Renderer2DScene& scene, bool enabled,
             scene.mark_dirty(entity);
         }
         auto* liquid = registry.try_get<LiquidGlassComponent>(entity);
+#if defined(_WIN32)
+        ui_set_liquid_stroke_surface(scene, entity, saved->shape.color0, saved->shape.color1);
+#endif
         const auto backend = native ?
 #if defined(__APPLE__)
             LiquidGlassBackend::eMacOSNative :

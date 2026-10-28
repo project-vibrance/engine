@@ -546,6 +546,9 @@ namespace
         {
         case DispatchBoundsMode::eShape:
             return transformPadding +
+#if defined(_WIN32)
+                ((batch.flags & eRenderer2DStyleLiquidOuterStroke) != 0u ? 1.0f : 0.0f) +
+#endif
                 std::max(batch.effect0.y, 0.0f) +
                 std::max(batch.effect0.z, 0.0f) +
                 notched_squircle_dispatch_padding(batch, batch.effect1);
@@ -733,18 +736,30 @@ namespace
                 std::min(softness + notchPadding, sourcePadding), batch.clipRect), 0.0f, coverWorkgroups);
     }
 
-    DispatchBounds make_blur_replay_dispatch_bounds(
+    DispatchBounds make_content_blur_output_dispatch_bounds(
+        const auto& swapchain, const Renderer2DBatch& batch, bool coverWorkgroups = true)
+    {
+        // Only horizontal filtering owns the sampling halo. Foreground-only
+        // replacement must stop at the authored chrome boundary.
+        return make_dispatch_bounds(swapchain,
+            expand_and_clip_rect(batch.rect, 0.0f, batch.clipRect), 0.0f, coverWorkgroups);
+    }
+
+    DispatchBounds make_blur_source_dispatch_bounds(
         const auto& swapchain,
-        const Renderer2DBatch& batch)
+        const Renderer2DBatch& batch,
+        bool coverWorkgroups = true,
+        bool includeReflections = true)
     {
         Renderer2DBatch sourceBatch = batch;
-        if ((batch.flags & eRenderer2DStyleLiquidGlass) != 0u)
+        if ((batch.flags & (eRenderer2DStyleLiquidGlass | eRenderer2DStyleBlurDynamicContentOnly)) != 0u)
         {
-            if (make_liquid_output_dispatch_bounds(swapchain, batch).empty())
+            if ((batch.flags & eRenderer2DStyleLiquidGlass) != 0u &&
+                make_liquid_output_dispatch_bounds(swapchain, batch).empty())
             {
                 return {};
             }
-            // Liquid filtering reads outside an inherited output clip. Match
+            // Filtering reads outside an inherited output clip. Match
             // its horizontal source pass when deciding which moving pixels
             // affect a cached lens and which higher layers must be replayed
             // before they can contaminate its retained backdrop.
@@ -752,7 +767,20 @@ namespace
                 static_cast<float>(swapchain.extent.width),
                 static_cast<float>(swapchain.extent.height) };
         }
-        return make_blur_dispatch_bounds(swapchain, sourceBatch);
+        if ((batch.flags & eRenderer2DStyleLiquidGlass) == 0u &&
+            (batch.flags & (eRenderer2DStyleBlurDynamicContentOnly | eRenderer2DStyleBlurClampToClip)) != 0u)
+        {
+            // Bilinear taps at a fractional radius can read one texel beyond
+            // the rounded-up Gaussian footprint. Populate that texel too.
+            sourceBatch.effect0.x += 1.0f;
+        }
+        return make_blur_dispatch_bounds(swapchain, sourceBatch, coverWorkgroups, includeReflections);
+    }
+
+    DispatchBounds make_blur_replay_dispatch_bounds(
+        const auto& swapchain, const Renderer2DBatch& batch)
+    {
+        return make_blur_source_dispatch_bounds(swapchain, batch);
     }
 
     DispatchBounds make_dynamic_coverage_bounds(
@@ -1815,12 +1843,16 @@ namespace
             if (const Mask2DComponent* mask = registry.try_get<Mask2DComponent>(parent->parent);
                 mask && mask->enabled)
             {
-                clip = intersect_rect(
-                    clip,
-                    animated_layout_rect(
-                        registry,
-                        parent->parent,
-                        entity_mask_rect(registry, parent->parent, *mask), currentTimeSeconds));
+                auto maskRect = animated_layout_rect(registry, parent->parent,
+                    entity_mask_rect(registry, parent->parent, *mask), currentTimeSeconds);
+                if (mask->insetToWholePixels)
+                {
+                    const auto first = glm::ceil(glm::vec2(maskRect));
+                    const auto last = glm::floor(glm::vec2(maskRect) + glm::vec2(maskRect.z, maskRect.w));
+                    maskRect = { first.x, first.y, std::max(last.x - first.x, 0.0f),
+                        std::max(last.y - first.y, 0.0f) };
+                }
+                clip = intersect_rect(clip, maskRect);
                 if (rect_empty(clip))
                 {
                     break;

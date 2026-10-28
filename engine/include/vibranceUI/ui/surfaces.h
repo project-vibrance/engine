@@ -641,6 +641,31 @@ inline std::vector<entt::entity> ui_create_panel_background_layers(
 // Endpoint centres and diameter are framebuffer-space values, which makes the
 // same primitive usable for independently positioned roots, floating panels,
 // and drag-to-dock interactions without introducing a layout-parent coupling.
+// Content fades independently of the shell. Zero is detached, one attached;
+// follow the full approach without changing the surface's own opacity.
+inline float ui_liquid_merge_attachment(glm::vec2 centre,
+    glm::vec2 detachedCentre, glm::vec2 attachedCentre)
+{
+    const glm::vec2 travel = detachedCentre - attachedCentre;
+    const float distanceSquared = glm::dot(travel, travel);
+    if (distanceSquared <= 0.000001f) return 1.0f;
+    return 1.0f - std::clamp(glm::dot(centre - attachedCentre, travel) /
+        distanceSquared, 0.0f, 1.0f);
+}
+
+inline float ui_liquid_merge_content_opacity(float attachmentAmount,
+    float revealStart = 0.0f, float revealEnd = 1.0f)
+{
+    // An opaque parent can conceal the first part of the separation. Let its
+    // caller keep the visible fade within the exposed part of that travel.
+    const float start = std::clamp(revealStart, 0.0f, 1.0f);
+    const float end = std::clamp(revealEnd, start, 1.0f);
+    const float reveal = std::clamp(
+        (1.0f - std::clamp(attachmentAmount, 0.0f, 1.0f) - start) /
+            std::max(end - start, 0.000001f), 0.0f, 1.0f);
+    return reveal * reveal * (3.0f - 2.0f * reveal);
+}
+
 struct UiLiquidMergeOptions
 {
     bool enabled = true;
@@ -772,7 +797,9 @@ inline bool ui_update_liquid_merge(
             style->backdropBlurClipToInheritedMask !=
                 nextStyle.backdropBlurClipToInheritedMask ||
             style->backdropBlurReplaceSource !=
-                nextStyle.backdropBlurReplaceSource;
+                nextStyle.backdropBlurReplaceSource ||
+            style->backdropBlurDynamicContentOnly != nextStyle.backdropBlurDynamicContentOnly ||
+            style->backdropBlurClampToClip != nextStyle.backdropBlurClampToClip;
         if (styleChanged)
         {
             *style = nextStyle;

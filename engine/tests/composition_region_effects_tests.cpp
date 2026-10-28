@@ -1,4 +1,5 @@
 #include "../src/platform/win32/composition_region_effects.h"
+#include "../src/platform/win32/composition_raw_backdrop_clip.h"
 
 #include <iostream>
 #include <cmath>
@@ -20,6 +21,68 @@ int main()
         !liquid_glass_cap_fully_opaque(true, 1.0f, translucent) &&
         !liquid_glass_cap_fully_opaque(true, std::numeric_limits<float>::quiet_NaN(), 1.0f),
         "Absent or even slightly translucent cap paint must retain its optical material");
+    VibranceCompositionRegion rawDependency {};
+    rawDependency.paintCapGradient = 1u;
+    rawDependency.capGradient[0] = rawDependency.capGradient[1] = 1.0f;
+    check(!composition_raw_backdrop_required(rawDependency),
+        "An opaque merging shell must not paint an unused desktop dependency around its silhouette");
+    rawDependency.capGradient[1] = translucent;
+    check(composition_raw_backdrop_required(rawDependency),
+        "Even slight cap translucency must restore the lens's original backdrop dependency");
+    rawDependency.paintCapGradient = 0u;
+    rawDependency.capGradient[1] = 1.0f;
+    check(composition_raw_backdrop_required(rawDependency),
+        "Glass without cap paint must retain its backdrop dependency");
+    // Match notification/card.cpp: each backing lens is inset by ten pixels
+    // and displaced seven pixels, leaving a narrow exposed lower band.
+    for (float height : { 72.0f, 90.0f, 108.0f, 140.0f })
+        for (unsigned layer : { 1u, 2u })
+        {
+            VibranceCompositionRegion backing {};
+            backing.shape = 3u;
+            backing.width = 376.0f - 20.0f * layer;
+            backing.height = height;
+            backing.cornerRadius = 24.0f - layer;
+            backing.hasExclusion = 1u;
+            backing.exclusion.shape = 3u;
+            backing.exclusion.x = -10.0f;
+            backing.exclusion.y = -7.0f;
+            backing.exclusion.width = backing.width + 20.0f;
+            backing.exclusion.height = height;
+            backing.exclusion.cornerRadius = backing.cornerRadius + 1.0f;
+            backing.viewportRect[1] = 12.0f;
+            backing.viewportRect[3] = 640.0f;
+            backing.viewportFade[0] = backing.viewportFade[1] = 16.0f;
+            backing.viewportFade[3] = 1.0f;
+            const auto source = composition_raw_backdrop_source_region(backing);
+            check(source.hasExclusion == 0u && source.exclusion.width == 0.0f,
+                "Stacked notification dependencies must retain source pixels behind the card in front");
+            check(source.width == backing.width && source.height == backing.height &&
+                source.shape == backing.shape && source.cornerRadius == backing.cornerRadius &&
+                source.liquidRim == backing.liquidRim && source.opacity == backing.opacity &&
+                source.viewportRect[1] == backing.viewportRect[1] &&
+                source.viewportFade[3] == backing.viewportFade[3],
+                "Full backing dependencies must retain their external silhouette, rim and scroll viewport");
+            check(backing.hasExclusion == 1u && backing.exclusion.y == -7.0f,
+                "Preparing a raw dependency must preserve the optical shader's original coverage cutout");
+        }
+    const auto detached = composition_bridge_clip_profiles(132.0f, 60.0f, 0.0f);
+    const auto joined = composition_bridge_clip_profiles(132.0f, 60.0f, 1.0f);
+    check(detached.size() == 2u && joined.size() == 1u,
+        "A native bridge clip must retain a real gap when detached and join only as its optical neck joins");
+    for (float amount : { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f })
+        for (float width : { 30.0f, 60.0f, 100.0f, 132.0f, 180.0f })
+            for (const auto& profile : composition_bridge_clip_profiles(width, 60.0f, amount))
+                for (const auto& point : profile)
+                {
+                    const float distance = composition_bridge_clip_distance(
+                        point[0], point[1], width, 60.0f, amount);
+                    check(point[0] >= 0 && point[0] <= width && point[1] >= 0 && point[1] <= 30.0f,
+                        "Bridge dependency contours must stay within the shader's dispatch bounds");
+                    check(distance <= 0.002f &&
+                        (std::abs(distance) < 0.002f || point[0] == 0 || point[0] == width),
+                        "Bridge clip vertices must match the optical boundary rather than its rectangular halo");
+                }
     VibranceCompositionRegion rim {};
     rim.liquidRim = 0.6f;
     rim.opacity = 1.0f;

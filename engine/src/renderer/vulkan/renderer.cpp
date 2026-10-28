@@ -922,6 +922,7 @@ struct Engine::Impl
 	~Impl();
 
 	void draw();
+	bool poll_pending_presentation();
 	int update_timing(double currentTimeSeconds);
 	bool set_present_mode(RendererPresentMode mode);
 	RendererPresentMode present_mode_preference() const;
@@ -1144,6 +1145,11 @@ void Engine::end_externally_paced_frame()
 void Engine::draw()
 {
 	impl->draw();
+}
+
+bool Engine::poll_pending_presentation()
+{
+	return impl->poll_pending_presentation();
 }
 
 int Engine::update_timing(double currentTimeSeconds)
@@ -2553,6 +2559,30 @@ void Engine::Impl::publish_completed_composition_frames()
 		}
 		compositionFramePending[pending] = false;
 	}
+}
+
+bool Engine::Impl::poll_pending_presentation()
+{
+#if defined(_WIN32)
+	if (!rendererReady || compositionRecoveryPending || !compositionPresenter.available())
+	{
+		return false;
+	}
+	const auto pending = [&] {
+		return std::any_of(compositionFramePending.begin(), compositionFramePending.end(),
+			[](bool value) { return value; });
+	};
+	if (!pending())
+	{
+		return false;
+	}
+	// Fence, keyed-mutex and DXGI readiness checks are nonblocking. Delivery
+	// retains its upload/copy across deferrals and never records a new frame.
+	publish_completed_composition_frames();
+	return !compositionRecoveryPending && pending();
+#else
+	return false;
+#endif
 }
 
 void Engine::Impl::draw()

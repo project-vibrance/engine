@@ -51,6 +51,13 @@ class VIBRANCE_ENGINE_API Engine
     // Draws the current renderer scene once
     void draw();
 
+    // Call on the same owning UI thread as draw(). Attempt nonblocking delivery
+    // of an already submitted Windows Composition frame without advancing scene
+    // animation or recording another GPU frame. Returns true only while a
+    // frame still needs delivery; recovery waits for the next normal draw().
+    // Other presenters return false.
+    bool poll_pending_presentation();
+
     // The application schedules a window independently at this UI cadence.
     static void begin_externally_paced_frame(uint32_t frameRate);
     static void end_externally_paced_frame();

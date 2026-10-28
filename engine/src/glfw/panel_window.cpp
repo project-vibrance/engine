@@ -563,6 +563,7 @@ void GlfwPanelWindow::tick()
         }
         else
         {
+            ui_update_hover_regions(engine->renderer2d_scene(), false, {}, now);
             ui_update_input_hover(
                 engine->renderer2d_scene(),
                 engine->renderer2d_font_atlas(),
@@ -1501,6 +1502,7 @@ void GlfwPanelWindow::update_hover_cursor()
     glm::vec2 point(0.0f);
     if (!cursor_framebuffer_point(point))
     {
+        ui_update_hover_regions(engine->renderer2d_scene(), false, {}, glfw_time_seconds());
         ui_update_input_hover(
             engine->renderer2d_scene(),
             engine->renderer2d_font_atlas(),
@@ -1518,6 +1520,9 @@ void GlfwPanelWindow::update_hover_cursor()
 void GlfwPanelWindow::update_hover_cursor_at(glm::vec2 point)
 {
     Renderer2DScene& scene = engine->renderer2d_scene();
+    // Observe chrome before draggable-title handling clears ordinary control
+    // hover. Passive regions must not change window dragging or child picking.
+    ui_update_hover_regions(scene, true, point, glfw_time_seconds());
 #if defined(__APPLE__)
     if (glfw_left_mouse_pressed(window))
     {

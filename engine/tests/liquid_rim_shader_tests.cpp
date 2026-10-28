@@ -104,6 +104,97 @@ try
     Harness shapeGpu(256,128,shapeShader,shapeShader);
     std::vector<uint8_t> black(256u*128u*4u,0u);
     for (unsigned image=0;image<5;++image) shapeGpu.set_input_pixels(image,black);
+    // The UI hairline must not alter any pixel of the optical inner rim.
+    for (const float scale : { 0.65f, 0.75f, 1.0f, 1.25f, 1.5f })
+    for (const float fraction : { 0.0f, 0.25f, 0.5f })
+    for (const float softness : { 0.5f, 1.25f, 2.0f })
+    {
+        Harness gpu(320,160,shapeShader,shapeShader);
+        std::vector<uint8_t> background(320u*160u*4u,160u);
+        for (unsigned i=3;i<background.size();i+=4) background[i]=255u;
+        for (unsigned image=0;image<5;++image) gpu.set_input_pixels(image,background);
+        Case glass;
+        glass.constants.rect={32.0f+fraction,32.0f+fraction,160.0f*scale,48.0f*scale};
+        glass.constants.color0=glass.constants.color1={0,0,0,0};
+        glass.constants.effect0={24.0f*scale,0,softness,1};
+        glass.constants.data={2u,(1u<<27u)|4u,0,0};
+        glass.dispatchWidth=320;glass.dispatchHeight=160;
+        const auto x=unsigned(glass.constants.rect[0]+glass.constants.rect[2]*0.5f);
+        const auto y=unsigned(std::ceil(glass.constants.rect[1]));
+        unsigned previousMass=256u;
+        for (const float tone : { 0.0f, 0.5f, 1.0f })
+        {
+            glass.constants.color2[3]=tone;
+            const auto result=gpu.run(glass,true,1u,false,false,true);
+            const auto value=[&](unsigned row){return result.bytes[(row*320u+x)*4u];};
+            unsigned darkMass=0;
+            for(unsigned row=y-3;row<=y+2;++row) darkMass+=160u-value(row);
+            const float t=std::clamp((tone-0.12f)/0.70f,0.0f,1.0f);
+            const float expectedMass=160.0f*(0.20f-0.12f*t*t*(3.0f-2.0f*t));
+            if (value(y+2)!=160u || value(y-3)!=160u || value(y-1)>=160u ||
+                std::abs(float(darkMass)-expectedMass)>4.0f || darkMass>previousMass)
+                throw std::runtime_error("Outside stroke scale="+std::to_string(scale)+" phase="+std::to_string(fraction)+
+                    " tone="+std::to_string(tone)+" coverage="+std::to_string(darkMass));
+            previousMass=darkMass;
+            ++checks;
+        }
+    }
+    // Exercise the shared bridge shader as well as the native D3D11 contour.
+    // A low merge amount must expose a real gap, without fading the caps.
+    {
+        Case bridge;
+        bridge.constants.rect = { 32, 32, 132, 64 };
+        bridge.constants.color0 = bridge.constants.color1 = { 1, 1, 1, 1 };
+        bridge.constants.effect0 = { 0, 0, 0.5f, 1 };
+        bridge.constants.data = { 9u, 0u, 0u, 0u }; // Renderer2DPrimitive::eLiquidBridge
+        bridge.dispatchWidth = 256;
+        bridge.dispatchHeight = 128;
+        unsigned previousCoverage = 0u;
+        for (unsigned step = 0; step <= 40; ++step)
+        {
+            bridge.constants.uvRect[0] = float(step) / 40.0f;
+            const auto result = shapeGpu.run(bridge, true, 1u, false, false, true);
+            unsigned coverage = 0u;
+            for (unsigned y = 32; y < 96; ++y)
+                coverage += result.bytes[(y * 256u + 98u) * 4u + 3u];
+            if (coverage < previousCoverage ||
+                (step <= 4 && result.bytes[(64u * 256u + 98u) * 4u + 3u] != 0u))
+                throw std::runtime_error("The liquid neck must pinch off continuously without a residual thread");
+            for (const unsigned x : { 64u, 132u })
+                if (result.bytes[(64u * 256u + x) * 4u + 3u] != 255u)
+                    throw std::runtime_error("Separating a liquid neck must retain opaque, sharp caps");
+            previousCoverage = coverage;
+            ++checks;
+        }
+        if (previousCoverage == 0u)
+            throw std::runtime_error("A complete liquid merge must still join the caps");
+        unsigned previousNeck = 255u;
+        for (unsigned distance = 0; distance <= 104; distance += 2)
+        {
+            bridge.constants.rect[2] = 64.0f + distance;
+            bridge.constants.uvRect[0] = 1.0f;
+            const auto result = shapeGpu.run(bridge, true, 1u, false, false, true);
+            const auto alpha = [&](unsigned x, unsigned y) {
+                return result.bytes[(y * 256u + x) * 4u + 3u];
+            };
+            const unsigned neck = alpha(64u + distance / 2u, 64u);
+            if (neck > previousNeck || alpha(64u, 64u) != 255u ||
+                alpha(64u + distance, 64u) != 255u ||
+                alpha(32u, 32u) != 0u || alpha(95u + distance, 32u) != 0u)
+                throw std::runtime_error("Separating surfaces must narrow their neck and keep both outer caps round and opaque");
+            if (distance >= 94u && neck != 0u)
+                throw std::runtime_error("Separated surfaces must not retain a stretched liquid thread");
+            previousNeck = neck;
+            if (const auto directory = std::getenv("VIBRANCE_MERGE_PREVIEW"))
+            {
+                std::ofstream frame(std::string(directory) + "/merge-" +
+                    std::to_string(distance) + ".rgba", std::ios::binary);
+                frame.write(reinterpret_cast<const char*>(result.bytes.data()), result.bytes.size());
+                if (!frame) throw std::runtime_error("Cannot write merge preview frame");
+            }
+            ++checks;
+        }
+    }
     for (const std::array<float,2> opacity : {std::array<float,2>{1,0},{0,0},{1,1}})
     {
         Case cap;

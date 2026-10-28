@@ -116,13 +116,20 @@ enum Renderer2DStyleFlags : uint32_t
     // Blur-only alias; bit 13 means colour adjustment in the media pipeline.
     eRenderer2DStyleLiquidStaticRim = 1u << 13,
     eRenderer2DStyleShadowOutsideOnly = 1u << 23,
+    // Blur-only source policy for a retained transparent foreground layer.
+    eRenderer2DStyleBlurDynamicContentOnly = 1u << 23,
     eRenderer2DStyleShadowExcludeShapeExtensions = 1u << 24,
+    // Blur-only sampling domain for uniform rectangular surfaces.
+    eRenderer2DStyleBlurClampToClip = 1u << 24,
     eRenderer2DStyleTextEdgeFade = 1u << 25,
     eRenderer2DStyleMediaSingleBlurSample = 1u << 26,
     // Blur-specific flag. Optical parameters, including all eight animation
     // phase bits, occupy the separate packed-data word.
     eRenderer2DStyleBlurForegroundGroupSource = 1u << 26,
     eRenderer2DStyleMediaBlurHorizontal = 1u << 27,
+    // Shape-only alias: a static outside contour, independent of optical rim
+    // lighting. The media shader uses this bit for its horizontal blur pass.
+    eRenderer2DStyleLiquidOuterStroke = 1u << 27,
     eRenderer2DStyleMediaBlurVertical = 1u << 28,
     eRenderer2DStyleShapeCutout = 1u << 29,
     eRenderer2DStyleLiquidRim = 1u << 30,
@@ -628,6 +635,9 @@ struct Mask2DComponent
     bool enabled = true;
     bool useContentRect = true;
     float effectPadding = 0.0f;
+    // Preserve the parent's partially covered boundary pixels by restricting
+    // descendant paint to complete framebuffer pixels inside this clip.
+    bool insetToWholePixels = false;
 };
 
 // Resolve an inherited shape mask through the shape pipeline's existing
@@ -764,6 +774,13 @@ struct LiquidGlassComponent
     bool sampleOwnPaint = false;
 };
 
+// Authored surface tone survives conversion to neutral glass paint. It allows
+// one continuous contour-contrast rule across themes and custom colours.
+struct LiquidGlassStrokeSurfaceComponent
+{
+    float luminance = 1.0f;
+};
+
 struct DragHandle2DComponent
 {
     entt::entity target = entt::null;
@@ -790,6 +807,13 @@ struct ShapeStyleComponent
     // Post-process the composed surface instead of layering blurred pixels
     // over their sharp originals (which leaves translucent content sharp).
     bool backdropBlurReplaceSource = false;
+    // Vulkan retained overlays: filter only the dynamic foreground, without
+    // copying the cached or external backdrop into that layer. Both this
+    // surface and its filtered content must stay outside the static cache.
+    bool backdropBlurDynamicContentOnly = false;
+    // Uniform rectangular blur surfaces can constrain source taps to their
+    // inherited clip instead of pulling colours from an adjacent pane.
+    bool backdropBlurClampToClip = false;
 
     void set_color(glm::vec4 color)
     {
@@ -1726,6 +1750,10 @@ public:
     std::optional<Renderer2DShapeVisualState> resolved_shape_visual_state(
         entt::entity entity,
         double currentTimeSeconds) const;
+    // Retarget UI effects from the last resolved frame without mixing the
+    // input host's clock with the renderer's animation clock.
+    std::optional<Renderer2DShapeVisualState> last_resolved_shape_visual_state(
+        entt::entity entity) const;
 
 private:
     friend class Renderer2D;
@@ -1739,6 +1767,7 @@ private:
     entt::registry registry_;
     uint64_t cacheGeneration_ = 1;
     uint64_t frameGeneration_ = 1;
+    double lastResolvedTimeSeconds_ = 0.0;
     bool fullDamagePending_ = true;
     std::vector<entt::entity> damageEntities_;
     std::vector<std::pair<entt::entity, glm::uvec4>> presentedBounds_;

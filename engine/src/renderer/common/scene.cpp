@@ -310,6 +310,7 @@ bool Renderer2DScene::destroy_entity_tree(entt::entity entity)
 void Renderer2DScene::clear()
 {
     registry_.clear();
+    lastResolvedTimeSeconds_ = 0.0;
     mark_dirty();
 }
 
@@ -1076,6 +1077,12 @@ Renderer2DScene::resolved_shape_visual_state(
     return state;
 }
 
+std::optional<Renderer2DShapeVisualState> Renderer2DScene::last_resolved_shape_visual_state(
+    entt::entity entity) const
+{
+    return resolved_shape_visual_state(entity, lastResolvedTimeSeconds_);
+}
+
 void Renderer2DScene::build_render_plan(
     Renderer2DRenderPlan& plan,
     double currentTimeSeconds,
@@ -1098,6 +1105,7 @@ void Renderer2DScene::build_render_plan_impl(
     uint64_t rendererCacheGeneration,
     bool visibleLayoutsOnly)
 {
+    lastResolvedTimeSeconds_ = currentTimeSeconds;
     plan.clear();
     if (update_display_transition_activity(registry_, currentTimeSeconds))
     {
@@ -1220,9 +1228,22 @@ void Renderer2DScene::build_render_plan_impl(
             renderer2d_interactive_visual_effects(registry_, entity);
         const float visualOpacity =
             displayTransition.opacity * interactiveEffects.y;
+        bool outerStroke = false;
+        float strokeLuminance = 1.0f;
+#if defined(_WIN32)
+        const auto* strokeGlass = registry_.try_get<LiquidGlassComponent>(entity);
+        outerStroke = strokeGlass && strokeGlass->material == GlassMaterial::eLiquid &&
+            !registry_.any_of<SystemBackdropUnionComponent>(entity) &&
+            (style.color0.a < 1.0f || style.color1.a < 1.0f);
+        if (const auto* tone = registry_.try_get<LiquidGlassStrokeSurfaceComponent>(entity))
+            strokeLuminance = tone->luminance;
+        else
+            strokeLuminance = glm::dot((glm::vec3(style.color0) + glm::vec3(style.color1)) * 0.5f,
+                glm::vec3(0.2126f, 0.7152f, 0.0722f));
+#endif
         const bool foregroundVisible =
             alpha_visible(visualOpacity) &&
-            (shape_fill_visible(style) || shape_outline_visible(style));
+            (shape_fill_visible(style) || shape_outline_visible(style) || outerStroke);
 
         Renderer2DBatch batch = {};
         batch.entity = entity;
@@ -1268,6 +1289,15 @@ void Renderer2DScene::build_render_plan_impl(
         const uint32_t transformFlags = transform2_5d_flags(transform);
         batch.effect1 = transformFlags == 0u ? shape_sdf_parameters(shape) : transform2_5d_effect(transform);
         batch.flags = shape_flags(shape, style) | transformFlags;
+#if defined(_WIN32)
+        if (outerStroke)
+        {
+            batch.flags |= eRenderer2DStyleLiquidOuterStroke;
+            // A zero-width inside outline leaves its alpha slot free. Masked
+            // shapes retain this value in the corresponding packed byte below.
+            if (style.outlineWidth <= 0.001f) batch.color2.a = strokeLuminance;
+        }
+#endif
         if (const LiquidGlassComponent* liquid =
                 registry_.try_get<LiquidGlassComponent>(entity);
             liquid && liquid->material == GlassMaterial::eLiquid &&
@@ -1309,7 +1339,8 @@ void Renderer2DScene::build_render_plan_impl(
                 });
                 const bool sharedSurfaceContour = (shape.primitive == Renderer2DPrimitive::eSquircle ||
                     shape.primitive == Renderer2DPrimitive::eRoundedRectangle) && style.outlineWidth <= 0.001f && binaryCorners;
-                if (mask.cutout && ((batch.flags & eRenderer2DStyleLiquidRim) != 0u || sharedSurfaceContour) &&
+                if (mask.cutout && ((batch.flags & (eRenderer2DStyleLiquidRim |
+                        eRenderer2DStyleLiquidOuterStroke)) != 0u || sharedSurfaceContour) &&
                     (mask.primitive == Renderer2DPrimitive::eRoundedRectangle ||
                         mask.primitive == Renderer2DPrimitive::eEllipse ||
                         mask.primitive == Renderer2DPrimitive::eRectangle))
@@ -1320,7 +1351,8 @@ void Renderer2DScene::build_render_plan_impl(
                     // mask shapes do not use these packed amount/power bits.
                     batch.flags |= eRenderer2DStyleMaskedLiquidShapeParameters;
                     batch.packedData = (batch.packedData & ~(0xffu << 12u)) |
-                        (pack_unorm8(style.outlineColor.a) << 12u);
+                        (pack_unorm8(outerStroke && style.outlineWidth <= 0.001f ?
+                            strokeLuminance : style.outlineColor.a) << 12u);
                     batch.color2 = shape_sdf_parameters(shape);
                     if (sharedSurfaceContour && shape.customCornerRadii)
                     {
@@ -1422,6 +1454,10 @@ void Renderer2DScene::build_render_plan_impl(
                 0.0f
             };
             blurBatch.flags |= eRenderer2DStyleBlur;
+            if (style.backdropBlurDynamicContentOnly && style.backdropBlurReplaceSource && !sceneLiquid)
+            {
+                blurBatch.flags |= eRenderer2DStyleBlurDynamicContentOnly;
+            }
             if (style.backdropBlurFollowsFillAlpha)
             {
                 blurBatch.flags |= eRenderer2DStyleBlurFollowsFillAlpha;
@@ -1447,6 +1483,14 @@ void Renderer2DScene::build_render_plan_impl(
                 eRenderer2DStyleTransform2_5D |
                 eRenderer2DStyleCornerRadii |
                 eRenderer2DStyleShapeMask);
+            if (style.backdropBlurClampToClip && style.fill == Renderer2DFill::eSolid &&
+                shape.primitive == Renderer2DPrimitive::eRectangle && !sceneLiquid)
+            {
+                blurBatch.flags |= eRenderer2DStyleBlurClampToClip;
+                // Solid rectangular surfaces do not use UV shape parameters
+                // or gradient coordinates, leaving this slot for the domain.
+                blurBatch.uvRect = batch.clipRect;
+            }
             blurBatch.packedData = 0u;
             if (sceneLiquid)
             {
@@ -1663,6 +1707,12 @@ void Renderer2DScene::build_render_plan_impl(
         if (batch.effect0.z > 0.0f)
         {
             batch.flags |= eRenderer2DStyleBlur;
+#if defined(_WIN32)
+            // Inherited merge blur must use the bounded separable route too;
+            // the ordinary media path otherwise performs a cubic 2-D kernel.
+            if (interactiveEffects.x > 0.0f)
+                batch.flags |= eRenderer2DStyleMediaSingleBlurSample;
+#endif
         }
         if (const ShapeMaskClip mask = inherited_shape_mask_clip(registry_, entity, currentTimeSeconds);
             mask.enabled &&

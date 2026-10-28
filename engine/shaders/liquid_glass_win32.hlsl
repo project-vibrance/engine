@@ -87,21 +87,22 @@ float box_distance(float2 p, float2 halfSize)
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
 }
 
-// Match the sharp renderer's liquid merge: the source cap extends left inside
-// the main island, and a polynomial smooth union joins the detached circle.
+// Match the shared renderer's distance-limited surface-tension neck and caps.
 float liquid_bridge_distance(float2 p, float2 halfSize, float amount)
 {
     float radius = max(halfSize.y, 0.5);
     float centreOffset = max(halfSize.x - radius, 0.0);
     float2 source = p - float2(-centreOffset, 0.0);
-    float left = length(float2(max(source.x, 0.0), source.y)) - radius;
+    float left = length(source) - radius;
     float right = length(p - float2(centreOffset, 0.0)) - radius;
     float centreDistance = centreOffset * 2.0;
     float surfaceGap = max(centreDistance - radius * 2.0, 0.0);
     float easedAmount = smoothstep(0.0, 1.0, saturate(amount));
     float separationFactor = smoothstep(0.0, radius * 0.9, centreDistance);
-    float smoothing = lerp(surfaceGap * 2.0 + 0.5,
-        surfaceGap * 2.0 + radius * 0.95, easedAmount) * separationFactor;
+    float proximity = 1.0 - smoothstep(0.0, radius * 0.9, surfaceGap);
+    float neckBand = 1.0 - smoothstep(radius * 0.65, radius, abs(p.y));
+    float smoothing = radius * 1.6 * easedAmount * separationFactor *
+        proximity * neckBand;
     float distance = min(left, right);
     if (smoothing > 0.001)
     {
@@ -179,8 +180,7 @@ float contour_distance(float2 pixelPosition, ContourParameters contour)
         contour.radii, contour.params, contour.kind.xy);
     if (contour.kind.x > 4.5)
     {
-        // The sharp merge's source cap continues left, but its own dispatch
-        // bounds clip that continuation. Preserve those bounds inside a union.
+        // Preserve the sharp primitive's dispatch bounds inside a union too.
         float2 halfSize = max(contour.rect.zw * 0.5, 0.5);
         distance = max(distance, box_distance(localPosition - halfSize, halfSize));
     }

@@ -1034,7 +1034,9 @@ struct Engine::Impl
                     sourceBatch.clipRect = {0.0f, 0.0f, float(extent.width), float(extent.height)};
                     bounds = make_blur_dispatch_bounds(*this, sourceBatch, false, false);
                 }
-                const auto outputBounds = liquid ? make_liquid_output_dispatch_bounds(*this, batch, false) :
+                const bool clampToClip = !liquid && (batch.flags & eRenderer2DStyleBlurClampToClip) != 0u;
+                const auto outputBounds = clampToClip ? make_content_blur_output_dispatch_bounds(*this, batch, false) :
+                    liquid ? make_liquid_output_dispatch_bounds(*this, batch, false) :
                     make_blur_dispatch_bounds(*this, batch, false);
                 // The Metal path never populates a separate static layer.
                 auto bindings = {colour.get(), colour.get(), backdrop ? texture(backdrop.get()) : colour.get(),
@@ -1285,6 +1287,10 @@ void Engine::begin_externally_paced_frame(uint32_t frameRate)
 void Engine::end_externally_paced_frame()
 {
     frameBatch.active = false;
+}
+bool Engine::poll_pending_presentation()
+{
+    return false;
 }
 double Engine::idle_event_wait_seconds()
 {

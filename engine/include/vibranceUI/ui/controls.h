@@ -754,8 +754,8 @@ struct UiNavClusterOptions
     std::string backgroundColor = "rgba(255, 255, 255, 0.90)";
     std::string backgroundBottomColor {};
     float backgroundOpacity = 1.0f;
-    std::string outlineColor = "#707075E8";
-    float outlineWidth = 1.4f;
+    std::string outlineColor = "rgba(0, 0, 0, 0.16)";
+    float outlineWidth = 0.65f;
     float backdropBlurRadius = 0.0f;
     uint32_t backdropBlurPasses = 1u;
     float backdropBlurOpacity = 0.85f;
@@ -781,7 +781,7 @@ struct UiSettingsShellOptions
     UiScrollBarOptions rightScrollbar {};
     float panelHeight = 1.0f;
     glm::vec2 navOffset { 10.0f, 12.0f };
-    glm::vec2 navSize { 96.0f, 40.0f };
+    glm::vec2 navSize { 84.0f, 40.0f };
     int32_t navLayer = 2;
     uint32_t navOrder = 0u;
     int32_t searchLayer = 6;
@@ -1182,11 +1182,11 @@ inline UiNavClusterOptions ui_nav_cluster_options_from_theme(
     UiNavClusterOptions options = {};
     options.backIcon = backIcon;
     options.forwardIcon = forwardIcon;
-    options.iconSize = 17.0f;
+    options.iconSize = 19.0f;
     options.backgroundColor = theme.settingsPanel.navBackground;
     options.backgroundBottomColor = theme.settingsPanel.navBackgroundBottom;
-    options.outlineColor = theme.settingsPanel.searchOutline;
-    options.outlineWidth = 1.4f;
+    options.outlineColor = theme.settingsPanel.navOutline;
+    options.outlineWidth = 0.65f;
     options.backdropBlurRadius = 18.0f;
     options.backdropBlurPasses = 2u;
     options.backdropBlurOpacity = 0.9f;
@@ -3258,6 +3258,8 @@ inline UiControlHandle ui_create_nav_cluster(
         std::max(size.y, 2.0f)
     };
     const float halfWidth = safeSize.x * 0.5f;
+    // Inset circular buttons leave the pill's contour and optical rim clear.
+    const float buttonDiameter = std::max(2.0f, std::min(halfWidth, safeSize.y) - 8.0f);
     const float cornerRadius = options.cornerRadius > 0.0f ? options.cornerRadius : safeSize.y * 0.5f;
     const std::string backgroundBottom = options.backgroundBottomColor.empty() ?
         options.backgroundColor :
@@ -3298,11 +3300,14 @@ inline UiControlHandle ui_create_nav_cluster(
         scaled_size(safeSize.x, safeSize.y, ui.scale()));
     ui_apply_glass_material(ui, handle.root, options.glass);
     scene.enable_mask(handle.root, false);
-    auto make_button_visual = [&ui]() {
+    const auto iconColour = renderer2d_hex_color(options.iconTint);
+    const bool lightIcons = iconColour.r * 0.2126f + iconColour.g * 0.7152f +
+        iconColour.b * 0.0722f > 0.5f;
+    auto make_button_visual = [&ui, lightIcons]() {
         ButtonVisualComponent visual = {};
         visual.idle = ui_macos26_control_style(ui, "#FFFFFF00", "#00000000", 0.0f, 1.0f);
-        visual.hovered = ui_macos26_control_style(ui, "#0000000A", "#00000000", 0.0f, 1.0f);
-        visual.pressed = ui_macos26_control_style(ui, "#00000018", "#00000000", 0.0f, 1.0f);
+        visual.hovered = ui_macos26_control_style(ui, lightIcons ? "#FFFFFF14" : "#0000000A", "#00000000", 0.0f, 1.0f);
+        visual.pressed = ui_macos26_control_style(ui, lightIcons ? "#FFFFFF26" : "#00000018", "#00000000", 0.0f, 1.0f);
         visual.disabled = ui_macos26_control_style(ui, "#FFFFFF00", "#00000000", 0.0f, 1.0f);
         visual.hasDisabled = true;
         return visual;
@@ -3310,29 +3315,33 @@ inline UiControlHandle ui_create_nav_cluster(
 
     handle.label = scene.create_shape(
         { 0.0f, 0.0f },
-        scaled_size(halfWidth, safeSize.y, ui.scale()),
+        scaled_size(buttonDiameter, buttonDiameter, ui.scale()),
         ui_macos26_control_style(ui, "#FFFFFF00", "#00000000", 0.0f, 1.0f),
-        Renderer2DPrimitive::eRectangle);
+        Renderer2DPrimitive::eRoundedRectangle);
+    ui.set_shape(handle.label, buttonDiameter * 0.5f);
     ui.set_layer(handle.label, layer + 1, order);
     ui.attach_aligned(
         handle.label,
         handle.root,
         UiAlignment::eTopLeft,
-        glm::vec2(0.0f),
-        scaled_size(halfWidth, safeSize.y, ui.scale()));
+        scaled_offset((halfWidth - buttonDiameter) * 0.5f,
+            (safeSize.y - buttonDiameter) * 0.5f, ui.scale()),
+        scaled_size(buttonDiameter, buttonDiameter, ui.scale()));
 
     handle.caret = scene.create_shape(
         { 0.0f, 0.0f },
-        scaled_size(halfWidth, safeSize.y, ui.scale()),
+        scaled_size(buttonDiameter, buttonDiameter, ui.scale()),
         ui_macos26_control_style(ui, "#FFFFFF00", "#00000000", 0.0f, 1.0f),
-        Renderer2DPrimitive::eRectangle);
+        Renderer2DPrimitive::eRoundedRectangle);
+    ui.set_shape(handle.caret, buttonDiameter * 0.5f);
     ui.set_layer(handle.caret, layer + 1, order + 1u);
     ui.attach_aligned(
         handle.caret,
         handle.root,
         UiAlignment::eTopLeft,
-        scaled_offset(halfWidth, 0.0f, ui.scale()),
-        scaled_size(halfWidth, safeSize.y, ui.scale()));
+        scaled_offset(halfWidth + (halfWidth - buttonDiameter) * 0.5f,
+            (safeSize.y - buttonDiameter) * 0.5f, ui.scale()),
+        scaled_size(buttonDiameter, buttonDiameter, ui.scale()));
 
     ButtonInputComponent backButton = {};
     backButton.enabled = options.backEnabled;
@@ -3358,6 +3367,26 @@ inline UiControlHandle ui_create_nav_cluster(
         UiAlignment::eCenter,
         glm::vec2(0.0f),
         scaled_size(1.0f, std::max(safeSize.y - 20.0f, 1.0f), ui.scale()));
+
+    // Change only on hover boundaries; settled navigation adds no frame work.
+    const auto updateDivider = [scenePtr = &scene, back = handle.label,
+        forward = handle.caret, divider = handle.indicator](bool) {
+        auto& capturedRegistry = scenePtr->registry();
+        if (!capturedRegistry.valid(divider)) return;
+        const auto isHovered = [&](entt::entity button) {
+            const auto* input = capturedRegistry.try_get<ButtonInputComponent>(button);
+            return input && input->enabled && input->hovered;
+        };
+        auto& paint = capturedRegistry.get<ShapeStyleComponent>(divider);
+        const float opacity = isHovered(back) || isHovered(forward) ? 0.0f : 1.0f;
+        if (paint.opacity != opacity)
+        {
+            paint.opacity = opacity;
+            scenePtr->mark_dirty(divider);
+        }
+    };
+    registry.get<ButtonInputComponent>(handle.label).onHoverChanged = updateDivider;
+    registry.get<ButtonInputComponent>(handle.caret).onHoverChanged = updateDivider;
 
     if (options.backIcon.valid())
     {

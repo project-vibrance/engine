@@ -5,6 +5,9 @@
 #include <iostream>
 #include <string_view>
 #include <vector>
+#if defined(_WIN32)
+#include "../src/platform/win32/monitor_names.h"
+#endif
 
 namespace
 {
@@ -43,6 +46,22 @@ int main()
         secondary
     };
     bool passed = true;
+#if defined(_WIN32)
+    using vibrance::win32::monitor_display_name;
+    passed &= expect(monitor_display_name(L"U2723QE", L"\\\\?\\DISPLAY#DEL1234#instance") == L"Dell U2723QE",
+        "monitor labels must include the EDID manufacturer and model");
+    passed &= expect(monitor_display_name(L"  DELL U2723QE\r\n", L"\\\\?\\DISPLAY#DEL1234#instance") == L"DELL U2723QE",
+        "monitor labels must trim descriptor whitespace without duplicating the manufacturer");
+    passed &= expect(monitor_display_name(L"VG27AQ", L"\\\\?\\display#aci1234#instance") == L"ASUS VG27AQ",
+        "monitor interface matching must accept lower-case hardware identifiers");
+    passed &= expect(monitor_display_name(L"Panel 27", L"\\\\?\\DISPLAY#XYZ1234#instance") == L"XYZ Panel 27",
+        "unknown manufacturers must retain their actual PnP ID");
+    passed &= expect(monitor_display_name(L"Generic PnP Monitor", L"\\\\?\\DISPLAY#BOE08F5#instance") == L"BOE 08F5",
+        "panels without a friendly model must use their hardware product identifier");
+    passed &= expect(monitor_display_name(L"Studio Display", L"invalid") == L"Studio Display" &&
+        monitor_display_name(L"", L"invalid").empty(),
+        "unavailable monitor metadata must preserve a reported name or allow the normal fallback");
+#endif
 
     // Fixed-size overlay contents scale with DPI, but monitor positions and
     // bounds stay in screen coordinates, including negative monitor origins.

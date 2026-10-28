@@ -1,5 +1,6 @@
 #include <vibranceUI/engine.h>
 #include <vibranceUI/ui/liquid_controls.h>
+#include <vibranceUI/ui/surfaces.h>
 
 #include <chrono>
 #include <filesystem>
@@ -635,10 +636,10 @@ int main()
             !glassRegistry.any_of<SystemBackdropComponent>(slider.thumbEntity),
             "only a dragged thumb must emit portable optical drawing");
 #endif
-        const auto thumbHasLiquidRim = [&](const auto& batches) {
+        const auto thumbHasOutsideStroke = [&](const auto& batches) {
             return std::any_of(batches.begin(), batches.end(), [&](const auto& batch) {
                 return batch.entity == slider.thumbEntity &&
-                    (batch.flags & eRenderer2DStyleLiquidRim) != 0u;
+                    (batch.flags & eRenderer2DStyleLiquidOuterStroke) != 0u;
             });
         };
         const auto& sliderThumbStyle =
@@ -654,8 +655,12 @@ int main()
             glassRegistry.get<ShadowComponent>(slider.thumbEntity).opacity <= 0.12f &&
             glassRegistry.get<ShadowComponent>(slider.thumbEntity).spread <= 0.75f &&
 #endif
-            !thumbHasLiquidRim(plan.shapes) && !thumbHasLiquidRim(plan.cachedShapes),
-            "configured slider thumbs must have a soft shadow without gaining an outline in normal or liquid rendering");
+#if defined(_WIN32)
+            (thumbHasOutsideStroke(plan.shapes) || thumbHasOutsideStroke(plan.cachedShapes)),
+#else
+            !thumbHasOutsideStroke(plan.shapes) && !thumbHasOutsideStroke(plan.cachedShapes),
+#endif
+            "configured slider thumbs must have a soft shadow without gaining an inside outline in normal or liquid rendering");
         float peakScale = 1.0f;
         for (int frame = 0; frame <= 120; ++frame)
         {
@@ -1302,5 +1307,63 @@ int main()
             "settled media and cache policies must allow identical optical frames to be retained");
     }
 
+#if defined(_WIN32)
+    for (const float tone : { 0.0f, 0.5f, 1.0f })
+    {
+        Renderer2DScene scene;
+        UiBuilder ui(scene);
+        const auto clear = scene.create_shape({ 20,20 }, { 80,40 },
+            make_solid_style("#00000000", "#00000000", 0.0f, 1.0f));
+        ui_set_liquid_stroke_surface(scene, clear, glm::vec4(tone,tone,tone,1),
+            glm::vec4(tone,tone,tone,1));
+        ui_apply_glass_material(ui, clear, ui_liquid_glass_options());
+        const auto plan=scene.build_render_plan(1.0,0);
+        bool emitted=false;
+        for (const auto* list : { &plan.shapes, &plan.cachedShapes })
+            for (const auto& batch : *list)
+                if (batch.entity == clear)
+                {
+                    emitted=true;
+                    passed &= expect((batch.flags&eRenderer2DStyleLiquidOuterStroke)!=0u &&
+                        (batch.flags&eRenderer2DStyleLiquidRim)==0u && batch.effect0.y==0.0f &&
+                        std::abs(batch.color2.a-tone)<0.0001f,
+                        "A clear native lens must emit its independent outside stroke with the authored surface tone");
+                }
+        passed &= expect(emitted,"Clear liquid surfaces must remain drawable for their outside contour");
+        const auto generation=scene.frame_generation();
+        for (unsigned frame=0;frame<120;++frame)
+            ui_set_liquid_stroke_surface(scene, clear, glm::vec4(tone,tone,tone,1),
+                glm::vec4(tone,tone,tone,1));
+        passed &= expect(scene.frame_generation()==generation,
+            "Unchanged surface contrast must not schedule repeated frames");
+    }
+#endif
+    for (const float dpi : { 1.0f, 1.5f, 2.0f })
+        for (const glm::vec2 direction : { glm::vec2(1, 0), glm::vec2(-1, 0), glm::vec2(0, 1) })
+        {
+            Renderer2DScene scene;
+            UiBuilder ui(scene);
+            UiLiquidMergeOptions options;
+            options.firstCenter = { 120.0f * dpi, 80.0f * dpi };
+            options.secondCenter = options.firstCenter + direction * (42.0f * dpi);
+            options.diameter = 40.0f * dpi;
+            options.amount = 1.0f;
+            const auto connection = ui_create_liquid_merge(ui, options);
+            options.amount = 0.5f;
+            ui_update_liquid_merge(scene, connection, options);
+            const auto& shape = scene.registry().get<ShapeComponent>(connection);
+            const auto& paint = scene.registry().get<ShapeStyleComponent>(connection);
+            const auto& transform = scene.registry().get<Transform2DComponent>(connection);
+            passed &= expect(shape.primitive == Renderer2DPrimitive::eLiquidBridge &&
+                paint.color0.a == 1.0f && paint.opacity == 1.0f &&
+                std::abs(transform.rotationRadians - std::atan2(direction.y, direction.x)) < 0.0001f,
+                "Generic liquid objects must deform at full paint opacity in every direction");
+            const auto generation = scene.frame_generation();
+            for (unsigned frame = 0; frame < 120; ++frame)
+                ui_update_liquid_merge(scene, connection, options);
+            passed &= expect(scene.frame_generation() == generation &&
+                !scene.requires_continuous_redraw(1.0),
+                "A stationary liquid connection must retain its frame without an animation loop");
+        }
     return passed ? 0 : 1;
 }

@@ -236,7 +236,11 @@ void BlurPipeline::record_batch(
     }
 
     const bool liquid = (batch.flags & eRenderer2DStyleLiquidGlass) != 0u;
-    const DispatchBounds bounds = liquid ?
+    const bool dynamicContentOnly = !liquid && frameScope == DescriptorScope::eFrame &&
+        (batch.flags & eRenderer2DStyleBlurDynamicContentOnly) != 0u;
+    const bool clampToClip = !liquid && (batch.flags & eRenderer2DStyleBlurClampToClip) != 0u;
+    const DispatchBounds bounds = dynamicContentOnly || clampToClip ?
+        make_content_blur_output_dispatch_bounds(swapchain, batch, false) : liquid ?
         make_liquid_output_dispatch_bounds(swapchain, batch, false) :
         make_blur_dispatch_bounds(swapchain, batch, false);
     if (bounds.empty())
@@ -244,14 +248,9 @@ void BlurPipeline::record_batch(
         return;
     }
 
-    Renderer2DBatch sourceBatch = batch;
     // Populate the complete sampling halo even when a scroll viewport clips
     // the control. Only the final optical output uses the original clip.
-    if (liquid) sourceBatch.clipRect = { 0.0f, 0.0f,
-        static_cast<float>(swapchain.extent.width),
-        static_cast<float>(swapchain.extent.height) };
-    const DispatchBounds sourceBounds = liquid ?
-        make_blur_dispatch_bounds(swapchain, sourceBatch, false, false) : bounds;
+    const DispatchBounds sourceBounds = make_blur_source_dispatch_bounds(swapchain, batch, false, false);
 
     bind_frame_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, frameScope);
     bind_post_set(commandBuffer, pipelineType, descriptorSets, pipelineLayouts, postScope);
@@ -283,11 +282,11 @@ void BlurPipeline::record_batch(
     for (uint32_t pass = 0; pass < passCount; ++pass)
     {
         uint32_t passData = liquid ? batch.packedData : pass;
-        if (includeStaticBackdrop)
+        if (includeStaticBackdrop && !dynamicContentOnly)
         {
             passData |= kBlurUseStaticBackdrop;
         }
-        if (includeExternalBackdrop)
+        if (includeExternalBackdrop && !dynamicContentOnly)
         {
             passData |= kBlurUseExternalBackdrop;
         }

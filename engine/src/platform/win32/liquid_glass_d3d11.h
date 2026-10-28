@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <array>
 #include <string>
+#include <vector>
 
 namespace vibrance::win32
 {
@@ -125,6 +126,7 @@ private:
         DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
         std::uint32_t width = 0u;
         std::uint32_t height = 0u;
+        std::uint64_t lastUsed = 0u;
     };
     bool resize_scratch(DXGI_FORMAT format, std::uint32_t width,
                         std::uint32_t height);
@@ -210,8 +212,11 @@ private:
     DXGI_FORMAT scratchFormat_ = DXGI_FORMAT_UNKNOWN;
     std::uint32_t scratchWidth_ = 0;
     std::uint32_t scratchHeight_ = 0;
-    std::array<ScratchSurfaces, 8> scratchCache_ {};
-    std::size_t scratchCacheInsertion_ = 0u;
+    // Grow the metadata for small lenses instead of imposing an eight-size
+    // allocation cliff. GPU memory remains bounded by the existing allowance.
+    std::vector<ScratchSurfaces> scratchCache_;
+    std::uint64_t scratchLastUsed_ = 0u;
+    std::uint64_t scratchCacheClock_ = 0u;
     std::uint64_t scratchCacheBudget_ = 32u * 1024u * 1024u;
     std::uint64_t scratchAllocationCount_ = 0u;
     std::uint64_t blurReuseCount_ = 0u;

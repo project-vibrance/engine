@@ -53,6 +53,25 @@ inline UiGlassOptions ui_liquid_glass_options()
     return options;
 }
 
+inline void ui_set_liquid_stroke_surface(Renderer2DScene& scene,
+    entt::entity entity, glm::vec4 top, glm::vec4 bottom)
+{
+#if defined(_WIN32)
+    auto& registry = scene.registry();
+    if (!registry.valid(entity)) return;
+    const glm::vec3 colour = glm::clamp((glm::vec3(top) + glm::vec3(bottom)) * 0.5f,
+        glm::vec3(0.0f), glm::vec3(1.0f));
+    const float luminance = glm::dot(colour, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+    auto* tone = registry.try_get<LiquidGlassStrokeSurfaceComponent>(entity);
+    if (tone && tone->luminance == luminance) return;
+    registry.emplace_or_replace<LiquidGlassStrokeSurfaceComponent>(entity,
+        LiquidGlassStrokeSurfaceComponent { luminance });
+    scene.mark_dirty(entity);
+#else
+    (void)scene; (void)entity; (void)top; (void)bottom;
+#endif
+}
+
 inline void ui_apply_glass_material(
     UiBuilder& ui,
     entt::entity entity,
@@ -63,6 +82,12 @@ inline void ui_apply_glass_material(
     {
         return;
     }
+#if defined(_WIN32)
+    if (options.material == GlassMaterial::eLiquid &&
+        !registry.any_of<LiquidGlassStrokeSurfaceComponent>(entity))
+        if (const auto* paint = registry.try_get<ShapeStyleComponent>(entity))
+            ui_set_liquid_stroke_surface(ui.scene(), entity, paint->color0, paint->color1);
+#endif
 
     // A shape has one glass owner. Changing material cannot leave a stale
     // platform visual or renderer request behind.
@@ -109,6 +134,9 @@ inline void ui_apply_glass_material(
         {
             SystemBackdropRegion region = {};
             region.material = GlassMaterial::eLiquid;
+            // The identity dependency must not paint its sampling halo into
+            // the surrounding desktop. The native shader retains that halo.
+            region.clipRawBackdropToShape = true;
             region.liquidBackend = options.liquidBackend;
             region.provider = SystemBackdropProvider::eEngine;
             region.blurRadius = std::max(options.systemBlurRadius, 0.0f);

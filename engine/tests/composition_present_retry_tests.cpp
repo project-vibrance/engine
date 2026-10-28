@@ -206,5 +206,49 @@ int main()
     }
     check(copiedPixels * 4u < fullCopyPixels,
         "Small UI changes under a large glass halo should copy substantially fewer pixels");
+    history.reset();
+    const CompositionDamageRect oldLens { 2, 2, 18, 18 };
+    const CompositionDamageRect newLens { 40, 8, 60, 28 };
+    for (unsigned index = 0; index < VIBRANCE_COMPOSITION_MAX_BUFFERS; ++index)
+    {
+        history.prepare(index, 64, 32, {}, oldLens);
+        history.commit(index);
+    }
+    std::vector<std::uint32_t> desktop(64u * 32u);
+    const auto nativePixel = [&](int x, int y, CompositionDamageRect lens) {
+        return x >= lens.left && x < lens.right && y >= lens.top && y < lens.bottom ?
+            0xff808080u : 0xff000000u | static_cast<std::uint32_t>(x + y * 64);
+    };
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 64; ++x) desktop[y * 64 + x] = nativePixel(x, y, oldLens);
+    const auto moved = history.prepare(0, 64, 32, a, newLens);
+    check(moved.copy == a && moved.present == composition_damage_union(oldLens, newLens),
+        "Moving a lens must invalidate its old optical footprint without widening the UI copy");
+    for (int y = moved.present.top; y < moved.present.bottom; ++y)
+        for (int x = moved.present.left; x < moved.present.right; ++x)
+            desktop[y * 64 + x] = nativePixel(x, y, newLens);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 64; ++x)
+            check(desktop[y * 64 + x] == nativePixel(x, y, newLens),
+                "A moved native lens must leave every exposed desktop pixel equal to a complete repaint");
+    // A deferred attempt must not forget the optical footprint still visible.
+    const auto deferred = history.prepare(0, 64, 32, {}, newLens);
+    check(deferred.present == composition_damage_union(oldLens, newLens),
+        "A deferred optical move must retain the previous accepted lens footprint");
+    history.commit(0);
+    const auto removed = history.prepare(0, 64, 32, {}, {});
+    check(removed.copy.empty() && removed.present == newLens,
+        "Removing a lens must repaint its former desktop halo without another UI texture copy");
+    for (int y = removed.present.top; y < removed.present.bottom; ++y)
+        for (int x = removed.present.left; x < removed.present.right; ++x)
+            desktop[y * 64 + x] = nativePixel(x, y, {});
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 64; ++x)
+            check(desktop[y * 64 + x] == nativePixel(x, y, {}),
+                "Removing a native lens must restore the desktop without retained optical trails");
+    history.commit(0);
+    const auto settled = history.prepare(0, 64, 32, {}, {});
+    check(settled.copy.empty() && settled.present.empty(),
+        "A completed optical removal must not retain recurring desktop invalidation");
     return passed ? 0 : 1;
 }

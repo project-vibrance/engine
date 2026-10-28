@@ -8,6 +8,7 @@
 
 #include "composition_bridge_abi.h"
 #include "composition_region_effects.h"
+#include "composition_raw_backdrop_clip.h"
 #include "composition_present_retry.h"
 #include "composition_upload.h"
 #include "composition_damage.h"
@@ -275,7 +276,8 @@ public:
         float bottomRightRadius,
         float bottomLeftRadius,
         float amount,
-        float power) :
+        float power,
+        ID2D1Factory* factory = nullptr) :
         width_(std::max(width, 0.0f)),
         height_(std::max(height, 0.0f)),
         topLeftRadius_(topLeftRadius),
@@ -285,9 +287,9 @@ public:
         amount_(std::clamp(amount, 0.0f, 1.0f)),
         power_(std::clamp(power, 2.0f, 5.0f))
     {
-        winrt::check_hresult(D2D1CreateFactory(
-            D2D1_FACTORY_TYPE_MULTI_THREADED,
-            factory_.put()));
+        if (factory) factory_.copy_from(factory);
+        else winrt::check_hresult(D2D1CreateFactory(
+            D2D1_FACTORY_TYPE_MULTI_THREADED, factory_.put()));
     }
 
     HRESULT STDMETHODCALLTYPE GetGeometry(ID2D1Geometry** value) noexcept override
@@ -409,6 +411,208 @@ private:
     float amount_ = 1.0f;
     float power_ = 4.0f;
     winrt::com_ptr<ID2D1Factory> factory_;
+};
+
+// Only the identity backdrop dependency needs this silhouette. The marker
+// stays unclipped so DWM can identify it on the original composition target.
+// Geometry is retained with its visual, and is never rebuilt for translation.
+class RawBackdropGeometrySource :
+    public winrt::implements<RawBackdropGeometrySource,
+        winrt::Windows::Graphics::IGeometrySource2D,
+        ABI::Windows::Graphics::IGeometrySource2DInterop>
+{
+public:
+    RawBackdropGeometrySource(const VibranceCompositionRegion& region,
+        float horizontalPadding) :
+        region_(vibrance::win32::composition_raw_backdrop_source_region(region)),
+        horizontalPadding_(horizontalPadding)
+    {
+        // All bridge updates use its composition thread. Share one factory
+        // across retained clips rather than allocating a factory per lens.
+        static thread_local winrt::com_ptr<ID2D1Factory> sharedFactory;
+        if (!sharedFactory) winrt::check_hresult(D2D1CreateFactory(
+            D2D1_FACTORY_TYPE_MULTI_THREADED, sharedFactory.put()));
+        factory_ = sharedFactory;
+        geometry_ = create_geometry(factory_.get());
+    }
+
+    HRESULT STDMETHODCALLTYPE GetGeometry(ID2D1Geometry** value) noexcept override
+    {
+        if (!value) return E_POINTER;
+        geometry_.copy_to(value);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE TryGetGeometryUsingFactory(
+        ID2D1Factory* factory, ID2D1Geometry** value) noexcept override
+    {
+        if (!value) return E_POINTER;
+        *value = nullptr;
+        if (!factory) return E_INVALIDARG;
+        try
+        {
+            if (factory == factory_.get()) geometry_.copy_to(value);
+            else create_geometry(factory).copy_to(value);
+            return S_OK;
+        }
+        catch (...) { return winrt::to_hresult(); }
+    }
+
+private:
+    static winrt::com_ptr<ID2D1Geometry> combine(ID2D1Factory* factory,
+        ID2D1Geometry* left, ID2D1Geometry* right, D2D1_COMBINE_MODE mode)
+    {
+        winrt::com_ptr<ID2D1PathGeometry> path;
+        winrt::check_hresult(factory->CreatePathGeometry(path.put()));
+        winrt::com_ptr<ID2D1GeometrySink> sink;
+        winrt::check_hresult(path->Open(sink.put()));
+        winrt::check_hresult(left->CombineWithGeometry(right, mode, nullptr, 0.05f, sink.get()));
+        winrt::check_hresult(sink->Close());
+        return path.as<ID2D1Geometry>();
+    }
+
+    static winrt::com_ptr<ID2D1Geometry> leaf(ID2D1Factory* factory,
+        const VibranceCompositionContour& contour)
+    {
+        const float width = std::max(contour.width, 0.0f);
+        const float height = std::max(contour.height, 0.0f);
+        if (contour.shape == 0u)
+        {
+            winrt::com_ptr<ID2D1RectangleGeometry> rectangle;
+            winrt::check_hresult(factory->CreateRectangleGeometry(
+                D2D1::RectF(0, 0, width, height), rectangle.put()));
+            return rectangle.as<ID2D1Geometry>();
+        }
+        if (contour.shape == 2u)
+        {
+            winrt::com_ptr<ID2D1EllipseGeometry> ellipse;
+            winrt::check_hresult(factory->CreateEllipseGeometry(D2D1::Ellipse(
+                D2D1::Point2F(width * 0.5f, height * 0.5f),
+                width * 0.5f, height * 0.5f), ellipse.put()));
+            return ellipse.as<ID2D1Geometry>();
+        }
+        if (contour.shape == 5u)
+        {
+            winrt::com_ptr<ID2D1PathGeometry> path;
+            winrt::check_hresult(factory->CreatePathGeometry(path.put()));
+            winrt::com_ptr<ID2D1GeometrySink> sink;
+            winrt::check_hresult(path->Open(sink.put()));
+            sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+            for (const auto& profile : vibrance::win32::composition_bridge_clip_profiles(
+                width, height, contour.notchAmount))
+            {
+                if (profile.size() < 2u) continue;
+                sink->BeginFigure(D2D1::Point2F(profile.front()[0],
+                    height * 0.5f - profile.front()[1]), D2D1_FIGURE_BEGIN_FILLED);
+                for (const auto& point : profile) sink->AddLine(
+                    D2D1::Point2F(point[0], height * 0.5f - point[1]));
+                for (auto point = profile.rbegin(); point != profile.rend(); ++point)
+                    sink->AddLine(D2D1::Point2F((*point)[0], height * 0.5f + (*point)[1]));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            }
+            winrt::check_hresult(sink->Close());
+            return path.as<ID2D1Geometry>();
+        }
+        const float maximum = std::min(width, height) * 0.5f;
+        const auto radius = [maximum, &contour](float value) {
+            return std::clamp(value > 0.0f ? value : contour.cornerRadius, 0.0f, maximum);
+        };
+        const float notch = contour.shape == 4u && contour.notchAmount > 0.01f ?
+            std::clamp(contour.notchAmount, 0.0f, 1.0f) : 0.0f;
+        const float topScale = 1.0f - std::clamp(notch / 0.85f, 0.0f, 1.0f);
+        const float amount = contour.shape >= 3u ? std::max(contour.squircleAmount, notch) : 0.0f;
+        const float uniform = radius(contour.cornerRadius);
+        auto source = winrt::make_self<SquircleGeometrySource>(width, height,
+            (notch > 0 ? uniform : radius(contour.topLeftRadius)) * topScale,
+            (notch > 0 ? uniform : radius(contour.topRightRadius)) * topScale,
+            notch > 0 ? uniform : radius(contour.bottomRightRadius),
+            notch > 0 ? uniform : radius(contour.bottomLeftRadius),
+            amount, contour.squirclePower, factory);
+        winrt::com_ptr<ID2D1Geometry> body;
+        winrt::check_hresult(source->GetGeometry(body.put()));
+        // A fully formed notch flares beyond its body at the screen edge.
+        // Use the same circular cut-outs as the optical shader, retaining
+        // those corners instead of clipping them to the body's rectangle.
+        if (notch > 0.85f)
+        {
+            const float depth = contour.notchDepth > 0.5f ? contour.notchDepth :
+                std::clamp(height * 0.62f, 0.0f, 92.0f);
+            const float target = std::clamp(depth * 0.18f, 0.0f, height * 0.5f);
+            const float progress = std::clamp((notch - 0.85f) / 0.15f, 0.0f, 1.0f);
+            const float factor = std::clamp(height * 0.5f / std::max(target, 0.001f), 0.0f, 1.0f) * progress;
+            const float flare = target * factor * factor;
+            if (flare > 0.05f)
+            {
+                winrt::com_ptr<ID2D1RectangleGeometry> bar;
+                winrt::check_hresult(factory->CreateRectangleGeometry(
+                    D2D1::RectF(-flare, 0, width + flare, flare), bar.put()));
+                winrt::com_ptr<ID2D1Geometry> cap = bar.as<ID2D1Geometry>();
+                for (float x : { -flare, width + flare })
+                {
+                    winrt::com_ptr<ID2D1EllipseGeometry> cutout;
+                    winrt::check_hresult(factory->CreateEllipseGeometry(D2D1::Ellipse(
+                        D2D1::Point2F(x, flare), flare, flare), cutout.put()));
+                    cap = combine(factory, cap.get(), cutout.get(), D2D1_COMBINE_MODE_EXCLUDE);
+                }
+                body = combine(factory, body.get(), cap.get(), D2D1_COMBINE_MODE_UNION);
+            }
+        }
+        return body;
+    }
+
+    static winrt::com_ptr<ID2D1Geometry> placed_leaf(ID2D1Factory* factory,
+        const VibranceCompositionContour& contour)
+    {
+        auto geometry = leaf(factory, contour);
+        if (contour.x == 0.0f && contour.y == 0.0f) return geometry;
+        winrt::com_ptr<ID2D1TransformedGeometry> translated;
+        winrt::check_hresult(factory->CreateTransformedGeometry(geometry.get(),
+            D2D1::Matrix3x2F::Translation(contour.x, contour.y), translated.put()));
+        return translated.as<ID2D1Geometry>();
+    }
+
+    winrt::com_ptr<ID2D1Geometry> create_geometry(ID2D1Factory* factory) const
+    {
+        std::array<winrt::com_ptr<ID2D1Geometry>, 3> leaves;
+        std::array<ID2D1Geometry*, 3> pointers {};
+        const unsigned count = std::clamp(region_.contourCount, 1u, 3u);
+        if (region_.contourCount == 0u)
+        {
+            VibranceCompositionContour contour {};
+            contour.width = region_.width; contour.height = region_.height;
+            contour.cornerRadius = region_.cornerRadius;
+            contour.topLeftRadius = region_.topLeftRadius; contour.topRightRadius = region_.topRightRadius;
+            contour.bottomRightRadius = region_.bottomRightRadius; contour.bottomLeftRadius = region_.bottomLeftRadius;
+            contour.squircleAmount = region_.squircleAmount; contour.squirclePower = region_.squirclePower;
+            contour.notchAmount = region_.notchAmount; contour.notchDepth = region_.notchDepth;
+            contour.shape = region_.shape;
+            leaves[0] = leaf(factory, contour);
+        }
+        else for (unsigned index = 0; index < count; ++index)
+            leaves[index] = placed_leaf(factory, region_.contours[index]);
+        for (unsigned index = 0; index < count; ++index) pointers[index] = leaves[index].get();
+        winrt::com_ptr<ID2D1GeometryGroup> group;
+        winrt::check_hresult(factory->CreateGeometryGroup(D2D1_FILL_MODE_WINDING,
+            pointers.data(), count, group.put()));
+        winrt::com_ptr<ID2D1Geometry> result = group.as<ID2D1Geometry>();
+        if (region_.contourCount != 0u)
+        {
+            // Contours keep their full body geometry when a material starts
+            // part-way down the island. Match the marker's actual draw bounds
+            // rather than letting that body paint above the glass slice.
+            winrt::com_ptr<ID2D1RectangleGeometry> bounds;
+            winrt::check_hresult(factory->CreateRectangleGeometry(D2D1::RectF(
+                -horizontalPadding_, 0, region_.width + horizontalPadding_,
+                region_.height), bounds.put()));
+            result = combine(factory, result.get(), bounds.get(), D2D1_COMBINE_MODE_INTERSECT);
+        }
+        return result;
+    }
+
+    VibranceCompositionRegion region_ {};
+    float horizontalPadding_ = 0.0f;
+    winrt::com_ptr<ID2D1Factory> factory_;
+    winrt::com_ptr<ID2D1Geometry> geometry_;
 };
 
 class GraphicsEffectBase
@@ -682,6 +886,7 @@ class CompositionBridge
         composition::ContainerVisual materialContainer { nullptr };
         composition::SpriteVisual materialVisual { nullptr };
         composition::SpriteVisual rawBackdropVisual { nullptr };
+        composition::CompositionClip rawBackdropClip { nullptr };
         composition::ContainerVisual rawBackdropContainer { nullptr };
         composition::SpriteVisual liquidSourceVisual { nullptr };
         composition::CompositionVisualSurface liquidSurface { nullptr };
@@ -691,6 +896,7 @@ class CompositionBridge
         bool materialInset = false;
         bool shaderOnly = false;
         bool rimClockRunning = false;
+        float stoppedClockOpacity = -1.0f;
         std::uint32_t shaderSlot = vibrance::win32::liquidDwmRegionSlots;
     };
 
@@ -2080,6 +2286,9 @@ private:
                 sizeof(region.contours)) != 0 ||
             std::memcmp(&previous.exclusion, &region.exclusion,
                 sizeof(region.exclusion)) != 0;
+        const bool rawContourGeometryChanged =
+            previous.contourCount != region.contourCount ||
+            std::memcmp(previous.contours, region.contours, sizeof(region.contours)) != 0;
         const bool markerGeometryChanged = materialGeometryChanged ||
             (state.shaderOnly &&
                 (maskGeometryChanged || previous.shape != region.shape ||
@@ -2090,6 +2299,9 @@ private:
             previous.liquidRefraction != region.liquidRefraction ||
             previous.liquidBlur != region.liquidBlur ||
             previous.liquidDispersion != region.liquidDispersion;
+        const bool rawBackdropVisibilityChanged =
+            vibrance::win32::composition_raw_backdrop_required(previous) !=
+            vibrance::win32::composition_raw_backdrop_required(region);
         const bool clipChanged =
             sizeChanged ||
             previous.shape != region.shape ||
@@ -2151,7 +2363,7 @@ private:
             state.materialVisual.Size({ region.width + padding * 2.0f,
                 materialHeight });
         }
-        if ((sourceFootprintChanged || clipChanged) && state.rawBackdropVisual)
+        if ((sourceFootprintChanged || clipChanged || rawBackdropVisibilityChanged) && state.rawBackdropVisual)
         {
             // The source footprint includes the shader's bounded sampling
             // margin, while the marker retains the exact optical bounds.
@@ -2160,7 +2372,8 @@ private:
             state.rawBackdropVisual.Offset({ -horizontalMargin, -margin, 0.0f });
             state.rawBackdropVisual.Size({ region.width + horizontalMargin * 2.0f,
                 materialHeight + margin * 2.0f });
-            sync_raw_backdrop_clip(state, region);
+            sync_raw_backdrop_clip(state, region,
+                materialGeometryChanged || rawContourGeometryChanged || clipChanged);
         }
         if (materialGeometryChanged && state.liquidSourceVisual)
         {
@@ -2708,15 +2921,40 @@ private:
     }
 
     void sync_raw_backdrop_clip(RegionVisualState& state,
-        const VibranceCompositionRegion& region)
+        const VibranceCompositionRegion& region, bool geometryChanged = true)
     {
         if (!state.rawBackdropVisual) return;
-        if ((region.flags & 1u) == 0u)
+        if (geometryChanged) state.rawBackdropClip = nullptr;
+        if ((region.flags & 1u) == 0u ||
+            !vibrance::win32::composition_raw_backdrop_required(region))
         {
             state.rawBackdropVisual.Clip(nullptr);
             return;
         }
-        auto clip = make_clip(region);
+        if (!state.rawBackdropClip)
+        {
+            auto local = vibrance::win32::composition_raw_backdrop_source_region(region);
+            const float top = std::clamp(region.verticalStart, 0.0f, 0.98f) * region.height;
+            local.height = std::max(region.height - top, 1.0f);
+            for (unsigned index = 0; index < std::min(local.contourCount, 3u); ++index)
+                local.contours[index].y -= top;
+            const bool complex = local.contourCount != 0u ||
+                local.shape == 5u || (local.shape == 4u && local.notchAmount > 0.85f);
+            if (complex)
+            {
+                auto source = winrt::make<RawBackdropGeometrySource>(local, liquid_marker_padding(region));
+                state.rawBackdropClip = compositor_.CreateGeometricClip(
+                    compositor_.CreatePathGeometry(composition::CompositionPath(source)));
+            }
+            else if (local.shape == 0u)
+            {
+                auto rectangle = compositor_.CreateRectangleGeometry();
+                rectangle.Size({ local.width, local.height });
+                state.rawBackdropClip = compositor_.CreateGeometricClip(rectangle);
+            }
+            else state.rawBackdropClip = make_clip(local);
+        }
+        auto clip = state.rawBackdropClip;
         if (clip)
         {
             const float margin = liquid_source_margin(region);
@@ -2879,7 +3117,10 @@ private:
         auto clockVisual = rawDependency ? state.rawBackdropVisual : state.materialVisual;
         const bool animate = state.shaderOnly && clockVisual &&
             vibrance::win32::composition_liquid_rim_clock_required(region);
-        if (animate == state.rimClockRunning) return;
+        const float stoppedOpacity = rawDependency ?
+            (vibrance::win32::composition_raw_backdrop_required(region) ? 0.99f : 0.0f) : 0.9999f;
+        if (animate == state.rimClockRunning &&
+            (animate || state.stoppedClockOpacity == stoppedOpacity)) return;
         if (animate)
         {
             // Composition advances this clock at display cadence, even when
@@ -2904,13 +3145,18 @@ private:
             clock.Duration(std::chrono::seconds(4));
             clock.IterationBehavior(composition::AnimationIterationBehavior::Forever);
             clockVisual.StartAnimation(L"Opacity", clock);
+            state.stoppedClockOpacity = -1.0f;
         }
         else if (clockVisual)
         {
             clockVisual.StopAnimation(L"Opacity");
             // Retain a translucent marker without a clock. Unity opacity can
             // let DWM promote away the dependency that owns the liquid effect.
-            clockVisual.Opacity(rawDependency ? 0.99f : 0.9999f);
+            // A fully opaque cap returns before any backdrop taps in HLSL.
+            // Hide its unused identity dependency as well; the marker remains
+            // available to draw the opaque cap and its merging silhouette.
+            clockVisual.Opacity(stoppedOpacity);
+            state.stoppedClockOpacity = stoppedOpacity;
         }
         state.rimClockRunning = animate;
     }
@@ -2963,7 +3209,8 @@ private:
                 rawBrush.SetSourceParameter(L"rawBackdrop",
                     compositor_.CreateBackdropBrush());
                 state.rawBackdropVisual = compositor_.CreateSpriteVisual();
-                state.rawBackdropVisual.Opacity(0.99f);
+                state.rawBackdropVisual.Opacity(
+                    vibrance::win32::composition_raw_backdrop_required(region) ? 0.99f : 0.0f);
                 const float margin = liquid_source_margin(region);
                 const float horizontalMargin = margin + liquid_marker_padding(region);
                 state.rawBackdropVisual.Offset({ -horizontalMargin, -margin, 0.0f });
