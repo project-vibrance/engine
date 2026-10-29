@@ -12,6 +12,18 @@
 
 namespace
 {
+    std::string shader_asset_name(std::string_view name, std::string_view extension,
+        VulkanShaderProfile profile)
+    {
+        return std::string(name) +
+            (profile == VulkanShaderProfile::eVulkan11 ? "_vulkan11" : "") + std::string(extension);
+    }
+
+    const char* shader_profile_name(VulkanShaderProfile profile)
+    {
+        return profile == VulkanShaderProfile::eVulkan11 ? "Vulkan 1.1 / SPIR-V 1.3" : "Vulkan 1.3 / SPIR-V 1.6";
+    }
+
     std::vector<uint32_t> load_embedded_spirv(const std::string& fileName)
     {
         const std::string shaderName = vibrance::path_utf8(std::filesystem::path(fileName).filename());
@@ -33,7 +45,12 @@ namespace
 
 uint64_t embedded_shader_fingerprint()
 {
-    static const uint64_t fingerprint = [] {
+    return embedded_shader_fingerprint(VulkanShaderProfile::eVulkan13);
+}
+
+uint64_t embedded_shader_fingerprint(VulkanShaderProfile profile)
+{
+    const auto computeFingerprint = [](VulkanShaderProfile selected) {
         constexpr std::array<std::string_view, 13> names {
             "blur_2d.comp", "clear_screen.comp", "composite_2d.comp",
             "hosted_3d_composite.comp", "media_2d.comp", "media_2d_nvidia.comp", "model_3d.frag",
@@ -42,13 +59,23 @@ uint64_t embedded_shader_fingerprint()
         uint64_t hash = 14695981039346656037ull;
         for (const auto name : names)
         {
+            const auto extension = name.rfind('.');
+            const auto asset = shader_asset_name(name.substr(0u, extension), name.substr(extension), selected);
             hash = vibrance::vulkan::pipeline_cache_hash(
-                std::as_bytes(std::span(name.data(), name.size())), hash);
-            hash = vibrance::vulkan::pipeline_cache_hash(vibrance_embedded_shader_spirv(name), hash);
+                std::as_bytes(std::span(asset.data(), asset.size())), hash);
+            hash = vibrance::vulkan::pipeline_cache_hash(vibrance_embedded_shader_spirv(asset), hash);
         }
         return hash;
-    }();
-    return fingerprint;
+    };
+    if (profile == VulkanShaderProfile::eVulkan11)
+    {
+        static const uint64_t legacy = computeFingerprint(VulkanShaderProfile::eVulkan11);
+        return legacy;
+    }
+    // Preserve modern-device binaries and cache identities exactly, and hash
+    // only the selected profile. No work is added to the frame loop.
+    static const uint64_t modern = computeFingerprint(VulkanShaderProfile::eVulkan13);
+    return modern;
 }
 
 PipelineLayoutBuilder::PipelineLayoutBuilder(vk::Device& logicalDevice) : logicalDevice(logicalDevice) {}
@@ -108,12 +135,21 @@ vk::Pipeline make_compute_pipeline(
     std::deque<std::function<void(vk::Device)>>& deletionQueue,
     vk::PipelineCache pipelineCache
 ) {
+    return make_compute_pipeline(logicalDevice, name, pipelineLayout, deletionQueue,
+        pipelineCache, VulkanShaderProfile::eVulkan13);
+}
+
+vk::Pipeline make_compute_pipeline(
+    vk::Device logicalDevice, const char* name, vk::PipelineLayout pipelineLayout,
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    vk::PipelineCache pipelineCache, VulkanShaderProfile profile
+) {
     Logger* logger = Logger::fetch_logger();
 
     std::stringstream fileNameBuilder;
     std::string fileName;
 
-    fileNameBuilder << "../shaders/" << name << ".comp";
+    fileNameBuilder << "../shaders/" << shader_asset_name(name, ".comp", profile);
     fileName = fileNameBuilder.str();
     fileNameBuilder.str("");
     
@@ -128,6 +164,8 @@ vk::Pipeline make_compute_pipeline(
     moduleInfo.codeSize = spirv.size() * sizeof(uint32_t);
     moduleInfo.pCode = spirv.data();
 
+    logger->info(std::string("Vulkan compute shader module: ") + name + " (" + shader_profile_name(profile) + ").");
+    logger->flush_file_output();
     auto moduleResult = logicalDevice.createShaderModule(moduleInfo);
     if (moduleResult.result != vk::Result::eSuccess)
     {
@@ -146,12 +184,14 @@ vk::Pipeline make_compute_pipeline(
     pipelineInfo.stage = stageInfo;
     pipelineInfo.layout = pipelineLayout;
 
+    logger->info(std::string("Vulkan compute pipeline creation: ") + name + ".");
+    logger->flush_file_output();
     auto pipelineResult = logicalDevice.createComputePipeline(pipelineCache, pipelineInfo);
     logicalDevice.destroyShaderModule(shaderModule);
 
     if (pipelineResult.result == vk::Result::eSuccess)
     {
-        logger->vulkan("Successfully created compute pipeline.");
+        logger->info(std::string("Vulkan compute pipeline ready: ") + name + ".");
         VkPipeline handle = pipelineResult.value;
         deletionQueue.push_back([logger, handle](vk::Device device) {
             logger->vulkan("Destroyed compute pipeline.");
@@ -176,10 +216,20 @@ vk::Pipeline make_graphics_pipeline(
     std::deque<std::function<void(vk::Device)>>& deletionQueue,
     vk::PipelineCache pipelineCache
 ) {
+    return make_graphics_pipeline(logicalDevice, name, pipelineLayout, renderPass,
+        rasterizationSamples, deletionQueue, pipelineCache, VulkanShaderProfile::eVulkan13);
+}
+
+vk::Pipeline make_graphics_pipeline(
+    vk::Device logicalDevice, const char* name, vk::PipelineLayout pipelineLayout,
+    vk::RenderPass renderPass, vk::SampleCountFlagBits rasterizationSamples,
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    vk::PipelineCache pipelineCache, VulkanShaderProfile profile
+) {
     Logger* logger = Logger::fetch_logger();
 
     std::stringstream vertexFileNameBuilder;
-    vertexFileNameBuilder << "../shaders/" << name << ".vert";
+    vertexFileNameBuilder << "../shaders/" << shader_asset_name(name, ".vert", profile);
     std::vector<uint32_t> vertexSpirv = load_embedded_spirv(vertexFileNameBuilder.str());
     if (vertexSpirv.empty())
     {
@@ -188,7 +238,7 @@ vk::Pipeline make_graphics_pipeline(
     }
 
     std::stringstream fragmentFileNameBuilder;
-    fragmentFileNameBuilder << "../shaders/" << name << ".frag";
+    fragmentFileNameBuilder << "../shaders/" << shader_asset_name(name, ".frag", profile);
     std::vector<uint32_t> fragmentSpirv = load_embedded_spirv(fragmentFileNameBuilder.str());
     if (fragmentSpirv.empty())
     {
@@ -210,6 +260,8 @@ vk::Pipeline make_graphics_pipeline(
         return moduleResult.value;
     };
 
+    logger->info(std::string("Vulkan graphics shader modules: ") + name + " (" + shader_profile_name(profile) + ").");
+    logger->flush_file_output();
     vk::ShaderModule vertexModule = make_shader_module(vertexSpirv);
     vk::ShaderModule fragmentModule = make_shader_module(fragmentSpirv);
     if (!vertexModule || !fragmentModule)
@@ -344,6 +396,8 @@ vk::Pipeline make_graphics_pipeline(
     pipelineInfo.basePipelineHandle = nullptr;
     pipelineInfo.basePipelineIndex = -1;
 
+    logger->info(std::string("Vulkan graphics pipeline creation: ") + name + ".");
+    logger->flush_file_output();
     auto pipelineResult = logicalDevice.createGraphicsPipeline(pipelineCache, pipelineInfo);
 
     logicalDevice.destroyShaderModule(vertexModule);
@@ -351,7 +405,7 @@ vk::Pipeline make_graphics_pipeline(
 
     if (pipelineResult.result == vk::Result::eSuccess)
     {
-        logger->vulkan("Successfully created graphics pipeline.");
+        logger->info(std::string("Vulkan graphics pipeline ready: ") + name + ".");
         VkPipeline handle = pipelineResult.value;
         deletionQueue.push_back([logger, handle](vk::Device device) {
             logger->vulkan("Destroyed graphics pipeline.");

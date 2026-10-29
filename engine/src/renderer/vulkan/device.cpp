@@ -6,6 +6,7 @@
 #include <cwchar>
 #include <limits>
 #include <string_view>
+#include "vulkan_api_policy.h"
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -184,10 +185,16 @@ bool supports(const vk::PhysicalDevice& device, const char** ppRequestedExtensio
     return true;
 }
 
-bool is_suitable(const vk::PhysicalDevice& device, bool requireWindowsCompositionInterop)
+bool is_suitable(const vk::PhysicalDevice& device, bool requireWindowsCompositionInterop,
+    uint32_t instanceApiVersion)
 {
     Logger* logger = Logger::fetch_logger();
     logger->vulkan("Checking if device is suitable...");
+    if (!vibrance::vulkan::negotiated_device_api_version(instanceApiVersion, device.getProperties().apiVersion))
+    {
+        logger->warning("Skipping a Vulkan device which does not support the renderer's minimum Vulkan 1.1 API.");
+        return false;
+    }
 
     std::vector<const char*> requestedExtensions {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
@@ -236,7 +243,8 @@ bool supports_windows_composition_interop(
 vk::PhysicalDevice choose_physical_device(
     const vk::Instance instance,
     bool requireWindowsCompositionInterop,
-    void* compositionWindow)
+    void* compositionWindow,
+    uint32_t instanceApiVersion)
 {
     // Prefer a native GPU ICD among devices that satisfy the requested
     // feature set. A Vulkan-over-D3D implementation remains the architecture-
@@ -261,7 +269,7 @@ vk::PhysicalDevice choose_physical_device(
     {
         logger->log(device);
         
-        if (is_suitable(device, requireWindowsCompositionInterop))
+        if (is_suitable(device, requireWindowsCompositionInterop, instanceApiVersion))
         {
             int score = device_score(device);
 #if defined(_WIN32)
@@ -342,9 +350,17 @@ vk::Device create_logical_device(
     vk::PhysicalDevice physicalDevice,
     vk::SurfaceKHR surface,
     std::deque<std::function<void(vk::Device)>>& deletionQueue,
-    bool enableWindowsCompositionInterop)
+    bool enableWindowsCompositionInterop,
+    uint32_t instanceApiVersion)
 {
     Logger* logger = Logger::fetch_logger();
+    const auto apiVersion = vibrance::vulkan::negotiated_device_api_version(
+        instanceApiVersion, physicalDevice.getProperties().apiVersion);
+    if (!apiVersion)
+    {
+        logger->error("Cannot create a renderer device without Vulkan 1.1 support.");
+        return {};
+    }
 
     uint32_t graphicsIndex = find_queue_family_index(physicalDevice, surface, vk::QueueFlagBits::eGraphics);
     if (graphicsIndex == UINT32_MAX)
@@ -360,9 +376,14 @@ vk::Device create_logical_device(
 
     vk::PhysicalDeviceFeatures deviceFeatures = vk::PhysicalDeviceFeatures();
     vk::PhysicalDeviceVulkan13Features supportedVulkan13Features = {};
-    vk::PhysicalDeviceFeatures2 supportedFeatures = {};
-    supportedFeatures.pNext = &supportedVulkan13Features;
-    physicalDevice.getFeatures2(&supportedFeatures);
+    // A newer loader can expose an older ICD. Do not pass core 1.3 feature
+    // structures through that driver's feature-query or device-create chain.
+    if (vibrance::vulkan::api_at_least_vulkan13(apiVersion))
+    {
+        vk::PhysicalDeviceFeatures2 supportedFeatures = {};
+        supportedFeatures.pNext = &supportedVulkan13Features;
+        physicalDevice.getFeatures2(&supportedFeatures);
+    }
 
     vk::PhysicalDeviceVulkan13Features enabledVulkan13Features = {};
     enabledVulkan13Features.shaderDemoteToHelperInvocation =

@@ -30,7 +30,8 @@ enum class LogLevel : uint8_t
 
 struct LoggerOutputOptions
 {
-    // Keeps the timestamped filename format while letting apps brand the path
+    // Explicit directories are preferred. Windows defaults to local application
+    // data (directoryName/logs), with profile-local and temporary fallbacks.
     std::filesystem::path directory {};
     std::string directoryName = "vibrance-dev/runtime/engine";
     std::string filePrefix = "vibrance_log";

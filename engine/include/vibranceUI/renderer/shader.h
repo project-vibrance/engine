@@ -27,13 +27,26 @@ class PipelineLayoutBuilder
 };
 
 // Loads embedded compute shader SPIR-V before pipeline creation
+enum class VulkanShaderProfile : std::uint8_t
+{
+    eVulkan11,
+    eVulkan13
+};
+
 uint64_t embedded_shader_fingerprint();
+uint64_t embedded_shader_fingerprint(VulkanShaderProfile profile);
 
 vk::Pipeline make_compute_pipeline(
     vk::Device logicalDevice, const char* name,
     vk::PipelineLayout pipelineLayout,
     std::deque<std::function<void(vk::Device)>>& deletionQueue,
     vk::PipelineCache pipelineCache = {}
+);
+vk::Pipeline make_compute_pipeline(
+    vk::Device logicalDevice, const char* name,
+    vk::PipelineLayout pipelineLayout,
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    vk::PipelineCache pipelineCache, VulkanShaderProfile profile
 );
 
 // Loads embedded graphics shader SPIR-V before pipeline creation
@@ -45,4 +58,13 @@ vk::Pipeline make_graphics_pipeline(
     vk::SampleCountFlagBits rasterizationSamples,
     std::deque<std::function<void(vk::Device)>>& deletionQueue,
     vk::PipelineCache pipelineCache = {}
+);
+vk::Pipeline make_graphics_pipeline(
+    vk::Device logicalDevice,
+    const char* name,
+    vk::PipelineLayout pipelineLayout,
+    vk::RenderPass renderPass,
+    vk::SampleCountFlagBits rasterizationSamples,
+    std::deque<std::function<void(vk::Device)>>& deletionQueue,
+    vk::PipelineCache pipelineCache, VulkanShaderProfile profile
 );

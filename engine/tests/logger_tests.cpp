@@ -9,6 +9,7 @@
 #include <vibranceUI/core/path_utf8.h>
 #if defined(_WIN32)
 #include <windows.h>
+#include <vibranceUI/core/windows_diagnostic_paths.h>
 
 namespace
 {
@@ -171,6 +172,34 @@ int main(int argc, char* argv[])
     std::ifstream emergency(emergencyPath);
     const std::string emergencyText { std::istreambuf_iterator<char>(emergency), std::istreambuf_iterator<char>() };
     passed &= emergencyText.find("emergency report after rotation") != std::string::npos;
+#if defined(_WIN32)
+    // A blocked/invalid preferred location must not disable all logging or
+    // lose fatal-report registration. Use an ordinary file as the blocker.
+    const auto requestedDirectory = options.directory;
+    const auto blocker = requestedDirectory / "not-a-directory";
+    { std::ofstream file(blocker); file << "blocked preferred log path fixture"; }
+    options.directory = blocker / "logs";
+    options.directoryName = "Vibrance/logger-fallback-fixture-" + std::to_string(GetCurrentProcessId());
+    Logger::configure_output(options);
+    const auto fallbackPath = logger->output_path();
+    passed &= logger->is_file_open() && fallbackPath.parent_path() != options.directory;
+    logger->info("fallback diagnostic fixture");
+    logger->flush_file_output();
+    std::ifstream fallback(fallbackPath);
+    const std::string fallbackText { std::istreambuf_iterator<char>(fallback), std::istreambuf_iterator<char>() };
+    passed &= fallbackText.find("fallback diagnostic fixture") != std::string::npos;
+    options.directory = requestedDirectory;
+    Logger::configure_output(options);
+    fallback.close();
+    std::error_code fallbackError;
+    std::filesystem::remove(fallbackPath, fallbackError);
+    auto fallbackEmergency = fallbackPath;
+    fallbackEmergency += ".crash.txt";
+    std::filesystem::remove(fallbackEmergency, fallbackError);
+    std::filesystem::remove(fallbackPath.parent_path(), fallbackError);
+    std::filesystem::remove(fallbackPath.parent_path().parent_path(), fallbackError);
+    std::filesystem::remove(blocker, fallbackError);
+#endif
     logger->get_file_stream().close();
     input.close();
     repeated.close();

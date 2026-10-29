@@ -15,6 +15,12 @@ if(VIBRANCE_RENDER_BACKEND STREQUAL "Vulkan")
 endif()
 
 if(WIN32)
+    # The bootstrap logger must work without loading the engine or its graphics
+    # and media dependencies. Keep this fixture independently linked as well.
+    add_executable(vibrance_windows_diagnostics_tests windows_diagnostics_tests.cpp)
+    target_compile_features(vibrance_windows_diagnostics_tests PRIVATE cxx_std_20)
+    target_include_directories(vibrance_windows_diagnostics_tests PRIVATE ../include)
+    add_test(NAME vibrance_windows_diagnostics_tests COMMAND vibrance_windows_diagnostics_tests)
     add_executable(vibrance_liquid_runtime_identity_tests liquid_runtime_identity_tests.cpp)
     target_compile_features(vibrance_liquid_runtime_identity_tests PRIVATE cxx_std_20)
     target_link_libraries(vibrance_liquid_runtime_identity_tests PRIVATE bcrypt)
@@ -203,6 +209,35 @@ if(VIBRANCE_RENDER_BACKEND STREQUAL "Vulkan")
     add_executable(vibrance_media_pipeline_policy_tests media_pipeline_policy_tests.cpp)
     target_compile_features(vibrance_media_pipeline_policy_tests PRIVATE cxx_std_20)
     add_test(NAME vibrance_media_pipeline_policy_tests COMMAND vibrance_media_pipeline_policy_tests)
+    add_executable(vibrance_vulkan_api_policy_tests vulkan_api_policy_tests.cpp)
+    target_compile_features(vibrance_vulkan_api_policy_tests PRIVATE cxx_std_20)
+    target_link_libraries(vibrance_vulkan_api_policy_tests PRIVATE Vulkan::Vulkan)
+    add_test(NAME vibrance_vulkan_api_policy_tests COMMAND vibrance_vulkan_api_policy_tests)
+    vibrance_add_engine_test(vibrance_vulkan_shader_profile_tests vulkan_shader_profile_tests.cpp)
+    # Exercise the production helpers without exporting private renderer
+    # symbols from the engine's DLL solely for a test.
+    target_sources(vibrance_vulkan_shader_profile_tests PRIVATE
+        ../src/renderer/vulkan/shader.cpp "${EMBEDDED_SHADER_CPP}")
+    target_include_directories(vibrance_vulkan_shader_profile_tests PRIVATE "${ENGINE_GENERATED_DIR}")
+    target_link_libraries(vibrance_vulkan_shader_profile_tests PRIVATE Vulkan::Vulkan)
+    add_test(NAME vibrance_vulkan_legacy_pipeline_tests COMMAND vibrance_vulkan_shader_profile_tests --pipelines)
+    set_tests_properties(vibrance_vulkan_legacy_pipeline_tests PROPERTIES SKIP_RETURN_CODE 77)
+    if(WIN32)
+        vibrance_add_engine_test(vibrance_vulkan_pipeline_initialisation_tests vulkan_pipeline_initialisation_tests.cpp
+            "${CMAKE_CURRENT_BINARY_DIR}/pipeline-initialisation-modern")
+        add_test(NAME vibrance_vulkan_pipeline_initialisation_legacy_tests
+            COMMAND vibrance_vulkan_pipeline_initialisation_tests
+                "${CMAKE_CURRENT_BINARY_DIR}/pipeline-initialisation-legacy")
+        set_tests_properties(vibrance_vulkan_pipeline_initialisation_legacy_tests
+            PROPERTIES ENVIRONMENT "VIBRANCE_FORCE_VULKAN_11=1")
+        add_test(NAME vibrance_vulkan_pipeline_initialisation_direct_tests
+            COMMAND vibrance_vulkan_pipeline_initialisation_tests
+                "${CMAKE_CURRENT_BINARY_DIR}/pipeline-initialisation-direct" --direct)
+        set_tests_properties(vibrance_vulkan_pipeline_initialisation_direct_tests
+            PROPERTIES ENVIRONMENT "VIBRANCE_FORCE_VULKAN_11=1" SKIP_RETURN_CODE 77 TIMEOUT 90)
+        set_tests_properties(vibrance_vulkan_pipeline_initialisation_tests
+            vibrance_vulkan_pipeline_initialisation_legacy_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 90)
+    endif()
     add_executable(vibrance_pipeline_cache_store_tests pipeline_cache_store_tests.cpp)
     target_include_directories(vibrance_pipeline_cache_store_tests PRIVATE ../include)
     target_compile_features(vibrance_pipeline_cache_store_tests PRIVATE cxx_std_20)

@@ -16,7 +16,7 @@
 #include <vibranceUI/core/runtime_log_storage.h>
 #include <vibranceUI/core/path_utf8.h>
 #if defined(_WIN32)
-#include <shlobj.h>
+#include <vibranceUI/core/windows_diagnostic_paths.h>
 #endif
 #if !defined(__APPLE__)
 #include <vulkan/vulkan.hpp>
@@ -109,20 +109,7 @@ namespace
             return options.directory;
         }
 
-#ifdef _WIN32
-        PWSTR documents = nullptr;
-        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents)))
-        {
-            const auto directory = std::filesystem::path(documents) / options.directoryName;
-            CoTaskMemFree(documents);
-            return directory;
-        }
-        const char* userProfile = std::getenv("USERPROFILE");
-        if (userProfile)
-        {
-            return std::filesystem::path(userProfile) / "Documents" / options.directoryName;
-        }
-#else
+#if !defined(_WIN32)
         const char* home = std::getenv("HOME");
         if (home)
         {
@@ -172,22 +159,39 @@ void Logger::reopen_file()
     static std::atomic<unsigned> sequence { 0 };
     filename << prefix << '_' << std::put_time(&utc, "%Y-%m-%d_%H-%M-%S") << '_' << milliseconds << '_' << processId << '_' << sequence.fetch_add(1) << ".txt";
     const std::string fileName = filename.str();
-    const std::filesystem::path docsPath = default_log_directory(outputOptions);
-
-    try 
-	{
-        std::filesystem::create_directories(docsPath);
-        logPath = docsPath / fileName;
-        logFile.open(logPath, std::ios::out | std::ios::trunc);
-        if (!logFile) throw std::runtime_error("Could not open log file: " + vibrance::path_utf8(logPath));
-        crash_diagnostics::initialise(logPath);
-        runtime_log_storage::prune(docsPath, logPath, prefix);
-        nextRetentionCheck = std::chrono::steady_clock::now() + std::chrono::minutes(1);
-    } 
-	catch (const std::exception& e) 
-	{
-        std::cerr << "\033[0;31m[Logger Error] Failed to create log directory/file: " << e.what() << "\033[0m" << std::endl;
+    std::vector<std::filesystem::path> directories;
+#if defined(_WIN32)
+    auto relative = std::filesystem::path(outputOptions.directoryName);
+    if (relative.empty()) relative = L"Vibrance";
+    if (relative.filename() != L"logs") relative /= L"logs";
+    directories = windows_diagnostic_paths::candidates(relative, outputOptions.directory);
+#else
+    directories.push_back(default_log_directory(outputOptions));
+#endif
+    for (const auto& directory : directories)
+    {
+        try
+        {
+            std::error_code error;
+            std::filesystem::create_directories(directory, error);
+            if (error) continue;
+            const auto candidate = directory / fileName;
+            logFile.clear();
+            logFile.open(candidate, std::ios::out | std::ios::trunc);
+            if (!logFile) continue;
+            logPath = candidate;
+            crash_diagnostics::initialise(logPath);
+            runtime_log_storage::prune(directory, logPath, prefix);
+            nextRetentionCheck = std::chrono::steady_clock::now() + std::chrono::minutes(1);
+            return;
+        }
+        catch (const std::exception& error)
+        {
+            if (logFile.is_open()) return; // Keep the usable log if optional diagnostics fail.
+            std::cerr << "[Logger Error] Diagnostic path unavailable: " << error.what() << std::endl;
+        }
     }
+    std::cerr << "[Logger Error] Could not open a diagnostic log in any available directory." << std::endl;
 }
 
 Logger::~Logger() 

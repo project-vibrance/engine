@@ -208,8 +208,6 @@ inline void initialise(const std::filesystem::path& logPath)
         nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     dumpPath = logPath;
     dumpPath += ".dmp";
-    static HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
-    if (dbghelp) writeDump = reinterpret_cast<WriteDump>(GetProcAddress(dbghelp, "MiniDumpWriteDump"));
     const auto previous = SetUnhandledExceptionFilter(unhandled);
     // The EXE and engine DLL each install this header's handler. Retain the
     // original predecessor when logs rotate; replacing it can form DLL/EXE
@@ -225,6 +223,11 @@ inline void initialise(const std::filesystem::path& logPath)
     // Native faults retain their exception code/address and minidump. Registering
     // SIGSEGV on Windows intercepts them before the unhandled exception filter.
     std::signal(SIGABRT, signal_handler);
+    // Register the emergency handlers before optional DLL initialisation.
+    // Load the OS copy explicitly: a stale app-local debugger DLL must not
+    // become a prerequisite for starting the application or recording a fault.
+    static HMODULE dbghelp = LoadLibraryExW(L"dbghelp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (dbghelp) writeDump = reinterpret_cast<WriteDump>(GetProcAddress(dbghelp, "MiniDumpWriteDump"));
 #else
     for (int signal : { SIGABRT, SIGSEGV, SIGILL, SIGFPE }) std::signal(signal, signal_handler);
 #endif

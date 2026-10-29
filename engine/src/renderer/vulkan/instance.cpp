@@ -3,6 +3,8 @@
 #include <sstream>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
+#include "vulkan_api_policy.h"
 
 bool supported_by_instance(const char* const* extensionNames, uint32_t extensionCount, const char* const* layerNames, uint32_t layerCount)
 {
@@ -89,18 +91,36 @@ vk::Instance make_instance(
     const char* applicationName,
     uint32_t requestedExtensionCount,
     const char* const* requestedExtensions,
-    std::deque<std::function<void(vk::Instance)>>& deletionQueue
+    std::deque<std::function<void(vk::Instance)>>& deletionQueue,
+    uint32_t* negotiatedApiVersion
 )
 {
     Logger* logger = Logger::fetch_logger();
+    if (negotiatedApiVersion) *negotiatedApiVersion = 0u;
     
     logger->vulkan("Creating an instance...");
 
-    uint32_t version = vk::enumerateInstanceVersion().value;
-
-    logger->report_version_number(version);
-
-    version &= ~(0xFFFU);
+    const auto loaderVersion = vk::enumerateInstanceVersion();
+    if (loaderVersion.result != vk::Result::eSuccess)
+    {
+        logger->error("Could not query the Vulkan loader version.");
+        return nullptr;
+    }
+    logger->report_version_number(loaderVersion.value);
+    uint32_t version = vibrance::vulkan::negotiated_instance_api_version(loaderVersion.value);
+    if (!version)
+    {
+        logger->error("The Vulkan loader does not support the renderer's minimum Vulkan 1.1 API.");
+        return nullptr;
+    }
+    const char* forceVulkan11 = std::getenv("VIBRANCE_FORCE_VULKAN_11");
+    if (forceVulkan11 && std::strcmp(forceVulkan11, "1") == 0)
+    {
+        // Exercise the real compatibility path on a newer driver, without
+        // inventing physical-device capabilities or changing normal defaults.
+        version = vk::ApiVersion11;
+        logger->info("Vulkan 1.1 renderer compatibility was forced for diagnostics.");
+    }
 
     vk::ApplicationInfo appInfo = vk::ApplicationInfo(applicationName, version, "vibranceUI", version, version);
 
@@ -185,6 +205,7 @@ vk::Instance make_instance(
     }
 
     vk::Instance instance = instanceAttempt.value;
+    if (negotiatedApiVersion) *negotiatedApiVersion = version;
 
     deletionQueue.push_back([logger](vk::Instance instance){
         instance.destroy();

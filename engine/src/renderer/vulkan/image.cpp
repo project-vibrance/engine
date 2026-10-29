@@ -313,7 +313,7 @@ void transition_image_layout(
 
 void copy_image_to_image(vk::CommandBuffer commandBuffer, vk::Image src, vk::Image dst, vk::Extent2D srcSize, vk::Extent2D dstSize)
 {
-	vk::ImageBlit2 blitRegion = {};
+	vk::ImageBlit blitRegion = {};
 
 	blitRegion.srcOffsets[1].x = srcSize.width;
 	blitRegion.srcOffsets[1].y = srcSize.height;
@@ -333,16 +333,10 @@ void copy_image_to_image(vk::CommandBuffer commandBuffer, vk::Image src, vk::Ima
 	blitRegion.dstSubresource.layerCount = 1;
 	blitRegion.dstSubresource.mipLevel = 0;
 
-	vk::BlitImageInfo2 blitInfo = {};
-	blitInfo.dstImage = dst;
-	blitInfo.dstImageLayout = vk::ImageLayout::eTransferDstOptimal;
-	blitInfo.srcImage = src;
-	blitInfo.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
-	blitInfo.filter = vk::Filter::eNearest;
-	blitInfo.regionCount  = 1;
-	blitInfo.pRegions = &blitRegion;
-
-	commandBuffer.blitImage2(&blitInfo);
+	// The original blit command is equivalent here and remains available on
+	// Vulkan 1.1 drivers; the 1.3 copy-commands2 API adds no required behaviour.
+	commandBuffer.blitImage(src, vk::ImageLayout::eTransferSrcOptimal,
+		dst, vk::ImageLayout::eTransferDstOptimal, 1u, &blitRegion, vk::Filter::eNearest);
 }
 
 void copy_image_region_to_image(
@@ -380,7 +374,7 @@ void copy_image_region_to_image(
 			(static_cast<uint64_t>(value) * destination + source - 1u) / source);
 	};
 
-	vk::ImageBlit2 blitRegion = {};
+	vk::ImageBlit blitRegion = {};
 	blitRegion.srcOffsets[0] = vk::Offset3D {
 		static_cast<int32_t>(srcX),
 		static_cast<int32_t>(srcY),
@@ -402,13 +396,6 @@ void copy_image_region_to_image(
 	blitRegion.dstSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
 	blitRegion.dstSubresource.layerCount = 1u;
 
-	vk::BlitImageInfo2 blitInfo = {};
-	blitInfo.srcImage = src;
-	blitInfo.srcImageLayout = vk::ImageLayout::eTransferSrcOptimal;
-	blitInfo.dstImage = dst;
-	blitInfo.dstImageLayout = vk::ImageLayout::eTransferDstOptimal;
-	blitInfo.filter = vk::Filter::eNearest;
-	blitInfo.regionCount = 1u;
-	blitInfo.pRegions = &blitRegion;
-	commandBuffer.blitImage2(&blitInfo);
+	commandBuffer.blitImage(src, vk::ImageLayout::eTransferSrcOptimal,
+		dst, vk::ImageLayout::eTransferDstOptimal, 1u, &blitRegion, vk::Filter::eNearest);
 }

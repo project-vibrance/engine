@@ -64,6 +64,37 @@ add_custom_command(
     VERBATIM)
 list(APPEND EMBEDDED_SHADER_BINARIES "${NVIDIA_MEDIA_SHADER_BINARY}")
 string(APPEND EMBEDDED_SHADER_MANIFEST_CONTENT "media_2d_nvidia.comp|${NVIDIA_MEDIA_SHADER_BINARY}\n")
+
+# Drivers exposing Vulkan 1.1/1.2 cannot consume SPIR-V 1.6, even when a newer
+# system loader is installed. Keep modern binaries unchanged and embed a
+# separately validated SPIR-V 1.3 profile for those physical devices.
+function(vibrance_compile_vulkan11_shader SHADER_SOURCE SHADER_NAME)
+    get_filename_component(SHADER_STEM "${SHADER_NAME}" NAME_WE)
+    get_filename_component(SHADER_EXTENSION "${SHADER_NAME}" EXT)
+    set(COMPAT_NAME "${SHADER_STEM}_vulkan11${SHADER_EXTENSION}")
+    set(COMPAT_BINARY "${EMBEDDED_SHADER_DIR}/spirv/${COMPAT_NAME}.spv")
+    add_custom_command(
+        OUTPUT "${COMPAT_BINARY}"
+        COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.1 -O
+            -DVIBRANCE_VULKAN_SAMPLE_LOOPS=1 ${ARGN}
+            "${SHADER_SOURCE}" -o "${COMPAT_BINARY}"
+        DEPENDS "${SHADER_SOURCE}" "${CMAKE_CURRENT_LIST_FILE}"
+        COMMENT "Compiling Vulkan 1.1 compatibility shader ${COMPAT_NAME}"
+        VERBATIM)
+    list(APPEND EMBEDDED_SHADER_BINARIES "${COMPAT_BINARY}")
+    set(EMBEDDED_SHADER_BINARIES "${EMBEDDED_SHADER_BINARIES}" PARENT_SCOPE)
+    set(EMBEDDED_SHADER_MANIFEST_CONTENT
+        "${EMBEDDED_SHADER_MANIFEST_CONTENT}${COMPAT_NAME}|${COMPAT_BINARY}\n" PARENT_SCOPE)
+endfunction()
+foreach(SHADER_SOURCE IN LISTS ENGINE_SHADER_SOURCES)
+    get_filename_component(SHADER_NAME "${SHADER_SOURCE}" NAME)
+    vibrance_compile_vulkan11_shader("${SHADER_SOURCE}" "${SHADER_NAME}")
+endforeach()
+vibrance_compile_vulkan11_shader("${CMAKE_CURRENT_SOURCE_DIR}/shaders/text_msdf.comp"
+    "text_msdf_batch.comp" -DVIBRANCE_TEXT_BATCH=1)
+vibrance_compile_vulkan11_shader("${CMAKE_CURRENT_SOURCE_DIR}/shaders/media_2d.comp"
+    "media_2d_nvidia.comp" -DVIBRANCE_NVIDIA_MEDIA_SAMPLE_LOOPS=1)
+
 file(CONFIGURE
     OUTPUT "${EMBEDDED_SHADER_MANIFEST}"
     CONTENT "${EMBEDDED_SHADER_MANIFEST_CONTENT}")

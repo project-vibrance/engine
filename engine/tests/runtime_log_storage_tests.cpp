@@ -67,6 +67,11 @@ int main()
     if (newest != "part 7") return 6;
     // Legacy names have no process identifier; seconds must not become a PID.
     if (storage::identify("vibrance-app_2026-01-01_00-00-04.txt").process != 0) return 7;
+    for (const auto prefix : { "vibrance-app-bootstrap", "vibrance-app-entry", "vibrance-installer-runtime" })
+    {
+        const auto kind = storage::identify(std::string(prefix) + "-20261029-010203-1234.log");
+        if (!kind.owned || kind.process != 1234) return 8;
+    }
     std::cout << "Retention budget, rotation, expiry, dump count and unrelated-file protection passed.\n";
     return 0;
 }

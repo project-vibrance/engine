@@ -10,5 +10,6 @@ vk::Instance make_instance(
     const char* applicationName,
     uint32_t requestedExtensionCount,
     const char* const* requestedExtensions,
-    std::deque<std::function<void(vk::Instance)>>& deletionQueue
+    std::deque<std::function<void(vk::Instance)>>& deletionQueue,
+    uint32_t* negotiatedApiVersion = nullptr
 );

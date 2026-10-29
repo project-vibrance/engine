@@ -12,6 +12,7 @@
 #include <vibranceUI/ui/layout_direction.h>
 #include "../../platform/composition_presenter.h"
 #include "pipeline_cache.h"
+#include "vulkan_api_policy.h"
 #include "media_pipeline_policy.h"
 #include "composition_readback.h"
 #include "composition_frame_delivery.h"
@@ -147,10 +148,12 @@ namespace
 
 	vk::Extent2D hosted_3d_extent(
 		vk::Extent2D renderExtent,
-		Renderer2DScene& scene)
+		Renderer2DScene& scene,
+		bool* hasModels = nullptr)
 	{
-		return scene.registry().view<Model3DComponent>().empty() ?
-			vk::Extent2D { 1u, 1u } : renderExtent;
+		const bool present = !scene.registry().view<Model3DComponent>().empty();
+		if (hasModels) *hasModels = present;
+		return present ? renderExtent : vk::Extent2D { 1u, 1u };
 	}
 
 
@@ -977,6 +980,7 @@ private:
 	void make_descriptor_sets();
 	void make_pipeline_layouts();
 	void make_pipelines();
+	bool ensure_model_pipelines();
 	bool initialise_composition_presenter();
 	bool rebuild_composition_presenter();
 	bool ensure_composition_readback(vk::Extent2D extent);
@@ -1010,6 +1014,10 @@ private:
 	std::deque<std::function<void(VmaAllocator)>> vmaDeletionQueue;
 
 	vk::Instance instance;
+	std::uint32_t instanceApiVersion = VK_API_VERSION_1_1;
+	std::uint32_t deviceApiVersion = VK_API_VERSION_1_1;
+	VulkanShaderProfile shaderProfile = VulkanShaderProfile::eVulkan11;
+	bool modelPipelineCreationAttempted = false;
 	vk::detail::DispatchLoaderDynamic dldi;
 	vk::DebugUtilsMessengerEXT debugMessenger = nullptr;
 	vk::PhysicalDevice physicalDevice;
@@ -1459,7 +1467,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
         createInfo.applicationName,
         createInfo.instanceExtensionCount,
         createInfo.instanceExtensions,
-        instanceDeletionQueue
+        instanceDeletionQueue, &instanceApiVersion
     );
     if (!instance)
     {
@@ -1525,7 +1533,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	physicalDevice = choose_physical_device(
 		instance,
 		attemptCompositionGpuInterop,
-		compositionRequested ? nativeWindowHandle : nullptr);
+		compositionRequested ? nativeWindowHandle : nullptr, instanceApiVersion);
 	compositionGpuInterop = attemptCompositionGpuInterop &&
 		static_cast<bool>(physicalDevice);
 	if (!physicalDevice && attemptCompositionGpuInterop)
@@ -1533,13 +1541,28 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		logger->warning(
 			"No Vulkan GPU supports D3D11 external-memory and keyed-mutex interop; using the host-upload Windows Composition fallback.");
 		physicalDevice = choose_physical_device(
-			instance, false, nativeWindowHandle);
+			instance, false, nativeWindowHandle, instanceApiVersion);
 	}
 	if (!physicalDevice)
 	{
 		logger->vulkan(LogLevel::eError, "No suitable physical device was found.");
 		return;
 	}
+	const auto deviceProperties = physicalDevice.getProperties();
+	deviceApiVersion = vibrance::vulkan::negotiated_device_api_version(
+		instanceApiVersion, deviceProperties.apiVersion);
+	if (!deviceApiVersion)
+	{
+		logger->error("The selected graphics device does not support Vulkan 1.1.");
+		return;
+	}
+	shaderProfile = vibrance::vulkan::api_at_least_vulkan13(deviceApiVersion) ?
+		VulkanShaderProfile::eVulkan13 : VulkanShaderProfile::eVulkan11;
+	logger->info(std::string("Renderer graphics device: ") + deviceProperties.deviceName.data() +
+		"; effective Vulkan " + std::to_string(VK_API_VERSION_MAJOR(deviceApiVersion)) + "." +
+		std::to_string(VK_API_VERSION_MINOR(deviceApiVersion)) +
+		(shaderProfile == VulkanShaderProfile::eVulkan11 ?
+			"; compatibility shaders (SPIR-V 1.3)." : "; modern shaders (SPIR-V 1.6)."));
 	hosted3DSamples = choose_hosted3d_sample_count(physicalDevice, requestedMsaaSamples);
 	logger->vulkan(std::string("Hosted 3D MSAA sample count: ") + sample_count_name(hosted3DSamples) + ".");
 
@@ -1548,7 +1571,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		physicalDevice,
 		surface,
 		deviceDeletionQueue,
-		compositionGpuInterop);
+		compositionGpuInterop, instanceApiVersion);
 	if (!logicalDevice)
 	{
 		logger->vulkan("Failed to create a logical device.");
@@ -1561,7 +1584,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	allocatorInfo.device = logicalDevice;
 	allocatorInfo.instance = instance;
 	allocatorInfo.physicalDevice = physicalDevice;
-	allocatorInfo.vulkanApiVersion = vk::ApiVersion13;
+	allocatorInfo.vulkanApiVersion = deviceApiVersion;
 	// Each UI window owns an allocator. Small blocks avoid reserving a large
 	// mostly empty heap for every window; larger resources still fit normally.
 	allocatorInfo.preferredLargeHeapBlockSize = 4ull * 1024ull * 1024ull;
@@ -1629,15 +1652,12 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 	make_pipelines();
 	const std::array requiredPipelines = {
 		PipelineType::eClear,
-		PipelineType::eRasteriseSmall,
 		PipelineType::eShape2D,
 		PipelineType::eShadow2D,
 		PipelineType::eBlur2D,
 		PipelineType::eTextMSDF,
 		PipelineType::eMedia2D,
-		PipelineType::eCompositeHosted3D,
-		PipelineType::eComposite2D,
-		PipelineType::eModel3D
+		PipelineType::eComposite2D
 	};
 	const bool hasRequiredPipelines = std::all_of(requiredPipelines.begin(), requiredPipelines.end(),
 		[this](PipelineType pipelineType) {
@@ -1889,7 +1909,7 @@ void Engine::Impl::make_pipelines()
 	try
 	{
 		pipelineCache = std::make_unique<vibrance::vulkan::PipelineCache>(
-			logicalDevice, physicalDevice.getProperties(), embedded_shader_fingerprint());
+			logicalDevice, physicalDevice.getProperties(), embedded_shader_fingerprint(shaderProfile));
 		cache = pipelineCache->handle();
 	}
 	catch (...)
@@ -1897,51 +1917,63 @@ void Engine::Impl::make_pipelines()
 		logger->vulkan("Vulkan pipeline cache unavailable; compiling normally.");
 	}
 	pipelines[PipelineType::eClear] = make_compute_pipeline(
-		logicalDevice, "clear_screen", pipelineLayouts[PipelineType::eClear], deviceDeletionQueue, cache
-	);
-	pipelines[PipelineType::eRasteriseSmall] = make_compute_pipeline(
-		logicalDevice, "rasterise_small", pipelineLayouts[PipelineType::eRasteriseSmall], deviceDeletionQueue, cache
+		logicalDevice, "clear_screen", pipelineLayouts[PipelineType::eClear], deviceDeletionQueue, cache, shaderProfile
 	);
 	pipelines[PipelineType::eShape2D] = make_compute_pipeline(
-		logicalDevice, "shape_2d", pipelineLayouts[PipelineType::eShape2D], deviceDeletionQueue, cache
+		logicalDevice, "shape_2d", pipelineLayouts[PipelineType::eShape2D], deviceDeletionQueue, cache, shaderProfile
 	);
 	pipelines[PipelineType::eShadow2D] = make_compute_pipeline(
-		logicalDevice, "shadow_2d", pipelineLayouts[PipelineType::eShadow2D], deviceDeletionQueue, cache
+		logicalDevice, "shadow_2d", pipelineLayouts[PipelineType::eShadow2D], deviceDeletionQueue, cache, shaderProfile
 	);
 	pipelines[PipelineType::eBlur2D] = make_compute_pipeline(
-		logicalDevice, "blur_2d", pipelineLayouts[PipelineType::eBlur2D], deviceDeletionQueue, cache
+		logicalDevice, "blur_2d", pipelineLayouts[PipelineType::eBlur2D], deviceDeletionQueue, cache, shaderProfile
 	);
 	pipelines[PipelineType::eTextMSDF] = make_compute_pipeline(
-		logicalDevice, "text_msdf", pipelineLayouts[PipelineType::eTextMSDF], deviceDeletionQueue, cache
+		logicalDevice, "text_msdf", pipelineLayouts[PipelineType::eTextMSDF], deviceDeletionQueue, cache, shaderProfile
 	);
 	// Batching is optional. The ordinary text pipeline remains available if a
 	// driver cannot create this variant or its bounded upload cannot be allocated.
 	pipelines[PipelineType::eTextMSDFBatch] = make_compute_pipeline(
-		logicalDevice, "text_msdf_batch", pipelineLayouts[PipelineType::eTextMSDFBatch], deviceDeletionQueue, cache
+		logicalDevice, "text_msdf_batch", pipelineLayouts[PipelineType::eTextMSDFBatch], deviceDeletionQueue, cache, shaderProfile
 	);
 	const uint32_t mediaVendorId = physicalDevice.getProperties().vendorID;
 	const std::string_view mediaShaderName =
 		vibrance::vulkan::media_pipeline_shader_name(mediaVendorId);
 	pipelines[PipelineType::eMedia2D] = make_compute_pipeline(
-		logicalDevice, mediaShaderName.data(), pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue, cache
+		logicalDevice, mediaShaderName.data(), pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue, cache, shaderProfile
 	);
 	if (!pipelines[PipelineType::eMedia2D] && mediaShaderName != "media_2d")
 	{
 		pipelines[PipelineType::eMedia2D] = make_compute_pipeline(
 			logicalDevice, vibrance::vulkan::media_pipeline_shader_name(mediaVendorId, false).data(),
-			pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue, cache);
+			pipelineLayouts[PipelineType::eMedia2D], deviceDeletionQueue, cache, shaderProfile);
 	}
-	pipelines[PipelineType::eCompositeHosted3D] = make_compute_pipeline(
-		logicalDevice, "hosted_3d_composite", pipelineLayouts[PipelineType::eCompositeHosted3D], deviceDeletionQueue, cache
-	);
 	pipelines[PipelineType::eComposite2D] = make_compute_pipeline(
-		logicalDevice, "composite_2d", pipelineLayouts[PipelineType::eComposite2D], deviceDeletionQueue, cache
-	);
-	pipelines[PipelineType::eModel3D] = make_graphics_pipeline(
-		logicalDevice, "model_3d", pipelineLayouts[PipelineType::eModel3D], hosted3DRenderPass,
-		hosted3DSamples, deviceDeletionQueue, cache
+		logicalDevice, "composite_2d", pipelineLayouts[PipelineType::eComposite2D], deviceDeletionQueue, cache, shaderProfile
 	);
 	if (pipelineCache) pipelineCache->persist();
+}
+
+bool Engine::Impl::ensure_model_pipelines()
+{
+	if (!modelPipelineCreationAttempted)
+	{
+		modelPipelineCreationAttempted = true;
+		logger->info("Hosted 3D pipelines: initialising on first model request.");
+		const vk::PipelineCache cache = pipelineCache ? pipelineCache->handle() : vk::PipelineCache {};
+		pipelines[PipelineType::eRasteriseSmall] = make_compute_pipeline(
+			logicalDevice, "rasterise_small", pipelineLayouts[PipelineType::eRasteriseSmall],
+			deviceDeletionQueue, cache, shaderProfile);
+		pipelines[PipelineType::eCompositeHosted3D] = make_compute_pipeline(
+			logicalDevice, "hosted_3d_composite", pipelineLayouts[PipelineType::eCompositeHosted3D],
+			deviceDeletionQueue, cache, shaderProfile);
+		pipelines[PipelineType::eModel3D] = make_graphics_pipeline(
+			logicalDevice, "model_3d", pipelineLayouts[PipelineType::eModel3D], hosted3DRenderPass,
+			hosted3DSamples, deviceDeletionQueue, cache, shaderProfile);
+		if (pipelineCache) pipelineCache->persist();
+	}
+	return pipelines[PipelineType::eRasteriseSmall] &&
+		pipelines[PipelineType::eCompositeHosted3D] && pipelines[PipelineType::eModel3D];
 }
 
 bool Engine::Impl::initialise_composition_presenter()
@@ -2969,8 +3001,13 @@ void Engine::Impl::draw()
 	// Model attachments are an optional part of the frame graph.  Keep their
 	// valid descriptor/framebuffer placeholders at 1x1 until a Model3D entity is
 	// present, then restore the full render resolution before recording it.
+	bool sceneHasModels = false;
 	const vk::Extent2D desiredModelRenderExtent =
-		hosted_3d_extent(renderExtent, renderer2DScene);
+		hosted_3d_extent(renderExtent, renderer2DScene, &sceneHasModels);
+	// Direct scene-authored models can use the legacy triangle path without
+	// calling load_model_3d. Reuse the existing model-presence check so those
+	// clients also get deferred pipelines, with no extra registry scan for 2D UI.
+	if (sceneHasModels && !ensure_model_pipelines()) return;
 	if (desiredModelRenderExtent.width != modelRenderExtent.width ||
 		desiredModelRenderExtent.height != modelRenderExtent.height)
 	{
@@ -3480,6 +3517,13 @@ Model3DHandle Engine::Impl::load_model_3d(const std::filesystem::path& path)
 	if (!logicalDevice || !allocator || !mainCommandBuffer || !graphicsQueue)
 	{
 		logger->vulkan("Cannot load 3D model before the renderer is ready.");
+		return handle;
+	}
+	// Most clients are entirely 2D. Do not invoke a driver's 3D shader compiler
+	// during their startup; retain both 3D rendering paths when first requested.
+	if (!ensure_model_pipelines())
+	{
+		logger->error("The graphics driver could not initialise the hosted 3D pipelines.");
 		return handle;
 	}
 

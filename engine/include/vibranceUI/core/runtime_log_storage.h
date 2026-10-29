@@ -69,7 +69,8 @@ inline FileName identify(std::string_view name, std::string_view customPrefix = 
         return false;
     };
     result.owned = matches(customPrefix);
-    for (const auto prefix : { "vibrance-app", "vibrance-installer", "vibrance-installer-bootstrap",
+    for (const auto prefix : { "vibrance-app", "vibrance-app-bootstrap", "vibrance-app-entry",
+            "vibrance-installer", "vibrance-installer-bootstrap", "vibrance-installer-runtime",
             "vibrance_log", "vibrance-updater", "vibrance-uninstaller", "vibrance-startup-service" })
         result.owned |= matches(prefix);
     if (!result.owned) return {};

@@ -1,6 +1,6 @@
 #pragma once
 #include "crash_diagnostics.h"
-#include <shlobj.h>
+#include "windows_diagnostic_paths.h"
 #include <string>
 #include <string_view>
 #include <mutex>
@@ -64,34 +64,50 @@ inline void log(std::wstring_view message) noexcept
     }
     catch (...) {}
 }
-inline void initialise(std::wstring_view component = L"installer-bootstrap") noexcept
+inline void initialise(std::wstring_view component = L"installer-bootstrap",
+    const std::filesystem::path& preferredDirectory = {}) noexcept
 {
     try
     {
-        PWSTR documents = nullptr;
-        if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents))) return;
-        auto directory = std::filesystem::path(documents) / "Vibrance";
-        CoTaskMemFree(documents);
-        std::filesystem::create_directories(directory);
+        if (logFile != INVALID_HANDLE_VALUE) CloseHandle(logFile);
+        logFile = INVALID_HANDLE_VALUE;
+        logPath.clear();
+        writtenBytes = 0;
+        nextRotationAttempt = {};
         SYSTEMTIME time {};
         GetSystemTime(&time);
         wchar_t name[128] {};
         std::swprintf(name, 128, L"vibrance-%ls-%04u%02u%02u-%02u%02u%02u-%lu.log",
             std::wstring(component).c_str(), time.wYear, time.wMonth, time.wDay,
             time.wHour, time.wMinute, time.wSecond, GetCurrentProcessId());
-        logPath = directory / name;
-        logFile = CreateFileW(logPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        LARGE_INTEGER size {};
-        if (logFile != INVALID_HANDLE_VALUE)
+        for (const auto& directory : windows_diagnostic_paths::candidates(L"Vibrance/logs", preferredDirectory))
         {
-            if (!GetFileSizeEx(logFile, &size)) { CloseHandle(logFile); logFile = INVALID_HANDLE_VALUE; }
-            else { writtenBytes = static_cast<std::uintmax_t>(size.QuadPart); SetFilePointer(logFile, 0, nullptr, FILE_END); }
+            std::error_code error;
+            std::filesystem::create_directories(directory, error);
+            if (error) continue;
+            const auto candidate = directory / name;
+            HANDLE file = CreateFileW(candidate.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) continue;
+            LARGE_INTEGER size {};
+            if (!GetFileSizeEx(file, &size)) { CloseHandle(file); continue; }
+            logPath = candidate;
+            logFile = file;
+            writtenBytes = static_cast<std::uintmax_t>(size.QuadPart);
+            SetFilePointer(logFile, 0, nullptr, FILE_END);
+            break;
         }
-        crash_diagnostics::initialise(logPath);
-        runtime_log_storage::prune(directory, logPath);
+        if (logFile == INVALID_HANDLE_VALUE)
+        {
+            OutputDebugStringA("Vibrance startup diagnostics could not open any local log directory.\n");
+            return;
+        }
+        // Record entry before loading optional crash-reporting support or
+        // scanning old files. A stall in either operation remains observable.
         nextRetentionCheck = std::chrono::steady_clock::now() + std::chrono::minutes(1);
         log(L"SESSION START: " + std::wstring(component));
+        crash_diagnostics::initialise(logPath);
+        runtime_log_storage::prune(logPath.parent_path(), logPath);
     }
     catch (...) { OutputDebugStringA("Vibrance bootstrap diagnostics could not be initialised.\n"); }
 }
