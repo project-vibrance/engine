@@ -1,0 +1,86 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#include <vibranceUI/core/file.h>
+#include <vibranceUI/core/process.h>
+#include <vibranceUI/core/path_utf8.h>
+#include <vibranceUI/ui/resources.h>
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <iostream>
+#include <thread>
+#include <vector>
+
+int main()
+{
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("vibrance-file-tests-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto path = directory / "nested" / std::filesystem::path(u8"préférences.json");
+    bool passed = true;
+    const auto expect = [&](bool condition, const char* message) {
+        if (!condition) { std::cerr << message << '\n'; passed = false; }
+    };
+    expect(write_file_atomically(path, "first"), "create nested document");
+    expect(write_file_atomically(path, "replacement"), "replace existing document");
+    expect(read_text_file(path) == "replacement", "replacement contents");
+    const std::string binary("a\0b", 3);
+    expect(write_file_atomically(path, binary) && read_text_file(path) == binary,
+        "binary data and Unicode path survive replacement");
+    expect(write_file_atomically(path, {}) && read_text_file(path).empty(), "empty document");
+    expect(!write_file_atomically({}, "bad"), "reject empty destination");
+    expect(!write_file_atomically(path / "child", "bad"), "reject a file as parent");
+    const auto blocked = directory / "blocked";
+    std::filesystem::create_directory(blocked);
+    expect(write_file_atomically(blocked / "sentinel", "preserve"), "seed blocked destination");
+    expect(!write_file_atomically(blocked, "bad"), "do not replace a directory");
+    expect(read_text_file(blocked / "sentinel") == "preserve", "failed replacement preserves destination");
+
+    const std::vector<std::string> documents {
+        std::string(16384, 'a'), std::string(16384, 'b'), std::string(16384, 'c') };
+    std::atomic<bool> writesSucceeded = true;
+    std::vector<std::thread> writers;
+    for (const auto& document : documents)
+        writers.emplace_back([&, document] {
+            for (int iteration = 0; iteration < 8; ++iteration)
+                if (!write_file_atomically(path, document)) writesSucceeded = false;
+        });
+    for (auto& writer : writers) writer.join();
+    expect(writesSucceeded, "concurrent writers use independent staging files");
+    const auto saved = read_text_file(path);
+    expect(saved == documents[0] || saved == documents[1] || saved == documents[2],
+        "a complete concurrent document wins");
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory))
+        expect(vibrance::path_utf8(entry.path().filename()).find(".tmp-") == std::string::npos,
+            "temporary files and directories are removed");
+
+    UiResourceDirectories resources;
+    resources.userAssetsDirectory = directory / "assets";
+    std::filesystem::create_directories(resources.userAssetsDirectory / "nested");
+    UiResourceChangeTracker tracker(resources);
+    const auto asset = resources.userAssetsDirectory / "nested" / "asset.txt";
+    write_file_atomically(asset, "first");
+    expect(tracker.poll(true).assetPaths == std::vector<std::filesystem::path>{"nested/asset.txt"},
+        "new resources retain their path relative to the watched root");
+    expect(!tracker.poll(true).any(), "unchanged resources do not trigger hot reload");
+    write_file_atomically(asset, "changed content");
+    expect(tracker.poll(true).assetPaths == std::vector<std::filesystem::path>{"nested/asset.txt"},
+        "modified resources trigger hot reload");
+    std::filesystem::remove(asset);
+    expect(tracker.poll(true).assetPaths == std::vector<std::filesystem::path>{"nested/asset.txt"},
+        "deleted resources trigger hot reload");
+#if !defined(_WIN32)
+    std::filesystem::create_symlink(path, resources.userAssetsDirectory / "linked.txt");
+    expect(tracker.poll(true).assetPaths == std::vector<std::filesystem::path>{"linked.txt"},
+        "linked resources are identified by their visible asset path");
+#endif
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+    const auto executable = current_executable_path();
+    expect(executable.is_absolute() && std::filesystem::is_regular_file(executable),
+        "resolve current executable");
+#endif
+
+    std::filesystem::remove_all(directory);
+    return passed ? 0 : 1;
+}

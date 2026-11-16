@@ -1,0 +1,20 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#include <vibranceUI/core/engine_manifest.h>
+
+namespace
+{
+    constexpr EngineManifest kEngineManifest {
+        .name = "@VIBRANCE_ENGINE_NAME@",
+        .version = "@PROJECT_VERSION@",
+        .suffix = "@VIBRANCE_SUFFIX@",
+        .full_version = "@VIBRANCE_FULL_VERSION@",
+        .lastUpdated = "@VIBRANCE_ENGINE_LAST_UPDATED@"
+    };
+}
+
+const EngineManifest& vibrance_engine_manifest() noexcept
+{
+    return kEngineManifest;
+}

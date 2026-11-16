@@ -1,0 +1,14 @@
+{
+    "recommendations": [
+        "rioj7.command-variable",
+        "ms-vscode.cpp-devtools",
+        "ms-vscode.cpptools",
+        "ms-vscode.cpptools-themes",
+        "ms-vscode.cpptools-extension-pack",
+        "ms-vscode.cmake-tools",
+        "github.vscode-github-actions",
+        "slevesque.shader",
+        "shd101wyy.markdown-preview-enhanced",
+        "dtoplak.vscode-glsllint"
+    ]
+}

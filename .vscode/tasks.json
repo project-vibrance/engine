@@ -1,0 +1,37 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Compile",
+            "type": "shell",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "windows": {
+                "command": "${workspaceFolder}\\mingwBuild.bat",
+                "args": ["${input:getBuildType}"]
+            },
+            "osx": {
+                "command": "${workspaceFolder}/unixBuild.sh",
+                "args": ["${input:getBuildType}"]
+            },
+            "linux": {
+                "command": "${workspaceFolder}/unixBuild.sh",
+                "args": ["${input:getBuildType}"]
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "getBuildType",
+            "type": "command",
+            "command": "extension.commandvariable.remember",
+            "args": {
+                "key": "activeBuildType",
+                "default": "Debug"
+            }
+        }
+    ]
+}

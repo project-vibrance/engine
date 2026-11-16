@@ -1,0 +1,1447 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+#include <vibranceUI/ui/layout_direction.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <limits>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+#include <entt/entt.hpp>
+#include <glm/glm.hpp>
+#include <vibranceUI/renderer/renderer2d_components.h>
+
+enum class PointerButton
+{
+    eLeft,
+    eRight,
+    eMiddle,
+    eOther
+};
+
+struct InputModifiers
+{
+    bool shift = false;
+    bool control = false;
+    bool alt = false;
+    bool super = false;
+
+    bool any() const
+    {
+        return shift || control || alt || super;
+    }
+};
+
+struct PointerInputEvent
+{
+
+    entt::entity target = entt::null;
+    glm::vec2 framebufferPosition { 0.0f };
+    PointerButton button = PointerButton::eOther;
+    int platformButton = 0;
+    InputModifiers modifiers {};
+};
+
+enum StretchDynamicsAxisFlags : uint32_t
+{
+    eStretchDynamicsNone = 0u,
+    eStretchDynamicsHorizontal = 1u << 0u,
+    eStretchDynamicsVertical = 1u << 1u,
+    eStretchDynamicsBoth =
+        eStretchDynamicsHorizontal | eStretchDynamicsVertical
+};
+
+enum class StretchDynamicsAnchor
+{
+
+
+    eAutomatic,
+    eMinimum,
+    eMaximum
+};
+
+struct StretchDynamicsEvent
+{
+    entt::entity target = entt::null;
+    glm::vec2 framebufferPosition { 0.0f };
+    glm::vec2 displacement { 0.0f };
+    glm::vec2 scale { 1.0f };
+    float inwardProgress = 0.0f;
+    bool inwardReleaseArmed = false;
+};
+
+struct StretchDynamicsOptions
+{
+
+
+    bool enabled = true;
+    bool requireLiquidGlass = true;
+    bool liquidMotion = true;
+
+    bool elasticEdges = false;
+    uint32_t axes = eStretchDynamicsBoth;
+    bool stretchSelf = true;
+    bool stretchDescendants = true;
+
+
+    bool directionAware = true;
+    StretchDynamicsAnchor horizontalAnchor =
+        StretchDynamicsAnchor::eAutomatic;
+    StretchDynamicsAnchor verticalAnchor =
+        StretchDynamicsAnchor::eAutomatic;
+    float dragResistance = 0.06f;
+    float maximumStretch = 0.035f;
+    float maximumCompression = 0.02f;
+    float dragDeadZone = 2.0f;
+    float grabScale = 1.0f;
+    float returnResponse = 0.26f;
+    float returnDampingFraction = 0.82f;
+    float dragResponse = 0.0f;
+    bool consumeClickAfterDrag = false;
+
+    bool allowTextInputDrag = false;
+    bool constrainToParent = false;
+
+
+
+
+    glm::vec2 inwardDirection { 0.0f };
+    float inwardReleaseDistance = 0.0f;
+    float inwardBlurRadius = 0.0f;
+
+
+    bool inwardBlurSelf = true;
+
+    std::function<void(const StretchDynamicsEvent&)> onChanged;
+    std::function<void(const StretchDynamicsEvent&)> onRelease;
+    std::function<void(const StretchDynamicsEvent&)> onInwardRelease;
+};
+
+struct StretchDynamicsComponent
+{
+    StretchDynamicsOptions options {};
+    bool dragging = false;
+    bool settling = false;
+    bool dragMoved = false;
+    glm::vec2 pressPoint { 0.0f };
+    glm::vec4 baseRect { 0.0f };
+    glm::vec2 grabSide { 1.0f };
+    uint32_t outwardAxes = eStretchDynamicsNone;
+    glm::vec2 displacement { 0.0f };
+    glm::vec2 scale { 1.0f };
+    glm::vec2 scaleVelocity { 0.0f };
+    glm::vec2 scaleOrigin { 0.0f };
+    glm::vec2 targetScale { 1.0f };
+    glm::vec2 targetScaleOrigin { 0.0f };
+    glm::vec2 scaleOriginVelocity { 0.0f };
+    glm::vec2 offset { 0.0f };
+    glm::vec2 targetOffset { 0.0f };
+    glm::vec2 offsetVelocity { 0.0f };
+    float contact = 0.0f;
+    float contactVelocity = 0.0f;
+    float blurRadius = 0.0f;
+    float blurVelocity = 0.0f;
+    float inwardProgress = 0.0f;
+    double lastUpdateSeconds = 0.0;
+};
+
+struct StretchDynamicsBlockerComponent
+{
+
+
+    bool enabled = true;
+};
+
+struct ScrollInputEvent
+{
+    entt::entity target = entt::null;
+    glm::vec2 framebufferPosition { 0.0f };
+    double offsetX = 0.0;
+    double offsetY = 0.0;
+    InputModifiers modifiers {};
+};
+
+struct FileDropInputEvent
+{
+    entt::entity target = entt::null;
+    glm::vec2 framebufferPosition { 0.0f };
+    std::vector<std::filesystem::path> paths;
+};
+
+struct SliderInputEvent
+{
+    entt::entity target = entt::null;
+    glm::vec2 framebufferPosition { 0.0f };
+    float value = 0.0f;
+    float normalizedValue = 0.0f;
+};
+
+struct ButtonInputComponent
+{
+
+    bool enabled = true;
+    bool hovered = false;
+    bool leftPressed = false;
+    bool rightPressed = false;
+    std::function<void(const PointerInputEvent&)> onPress;
+    std::function<void(const PointerInputEvent&)> onRelease;
+    std::function<void(const PointerInputEvent&)> onClick;
+    std::function<void(const PointerInputEvent&)> onRightClick;
+    std::function<void(bool)> onHoverChanged;
+};
+
+struct ButtonVisualComponent
+{
+    ShapeStyleComponent idle;
+    ShapeStyleComponent hovered;
+    ShapeStyleComponent pressed;
+    ShapeStyleComponent disabled;
+    bool hasDisabled = false;
+};
+
+struct OutsidePointerInputComponent
+{
+    bool enabled = false;
+    std::function<void(const PointerInputEvent&)> onPress;
+    std::function<void()> onFocusLost;
+};
+
+struct UiHoverRegionComponent
+{
+
+    bool enabled = true;
+    bool hovered = false;
+    std::function<void(bool, double)> onHoverChanged;
+};
+
+enum class TextInputEditKind { eNone, eTyping, eBackspace, eDelete, eReplace };
+
+struct TextInputEditSnapshot
+{
+    std::string value;
+    std::size_t caret = 0u;
+    std::size_t anchor = 0u;
+};
+
+struct TextInputComponent
+{
+
+    entt::entity textEntity = entt::null;
+    entt::entity caretEntity = entt::null;
+    std::string value;
+    std::string placeholder;
+    std::size_t maxBytes = 256u;
+    std::size_t displayStartByte = 0u;
+    float textPaddingLeft = 0.0f;
+    float textPaddingRight = 10.0f;
+    std::optional<TextHorizontalAlignment2D> textAlignment {};
+    float caretWidth = 1.5f;
+    float caretHeight = 16.0f;
+    float caretBlinkPeriodSeconds = 1.0f;
+    bool enabled = true;
+    bool focused = false;
+    bool multiline = false;
+    std::function<void(const std::string&)> onChanged;
+    std::function<void(const std::string&)> onSubmitted;
+    bool readOnly = false;
+    bool overwrite = false;
+    std::size_t caretByte = std::string::npos;
+    std::size_t selectionAnchorByte = std::string::npos;
+    std::size_t displayEndByte = 0u;
+    float preferredCaretX = std::numeric_limits<float>::quiet_NaN();
+    float verticalScroll = 0.0f;
+    float textPaddingTop = 6.0f;
+    bool caretWakeRequested = true;
+    double caretBlinkEpoch = 0.0;
+    std::vector<entt::entity> selectionEntities;
+
+    std::string observedValue;
+    std::vector<std::size_t> graphemeBoundaries;
+    std::vector<TextInputEditSnapshot> undoHistory;
+    std::vector<TextInputEditSnapshot> redoHistory;
+    TextInputEditKind lastEditKind = TextInputEditKind::eNone;
+    double lastEditSeconds = -1.0;
+};
+
+struct TextInputVisualComponent
+{
+    ShapeStyleComponent idle;
+    ShapeStyleComponent focused;
+    ShapeStyleComponent disabled;
+    TextStyleComponent valueText;
+    TextStyleComponent placeholderText;
+    ShapeStyleComponent caretStyle;
+    bool hasDisabled = false;
+    std::size_t maxDisplayCharacters = 28u;
+    ShapeStyleComponent selectionStyle = [] {
+        ShapeStyleComponent paint;
+        paint.set_color(glm::vec4(0.18f, 0.48f, 1.0f, 0.40f));
+        return paint;
+    }();
+};
+
+struct DropTargetComponent
+{
+    bool enabled = true;
+    bool hovered = false;
+    std::vector<std::filesystem::path> lastDroppedPaths;
+    std::function<void(const FileDropInputEvent&)> onDrop;
+};
+
+struct ScrollInputComponent
+{
+
+    bool enabled = true;
+    bool hovered = false;
+    float offset = 0.0f;
+    float minOffset = 0.0f;
+    float maxOffset = 0.0f;
+    float step = 48.0f;
+    std::function<void(const ScrollInputEvent&)> onScroll;
+};
+
+struct ScrollBarInputComponent
+{
+    entt::entity scrollTarget = entt::null;
+    entt::entity thumb = entt::null;
+    bool enabled = true;
+    bool hovered = false;
+    bool dragging = false;
+    bool wakeRequested = true;
+    bool fadeWhenIdle = true;
+    float dragGrabOffsetY = 0.0f;
+    float visibleOpacity = 1.0f;
+    float hiddenOpacity = 0.0f;
+    float idleDelaySeconds = 0.85f;
+    float fadeDurationSeconds = 0.22f;
+    double lastActiveSeconds = -1000000.0;
+};
+
+struct UiLiquidInteractionState
+{
+    float formation = 0.0f;
+    float velocity = 0.0f;
+    double heldSeconds = 0.0;
+};
+
+struct UiLiquidDragState
+{
+    float stretch = 0.0f;
+    float velocity = 0.0f;
+    float position = 0.0f;
+    bool tracking = false;
+};
+
+inline glm::vec2 ui_expanded_capsule_size(glm::vec2 size, float bodyScale, float diameterScale)
+{
+    const float diameter = std::min(size.x, size.y);
+    return glm::vec2(diameter * diameterScale) +
+        glm::max(size - glm::vec2(diameter), glm::vec2(0.0f)) * bodyScale;
+}
+
+struct SliderInputComponent
+{
+    entt::entity maskEntity = entt::null;
+    entt::entity fillEntity = entt::null;
+    entt::entity thumbEntity = entt::null;
+    entt::entity labelEntity = entt::null;
+    bool enabled = true;
+    bool hovered = false;
+    bool dragging = false;
+
+
+    bool dimWhenDisabled = true;
+    float value = 0.0f;
+    float visualValue = 0.0f;
+    float minValue = 0.0f;
+    float maxValue = 1.0f;
+    float step = 0.0f;
+    float normalisedStep = 0.0f;
+    float trackHeight = 0.0f;
+    float hoveredTrackHeight = 0.0f;
+    glm::vec2 thumbSize { 0.0f };
+    glm::vec2 hoveredThumbSize { 0.0f };
+    float thumbExpansionReserve = 1.52f;
+    bool insetThumb = false;
+    float hoverExpansion = 0.0f;
+    float hoverExpansionRate = 20.0f;
+
+
+    bool liquidThumbEnabled = false;
+    float liquidThumbScale = 1.0f;
+    float liquidThumbVelocity = 0.0f;
+    UiLiquidInteractionState liquidInteraction;
+    UiLiquidDragState liquidDrag;
+    glm::vec2 liquidPressPoint {};
+    bool liquidDragMoved = false;
+
+    bool smoothScrubbing = false;
+    float visualSmoothingRate = 24.0f;
+    double lastVisualUpdateSeconds = 0.0;
+    std::function<void(const SliderInputEvent&)> onChanged;
+
+
+    std::function<void(const SliderInputEvent&)> onCommitted;
+};
+
+
+
+inline void ui_damped_spring_step(float& value, float& velocity, float target,
+    double deltaSeconds, float frequency, float damping)
+{
+    const float dt = static_cast<float>(std::clamp(deltaSeconds, 0.0, 0.1));
+    if (dt <= 0.0f) return;
+    const float displacement = value - target;
+    const float originalVelocity = velocity;
+    if (damping < 0.999f)
+    {
+        const float decayRate = frequency * std::max(damping, 0.0f);
+        const float oscillation = frequency * std::sqrt(1.0f - damping * damping);
+        const float phase = oscillation * dt;
+        const float decay = std::exp(-decayRate * dt);
+        value = target + decay * (displacement * std::cos(phase) +
+            (originalVelocity + decayRate * displacement) / oscillation * std::sin(phase));
+        velocity = decay * (originalVelocity * std::cos(phase) -
+            (decayRate * originalVelocity + frequency * frequency * displacement) /
+                oscillation * std::sin(phase));
+    }
+    else if (damping <= 1.001f)
+    {
+        const float decay = std::exp(-frequency * dt);
+        const float c = originalVelocity + frequency * displacement;
+        value = target + decay * (displacement + c * dt);
+        velocity = decay * (originalVelocity - frequency * c * dt);
+    }
+    else
+    {
+        const float root = std::sqrt(damping * damping - 1.0f);
+        const float first = -frequency * (damping - root);
+        const float second = -frequency * (damping + root);
+        const float a = (originalVelocity - second * displacement) / (first - second);
+        const float b = displacement - a;
+        value = target + a * std::exp(first * dt) + b * std::exp(second * dt);
+        velocity = first * a * std::exp(first * dt) + second * b * std::exp(second * dt);
+    }
+    if (std::abs(value - target) < 0.0001f && std::abs(velocity) < 0.001f)
+    {
+        value = target;
+        velocity = 0.0f;
+    }
+}
+
+inline void ui_update_liquid_interaction(UiLiquidInteractionState& state, bool pressed,
+    bool moved, double deltaSeconds)
+{
+    const double delta = std::clamp(deltaSeconds, 0.0, 0.1);
+    state.heldSeconds = pressed ? state.heldSeconds + delta : 0.0;
+    const bool lifted = pressed && (moved || state.heldSeconds >= 0.075);
+    ui_damped_spring_step(state.formation, state.velocity, lifted ? 1.0f : 0.0f,
+        delta, lifted ? 34.0f : 42.0f, lifted ? 0.72f : 0.88f);
+    if (!pressed && state.formation < 0.0f)
+    {
+        state.formation = 0.0f;
+        state.velocity = 0.0f;
+    }
+}
+
+inline void ui_update_liquid_drag(UiLiquidDragState& state, bool dragging,
+    float position, double deltaSeconds)
+{
+    const double delta = std::clamp(deltaSeconds, 0.0, 0.1);
+    if (delta <= 0.0) return;
+    const float speed = dragging && state.tracking ?
+        std::abs(position - state.position) / static_cast<float>(delta) : 0.0f;
+    state.position = position;
+    state.tracking = dragging;
+    const float target = dragging ? std::tanh(speed / 24.0f) : 0.0f;
+    ui_damped_spring_step(state.stretch, state.velocity, target, delta, 44.0f, 0.9f);
+}
+
+struct DisabledVisualComponent
+{
+    bool dimWhenDisabled = true;
+    bool useUnavailableCursor = false;
+};
+
+enum PanelResizeEdgeFlags : uint32_t
+{
+    ePanelResizeNone = 0u,
+    ePanelResizeLeft = 1u << 0u,
+    ePanelResizeRight = 1u << 1u,
+    ePanelResizeTop = 1u << 2u,
+    ePanelResizeBottom = 1u << 3u,
+    ePanelResizeAll = ePanelResizeLeft | ePanelResizeRight | ePanelResizeTop | ePanelResizeBottom
+};
+
+struct ResizablePanelComponent
+{
+    bool enabled = true;
+    bool hovered = false;
+    float edgeThickness = 10.0f;
+    glm::vec2 minSize { 180.0f, 120.0f };
+    glm::vec2 maxSize { 1000000.0f, 1000000.0f };
+    uint32_t enabledEdges = ePanelResizeAll;
+    uint32_t activeEdges = ePanelResizeNone;
+};
+
+struct KeyboardShortcutComponent
+{
+    int key = 0;
+    bool shift = false;
+    bool control = false;
+    bool alt = false;
+    bool super = false;
+    bool requireExactModifiers = true;
+    bool enabled = true;
+    std::function<void()> onTriggered;
+};
+
+struct UiInputState
+{
+
+    entt::entity draggedPanel = entt::null;
+    entt::entity resizingPanel = entt::null;
+    entt::entity activeSlider = entt::null;
+    entt::entity activeScrollBar = entt::null;
+    entt::entity activeStretchDynamics = entt::null;
+    entt::entity pressedInputEntity = entt::null;
+    entt::entity pointerInputCapture = entt::null;
+    entt::entity focusedTextInput = entt::null;
+    entt::entity activeTextSelection = entt::null;
+    entt::entity lastTextClickEntity = entt::null;
+    glm::vec2 lastTextClickPoint {};
+    double lastTextClickSeconds = -1.0;
+    unsigned textClickCount = 0u;
+    unsigned textDragGranularity = 0u;
+    std::size_t textDragStartByte = 0u;
+    std::size_t textDragEndByte = 0u;
+    entt::entity hoveredButton = entt::null;
+    entt::entity hoveredDropTarget = entt::null;
+    entt::entity hoveredScrollTarget = entt::null;
+    entt::entity hoveredScrollBar = entt::null;
+    entt::entity hoveredResizePanel = entt::null;
+    entt::entity hoveredSlider = entt::null;
+    glm::vec2 lastPanelDragPoint { 0.0f };
+    glm::vec2 resizeStartPoint { 0.0f };
+    glm::vec2 resizeStartMin { 0.0f };
+    glm::vec2 resizeStartSize { 0.0f };
+    glm::vec2 resizeStartLayoutOffset { 0.0f };
+    uint32_t activeResizeEdges = ePanelResizeNone;
+    bool hasWindowFocusSample = false;
+    bool windowFocused = false;
+
+    void clear_capture()
+    {
+        activeSlider = entt::null;
+        activeScrollBar = entt::null;
+        activeStretchDynamics = entt::null;
+        activeTextSelection = entt::null;
+        pressedInputEntity = entt::null;
+        pointerInputCapture = entt::null;
+        draggedPanel = entt::null;
+        resizingPanel = entt::null;
+        activeResizeEdges = ePanelResizeNone;
+    }
+
+    void clear_hover()
+    {
+        hoveredButton = entt::null;
+        hoveredDropTarget = entt::null;
+        hoveredScrollTarget = entt::null;
+        hoveredResizePanel = entt::null;
+        hoveredSlider = entt::null;
+    }
+
+    void clear_focus()
+    {
+        focusedTextInput = entt::null;
+    }
+};
+
+
+constexpr float kUiPointerMovementEpsilon = 0.25f;
+constexpr float kUiPointerMovementEpsilonSquared = kUiPointerMovementEpsilon * kUiPointerMovementEpsilon;
+
+inline bool ui_has_meaningful_delta(glm::vec2 delta)
+{
+    return glm::dot(delta, delta) > kUiPointerMovementEpsilonSquared;
+}
+
+inline bool ui_has_meaningful_delta(glm::vec2 delta, float epsilon)
+{
+    return glm::dot(delta, delta) > epsilon * epsilon;
+}
+
+inline void ui_set_timed_moving_cache(Renderer2DScene& scene, entt::entity entity)
+{
+    entt::registry& registry = scene.registry();
+    if (entity == entt::null || !registry.valid(entity))
+    {
+        return;
+    }
+
+    Renderer2DCacheComponent& cache = registry.get_or_emplace<Renderer2DCacheComponent>(entity);
+    if (cache.mode != Renderer2DCacheMode::eStatic)
+    {
+        return;
+    }
+
+    cache.mode = Renderer2DCacheMode::eTimed;
+    cache.idleTickRate = 0.0f;
+    cache.activeTickRate = 60.0f;
+    cache.propagateToChildren = true;
+    cache.restoreStaticWhenIdle = true;
+}
+
+inline void ui_mark_moving_entity_dirty(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    float activeSeconds = 1.0f / 30.0f)
+{
+    if (entity == entt::null || !scene.registry().valid(entity))
+    {
+        return;
+    }
+
+    ui_set_timed_moving_cache(scene, entity);
+    scene.activate_dynamic(entity, std::max(activeSeconds, 1.0f / 60.0f));
+    scene.mark_dirty(entity);
+}
+
+inline void ui_mark_direct_manipulation_dirty(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    float activeSeconds = 1.0f / 30.0f)
+{
+    if (entity == entt::null || !scene.registry().valid(entity))
+    {
+        return;
+    }
+
+
+
+
+    entt::registry& registry = scene.registry();
+    Renderer2DCacheComponent& cache =
+        registry.get_or_emplace<Renderer2DCacheComponent>(entity);
+
+
+
+
+    cache.activeFrameRateLimit = 144u;
+    if (cache.mode == Renderer2DCacheMode::eStatic)
+    {
+        cache.mode = Renderer2DCacheMode::eTimed;
+        cache.idleTickRate = 0.0f;
+        cache.activeTickRate = 0.0f;
+        cache.propagateToChildren = true;
+        cache.restoreStaticWhenIdle = true;
+    }
+    scene.activate_dynamic(entity, std::max(activeSeconds, 1.0f / 60.0f));
+    scene.mark_dirty(entity);
+}
+
+inline bool ui_entity_has_liquid_glass(const entt::registry& registry, entt::entity entity)
+{
+    for (unsigned depth = 0u; depth < 64u && registry.valid(entity); ++depth)
+    {
+        if (const auto* glass = registry.try_get<LiquidGlassComponent>(entity);
+            glass && glass->material == GlassMaterial::eLiquid) return true;
+        if (const auto* backdrop = registry.try_get<SystemBackdropComponent>(entity);
+            backdrop && backdrop->region.material == GlassMaterial::eLiquid) return true;
+        const auto* parent = registry.try_get<Parent2DComponent>(entity);
+        if (!parent || parent->parent == entity) break;
+        entity = parent->parent;
+    }
+    return false;
+}
+
+inline bool ui_stretch_dynamics_allowed(const entt::registry& registry, entt::entity entity,
+    const StretchDynamicsOptions& options)
+{
+    const bool deforms = options.stretchSelf || options.stretchDescendants || options.inwardBlurRadius > 0.0f;
+    return options.enabled && (!options.requireLiquidGlass || !deforms || ui_entity_has_liquid_glass(registry, entity));
+}
+
+inline bool ui_stretch_dynamics_has_action(const StretchDynamicsOptions& options)
+{
+    return bool(options.onChanged) || bool(options.onRelease) || bool(options.onInwardRelease);
+}
+
+inline bool ui_stretch_uses_liquid_motion(const entt::registry& registry,
+    entt::entity entity, const StretchDynamicsOptions& options)
+{
+    return options.liquidMotion && (options.stretchSelf || options.stretchDescendants) &&
+        ui_entity_has_liquid_glass(registry, entity);
+}
+
+inline void ui_reset_stretch_dynamics_visual(Renderer2DScene& scene, entt::entity entity)
+{
+    auto& registry = scene.registry();
+    auto* dynamics = registry.try_get<StretchDynamicsComponent>(entity);
+    if (!dynamics) return;
+    auto* visual = registry.try_get<InteractiveVisual2DComponent>(entity);
+    const bool hadContact = registry.remove<LiquidGlassContact2DComponent>(entity) != 0u;
+    const bool changed = dynamics->scale != glm::vec2(1.0f) || dynamics->blurRadius != 0.0f ||
+        dynamics->offset != glm::vec2(0.0f) ||
+        hadContact ||
+        (visual && (visual->scale != glm::vec2(1.0f) || visual->blurRadius != 0.0f || visual->offset != glm::vec2(0.0f)));
+    dynamics->scale = glm::vec2(1.0f);
+    dynamics->scaleVelocity = {};
+    dynamics->targetScale = glm::vec2(1.0f);
+    dynamics->scaleOriginVelocity = {};
+    dynamics->offset = dynamics->targetOffset = dynamics->offsetVelocity = {};
+    dynamics->contact = dynamics->contactVelocity = 0.0f;
+    dynamics->blurRadius = dynamics->blurVelocity = 0.0f;
+    dynamics->settling = false;
+    dynamics->lastUpdateSeconds = 0.0;
+    if (visual)
+    {
+        visual->enabled = false;
+        visual->scale = glm::vec2(1.0f);
+        visual->blurRadius = 0.0f;
+        visual->offset = {};
+    }
+    if (changed) scene.mark_dirty(entity);
+}
+
+inline void ui_reset_non_liquid_stretch_dynamics(Renderer2DScene& scene)
+{
+    auto& registry = scene.registry();
+    for (const auto entity : registry.view<StretchDynamicsComponent>())
+    {
+        const auto& dynamics = registry.get<StretchDynamicsComponent>(entity);
+        if ((dynamics.dragging || dynamics.settling || dynamics.scale != glm::vec2(1.0f)) &&
+            !ui_stretch_dynamics_allowed(registry, entity, dynamics.options))
+            ui_reset_stretch_dynamics_visual(scene, entity);
+    }
+}
+
+inline StretchDynamicsComponent& ui_enable_stretch_dynamics(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    StretchDynamicsOptions options = {})
+{
+    entt::registry& registry = scene.registry();
+    StretchDynamicsComponent dynamics = {};
+    dynamics.options = std::move(options);
+    StretchDynamicsComponent& result =
+        registry.emplace_or_replace<StretchDynamicsComponent>(
+            entity,
+            std::move(dynamics));
+
+    InteractiveVisual2DComponent visual = {};
+    visual.affectSelf = result.options.stretchSelf;
+    visual.inheritToChildren = result.options.stretchDescendants;
+    visual.blurSelf = result.options.inwardBlurSelf;
+    registry.emplace_or_replace<InteractiveVisual2DComponent>(
+        entity,
+        visual);
+    scene.mark_dirty(entity);
+    return result;
+}
+
+inline void ui_set_stretch_dynamics_blocker(
+    Renderer2DScene& scene,
+    entt::entity entity,
+    bool blocked = true)
+{
+    entt::registry& registry = scene.registry();
+    if (entity == entt::null || !registry.valid(entity))
+    {
+        return;
+    }
+    if (blocked)
+    {
+        registry.emplace_or_replace<StretchDynamicsBlockerComponent>(entity);
+    }
+    else
+    {
+        registry.remove<StretchDynamicsBlockerComponent>(entity);
+    }
+}
+
+inline void ui_disable_stretch_dynamics(
+    Renderer2DScene& scene,
+    entt::entity entity)
+{
+    entt::registry& registry = scene.registry();
+    if (entity == entt::null || !registry.valid(entity))
+    {
+        return;
+    }
+    registry.remove<StretchDynamicsComponent>(entity);
+    registry.remove<InteractiveVisual2DComponent>(entity);
+    registry.remove<LiquidGlassContact2DComponent>(entity);
+    scene.mark_dirty(entity);
+}
+
+inline float ui_stretch_scale_for_axis(
+    float displacement,
+    float grabSide,
+    float extent,
+    float dragResistance,
+    float maximumStretch,
+    float maximumCompression,
+    float dragDeadZone,
+    bool elasticEdges = false)
+{
+    const float safeExtent = std::max(extent, 1.0f);
+    const float direction = displacement < 0.0f ? -1.0f : 1.0f;
+    const float effectiveDisplacement = direction * std::max(
+        std::abs(displacement) - std::max(dragDeadZone, 0.0f),
+        0.0f);
+    const float signedEdgeMovement = effectiveDisplacement *
+        (grabSide < 0.0f ? -1.0f : 1.0f);
+    const float deformation = signedEdgeMovement *
+        std::max(dragResistance, 0.0f) / safeExtent;
+    if (elasticEdges)
+    {
+        const float limit = deformation >= 0.0f ? maximumStretch : maximumCompression;
+        return limit > 0.0001f ? 1.0f + limit * std::tanh(deformation / limit) : 1.0f;
+    }
+    return 1.0f + std::clamp(
+        deformation,
+        -std::max(maximumCompression, 0.0f),
+        std::max(maximumStretch, 0.0f));
+}
+
+inline void ui_target_liquid_stretch(StretchDynamicsComponent& dynamics)
+{
+    const auto& options = dynamics.options;
+    const glm::vec2 size = glm::max(glm::vec2(dynamics.baseRect.z, dynamics.baseRect.w), glm::vec2(1.0f));
+    const float diameter = std::min(size.x, size.y);
+    const glm::vec2 centre = glm::vec2(dynamics.baseRect) + size * 0.5f;
+    const float distance = glm::length(dynamics.displacement);
+    const float deadZone = std::max(options.dragDeadZone, 0.0f);
+    const glm::vec2 pull = distance > deadZone ?
+        dynamics.displacement * ((distance - deadZone) / distance) : glm::vec2(0.0f);
+    const float pullLength = glm::length(pull);
+    const glm::vec2 direction = pullLength > 0.0001f ? pull / pullLength : glm::vec2(0.0f);
+    const glm::vec2 resisted = pull * std::max(options.dragResistance, 0.0f) * 1.5f;
+
+    dynamics.targetOffset = resisted / (1.0f + glm::length(resisted) / (diameter * 0.08f));
+    const float strain = 1.0f - std::exp(-glm::length(resisted) / (diameter * 0.7f));
+    const glm::vec2 lift = ui_expanded_capsule_size(size,
+        std::max(options.grabScale, 1.01f), std::max(options.grabScale, 1.04f)) / size;
+    dynamics.targetScale = lift;
+    dynamics.targetScaleOrigin = centre;
+    for (int axis = 0; axis < 2; ++axis)
+    {
+        const auto anchor = axis == 0 ? options.horizontalAnchor : options.verticalAnchor;
+        const uint32_t flag = axis == 0 ? eStretchDynamicsHorizontal : eStretchDynamicsVertical;
+        if ((options.axes & flag) == 0u)
+        {
+            dynamics.targetScale[axis] = 1.0f;
+            dynamics.targetOffset[axis] = 0.0f;
+            continue;
+        }
+        if (anchor != StretchDynamicsAnchor::eAutomatic)
+        {
+            const float side = anchor == StretchDynamicsAnchor::eMinimum ? 1.0f : -1.0f;
+            const float limit = pull[axis] * side >= 0.0f ? options.maximumStretch : options.maximumCompression;
+            const float deformation = limit > 0.0001f ? limit * std::tanh(
+                pull[axis] * side * std::max(options.dragResistance, 0.0f) / (size[axis] * limit)) : 0.0f;
+            dynamics.targetScale[axis] += deformation;
+            dynamics.targetScaleOrigin[axis] = dynamics.baseRect[axis] + (side < 0.0f ? size[axis] : 0.0f);
+            dynamics.targetOffset[axis] = 0.0f;
+        }
+        else
+        {
+            const float along = direction[axis] * direction[axis];
+            const float across = direction[1 - axis] * direction[1 - axis];
+            dynamics.targetScale[axis] += strain * (std::max(options.maximumStretch, 0.0f) * along -
+                std::min(std::max(options.maximumCompression, 0.0f), 0.04f) * across);
+        }
+    }
+}
+
+inline bool ui_shortcut_matches(const KeyboardShortcutComponent& shortcut, int key, const InputModifiers& modifiers)
+{
+    if (!shortcut.enabled || shortcut.key != key)
+    {
+        return false;
+    }
+
+    if (shortcut.requireExactModifiers)
+    {
+        return shortcut.shift == modifiers.shift &&
+            shortcut.control == modifiers.control &&
+            shortcut.alt == modifiers.alt &&
+            shortcut.super == modifiers.super;
+    }
+
+    return (!shortcut.shift || modifiers.shift) &&
+        (!shortcut.control || modifiers.control) &&
+        (!shortcut.alt || modifiers.alt) &&
+        (!shortcut.super || modifiers.super);
+}
+
+template<typename Component>
+entt::entity ui_component_owner(const entt::registry& registry, entt::entity entity)
+{
+    entt::entity current = entity;
+    for (uint32_t depth = 0; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+    {
+        if (registry.all_of<Component>(current))
+        {
+            return current;
+        }
+
+        const Parent2DComponent* parent = registry.try_get<Parent2DComponent>(current);
+        if (!parent || parent->parent == entt::null || parent->parent == current)
+        {
+            break;
+        }
+        current = parent->parent;
+    }
+    return entt::null;
+}
+
+inline bool ui_entity_visible_by_hierarchy(const entt::registry& registry, entt::entity entity)
+{
+    entt::entity current = entity;
+    for (uint32_t depth = 0; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+    {
+        if (const RenderLayer2DComponent* layer = registry.try_get<RenderLayer2DComponent>(current);
+            layer && !layer->visible)
+        {
+            return false;
+        }
+
+        const Parent2DComponent* parent = registry.try_get<Parent2DComponent>(current);
+        if (!parent || parent->parent == entt::null || parent->parent == current)
+        {
+            break;
+        }
+        current = parent->parent;
+    }
+    return true;
+}
+
+inline bool ui_has_input_component(const entt::registry& registry, entt::entity entity)
+{
+    return registry.all_of<ButtonInputComponent>(entity) ||
+        registry.all_of<StretchDynamicsComponent>(entity) ||
+        registry.all_of<TextInputComponent>(entity) ||
+        registry.all_of<DropTargetComponent>(entity) ||
+        registry.all_of<ScrollInputComponent>(entity) ||
+        registry.all_of<ScrollBarInputComponent>(entity) ||
+        registry.all_of<SliderInputComponent>(entity);
+}
+
+inline bool ui_point_in_rect(glm::vec4 rect, glm::vec2 point)
+{
+    return rect.z > 0.0f &&
+        rect.w > 0.0f &&
+        point.x >= rect.x &&
+        point.y >= rect.y &&
+        point.x <= rect.x + rect.z &&
+        point.y <= rect.y + rect.w;
+}
+
+inline glm::vec2 ui_entity_framebuffer_size(const entt::registry& registry, entt::entity entity)
+{
+    const Transform2DComponent* transform = registry.try_get<Transform2DComponent>(entity);
+    if (!transform)
+    {
+        return glm::vec2(0.0f);
+    }
+
+    glm::vec2 size(0.0f);
+    if (const ShapeComponent* shape = registry.try_get<ShapeComponent>(entity))
+    {
+        size = shape->size;
+    }
+    else if (const Media2DComponent* media = registry.try_get<Media2DComponent>(entity))
+    {
+        size = media->size;
+    }
+    else if (const Model3DComponent* model = registry.try_get<Model3DComponent>(entity))
+    {
+        size = model->size;
+    }
+    else if (const TextComponent* text = registry.try_get<TextComponent>(entity))
+    {
+        size = {
+            std::max(text->bounds.x, static_cast<float>(text->text.size()) * text->fontSize * 0.55f),
+            std::max(text->bounds.y, text->fontSize * 1.25f)
+        };
+    }
+
+    return glm::max(size * transform->scale, glm::vec2(0.0f));
+}
+
+inline glm::vec4 ui_entity_base_framebuffer_rect(
+    const entt::registry& registry,
+    entt::entity entity)
+{
+    const Transform2DComponent* transform = registry.try_get<Transform2DComponent>(entity);
+    if (!transform)
+    {
+        return glm::vec4(0.0f);
+    }
+
+    const glm::vec2 size = ui_entity_framebuffer_size(registry, entity);
+    const glm::vec2 minPosition = transform->position - transform->origin * size;
+    return { minPosition.x, minPosition.y, size.x, size.y };
+}
+
+inline glm::vec4 ui_entity_framebuffer_rect(
+    const entt::registry& registry,
+    entt::entity entity)
+{
+
+
+
+    return ui_entity_base_framebuffer_rect(registry, entity);
+}
+
+inline glm::vec4 ui_entity_visual_framebuffer_rect(
+    const entt::registry& registry,
+    entt::entity entity)
+{
+    return renderer2d_apply_interactive_visual_rect(
+        registry,
+        entity,
+        ui_entity_base_framebuffer_rect(registry, entity));
+}
+
+inline uint32_t ui_panel_resize_edges_for(glm::vec4 rect, glm::vec2 point, const ResizablePanelComponent& resize)
+{
+    const float thickness = std::max(resize.edgeThickness, 1.0f);
+    const glm::vec4 expanded {
+        rect.x - thickness,
+        rect.y - thickness,
+        rect.z + thickness * 2.0f,
+        rect.w + thickness * 2.0f
+    };
+    if (!ui_point_in_rect(expanded, point))
+    {
+        return ePanelResizeNone;
+    }
+
+    uint32_t edges = ePanelResizeNone;
+    if ((resize.enabledEdges & ePanelResizeLeft) != 0u && std::abs(point.x - rect.x) <= thickness)
+    {
+        edges |= ePanelResizeLeft;
+    }
+    if ((resize.enabledEdges & ePanelResizeRight) != 0u && std::abs(point.x - (rect.x + rect.z)) <= thickness)
+    {
+        edges |= ePanelResizeRight;
+    }
+    if ((resize.enabledEdges & ePanelResizeTop) != 0u && std::abs(point.y - rect.y) <= thickness)
+    {
+        edges |= ePanelResizeTop;
+    }
+    if ((resize.enabledEdges & ePanelResizeBottom) != 0u && std::abs(point.y - (rect.y + rect.w)) <= thickness)
+    {
+        edges |= ePanelResizeBottom;
+    }
+    return edges;
+}
+
+inline bool ui_render_layer_above(const entt::registry& registry, entt::entity candidate, entt::entity current)
+{
+    if (current == entt::null)
+    {
+        return true;
+    }
+
+    const RenderLayer2DComponent* candidateLayer = registry.try_get<RenderLayer2DComponent>(candidate);
+    const RenderLayer2DComponent* currentLayer = registry.try_get<RenderLayer2DComponent>(current);
+    const bool candidateAlwaysOnTop = candidateLayer && candidateLayer->alwaysOnTop;
+    const bool currentAlwaysOnTop = currentLayer && currentLayer->alwaysOnTop;
+    const int32_t candidateLayerValue = candidateLayer ? candidateLayer->layer : 0;
+    const uint32_t candidateOrderValue = candidateLayer ? candidateLayer->order : 0u;
+    const int32_t currentLayerValue = currentLayer ? currentLayer->layer : 0;
+    const uint32_t currentOrderValue = currentLayer ? currentLayer->order : 0u;
+
+    if (candidateAlwaysOnTop != currentAlwaysOnTop)
+    {
+        return candidateAlwaysOnTop;
+    }
+    if (candidateLayerValue != currentLayerValue)
+    {
+        return candidateLayerValue > currentLayerValue;
+    }
+    if (candidateOrderValue != currentOrderValue)
+    {
+        return candidateOrderValue > currentOrderValue;
+    }
+    return entt::to_integral(candidate) > entt::to_integral(current);
+}
+
+inline entt::entity ui_input_owner_from_hit(const entt::registry& registry, entt::entity hit)
+{
+    entt::entity current = hit;
+    for (uint32_t depth = 0; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+    {
+        if (ui_has_input_component(registry, current))
+        {
+            return current;
+        }
+
+        const Parent2DComponent* parent = registry.try_get<Parent2DComponent>(current);
+        if (!parent || parent->parent == entt::null || parent->parent == current)
+        {
+            break;
+        }
+        current = parent->parent;
+    }
+    return entt::null;
+}
+
+inline void ui_set_entity_framebuffer_size(entt::registry& registry, entt::entity entity, glm::vec2 size)
+{
+    Transform2DComponent* transform = registry.try_get<Transform2DComponent>(entity);
+    if (!transform)
+    {
+        return;
+    }
+
+    const glm::vec2 safeScale {
+        std::abs(transform->scale.x) > 0.0001f ? transform->scale.x : 1.0f,
+        std::abs(transform->scale.y) > 0.0001f ? transform->scale.y : 1.0f
+    };
+    const glm::vec2 localSize = glm::max(size / safeScale, glm::vec2(0.0f));
+    if (ShapeComponent* shape = registry.try_get<ShapeComponent>(entity))
+    {
+        shape->size = localSize;
+    }
+    else if (Media2DComponent* media = registry.try_get<Media2DComponent>(entity))
+    {
+        media->size = localSize;
+    }
+    else if (Model3DComponent* model = registry.try_get<Model3DComponent>(entity))
+    {
+        model->size = localSize;
+    }
+}
+
+inline glm::vec2 ui_clamp_drag_delta_to_bounds(
+    const entt::registry& registry,
+    entt::entity entity,
+    glm::vec2 delta,
+    glm::vec2 bounds)
+{
+    const Transform2DComponent* transform = registry.try_get<Transform2DComponent>(entity);
+    if (!transform || bounds.x <= 0.0f || bounds.y <= 0.0f)
+    {
+        return delta;
+    }
+
+    const glm::vec2 size = ui_entity_framebuffer_size(registry, entity);
+    const glm::vec2 currentMin = transform->position - transform->origin * size;
+    const glm::vec2 proposedMin = currentMin + delta;
+    const glm::vec2 minAllowed = glm::min(glm::vec2(0.0f), bounds - size);
+    const glm::vec2 maxAllowed = glm::max(glm::vec2(0.0f), bounds - size);
+    const glm::vec2 clampedMin = glm::clamp(proposedMin, minAllowed, maxAllowed);
+    return clampedMin - currentMin;
+}
+
+inline entt::entity ui_input_owner_at(Renderer2DScene& scene, glm::vec2 point)
+{
+    return ui_input_owner_from_hit(scene.registry(), scene.entity_at(point));
+}
+
+inline entt::entity ui_resizable_panel_at_from_hit(
+    Renderer2DScene& scene,
+    entt::entity hit,
+    glm::vec2 point,
+    uint32_t& edges)
+{
+    edges = ePanelResizeNone;
+    entt::registry& registry = scene.registry();
+    if (hit != entt::null)
+    {
+        entt::entity current = hit;
+        for (uint32_t depth = 0; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+        {
+            if (const ResizablePanelComponent* resize = registry.try_get<ResizablePanelComponent>(current);
+                resize && resize->enabled && ui_entity_visible_by_hierarchy(registry, current))
+            {
+                const uint32_t candidateEdges = ui_panel_resize_edges_for(ui_entity_framebuffer_rect(registry, current), point, *resize);
+                if (candidateEdges != ePanelResizeNone)
+                {
+                    edges = candidateEdges;
+                    return current;
+                }
+            }
+
+            const Parent2DComponent* parent = registry.try_get<Parent2DComponent>(current);
+            if (!parent || parent->parent == entt::null || parent->parent == current)
+            {
+                break;
+            }
+            current = parent->parent;
+        }
+
+        return entt::null;
+    }
+
+    entt::entity topmost = entt::null;
+    uint32_t topmostEdges = ePanelResizeNone;
+    auto view = registry.view<const Transform2DComponent, const ResizablePanelComponent>();
+    view.each([&](
+        entt::entity entity,
+        const Transform2DComponent&,
+        const ResizablePanelComponent& resize) {
+        if (!resize.enabled)
+        {
+            return;
+        }
+        if (!ui_entity_visible_by_hierarchy(registry, entity))
+        {
+            return;
+        }
+
+        const uint32_t candidateEdges = ui_panel_resize_edges_for(ui_entity_framebuffer_rect(registry, entity), point, resize);
+        if (candidateEdges == ePanelResizeNone || !ui_render_layer_above(registry, entity, topmost))
+        {
+            return;
+        }
+
+        topmost = entity;
+        topmostEdges = candidateEdges;
+    });
+
+    edges = topmostEdges;
+    return topmost;
+}
+
+inline entt::entity ui_resizable_panel_at(Renderer2DScene& scene, glm::vec2 point, uint32_t& edges)
+{
+    return ui_resizable_panel_at_from_hit(scene, scene.entity_at(point), point, edges);
+}
+
+inline entt::entity ui_draggable_parent_from_hit(const entt::registry& registry, entt::entity hit)
+{
+    entt::entity current = hit;
+    for (uint32_t depth = 0u; depth < 64u && current != entt::null && registry.valid(current); ++depth)
+    {
+        if (!ui_entity_visible_by_hierarchy(registry, current))
+            return entt::null;
+        if (const auto* handle = registry.try_get<DragHandle2DComponent>(current);
+            handle && handle->enabled)
+        {
+            const entt::entity target = handle->target != entt::null ? handle->target : current;
+            return registry.valid(target) ? target : entt::null;
+        }
+        if (const auto* shape = registry.try_get<ShapeComponent>(current); shape && shape->draggable)
+            return current;
+        const auto* parent = registry.try_get<Parent2DComponent>(current);
+        if (!parent || parent->parent == entt::null || parent->parent == current)
+            break;
+        current = parent->parent;
+    }
+    return entt::null;
+}
+
+inline bool ui_pointer_capture_blocks_window_action(const UiInputState& state)
+{
+    return state.pressedInputEntity != entt::null ||
+        state.pointerInputCapture != entt::null ||
+        state.activeSlider != entt::null || state.activeScrollBar != entt::null;
+}
+
+inline bool ui_hit_blocks_window_action(Renderer2DScene& scene,
+    const UiInputState& state, glm::vec2 point, entt::entity hit)
+{
+    if (ui_pointer_capture_blocks_window_action(state))
+        return true;
+    const auto& registry = scene.registry();
+    if (ui_draggable_parent_from_hit(registry, hit) != entt::null)
+        return true;
+    uint32_t resizeEdges = ePanelResizeNone;
+    if (ui_resizable_panel_at_from_hit(scene, hit, point, resizeEdges) != entt::null)
+        return true;
+    if (const auto owner = ui_component_owner<ButtonInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<ButtonInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<TextInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<TextInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<DropTargetComponent>(registry, hit); owner != entt::null)
+        return registry.get<DropTargetComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<ScrollBarInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<ScrollBarInputComponent>(owner).enabled;
+    if (const auto owner = ui_component_owner<SliderInputComponent>(registry, hit); owner != entt::null)
+        return registry.get<SliderInputComponent>(owner).enabled;
+    return false;
+}
+
+inline bool ui_append_codepoint(std::string& value, unsigned int codepoint, std::size_t maxBytes)
+{
+    if (codepoint < 32u || codepoint == 127u || value.size() >= maxBytes)
+    {
+        return false;
+    }
+
+    const char appended = codepoint < 128u ? static_cast<char>(codepoint) : '?';
+    value.push_back(appended);
+    if (value.size() > maxBytes)
+    {
+        value.resize(maxBytes);
+    }
+    return true;
+}
+
+inline bool ui_erase_previous_codepoint(std::string& value)
+{
+    if (value.empty())
+    {
+        return false;
+    }
+
+    do
+    {
+        const unsigned char byte = static_cast<unsigned char>(value.back());
+        value.pop_back();
+        if ((byte & 0x80u) == 0u || (byte & 0xC0u) == 0xC0u)
+        {
+            break;
+        }
+    }
+    while (!value.empty());
+    return true;
+}
+
+inline float ui_slider_normalized_value(const SliderInputComponent& slider)
+{
+    return (slider.maxValue > slider.minValue) ?
+        (slider.value - slider.minValue) / (slider.maxValue - slider.minValue) : 0.0f;
+}
+
+inline float ui_slider_visual_normalized_value(const SliderInputComponent& slider)
+{
+    const float value = slider.smoothScrubbing ? slider.visualValue : slider.value;
+    return (slider.maxValue > slider.minValue) ?
+        (value - slider.minValue) / (slider.maxValue - slider.minValue) : 0.0f;
+}
+
+
+
+inline float ui_slider_thumb_inset(float trackWidth, float thumbWidth)
+{
+    return std::clamp(thumbWidth * 0.5f, 0.0f, std::max(trackWidth, 0.0f) * 0.5f);
+}
+
+inline float ui_slider_thumb_position(float trackWidth, float thumbWidth, float value)
+{
+    const float inset = ui_slider_thumb_inset(trackWidth, thumbWidth);
+    return inset + std::max(trackWidth - 2.0f * inset, 0.0f) * std::clamp(value, 0.0f, 1.0f);
+}
+
+inline float ui_slider_thumb_reserved_width(const SliderInputComponent& slider)
+{
+    if (slider.insetThumb) return slider.trackHeight;
+
+
+    return std::max(slider.thumbSize.x * slider.thumbExpansionReserve, slider.hoveredThumbSize.x);
+}
+
+inline bool ui_set_slider_value_from_point(Renderer2DScene& scene, entt::entity entity, glm::vec2 point)
+{
+    if (entity == entt::null)
+    {
+        return false;
+    }
+
+    entt::registry& registry = scene.registry();
+    SliderInputComponent* slider = registry.try_get<SliderInputComponent>(entity);
+    if (!slider || !slider->enabled)
+    {
+        return false;
+    }
+
+    const glm::vec4 authoredRect = ui_entity_framebuffer_rect(registry, entity);
+    const glm::vec4 rect = ui_entity_visual_framebuffer_rect(registry, entity);
+    if (rect.z <= 0.0f || authoredRect.z <= 0.0f)
+    {
+        return false;
+    }
+
+
+
+    const float inset = ui_slider_thumb_inset(authoredRect.z,
+        ui_slider_thumb_reserved_width(*slider)) * (rect.z / authoredRect.z);
+    const float left = rect.x + inset;
+    const float right = rect.x + rect.z - inset;
+    const float travel = right - left;
+    float normalized = point.x <= left ? 0.0f : point.x >= right ? 1.0f :
+        (travel > 0.0f ? (point.x - left) / travel : 0.0f);
+    normalized = glm::clamp(normalized, 0.0f, 1.0f);
+
+    if (ui_layout_is_rtl(registry, entity)) normalized = 1.0f - normalized;
+
+    if (slider->normalisedStep > 0.0f)
+    {
+        const float snap = std::clamp(slider->normalisedStep, 0.0001f, 1.0f);
+        normalized = std::round(normalized / snap) * snap;
+        normalized = glm::clamp(normalized, 0.0f, 1.0f);
+    }
+
+    float newValue = slider->minValue + normalized * (slider->maxValue - slider->minValue);
+    if (slider->normalisedStep <= 0.0f && slider->step > 0.0f)
+    {
+        const float steps = std::round((newValue - slider->minValue) / slider->step);
+        newValue = slider->minValue + steps * slider->step;
+    }
+    newValue = std::clamp(newValue, slider->minValue, slider->maxValue);
+
+    const float prev = slider->value;
+    slider->value = newValue;
+    const bool changed = std::abs(prev - newValue) > 1e-6f;
+    if (changed && !slider->smoothScrubbing)
+    {
+        slider->visualValue = newValue;
+    }
+    return changed;
+}
+
+inline void ui_bring_panel_to_front(Renderer2DScene& scene, entt::entity panel)
+{
+    entt::registry& registry = scene.registry();
+    RenderLayer2DComponent* panelLayer = registry.try_get<RenderLayer2DComponent>(panel);
+    if (!panelLayer)
+    {
+        return;
+    }
+
+    int32_t topLayer = panelLayer->layer;
+    uint32_t topOrder = panelLayer->order;
+    auto panelView = registry.view<const ShapeComponent, const LayoutRect2DComponent, const RenderLayer2DComponent>();
+    panelView.each([&](
+        entt::entity entity,
+        const ShapeComponent&,
+        const LayoutRect2DComponent&,
+        const RenderLayer2DComponent& layer) {
+        if (entity == panel || registry.all_of<Parent2DComponent>(entity) || !layer.visible)
+        {
+            return;
+        }
+
+        if (layer.layer > topLayer || (layer.layer == topLayer && layer.order > topOrder))
+        {
+            topLayer = layer.layer;
+            topOrder = layer.order;
+        }
+    });
+
+    if (panelLayer->layer > topLayer ||
+        (panelLayer->layer == topLayer && panelLayer->order >= topOrder))
+    {
+        return;
+    }
+
+    panelLayer->layer = topLayer;
+    panelLayer->order = topOrder == std::numeric_limits<uint32_t>::max() ? topOrder : topOrder + 1u;
+    ui_mark_moving_entity_dirty(scene, panel);
+}

@@ -1,0 +1,2586 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#if defined(_WIN32)
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <appmodel.h>
+#include <audiopolicy.h>
+#include <mmdeviceapi.h>
+#include <shlobj_core.h>
+#include <shobjidl_core.h>
+#include <shellapi.h>
+#include <tlhelp32.h>
+#include <propvarutil.h>
+#include <propkey.h>
+
+#include <vibranceUI/platform/win32_interop_abi.h>
+
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Graphics.Imaging.h>
+#include <winrt/Windows.Media.Control.h>
+#include <winrt/Windows.Storage.Streams.h>
+#include <winrt/Windows.UI.Notifications.h>
+#include <winrt/Windows.UI.Notifications.Management.h>
+
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstring>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <mutex>
+#include <new>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+#include <memory>
+#include "playback_quality_probe.h"
+#include "media_seek_fallback.h"
+#include "notification_activation.h"
+#include "notification_payload_store.h"
+#include "notification_record_cache.h"
+#include "media_process_routing.h"
+#include "../../media/timeline_range.h"
+
+namespace
+{
+using namespace std::chrono_literals;
+
+constexpr GUID kClsidMmDeviceEnumerator {
+    0xbcde0395, 0xe52f, 0x467c,
+    { 0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e }
+};
+constexpr GUID kIidMmDeviceEnumerator {
+    0xa95664d2, 0x9614, 0x4f35,
+    { 0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6 }
+};
+constexpr GUID kIidAudioSessionManager2 {
+    0x77aa99a0, 0x1bd6, 0x484f,
+    { 0x8b, 0xc7, 0x2c, 0x65, 0x4c, 0x9a, 0x9b, 0x6f }
+};
+constexpr GUID kIidAudioSessionControl2 {
+    0xbfb7ff88, 0x7239, 0x4fc9,
+    { 0x8f, 0xa2, 0x07, 0xc9, 0x50, 0xbe, 0x9c, 0x6d }
+};
+
+template <typename T>
+void release_com(T*& value)
+{
+    if (value)
+    {
+        value->Release();
+        value = nullptr;
+    }
+}
+
+using winrt::Windows::Media::Control::
+    GlobalSystemMediaTransportControlsSession;
+using winrt::Windows::Media::Control::
+    GlobalSystemMediaTransportControlsSessionManager;
+using winrt::Windows::Media::Control::
+    GlobalSystemMediaTransportControlsSessionPlaybackStatus;
+using winrt::Windows::Storage::Streams::Buffer;
+using winrt::Windows::Storage::Streams::DataReader;
+using winrt::Windows::Storage::Streams::DataWriter;
+using winrt::Windows::Storage::Streams::InMemoryRandomAccessStream;
+using winrt::Windows::Storage::Streams::InputStreamOptions;
+using winrt::Windows::Storage::Streams::IRandomAccessStream;
+using winrt::Windows::Graphics::Imaging::BitmapAlphaMode;
+using winrt::Windows::Graphics::Imaging::BitmapDecoder;
+using winrt::Windows::Graphics::Imaging::BitmapEncoder;
+using winrt::Windows::Graphics::Imaging::BitmapPixelFormat;
+using winrt::Windows::Graphics::Imaging::SoftwareBitmap;
+using winrt::Windows::UI::Notifications::KnownNotificationBindings;
+using winrt::Windows::UI::Notifications::NotificationKinds;
+using winrt::Windows::UI::Notifications::Management::UserNotificationListener;
+using winrt::Windows::UI::Notifications::Management::
+    UserNotificationListenerAccessStatus;
+
+template <std::size_t Size>
+void copy_utf8(char (&destination)[Size], const winrt::hstring& value)
+{
+    const std::string utf8 = winrt::to_string(value);
+    const std::size_t limit = std::min(utf8.size(), Size - 1u);
+    std::size_t validSize = 0u;
+    while (validSize < limit)
+    {
+        const unsigned char lead =
+            static_cast<unsigned char>(utf8[validSize]);
+        std::size_t sequenceLength = 1u;
+        if ((lead & 0xE0u) == 0xC0u)
+        {
+            sequenceLength = 2u;
+        }
+        else if ((lead & 0xF0u) == 0xE0u)
+        {
+            sequenceLength = 3u;
+        }
+        else if ((lead & 0xF8u) == 0xF0u)
+        {
+            sequenceLength = 4u;
+        }
+        if (validSize + sequenceLength > limit)
+        {
+            break;
+        }
+        validSize += sequenceLength;
+    }
+    std::memcpy(destination, utf8.data(), validSize);
+    destination[validSize] = '\0';
+}
+
+template <std::size_t Size>
+void copy_utf8(char (&destination)[Size], const std::string& value)
+{
+    const std::size_t copySize = std::min(value.size(), Size - 1u);
+    std::memcpy(destination, value.data(), copySize);
+    destination[copySize] = '\0';
+}
+
+std::int64_t milliseconds(
+    const winrt::Windows::Foundation::TimeSpan& value)
+{
+    return value.count() / 10000;
+}
+
+std::string utf8_path(const std::filesystem::path& path)
+{
+    const std::wstring wide = path.wstring();
+    if (wide.empty())
+    {
+        return {};
+    }
+    const int size = WideCharToMultiByte(
+        CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+        nullptr, 0, nullptr, nullptr);
+    std::string result(static_cast<std::size_t>(std::max(size, 0)), '\0');
+    if (size > 0)
+    {
+        WideCharToMultiByte(
+            CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+            result.data(), size, nullptr, nullptr);
+    }
+    return result;
+}
+
+std::uint64_t thumbnail_hash(const std::vector<std::uint8_t>& bytes)
+{
+    std::uint64_t value = 1469598103934665603ull;
+    for (const std::uint8_t byte : bytes)
+    {
+        value = (value ^ byte) * 1099511628211ull;
+    }
+    return value;
+}
+
+std::wstring thumbnail_extension(const std::vector<std::uint8_t>& bytes)
+{
+    if (bytes.size() >= 8u &&
+        bytes[0] == 0x89u && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G')
+    {
+        return L".png";
+    }
+    if (bytes.size() >= 3u && bytes[0] == 0xFFu && bytes[1] == 0xD8u)
+    {
+        return L".jpg";
+    }
+    if (bytes.size() >= 12u &&
+        std::memcmp(bytes.data(), "RIFF", 4u) == 0 &&
+        std::memcmp(bytes.data() + 8u, "WEBP", 4u) == 0)
+    {
+        return L".webp";
+    }
+    if (bytes.size() >= 6u &&
+        (std::memcmp(bytes.data(), "GIF87a", 6u) == 0 ||
+            std::memcmp(bytes.data(), "GIF89a", 6u) == 0))
+    {
+        return L".gif";
+    }
+    if (bytes.size() >= 2u && bytes[0] == 'B' && bytes[1] == 'M')
+    {
+        return L".bmp";
+    }
+    if (bytes.size() >= 4u && bytes[0] == 0u && bytes[1] == 0u &&
+        bytes[2] == 1u && bytes[3] == 0u)
+    {
+        return L".ico";
+    }
+    const std::size_t textProbeSize = std::min<std::size_t>(
+        bytes.size(),
+        1024u);
+    const std::string textProbe(
+        reinterpret_cast<const char*>(bytes.data()),
+        textProbeSize);
+    if (textProbe.find("<svg") != std::string::npos)
+    {
+        return L".svg";
+    }
+    return L".img";
+}
+
+std::vector<std::uint8_t> read_stream_bytes(
+    const IRandomAccessStream& stream)
+{
+    std::vector<std::uint8_t> result;
+    stream.Seek(0u);
+    const std::uint64_t streamSize = std::min<std::uint64_t>(
+        stream.Size(), 32ull * 1024ull * 1024ull);
+    if (streamSize == 0u)
+    {
+        return result;
+    }
+    Buffer buffer(static_cast<std::uint32_t>(streamSize));
+    const auto filled = stream.ReadAsync(
+        buffer,
+        static_cast<std::uint32_t>(streamSize),
+        InputStreamOptions::None).get();
+    DataReader reader = DataReader::FromBuffer(filled);
+    result.resize(reader.UnconsumedBufferLength());
+    reader.ReadBytes(winrt::array_view<std::uint8_t>(result));
+    return result;
+}
+
+bool cache_encoded_thumbnail(
+    const std::vector<std::uint8_t>& bytes,
+    std::uint64_t& revision,
+    std::string& path,
+    std::wstring extension = {})
+{
+    if (bytes.empty())
+    {
+        return false;
+    }
+    revision = thumbnail_hash(bytes);
+    std::error_code error;
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path(error) / L"vibranceUI" / L"gsmtc";
+    if (error)
+    {
+        return false;
+    }
+    std::filesystem::create_directories(directory, error);
+    if (error)
+    {
+        return false;
+    }
+    if (extension.empty())
+    {
+        extension = thumbnail_extension(bytes);
+    }
+    std::wostringstream filename;
+    filename << L"thumbnail-" << std::hex << revision << extension;
+    const std::filesystem::path destination = directory / filename.str();
+    if (!std::filesystem::exists(destination, error))
+    {
+        const std::filesystem::path temporary = destination.wstring() + L".tmp";
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        output.write(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+        output.close();
+        if (!output)
+        {
+            std::filesystem::remove(temporary, error);
+            return false;
+        }
+        std::filesystem::rename(temporary, destination, error);
+        if (error && !std::filesystem::exists(destination))
+        {
+            return false;
+        }
+    }
+    path = utf8_path(destination);
+    return !path.empty();
+}
+
+bool cache_icon(
+    HICON icon,
+    std::uint64_t& revision,
+    std::string& path)
+{
+    if (!icon)
+    {
+        return false;
+    }
+    constexpr int width = 64;
+    constexpr int height = 64;
+    BITMAPINFO bitmapInfo = {};
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1u;
+    bitmapInfo.bmiHeader.biBitCount = 32u;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    void* pixelMemory = nullptr;
+    HDC screen = GetDC(nullptr);
+    HDC memory = screen ? CreateCompatibleDC(screen) : nullptr;
+    HBITMAP bitmap = memory ? CreateDIBSection(
+        memory,
+        &bitmapInfo,
+        DIB_RGB_COLORS,
+        &pixelMemory,
+        nullptr,
+        0u) : nullptr;
+    bool drawn = false;
+    if (bitmap && pixelMemory)
+    {
+        const HGDIOBJ previous = SelectObject(memory, bitmap);
+        std::memset(pixelMemory, 0, width * height * 4u);
+        drawn = DrawIconEx(
+            memory,
+            0,
+            0,
+            icon,
+            width,
+            height,
+            0u,
+            nullptr,
+            DI_NORMAL) != FALSE;
+        SelectObject(memory, previous);
+    }
+    DestroyIcon(icon);
+    if (memory)
+    {
+        DeleteDC(memory);
+    }
+    if (screen)
+    {
+        ReleaseDC(nullptr, screen);
+    }
+    if (!drawn || !bitmap || !pixelMemory)
+    {
+        if (bitmap)
+        {
+            DeleteObject(bitmap);
+        }
+        return false;
+    }
+
+    std::vector<std::uint8_t> pixels(width * height * 4u);
+    std::memcpy(pixels.data(), pixelMemory, pixels.size());
+    DeleteObject(bitmap);
+    bool nonZeroAlpha = false;
+    for (std::size_t index = 3u; index < pixels.size(); index += 4u)
+    {
+        nonZeroAlpha = nonZeroAlpha || pixels[index] != 0u;
+    }
+    if (!nonZeroAlpha)
+    {
+        for (std::size_t index = 0u; index < pixels.size(); index += 4u)
+        {
+            if (pixels[index] != 0u || pixels[index + 1u] != 0u ||
+                pixels[index + 2u] != 0u)
+            {
+                pixels[index + 3u] = 255u;
+            }
+        }
+    }
+
+    try
+    {
+        DataWriter writer;
+        writer.WriteBytes(winrt::array_view<const std::uint8_t>(pixels));
+        const auto buffer = writer.DetachBuffer();
+        const SoftwareBitmap softwareBitmap =
+            SoftwareBitmap::CreateCopyFromBuffer(
+                buffer,
+                BitmapPixelFormat::Bgra8,
+                width,
+                height,
+                BitmapAlphaMode::Straight);
+        InMemoryRandomAccessStream encoded;
+        const auto encoder = BitmapEncoder::CreateAsync(
+            BitmapEncoder::PngEncoderId(), encoded).get();
+        encoder.SetSoftwareBitmap(softwareBitmap);
+        encoder.FlushAsync().get();
+        return cache_encoded_thumbnail(
+            read_stream_bytes(encoded),
+            revision,
+            path,
+            L".png");
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+bool cache_registered_application_icon(
+    std::wstring_view appUserModelId,
+    std::uint64_t& revision,
+    std::string& path)
+{
+    if (appUserModelId.empty())
+    {
+        return false;
+    }
+    const std::wstring parsingName =
+        L"shell:AppsFolder\\" + std::wstring(appUserModelId);
+    PIDLIST_ABSOLUTE itemIdList = nullptr;
+    if (FAILED(SHParseDisplayName(
+            parsingName.c_str(),
+            nullptr,
+            &itemIdList,
+            0u,
+            nullptr)) || !itemIdList)
+    {
+        return false;
+    }
+    SHFILEINFOW fileInfo = {};
+    const DWORD_PTR result = SHGetFileInfoW(
+        reinterpret_cast<LPCWSTR>(itemIdList),
+        0u,
+        &fileInfo,
+        sizeof(fileInfo),
+        SHGFI_PIDL | SHGFI_ICON | SHGFI_LARGEICON);
+    CoTaskMemFree(itemIdList);
+    return result != 0u && fileInfo.hIcon &&
+        cache_icon(fileInfo.hIcon, revision, path);
+}
+
+bool cache_window_icon(
+    HWND window,
+    std::uint64_t& revision,
+    std::string& path)
+{
+    if (!window)
+    {
+        return false;
+    }
+    DWORD_PTR messageResult = 0u;
+    SendMessageTimeoutW(
+        window,
+        WM_GETICON,
+        ICON_BIG,
+        0,
+        SMTO_ABORTIFHUNG | SMTO_BLOCK,
+        100u,
+        &messageResult);
+    HICON sourceIcon = reinterpret_cast<HICON>(messageResult);
+    if (!sourceIcon)
+    {
+        sourceIcon = reinterpret_cast<HICON>(
+            GetClassLongPtrW(window, GCLP_HICON));
+    }
+    if (!sourceIcon)
+    {
+        SendMessageTimeoutW(
+            window,
+            WM_GETICON,
+            ICON_SMALL2,
+            0,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            100u,
+            &messageResult);
+        sourceIcon = reinterpret_cast<HICON>(messageResult);
+    }
+    if (!sourceIcon)
+    {
+        sourceIcon = reinterpret_cast<HICON>(
+            GetClassLongPtrW(window, GCLP_HICONSM));
+    }
+    HICON icon = sourceIcon ? CopyIcon(sourceIcon) : nullptr;
+    if (!icon)
+    {
+        DWORD processId = 0u;
+        GetWindowThreadProcessId(window, &processId);
+        HANDLE process = processId != 0u ? OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            processId) : nullptr;
+        std::wstring executablePath(32768u, L'\0');
+        DWORD executablePathSize =
+            static_cast<DWORD>(executablePath.size());
+        if (process && QueryFullProcessImageNameW(
+                process,
+                0u,
+                executablePath.data(),
+                &executablePathSize))
+        {
+            executablePath.resize(executablePathSize);
+            SHFILEINFOW fileInfo = {};
+            if (SHGetFileInfoW(
+                    executablePath.c_str(),
+                    0u,
+                    &fileInfo,
+                    sizeof(fileInfo),
+                    SHGFI_ICON | SHGFI_LARGEICON) != 0u)
+            {
+                icon = fileInfo.hIcon;
+            }
+        }
+        if (process)
+        {
+            CloseHandle(process);
+        }
+    }
+    return cache_icon(icon, revision, path);
+}
+
+bool cache_thumbnail(
+    const winrt::Windows::Storage::Streams::IRandomAccessStreamReference& reference,
+    std::uint64_t& revision,
+    std::string& path,
+    bool normalizeToPng = false)
+{
+    if (!reference)
+    {
+        return false;
+    }
+    std::vector<std::uint8_t> bytes;
+    bool encodedAsPng = false;
+    if (normalizeToPng)
+    {
+        try
+        {
+            const auto source = reference.OpenReadAsync().get();
+            const auto decoder = BitmapDecoder::CreateAsync(source).get();
+            const auto bitmap = decoder.GetSoftwareBitmapAsync(
+                BitmapPixelFormat::Bgra8,
+                BitmapAlphaMode::Premultiplied).get();
+            InMemoryRandomAccessStream encoded;
+            const auto encoder = BitmapEncoder::CreateAsync(
+                BitmapEncoder::PngEncoderId(),
+                encoded).get();
+            encoder.SetSoftwareBitmap(bitmap);
+            encoder.FlushAsync().get();
+            bytes = read_stream_bytes(encoded);
+            encodedAsPng = !bytes.empty();
+        }
+        catch (...)
+        {
+
+
+        }
+    }
+    if (bytes.empty())
+    {
+        bytes = read_stream_bytes(reference.OpenReadAsync().get());
+    }
+    if (bytes.empty())
+    {
+        return false;
+    }
+
+
+
+    const std::wstring rawExtension = thumbnail_extension(bytes);
+    if (normalizeToPng && !encodedAsPng &&
+        (rawExtension == L".img" || rawExtension == L".ico"))
+    {
+        return false;
+    }
+
+    return cache_encoded_thumbnail(
+        bytes,
+        revision,
+        path,
+        encodedAsPng ? L".png" : rawExtension);
+}
+
+std::uint32_t playback_status(
+    GlobalSystemMediaTransportControlsSessionPlaybackStatus status)
+{
+    switch (status)
+    {
+        case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Closed:
+            return VIBRANCE_WIN32_MEDIA_CLOSED;
+        case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Opened:
+            return VIBRANCE_WIN32_MEDIA_OPENED;
+        case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Changing:
+            return VIBRANCE_WIN32_MEDIA_CHANGING;
+        case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Stopped:
+            return VIBRANCE_WIN32_MEDIA_STOPPED;
+        case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing:
+            return VIBRANCE_WIN32_MEDIA_PLAYING;
+        case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused:
+            return VIBRANCE_WIN32_MEDIA_PAUSED;
+        default:
+            return VIBRANCE_WIN32_MEDIA_UNKNOWN;
+    }
+}
+
+bool same_payload(
+    const VibranceWin32MediaSnapshot& left,
+    const VibranceWin32MediaSnapshot& right)
+{
+    return
+        left.serviceReady == right.serviceReady &&
+        left.sessionAvailable == right.sessionAvailable &&
+        left.playbackStatus == right.playbackStatus &&
+        left.capabilities == right.capabilities &&
+        left.sourceProcessId == right.sourceProcessId &&
+        left.playbackQuality == right.playbackQuality &&
+        left.thumbnailRevision == right.thumbnailRevision &&
+        left.positionMilliseconds == right.positionMilliseconds &&
+        left.durationMilliseconds == right.durationMilliseconds &&
+        std::strcmp(left.sourceApp, right.sourceApp) == 0 &&
+        std::strcmp(left.title, right.title) == 0 &&
+        std::strcmp(left.artist, right.artist) == 0 &&
+        std::strcmp(left.album, right.album) == 0 &&
+        std::strcmp(left.thumbnailPath, right.thumbnailPath) == 0 &&
+        std::strcmp(left.diagnostic, right.diagnostic) == 0;
+}
+
+std::uint32_t notification_access_status(
+    UserNotificationListenerAccessStatus status)
+{
+    switch (status)
+    {
+        case UserNotificationListenerAccessStatus::Allowed:
+            return VIBRANCE_WIN32_NOTIFICATIONS_ALLOWED;
+        case UserNotificationListenerAccessStatus::Denied:
+            return VIBRANCE_WIN32_NOTIFICATIONS_DENIED;
+        case UserNotificationListenerAccessStatus::Unspecified:
+        default:
+            return VIBRANCE_WIN32_NOTIFICATIONS_UNSPECIFIED;
+    }
+}
+
+bool same_notification_item(
+    const VibranceWin32NotificationItem& left,
+    const VibranceWin32NotificationItem& right)
+{
+    return vibrance::win32::same_notification_record(left, right);
+}
+
+class Win32InteropBridge
+{
+public:
+    explicit Win32InteropBridge(
+        std::uint32_t enabledFeatures = VIBRANCE_WIN32_INTEROP_MEDIA) :
+        featureMask(enabledFeatures)
+    {
+        snapshot.structSize = sizeof(snapshot);
+        notificationSnapshot.structSize = sizeof(notificationSnapshot);
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_MEDIA) != 0u)
+        {
+            qualityProbe = std::make_unique<Win32PlaybackQualityProbe>(quality_source_window);
+        }
+        worker = std::thread(&Win32InteropBridge::run, this);
+    }
+
+    ~Win32InteropBridge()
+    {
+        {
+            std::lock_guard lock(mutex);
+            stopping = true;
+        }
+        wake.notify_all();
+        if (worker.joinable())
+        {
+            worker.join();
+        }
+    }
+
+    bool get_snapshot(
+        VibranceWin32MediaSnapshot* destination,
+        std::uint32_t destinationSize)
+    {
+        if (!destination ||
+            destinationSize < sizeof(VibranceWin32MediaSnapshot))
+        {
+            return false;
+        }
+
+        std::lock_guard lock(mutex);
+        *destination = snapshot;
+        return true;
+    }
+
+    bool enqueue(std::uint32_t command)
+    {
+        if (command < VIBRANCE_WIN32_MEDIA_TOGGLE_PLAY_PAUSE ||
+            command > VIBRANCE_WIN32_MEDIA_SKIP_PREVIOUS)
+        {
+            return false;
+        }
+
+        {
+            std::lock_guard lock(mutex);
+            if (stopping)
+            {
+                return false;
+            }
+            commands.push_back(command);
+        }
+        wake.notify_one();
+        return true;
+    }
+
+    bool enqueue_seek(std::int64_t positionMilliseconds)
+    {
+        {
+            std::lock_guard lock(mutex);
+            if (stopping || !snapshot.sessionAvailable || snapshot.sourceApp[0] == '\0')
+            {
+                return false;
+            }
+            Win32MediaSeekFallback::Request request;
+            request.source = publishedSeekSource;
+            request.source.active = true;
+            request.positionMilliseconds = std::max(positionMilliseconds, std::int64_t(0));
+            request.generation = ++seekGeneration;
+            if (seekFallback) seekFallback->cancel();
+            pendingSeekRequest = std::move(request);
+        }
+        wake.notify_one();
+        return true;
+    }
+
+    bool request_notification_access()
+    {
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u)
+        {
+            return false;
+        }
+        {
+            std::lock_guard lock(mutex);
+            if (stopping)
+            {
+                return false;
+            }
+            notificationPolling = true;
+        }
+        wake.notify_one();
+
+        try
+        {
+            struct CallingThreadApartment
+            {
+                CallingThreadApartment()
+                {
+                    winrt::init_apartment(
+                        winrt::apartment_type::multi_threaded);
+                }
+                ~CallingThreadApartment()
+                {
+                    winrt::uninit_apartment();
+                }
+            } apartment;
+            const UserNotificationListener listener =
+                UserNotificationListener::Current();
+            VibranceWin32NotificationSnapshot next {};
+            next.structSize = sizeof(next);
+            next.serviceReady = 1u;
+            next.accessStatus = notification_access_status(
+                listener.RequestAccessAsync().get());
+            publish_notifications(next, {});
+            return true;
+        }
+        catch (const winrt::hresult_error& error)
+        {
+            publish_notification_error(error.message());
+        }
+        catch (const std::exception& error)
+        {
+            publish_notification_error(error.what());
+        }
+        catch (...)
+        {
+            publish_notification_error(
+                "Windows could not request notification access.");
+        }
+        return false;
+    }
+
+    bool get_notifications(
+        VibranceWin32NotificationSnapshot* destination,
+        std::uint32_t destinationSize,
+        VibranceWin32NotificationItem* items,
+        std::uint32_t itemSize,
+        std::uint32_t capacity)
+    {
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u ||
+            !destination || destinationSize < sizeof(*destination) ||
+            itemSize < sizeof(VibranceWin32NotificationItem) ||
+            (capacity > 0u && !items))
+        {
+            return false;
+        }
+        {
+            std::lock_guard lock(mutex);
+            notificationPolling = true;
+            *destination = notificationSnapshot;
+            const std::uint32_t copied = std::min<std::uint32_t>(
+                capacity,
+                static_cast<std::uint32_t>(notificationItems.size()));
+            destination->itemCount = copied;
+            for (std::uint32_t index = 0u; index < copied; ++index)
+            {
+                items[index] = notificationItems[index];
+            }
+        }
+        return true;
+    }
+
+    bool enqueue_notification_dismissal(std::uint32_t notificationId)
+    {
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u)
+        {
+            return false;
+        }
+        {
+            std::lock_guard lock(mutex);
+            if (stopping)
+            {
+                return false;
+            }
+            notificationPolling = true;
+            notificationDismissals.push_back(notificationId);
+        }
+        wake.notify_one();
+        return true;
+    }
+
+    bool enqueue_notification_activation(const char* appUserModelId)
+    {
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u ||
+            !appUserModelId || appUserModelId[0] == '\0')
+        {
+            return false;
+        }
+        {
+            std::lock_guard lock(mutex);
+            if (stopping)
+            {
+                return false;
+            }
+            notificationActivations.emplace_back(appUserModelId);
+        }
+        wake.notify_one();
+        return true;
+    }
+
+    bool activate_notification_source(const char* appUserModelId)
+    {
+        return (featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) != 0u &&
+            appUserModelId && appUserModelId[0] != '\0' &&
+            activate_application(appUserModelId);
+    }
+
+    bool activate_notification(const char* appUserModelId, const char* arguments, std::uint32_t kind)
+    {
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u ||
+            !appUserModelId || !arguments) return false;
+
+
+        if (kind == 0u) return false;
+        return vibrance::win32::invoke_toast_destination(appUserModelId, arguments, kind);
+    }
+
+    bool resolve_application_icon(
+        const char* appUserModelId,
+        VibranceWin32ApplicationIcon* destination,
+        std::uint32_t destinationSize)
+    {
+        if ((featureMask & VIBRANCE_WIN32_INTEROP_NOTIFICATIONS) == 0u ||
+            !appUserModelId || appUserModelId[0] == '\0' ||
+            !destination || destinationSize < sizeof(*destination))
+        {
+            return false;
+        }
+        *destination = {};
+        destination->structSize = sizeof(*destination);
+        const winrt::hstring identity =
+            winrt::to_hstring(appUserModelId);
+        std::uint64_t revision = 0u;
+        std::string path;
+        bool loaded = false;
+
+
+
+        const std::filesystem::path executable(identity.c_str());
+        std::error_code iconError;
+        if (executable.is_absolute() &&
+            std::filesystem::is_regular_file(executable, iconError) && !iconError)
+        {
+            SHFILEINFOW fileInfo {};
+            if (SHGetFileInfoW(executable.c_str(), 0, &fileInfo, sizeof(fileInfo),
+                    SHGFI_ICON | SHGFI_LARGEICON) && fileInfo.hIcon)
+                loaded = cache_icon(fileInfo.hIcon, revision, path);
+        }
+        if (!loaded) try
+        {
+            const auto appInfo = winrt::Windows::ApplicationModel::AppInfo::
+                GetFromAppUserModelId(identity);
+            if (appInfo)
+            {
+                loaded = cache_thumbnail(
+                    appInfo.DisplayInfo().GetLogo({ 64.0f, 64.0f }),
+                    revision,
+                    path,
+                    true);
+            }
+        }
+        catch (...)
+        {
+
+
+        }
+        if (!loaded)
+        {
+            loaded = cache_registered_application_icon(
+                identity.c_str(),
+                revision,
+                path);
+        }
+        if (!loaded)
+        {
+            loaded = cache_window_icon(
+                find_source_window(identity.c_str()),
+                revision,
+                path);
+        }
+        if (!loaded)
+        {
+            return false;
+        }
+        destination->revision = revision;
+        copy_utf8(destination->path, path);
+        return destination->path[0] != '\0';
+    }
+
+private:
+    void publish(VibranceWin32MediaSnapshot next, bool forceSample = false,
+        Win32PlaybackQualityProbe::Request seekSource = {})
+    {
+        std::lock_guard lock(mutex);
+        next.structSize = sizeof(next);
+        const bool sameIdentity = publishedSeekSource.sourceApp == seekSource.sourceApp &&
+            publishedSeekSource.title == seekSource.title &&
+            publishedSeekSource.artist == seekSource.artist &&
+            publishedSeekSource.album == seekSource.album;
+        publishedSeekSource = std::move(seekSource);
+        if (!forceSample && sameIdentity && same_payload(snapshot, next))
+        {
+            return;
+        }
+        next.revision = snapshot.revision + 1u;
+        snapshot = next;
+    }
+
+    void publish_error(const winrt::hresult_error& error)
+    {
+        VibranceWin32MediaSnapshot next {};
+        next.structSize = sizeof(next);
+        copy_utf8(next.diagnostic, error.message());
+        publish(next);
+    }
+
+    void publish_error(const std::string& message)
+    {
+        VibranceWin32MediaSnapshot next {};
+        next.structSize = sizeof(next);
+        copy_utf8(next.diagnostic, message);
+        publish(next);
+    }
+
+    void publish_notifications(
+        VibranceWin32NotificationSnapshot next,
+        std::vector<VibranceWin32NotificationItem> nextItems)
+    {
+        std::lock_guard lock(mutex);
+        next.structSize = sizeof(next);
+        next.itemCount = static_cast<std::uint32_t>(nextItems.size());
+        const bool sameHeader =
+            notificationSnapshot.serviceReady == next.serviceReady &&
+            notificationSnapshot.accessStatus == next.accessStatus &&
+            std::strcmp(
+                notificationSnapshot.diagnostic,
+                next.diagnostic) == 0;
+        const bool sameItems = sameHeader &&
+            notificationItems.size() == nextItems.size() &&
+            std::equal(
+                notificationItems.begin(),
+                notificationItems.end(),
+                nextItems.begin(),
+                same_notification_item);
+        if (sameItems)
+        {
+            return;
+        }
+        next.revision = notificationSnapshot.revision + 1u;
+        notificationSnapshot = next;
+        notificationItems = std::move(nextItems);
+    }
+
+    void publish_notification_error(const winrt::hstring& message)
+    {
+        VibranceWin32NotificationSnapshot next {};
+        next.structSize = sizeof(next);
+        next.accessStatus = VIBRANCE_WIN32_NOTIFICATIONS_ERROR;
+        copy_utf8(next.diagnostic, message);
+        publish_notifications(next, {});
+    }
+
+    void publish_notification_error(const std::string& message)
+    {
+        VibranceWin32NotificationSnapshot next {};
+        next.structSize = sizeof(next);
+        next.accessStatus = VIBRANCE_WIN32_NOTIFICATIONS_ERROR;
+        copy_utf8(next.diagnostic, message);
+        publish_notifications(next, {});
+    }
+
+    void poll_notifications(const UserNotificationListener& listener)
+    {
+        VibranceWin32NotificationSnapshot next {};
+        next.structSize = sizeof(next);
+        next.serviceReady = 1u;
+        const UserNotificationListenerAccessStatus status =
+            listener.GetAccessStatus();
+        next.accessStatus = notification_access_status(status);
+        if (status != UserNotificationListenerAccessStatus::Allowed)
+        {
+            notificationRecordCache.clear();
+            notificationIconCache.clear();
+            publish_notifications(next, {});
+            return;
+        }
+
+        const auto notifications = listener.GetNotificationsAsync(
+            NotificationKinds::Toast).get();
+        if (notifications.Size() == 0u)
+        {
+            notificationRecordCache.clear();
+            notificationIconCache.clear();
+            publish_notifications(next, {});
+            return;
+        }
+        std::vector<VibranceWin32NotificationItem> items;
+        items.reserve(notifications.Size());
+        const auto now = std::chrono::steady_clock::now();
+        std::unordered_set<std::uint32_t> liveIds;
+        std::unordered_set<std::string> liveIconKeys;
+        std::unique_ptr<vibrance::win32::NotificationPayloadStore> payloadStore;
+        const auto readPayload = [&](VibranceWin32NotificationItem& item) {
+            if (!payloadStore) payloadStore = std::make_unique<vibrance::win32::NotificationPayloadStore>();
+            if (const auto target = payloadStore->read(item.notificationId,
+                    item.appUserModelId, item.creationUnixMilliseconds))
+            {
+                item.activationKind = target->kind;
+                copy_utf8(item.activationArguments, target->arguments);
+            }
+        };
+        for (const auto& notification : notifications)
+        {
+            try
+            {
+                VibranceWin32NotificationItem item {};
+                item.structSize = sizeof(item);
+                item.notificationId = notification.Id();
+                liveIds.insert(item.notificationId);
+                constexpr std::int64_t windowsToUnixMilliseconds =
+                    11'644'473'600'000ll;
+                item.creationUnixMilliseconds =
+                    notification.CreationTime().time_since_epoch().count() /
+                        10'000ll -
+                    windowsToUnixMilliseconds;
+                const auto binding = notification.Notification().Visual().
+                    GetBinding(KnownNotificationBindings::ToastGeneric());
+                if (binding)
+                {
+                    const auto textElements = binding.GetTextElements();
+                    if (textElements.Size() > 0u)
+                        copy_utf8(item.title, textElements.GetAt(0u).Text());
+                    std::string body;
+                    for (std::uint32_t index = 1u; index < textElements.Size(); ++index)
+                    {
+                        if (!body.empty()) body += '\n';
+                        body += winrt::to_string(textElements.GetAt(index).Text());
+                    }
+                    copy_utf8(item.message, body);
+                }
+                if (auto* cached = notificationRecordCache.find(item, now))
+                {
+
+
+                    if (cached->item.activationKind == 0u &&
+                        now - cached->payloadChecked >= 2s)
+                    {
+                        readPayload(cached->item);
+                        cached->payloadChecked = now;
+                    }
+                    items.push_back(cached->item);
+                    liveIconKeys.insert(cached->item.appUserModelId[0] ?
+                        cached->item.appUserModelId : cached->item.sourceApp);
+                    continue;
+                }
+                const auto appInfo = notification.AppInfo();
+                const auto displayInfo = appInfo.DisplayInfo();
+                copy_utf8(item.sourceApp, displayInfo.DisplayName());
+                const winrt::hstring appUserModelId =
+                    appInfo.AppUserModelId();
+                copy_utf8(item.appUserModelId, appUserModelId);
+
+                std::string iconCacheKey = winrt::to_string(
+                    appInfo.AppUserModelId());
+                if (iconCacheKey.empty())
+                {
+                    iconCacheKey = item.sourceApp;
+                }
+                liveIconKeys.insert(iconCacheKey);
+                const auto cachedIcon = notificationIconCache.find(
+                    iconCacheKey);
+                std::error_code iconError;
+                const bool cachedFile = cachedIcon != notificationIconCache.end() &&
+                    !cachedIcon->second.path.empty() &&
+                    std::filesystem::exists(cachedIcon->second.path, iconError);
+                const bool cachedFailure = cachedIcon != notificationIconCache.end() &&
+                    cachedIcon->second.path.empty() && now < cachedIcon->second.retryAfter;
+                if (cachedFile || cachedFailure)
+                {
+                    item.iconRevision = cachedIcon->second.revision;
+                    copy_utf8(item.iconPath, cachedIcon->second.path);
+                }
+                else
+                {
+                    if (cachedIcon != notificationIconCache.end())
+                    {
+                        notificationIconCache.erase(cachedIcon);
+                    }
+                    CachedNotificationIcon icon = {};
+                    icon.retryAfter = now + 60s;
+                    bool loadedIcon = false;
+                    try
+                    {
+                        loadedIcon = cache_thumbnail(
+                            displayInfo.GetLogo({ 64.0f, 64.0f }),
+                            icon.revision,
+                            icon.path,
+                            true);
+                    }
+                    catch (...)
+                    {
+
+                    }
+                    if (!loadedIcon && !appUserModelId.empty())
+                    {
+                        loadedIcon = cache_registered_application_icon(
+                            appUserModelId.c_str(),
+                            icon.revision,
+                            icon.path);
+                    }
+                    if (!loadedIcon && !appUserModelId.empty())
+                    {
+                        loadedIcon = cache_window_icon(
+                            find_source_window(appUserModelId.c_str()),
+                            icon.revision,
+                            icon.path);
+                    }
+                    if (loadedIcon)
+                    {
+                        item.iconRevision = icon.revision;
+                        copy_utf8(item.iconPath, icon.path);
+                    }
+
+
+
+                    notificationIconCache.emplace(std::move(iconCacheKey), std::move(icon));
+                }
+
+                notificationRecordCache.store(item, now);
+                auto* cached = notificationRecordCache.find(item, now);
+                if (item.title[0] == '\0')
+                {
+                    copy_utf8(item.title, notification.AppInfo().
+                        DisplayInfo().DisplayName());
+                }
+
+
+
+                readPayload(item);
+
+
+                cached->item = item;
+                items.push_back(item);
+            }
+            catch (...)
+            {
+
+
+            }
+        }
+        notificationRecordCache.retain(liveIds);
+        std::erase_if(notificationIconCache,
+            [&](const auto& entry) { return !liveIconKeys.contains(entry.first); });
+        std::stable_sort(
+            items.begin(),
+            items.end(),
+            [](const auto& left, const auto& right) {
+                if (left.creationUnixMilliseconds !=
+                    right.creationUnixMilliseconds)
+                {
+                    return left.creationUnixMilliseconds >
+                        right.creationUnixMilliseconds;
+                }
+                return left.notificationId > right.notificationId;
+            });
+        publish_notifications(next, std::move(items));
+    }
+
+    std::chrono::steady_clock::time_point lastProcessResolution {};
+    std::chrono::steady_clock::time_point playbackResumedAt {};
+
+    void poll(
+        const GlobalSystemMediaTransportControlsSessionManager& manager, bool forceSample = false)
+    {
+        VibranceWin32MediaSnapshot next {};
+        next.structSize = sizeof(next);
+        next.serviceReady = 1u;
+
+        const GlobalSystemMediaTransportControlsSession session =
+            manager.GetCurrentSession();
+        if (!session)
+        {
+            if (qualityProbe) qualityProbe->refresh({});
+            publish(next);
+            return;
+        }
+
+        next.sessionAvailable = 1u;
+        const winrt::hstring sourceApp = session.SourceAppUserModelId();
+        copy_utf8(next.sourceApp, sourceApp);
+        const auto processNow = std::chrono::steady_clock::now();
+        DWORD preferredProcessId = 0u;
+        {
+            std::lock_guard lock(mutex);
+            if (std::strcmp(snapshot.sourceApp, next.sourceApp) == 0)
+            {
+                preferredProcessId = snapshot.sourceProcessId;
+                if (processNow - lastProcessResolution < std::chrono::seconds(1) &&
+                    process_alive(preferredProcessId))
+                    next.sourceProcessId = preferredProcessId;
+            }
+        }
+        if (next.sourceProcessId == 0u)
+        {
+            next.sourceProcessId = resolve_media_process_id(sourceApp.c_str(), preferredProcessId);
+            lastProcessResolution = processNow;
+        }
+
+        const auto mediaProperties =
+            session.TryGetMediaPropertiesAsync().get();
+        copy_utf8(next.title, mediaProperties.Title());
+        copy_utf8(next.artist, mediaProperties.Artist());
+        copy_utf8(next.album, mediaProperties.AlbumTitle());
+        bool reuseThumbnail = false;
+        {
+            std::lock_guard lock(mutex);
+            reuseThumbnail =
+                std::strcmp(snapshot.sourceApp, next.sourceApp) == 0 &&
+                std::strcmp(snapshot.title, next.title) == 0 &&
+                std::strcmp(snapshot.artist, next.artist) == 0 &&
+                std::strcmp(snapshot.album, next.album) == 0 &&
+                snapshot.thumbnailRevision != 0u;
+            if (reuseThumbnail)
+            {
+                next.thumbnailRevision = snapshot.thumbnailRevision;
+                std::memcpy(next.thumbnailPath, snapshot.thumbnailPath, sizeof(next.thumbnailPath));
+            }
+        }
+        if (!reuseThumbnail)
+        {
+            std::uint64_t thumbnailRevision = 0u;
+            std::string thumbnailPath;
+            if (cache_thumbnail(
+                    mediaProperties.Thumbnail(),
+                    thumbnailRevision,
+                    thumbnailPath))
+            {
+                next.thumbnailRevision = thumbnailRevision;
+                copy_utf8(next.thumbnailPath, thumbnailPath);
+            }
+        }
+
+        const auto playbackInfo = session.GetPlaybackInfo();
+        next.playbackStatus =
+            playback_status(playbackInfo.PlaybackStatus());
+        const auto controls = playbackInfo.Controls();
+        if (controls.IsPlayPauseToggleEnabled())
+        {
+            next.capabilities |=
+                VIBRANCE_WIN32_MEDIA_CAN_PLAY_PAUSE;
+        }
+        if (controls.IsNextEnabled())
+        {
+            next.capabilities |= VIBRANCE_WIN32_MEDIA_CAN_SKIP_NEXT;
+        }
+        if (controls.IsPreviousEnabled())
+        {
+            next.capabilities |=
+                VIBRANCE_WIN32_MEDIA_CAN_SKIP_PREVIOUS;
+        }
+
+        VibranceWin32MediaSnapshot previous;
+        {
+            std::lock_guard lock(mutex);
+            previous = snapshot;
+        }
+        const bool sameItem = previous.sessionAvailable &&
+            std::strcmp(previous.sourceApp, next.sourceApp) == 0 &&
+            std::strcmp(previous.title, next.title) == 0 &&
+            std::strcmp(previous.artist, next.artist) == 0 &&
+            std::strcmp(previous.album, next.album) == 0;
+        const auto sampledAt = std::chrono::steady_clock::now();
+        if (!sameItem) playbackResumedAt = {};
+        else if (next.playbackStatus == VIBRANCE_WIN32_MEDIA_PLAYING &&
+            previous.playbackStatus != VIBRANCE_WIN32_MEDIA_PLAYING)
+            playbackResumedAt = sampledAt;
+        try
+        {
+            const auto timeline = session.GetTimelineProperties();
+            double elapsed = 0.0;
+            if (next.playbackStatus == VIBRANCE_WIN32_MEDIA_PLAYING &&
+                timeline.LastUpdatedTime().time_since_epoch().count() > 0)
+            {
+                elapsed = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    winrt::clock::now() - timeline.LastUpdatedTime()).count());
+
+
+                if (playbackResumedAt != std::chrono::steady_clock::time_point {})
+                    elapsed = std::min(elapsed, std::chrono::duration<double, std::milli>(
+                        sampledAt - playbackResumedAt).count());
+            }
+            const auto rate = playbackInfo.PlaybackRate();
+            const auto range = vibrance::media::timeline_range(
+                milliseconds(timeline.StartTime()), milliseconds(timeline.EndTime()),
+                milliseconds(timeline.MaxSeekTime()), milliseconds(timeline.Position()),
+                elapsed, rate ? rate.Value() : 1.0, sameItem ? previous.durationMilliseconds : 0);
+            next.durationMilliseconds = range.duration;
+            next.positionMilliseconds = range.position;
+            if (sameItem && !range.hasItemEnd && milliseconds(timeline.MaxSeekTime()) <= range.origin)
+            {
+                next.durationMilliseconds = previous.durationMilliseconds;
+                if (milliseconds(timeline.Position()) == 0)
+                    next.positionMilliseconds = previous.positionMilliseconds;
+            }
+            if (next.durationMilliseconds > 0)
+                next.positionMilliseconds = std::min(next.positionMilliseconds, next.durationMilliseconds);
+        }
+        catch (const winrt::hresult_error&)
+        {
+            if (sameItem)
+            {
+                next.durationMilliseconds = previous.durationMilliseconds;
+                next.positionMilliseconds = previous.positionMilliseconds;
+            }
+        }
+        Win32PlaybackQualityProbe::Request seekSource { next.sourceProcessId,
+            std::wstring(sourceApp), std::wstring(mediaProperties.Title()),
+            std::wstring(mediaProperties.Artist()),
+            next.playbackStatus == VIBRANCE_WIN32_MEDIA_PLAYING ||
+                next.playbackStatus == VIBRANCE_WIN32_MEDIA_PAUSED,
+            std::wstring(mediaProperties.AlbumTitle()), next.durationMilliseconds };
+        if (qualityProbe)
+        {
+            const auto quality = qualityProbe->refresh(seekSource);
+            switch (quality)
+            {
+                case MediaPlaybackQuality::eDolbyAtmos:
+                    next.playbackQuality = VIBRANCE_WIN32_MEDIA_QUALITY_DOLBY_ATMOS;
+                    break;
+                case MediaPlaybackQuality::eLossless:
+                    next.playbackQuality = VIBRANCE_WIN32_MEDIA_QUALITY_LOSSLESS;
+                    break;
+                default: break;
+            }
+        }
+        publish(next, forceSample, std::move(seekSource));
+    }
+
+    static void execute(
+        const GlobalSystemMediaTransportControlsSessionManager& manager,
+        std::uint32_t command)
+    {
+        const GlobalSystemMediaTransportControlsSession session =
+            manager.GetCurrentSession();
+        if (!session)
+        {
+            return;
+        }
+
+        switch (command)
+        {
+            case VIBRANCE_WIN32_MEDIA_TOGGLE_PLAY_PAUSE:
+                session.TryTogglePlayPauseAsync().get();
+                break;
+            case VIBRANCE_WIN32_MEDIA_SKIP_NEXT:
+                session.TrySkipNextAsync().get();
+                break;
+            case VIBRANCE_WIN32_MEDIA_SKIP_PREVIOUS:
+                session.TrySkipPreviousAsync().get();
+                break;
+            default:
+                break;
+        }
+    }
+
+    void execute_seek(
+        const GlobalSystemMediaTransportControlsSessionManager& manager,
+        Win32MediaSeekFallback::Request request)
+    {
+        {
+            std::lock_guard lock(mutex);
+            if (stopping || request.generation != seekGeneration) return;
+        }
+        const GlobalSystemMediaTransportControlsSession session =
+            manager.GetCurrentSession();
+        if (!Win32MediaSeekFallback::matches_session(session, request))
+        {
+            return;
+        }
+        const auto timeline = session.GetTimelineProperties();
+        const auto range = vibrance::media::timeline_range(milliseconds(timeline.StartTime()),
+            milliseconds(timeline.EndTime()), milliseconds(timeline.MaxSeekTime()), 0,
+            0.0, 1.0, request.source.durationMilliseconds);
+        constexpr std::int64_t ticksPerMillisecond = 10'000;
+        constexpr auto limit = std::numeric_limits<std::int64_t>::max() / ticksPerMillisecond;
+        const std::int64_t relativeTarget = range.hasItemEnd ?
+                std::clamp(request.positionMilliseconds, std::int64_t(0), range.duration) :
+                std::clamp(request.positionMilliseconds, std::int64_t(0), limit);
+        const std::int64_t targetTicks = std::clamp(range.origin + relativeTarget, -limit, limit) * ticksPerMillisecond;
+        try
+        {
+            if (session.GetPlaybackInfo().Controls().IsPlaybackPositionEnabled() &&
+                session.TryChangePlaybackPositionAsync(targetTicks).get()) return;
+        }
+        catch (const winrt::hresult_error&) {}
+        request.source.durationMilliseconds = range.duration;
+        request.positionMilliseconds = relativeTarget;
+        {
+            std::lock_guard lock(mutex);
+            if (stopping || request.generation != seekGeneration) return;
+            if (!seekFallback)
+                seekFallback = std::make_unique<Win32MediaSeekFallback>(
+                    [](const Win32PlaybackQualityProbe::Request& source) {
+                        if (HWND window = find_source_window(source.sourceApp)) return window;
+                        return quality_source_window(source);
+                    });
+            seekFallback->enqueue(std::move(request));
+        }
+    }
+
+    static bool equal_aumid(
+        std::wstring_view left,
+        std::wstring_view right)
+    {
+        return left.size() == right.size() &&
+            CompareStringOrdinal(
+                left.data(),
+                static_cast<int>(left.size()),
+                right.data(),
+                static_cast<int>(right.size()),
+                TRUE) == CSTR_EQUAL;
+    }
+
+    static std::wstring process_aumid(DWORD processId)
+    {
+        const HANDLE process = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            processId);
+        if (!process)
+        {
+            return {};
+        }
+        UINT32 length = 0u;
+        const LONG sizeResult = GetApplicationUserModelId(
+            process,
+            &length,
+            nullptr);
+        if (sizeResult != ERROR_INSUFFICIENT_BUFFER || length == 0u)
+        {
+            CloseHandle(process);
+            return {};
+        }
+        std::wstring value(length, L'\0');
+        const LONG valueResult = GetApplicationUserModelId(
+            process,
+            &length,
+            value.data());
+        CloseHandle(process);
+        if (valueResult != ERROR_SUCCESS)
+        {
+            return {};
+        }
+        if (!value.empty() && value.back() == L'\0')
+        {
+            value.pop_back();
+        }
+        return value;
+    }
+
+    static std::wstring process_executable_path(DWORD processId)
+    {
+        const HANDLE process = processId != 0u ? OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            processId) : nullptr;
+        if (!process)
+        {
+            return {};
+        }
+        std::wstring path(32768u, L'\0');
+        DWORD length = static_cast<DWORD>(path.size());
+        const bool queried = QueryFullProcessImageNameW(
+            process,
+            0u,
+            path.data(),
+            &length) != FALSE;
+        CloseHandle(process);
+        if (!queried)
+        {
+            return {};
+        }
+        path.resize(length);
+        return path;
+    }
+
+    static std::wstring process_package_family(DWORD processId)
+    {
+        const HANDLE process = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+        if (!process) return {};
+        UINT32 length = 0u;
+        const LONG sizeResult = GetPackageFamilyName(process, &length, nullptr);
+        std::wstring family;
+        if (sizeResult == ERROR_INSUFFICIENT_BUFFER && length != 0u)
+        {
+            family.resize(length);
+            if (GetPackageFamilyName(process, &length, family.data()) != ERROR_SUCCESS)
+                family.clear();
+            else if (!family.empty() && family.back() == L'\0')
+                family.pop_back();
+        }
+        CloseHandle(process);
+        return family;
+    }
+
+    static bool process_alive(DWORD processId)
+    {
+        if (processId == 0u)
+        {
+            return false;
+        }
+        const HANDLE process = OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            processId);
+        if (!process)
+        {
+            return false;
+        }
+        const bool alive = WaitForSingleObject(process, 0u) == WAIT_TIMEOUT;
+        CloseHandle(process);
+        return alive;
+    }
+
+    static std::wstring executable_file_name(std::wstring_view path)
+    {
+        const std::size_t separator = path.find_last_of(L"\\/");
+        return std::wstring(separator == std::wstring_view::npos ?
+            path : path.substr(separator + 1u));
+    }
+
+    static bool source_matches_process(
+        std::wstring_view sourceApp,
+        DWORD processId)
+    {
+        if (sourceApp.empty() || processId == 0u)
+        {
+            return false;
+        }
+        const std::wstring appUserModelId = process_aumid(processId);
+        if (!appUserModelId.empty() &&
+            equal_aumid(appUserModelId, sourceApp))
+        {
+            return true;
+        }
+        const std::wstring executablePath =
+            process_executable_path(processId);
+        return !executablePath.empty() &&
+            (equal_aumid(executablePath, sourceApp) ||
+                equal_aumid(
+                    executable_file_name(executablePath),
+                    sourceApp));
+    }
+
+    struct ProcessEntry
+    {
+        DWORD processId = 0u;
+        DWORD parentProcessId = 0u;
+        std::wstring executableName;
+    };
+
+    static std::vector<ProcessEntry> process_snapshot()
+    {
+        std::vector<ProcessEntry> entries;
+        const HANDLE snapshotHandle = CreateToolhelp32Snapshot(
+            TH32CS_SNAPPROCESS,
+            0u);
+        if (snapshotHandle == INVALID_HANDLE_VALUE)
+        {
+            return entries;
+        }
+        PROCESSENTRY32W entry {};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshotHandle, &entry))
+        {
+            do
+            {
+                entries.push_back({ entry.th32ProcessID, entry.th32ParentProcessID, entry.szExeFile });
+            }
+            while (Process32NextW(snapshotHandle, &entry));
+        }
+        CloseHandle(snapshotHandle);
+        return entries;
+    }
+
+    static DWORD resolve_media_process_id(std::wstring_view sourceApp,
+        DWORD preferredProcessId = 0u)
+    {
+        if (sourceApp.empty())
+        {
+            return 0u;
+        }
+
+        const std::vector<ProcessEntry> processes = process_snapshot();
+        const std::wstring registeredPath = registered_application_executable_path(sourceApp);
+        std::wstring sourcePackageFamily(vibrance::win32::media_source_package_family(sourceApp));
+        if (sourcePackageFamily.empty())
+        {
+            const auto sourceExecutable = vibrance::win32::media_executable_name(
+                registeredPath.empty() ? sourceApp : std::wstring_view(registeredPath));
+            for (const auto& process : processes)
+            {
+                if (!equal_aumid(process.executableName, sourceExecutable) ||
+                    !vibrance::win32::media_process_identity_matches(sourceApp,
+                        registeredPath, process_aumid(process.processId),
+                        process_executable_path(process.processId), {}, equal_aumid)) continue;
+                const auto family = process_package_family(process.processId);
+                if (family.empty()) continue;
+                if (!sourcePackageFamily.empty() && !equal_aumid(sourcePackageFamily, family))
+                {
+                    sourcePackageFamily.clear();
+                    break;
+                }
+                sourcePackageFamily = family;
+            }
+        }
+        std::unordered_map<DWORD, bool> identities;
+        const auto matchesIdentity = [&](DWORD processId) {
+            const auto cached = identities.find(processId);
+            if (cached != identities.end()) return cached->second;
+            const bool matches = vibrance::win32::media_process_identity_matches(
+                sourceApp, registeredPath, process_aumid(processId),
+                process_executable_path(processId), process_package_family(processId),
+                equal_aumid, sourcePackageFamily);
+            identities.emplace(processId, matches);
+            return matches;
+        };
+        const auto matchesSource = [&](DWORD processId) {
+            return vibrance::win32::media_audio_process_matches_source(processId,
+                matchesIdentity, [&](DWORD candidate) -> DWORD {
+                    const auto entry = std::find_if(processes.begin(), processes.end(),
+                        [candidate](const ProcessEntry& value) { return value.processId == candidate; });
+                    return entry != processes.end() ? entry->parentProcessId : 0u;
+                });
+        };
+        vibrance::win32::MediaAudioProcessSelection selection;
+        IMMDeviceEnumerator* deviceEnumerator = nullptr;
+        IMMDeviceCollection* devices = nullptr;
+        if (SUCCEEDED(CoCreateInstance(
+                kClsidMmDeviceEnumerator,
+                nullptr,
+                CLSCTX_ALL,
+                kIidMmDeviceEnumerator,
+                reinterpret_cast<void**>(&deviceEnumerator))) &&
+            SUCCEEDED(deviceEnumerator->EnumAudioEndpoints(
+                eRender,
+                DEVICE_STATE_ACTIVE,
+                &devices)))
+        {
+            UINT deviceCount = 0u;
+            devices->GetCount(&deviceCount);
+            for (UINT deviceIndex = 0u;
+                deviceIndex < deviceCount;
+                ++deviceIndex)
+            {
+                IMMDevice* device = nullptr;
+                IAudioSessionManager2* sessionManager = nullptr;
+                IAudioSessionEnumerator* sessions = nullptr;
+                if (SUCCEEDED(devices->Item(deviceIndex, &device)) &&
+                    SUCCEEDED(device->Activate(
+                        kIidAudioSessionManager2,
+                        CLSCTX_ALL,
+                        nullptr,
+                        reinterpret_cast<void**>(&sessionManager))) &&
+                    SUCCEEDED(sessionManager->GetSessionEnumerator(&sessions)))
+                {
+                    int sessionCount = 0;
+                    sessions->GetCount(&sessionCount);
+                    for (int sessionIndex = 0;
+                        sessionIndex < sessionCount;
+                        ++sessionIndex)
+                    {
+                        IAudioSessionControl* sessionControl = nullptr;
+                        IAudioSessionControl2* sessionControl2 = nullptr;
+                        if (SUCCEEDED(sessions->GetSession(
+                                sessionIndex,
+                                &sessionControl)) &&
+                            SUCCEEDED(sessionControl->QueryInterface(
+                                kIidAudioSessionControl2,
+                                reinterpret_cast<void**>(&sessionControl2))))
+                        {
+                            DWORD processId = 0u;
+                            AudioSessionState state =
+                                AudioSessionStateInactive;
+                            if (SUCCEEDED(sessionControl2->GetProcessId(&processId)) &&
+                                SUCCEEDED(sessionControl2->GetState(&state)) &&
+                                state != AudioSessionStateExpired && processId != 0u &&
+                                matchesSource(processId))
+                            {
+                                selection.consider(processId,
+                                    state == AudioSessionStateActive, preferredProcessId);
+                            }
+                        }
+                        release_com(sessionControl2);
+                        release_com(sessionControl);
+                    }
+                }
+                release_com(sessions);
+                release_com(sessionManager);
+                release_com(device);
+            }
+        }
+        release_com(devices);
+        release_com(deviceEnumerator);
+
+        return selection.process_id();
+    }
+
+    static std::wstring registered_application_executable_path(
+        std::wstring_view appUserModelId)
+    {
+        if (appUserModelId.empty())
+        {
+            return {};
+        }
+        const std::wstring parsingName =
+            L"shell:AppsFolder\\" + std::wstring(appUserModelId);
+        winrt::com_ptr<IShellItem2> item;
+        if (FAILED(SHCreateItemFromParsingName(
+                parsingName.c_str(),
+                nullptr,
+                IID_PPV_ARGS(item.put()))))
+        {
+            return {};
+        }
+        PWSTR rawPath = nullptr;
+        if (FAILED(item->GetString(
+                PKEY_Link_TargetParsingPath,
+                &rawPath)) || !rawPath)
+        {
+            return {};
+        }
+        std::wstring path(rawPath);
+        CoTaskMemFree(rawPath);
+        return path;
+    }
+
+    static std::wstring window_aumid(HWND window)
+    {
+        winrt::com_ptr<IPropertyStore> properties;
+        if (SUCCEEDED(SHGetPropertyStoreForWindow(
+                window,
+                IID_PPV_ARGS(properties.put()))))
+        {
+            PROPVARIANT value;
+            PropVariantInit(&value);
+            if (SUCCEEDED(properties->GetValue(
+                    PKEY_AppUserModel_ID,
+                    &value)) &&
+                value.vt == VT_LPWSTR && value.pwszVal)
+            {
+                std::wstring result(value.pwszVal);
+                PropVariantClear(&value);
+                return result;
+            }
+            PropVariantClear(&value);
+        }
+        DWORD processId = 0u;
+        GetWindowThreadProcessId(window, &processId);
+        return process_aumid(processId);
+    }
+
+    struct SourceWindowSearch
+    {
+        std::wstring appUserModelId;
+        std::wstring executablePath;
+        DWORD processId = 0u;
+        HWND result = nullptr;
+    };
+
+    static BOOL CALLBACK find_source_window_callback(
+        HWND window,
+        LPARAM parameter)
+    {
+        auto* search = reinterpret_cast<SourceWindowSearch*>(parameter);
+        if (!search || !IsWindowVisible(window) ||
+            GetAncestor(window, GA_ROOT) != window)
+        {
+            return TRUE;
+        }
+        DWORD processId = 0u;
+        GetWindowThreadProcessId(window, &processId);
+        const bool processMatches = search->processId != 0u &&
+            processId == search->processId;
+        const bool identityMatches = !search->appUserModelId.empty() &&
+            equal_aumid(window_aumid(window), search->appUserModelId);
+        const bool executableMatches = !search->executablePath.empty() &&
+            equal_aumid(
+                process_executable_path(processId),
+                search->executablePath);
+        if (!processMatches && !identityMatches && !executableMatches)
+        {
+            return TRUE;
+        }
+        search->result = window;
+        return FALSE;
+    }
+
+    static HWND find_source_window(
+        std::wstring_view appUserModelId,
+        DWORD processId = 0u,
+        std::wstring_view executablePath = {})
+    {
+        SourceWindowSearch search = {};
+        search.appUserModelId = appUserModelId;
+        search.executablePath = executablePath;
+        search.processId = processId;
+        EnumWindows(
+            find_source_window_callback,
+            reinterpret_cast<LPARAM>(&search));
+        return search.result;
+    }
+
+    static HWND quality_source_window(const Win32PlaybackQualityProbe::Request& request)
+    {
+
+
+        if (request.processId != 0u)
+            if (HWND window = find_source_window({}, request.processId)) return window;
+
+
+
+
+        const auto processes = process_snapshot();
+        const auto executable = process_executable_path(request.processId);
+        DWORD processId = request.processId;
+        for (unsigned depth = 0; processId != 0u && depth < 32u; ++depth)
+        {
+            if (processId != request.processId &&
+                !source_matches_process(request.sourceApp, processId) &&
+                (executable.empty() || !equal_aumid(
+                    process_executable_path(processId), executable))) break;
+            if (processId != request.processId)
+                if (HWND window = find_source_window({}, processId)) return window;
+            const auto entry = std::find_if(processes.begin(), processes.end(),
+                [processId](const ProcessEntry& value) { return value.processId == processId; });
+            if (entry == processes.end() || entry->parentProcessId == processId) break;
+            processId = entry->parentProcessId;
+        }
+
+        return find_source_window(request.sourceApp);
+    }
+
+    static bool foreground_source_window(HWND window)
+    {
+        if (!window)
+        {
+            return false;
+        }
+        DWORD processId = 0u;
+        const DWORD targetThread =
+            GetWindowThreadProcessId(window, &processId);
+        if (processId != 0u)
+        {
+            AllowSetForegroundWindow(processId);
+        }
+        const DWORD callingThread = GetCurrentThreadId();
+        const HWND foregroundWindow = GetForegroundWindow();
+        const DWORD foregroundThread = foregroundWindow ?
+            GetWindowThreadProcessId(foregroundWindow, nullptr) : 0u;
+        const bool attachedForeground = foregroundThread != 0u &&
+            foregroundThread != callingThread &&
+            AttachThreadInput(
+                callingThread,
+                foregroundThread,
+                TRUE) != FALSE;
+        const bool attachedTarget = targetThread != 0u &&
+            targetThread != callingThread &&
+            targetThread != foregroundThread &&
+            AttachThreadInput(
+                callingThread,
+                targetThread,
+                TRUE) != FALSE;
+        if (IsIconic(window))
+        {
+            ShowWindow(window, SW_RESTORE);
+        }
+        else
+        {
+            ShowWindow(window, SW_SHOW);
+        }
+        BringWindowToTop(window);
+        const bool raised = SetWindowPos(
+            window,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) != FALSE;
+        bool foregrounded = SetForegroundWindow(window) != FALSE ||
+            GetForegroundWindow() == window;
+        if (!foregrounded)
+        {
+
+
+
+
+            SwitchToThisWindow(window, TRUE);
+            foregrounded = GetForegroundWindow() == window;
+        }
+        bool forcedAbove = false;
+        if (!foregrounded)
+        {
+
+
+
+
+            const bool promoted = SetWindowPos(
+                window,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) != FALSE;
+            const bool demoted = SetWindowPos(
+                window,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) != FALSE;
+            forcedAbove = promoted && demoted;
+        }
+        if (attachedTarget)
+        {
+            AttachThreadInput(callingThread, targetThread, FALSE);
+        }
+        if (attachedForeground)
+        {
+            AttachThreadInput(callingThread, foregroundThread, FALSE);
+        }
+        return foregrounded || forcedAbove || raised;
+    }
+
+    static bool activate_application(const std::string& appUserModelId)
+    {
+        if (appUserModelId.empty())
+        {
+            return false;
+        }
+        const winrt::hstring target = winrt::to_hstring(appUserModelId);
+        const std::wstring registeredExecutable =
+            registered_application_executable_path(target.c_str());
+        if (foreground_source_window(find_source_window(
+                target.c_str(),
+                0u,
+                registeredExecutable)))
+        {
+            return true;
+        }
+
+        DWORD processId = 0u;
+        bool activationRequested = false;
+        try
+        {
+            winrt::com_ptr<IApplicationActivationManager> activationManager;
+            winrt::check_hresult(CoCreateInstance(
+                CLSID_ApplicationActivationManager,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(activationManager.put())));
+            (void)CoAllowSetForegroundWindow(
+                activationManager.get(),
+                nullptr);
+            winrt::check_hresult(activationManager->ActivateApplication(
+                target.c_str(),
+                nullptr,
+                AO_NONE,
+                &processId));
+            activationRequested = true;
+        }
+        catch (...)
+        {
+
+
+
+        }
+        if (!activationRequested)
+        {
+            const std::wstring shellTarget =
+                L"shell:AppsFolder\\" + std::wstring(target.c_str());
+            const HINSTANCE result = ShellExecuteW(
+                nullptr,
+                L"open",
+                shellTarget.c_str(),
+                nullptr,
+                nullptr,
+                SW_SHOWNORMAL);
+            activationRequested =
+                reinterpret_cast<INT_PTR>(result) > 32;
+        }
+        if (!activationRequested)
+        {
+            return false;
+        }
+        std::wstring executablePath = registeredExecutable;
+        if (executablePath.empty() && processId != 0u)
+        {
+            executablePath = process_executable_path(processId);
+        }
+        for (std::size_t attempt = 0u; attempt < 20u; ++attempt)
+        {
+            HWND window = find_source_window(
+                target.c_str(),
+                processId,
+                executablePath);
+            if (window && foreground_source_window(window))
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(40ms);
+        }
+
+
+        return true;
+    }
+
+    bool take_work(
+        std::deque<std::uint32_t>& pending,
+        std::optional<Win32MediaSeekFallback::Request>& seekRequest,
+        std::deque<std::uint32_t>& dismissals,
+        std::deque<std::string>& activations,
+        bool& shouldPollNotifications)
+    {
+        std::lock_guard lock(mutex);
+        pending.swap(commands);
+        seekRequest.swap(pendingSeekRequest);
+        dismissals.swap(notificationDismissals);
+        activations.swap(notificationActivations);
+        shouldPollNotifications = notificationPolling;
+        notificationChangePending = false;
+        return stopping;
+    }
+
+    void signal_notification_change()
+    {
+        {
+            std::lock_guard lock(mutex);
+            notificationChangePending = true;
+        }
+        wake.notify_one();
+    }
+
+    bool wait_for_work()
+    {
+        std::unique_lock lock(mutex);
+        wake.wait_for(
+            lock,
+            500ms,
+            [this] {
+                return stopping || !commands.empty() ||
+                    pendingSeekRequest.has_value() ||
+                    !notificationDismissals.empty() ||
+                    !notificationActivations.empty() ||
+                    notificationChangePending;
+            });
+        return stopping;
+    }
+
+    void run()
+    {
+        try
+        {
+            struct ApartmentScope
+            {
+                ApartmentScope()
+                {
+                    winrt::init_apartment(
+                        winrt::apartment_type::multi_threaded);
+                }
+
+                ~ApartmentScope()
+                {
+                    winrt::uninit_apartment();
+                }
+            } apartment;
+
+            GlobalSystemMediaTransportControlsSessionManager manager = nullptr;
+            UserNotificationListener notificationListener = nullptr;
+            winrt::event_token notificationChangedToken {};
+            bool notificationChangedSubscribed = false;
+            if ((featureMask & VIBRANCE_WIN32_INTEROP_MEDIA) != 0u)
+            {
+                try
+                {
+                    manager = GlobalSystemMediaTransportControlsSessionManager::
+                        RequestAsync().get();
+                }
+                catch (const winrt::hresult_error& error)
+                {
+                    publish_error(error);
+                }
+            }
+
+            while (true)
+            {
+                std::deque<std::uint32_t> pending;
+                std::optional<Win32MediaSeekFallback::Request> seekRequest;
+                std::deque<std::uint32_t> dismissals;
+                std::deque<std::string> activations;
+                bool shouldPollNotifications = false;
+                if (take_work(
+                        pending,
+                        seekRequest,
+                        dismissals,
+                        activations,
+                        shouldPollNotifications))
+                {
+                    break;
+                }
+                if (manager && seekRequest)
+                {
+                    try
+                    {
+                        execute_seek(manager, *seekRequest);
+                    }
+                    catch (const winrt::hresult_error&)
+                    {
+                    }
+                }
+
+                for (const std::uint32_t command : pending)
+                {
+                    if (!manager)
+                    {
+                        break;
+                    }
+                    try
+                    {
+                        execute(manager, command);
+                    }
+                    catch (const winrt::hresult_error&)
+                    {
+
+
+                    }
+                }
+
+                for (const std::string& appUserModelId : activations)
+                {
+                    try
+                    {
+                        activate_application(appUserModelId);
+                    }
+                    catch (const winrt::hresult_error&)
+                    {
+
+
+                    }
+                }
+
+                if (manager)
+                {
+                    try
+                    {
+                        poll(manager, !pending.empty() || seekRequest.has_value());
+                    }
+                    catch (const winrt::hresult_error& error)
+                    {
+                        publish_error(error);
+                    }
+                }
+
+                if (shouldPollNotifications)
+                {
+                    try
+                    {
+                        if (!notificationListener)
+                        {
+                            notificationListener =
+                                UserNotificationListener::Current();
+                            notificationChangedToken =
+                                notificationListener.NotificationChanged(
+                                    [this](const auto&, const auto&) {
+                                        signal_notification_change();
+                                    });
+                            notificationChangedSubscribed = true;
+                        }
+                        for (const std::uint32_t id : dismissals)
+                        {
+                            notificationListener.RemoveNotification(id);
+                        }
+                        poll_notifications(notificationListener);
+                    }
+                    catch (const winrt::hresult_error& error)
+                    {
+                        publish_notification_error(error.message());
+                    }
+                    catch (const std::exception& error)
+                    {
+                        publish_notification_error(error.what());
+                    }
+                }
+
+                if (wait_for_work())
+                {
+                    break;
+                }
+            }
+            if (notificationChangedSubscribed && notificationListener)
+            {
+                notificationListener.NotificationChanged(
+                    notificationChangedToken);
+            }
+        }
+        catch (const winrt::hresult_error& error)
+        {
+            publish_error(error);
+        }
+        catch (const std::exception& error)
+        {
+            publish_error(error.what());
+        }
+        catch (...)
+        {
+            publish_error("The GSMTC worker stopped unexpectedly.");
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<std::uint32_t> commands;
+    std::optional<Win32MediaSeekFallback::Request> pendingSeekRequest;
+    std::uint64_t seekGeneration = 0u;
+    std::deque<std::uint32_t> notificationDismissals;
+    std::deque<std::string> notificationActivations;
+    VibranceWin32MediaSnapshot snapshot {};
+    Win32PlaybackQualityProbe::Request publishedSeekSource;
+    VibranceWin32NotificationSnapshot notificationSnapshot {};
+    std::vector<VibranceWin32NotificationItem> notificationItems;
+    struct CachedNotificationIcon
+    {
+        std::uint64_t revision = 0u;
+        std::string path;
+        std::chrono::steady_clock::time_point retryAfter {};
+    };
+    vibrance::win32::NotificationRecordCache notificationRecordCache;
+    std::unordered_map<std::string, CachedNotificationIcon>
+        notificationIconCache;
+    bool notificationPolling = false;
+    bool notificationChangePending = false;
+    std::uint32_t featureMask = VIBRANCE_WIN32_INTEROP_MEDIA;
+    bool stopping = false;
+    std::unique_ptr<Win32PlaybackQualityProbe> qualityProbe;
+    std::unique_ptr<Win32MediaSeekFallback> seekFallback;
+    std::thread worker;
+};
+}
+
+#if defined(_M_IX86)
+
+
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_abi_version=_vibrance_win32_interop_abi_version")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_create=_vibrance_win32_interop_create")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_create_with_features=_vibrance_win32_interop_create_with_features")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_destroy=_vibrance_win32_interop_destroy")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_get_media_snapshot=_vibrance_win32_interop_get_media_snapshot")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_send_media_command=_vibrance_win32_interop_send_media_command")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_seek_media=_vibrance_win32_interop_seek_media")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_request_notification_access=_vibrance_win32_interop_request_notification_access")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_get_notifications=_vibrance_win32_interop_get_notifications")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_dismiss_notification=_vibrance_win32_interop_dismiss_notification")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_activate_notification_source=_vibrance_win32_interop_activate_notification_source")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_activate_notification=_vibrance_win32_interop_activate_notification")
+#pragma comment(linker, "/EXPORT:vibrance_win32_interop_resolve_application_icon=_vibrance_win32_interop_resolve_application_icon")
+#endif
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_abi_version()
+{
+    return VIBRANCE_WIN32_INTEROP_ABI_VERSION;
+}
+
+extern "C" __declspec(dllexport) VibranceWin32InteropHandle __cdecl
+vibrance_win32_interop_create()
+{
+    try
+    {
+        return new (std::nothrow) Win32InteropBridge(
+            VIBRANCE_WIN32_INTEROP_MEDIA);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+extern "C" __declspec(dllexport) VibranceWin32InteropHandle __cdecl
+vibrance_win32_interop_create_with_features(std::uint32_t features)
+{
+    try
+    {
+        const std::uint32_t supported = features &
+            (VIBRANCE_WIN32_INTEROP_MEDIA |
+                VIBRANCE_WIN32_INTEROP_NOTIFICATIONS);
+        return supported == 0u ? nullptr :
+            new (std::nothrow) Win32InteropBridge(supported);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+extern "C" __declspec(dllexport) void __cdecl
+vibrance_win32_interop_destroy(VibranceWin32InteropHandle handle)
+{
+    delete static_cast<Win32InteropBridge*>(handle);
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_get_media_snapshot(
+    VibranceWin32InteropHandle handle,
+    VibranceWin32MediaSnapshot* snapshot,
+    std::uint32_t snapshotSize)
+{
+    try
+    {
+        Win32InteropBridge* bridge =
+            static_cast<Win32InteropBridge*>(handle);
+        return bridge &&
+            bridge->get_snapshot(snapshot, snapshotSize) ? 1u : 0u;
+    }
+    catch (...)
+    {
+        return 0u;
+    }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_send_media_command(
+    VibranceWin32InteropHandle handle,
+    std::uint32_t command)
+{
+    try
+    {
+        Win32InteropBridge* bridge =
+            static_cast<Win32InteropBridge*>(handle);
+        return bridge && bridge->enqueue(command) ? 1u : 0u;
+    }
+    catch (...)
+    {
+        return 0u;
+    }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_seek_media(
+    VibranceWin32InteropHandle handle,
+    std::int64_t positionMilliseconds)
+{
+    try
+    {
+        Win32InteropBridge* bridge =
+            static_cast<Win32InteropBridge*>(handle);
+        return bridge && bridge->enqueue_seek(positionMilliseconds) ? 1u : 0u;
+    }
+    catch (...)
+    {
+        return 0u;
+    }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_request_notification_access(
+    VibranceWin32InteropHandle handle)
+{
+    try
+    {
+        Win32InteropBridge* bridge =
+            static_cast<Win32InteropBridge*>(handle);
+        return bridge && bridge->request_notification_access() ? 1u : 0u;
+    }
+    catch (...)
+    {
+        return 0u;
+    }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_get_notifications(
+    VibranceWin32InteropHandle handle,
+    VibranceWin32NotificationSnapshot* snapshot,
+    std::uint32_t snapshotSize,
+    VibranceWin32NotificationItem* items,
+    std::uint32_t itemSize,
+    std::uint32_t capacity)
+{
+    try
+    {
+        Win32InteropBridge* bridge =
+            static_cast<Win32InteropBridge*>(handle);
+        return bridge && bridge->get_notifications(
+            snapshot,
+            snapshotSize,
+            items,
+            itemSize,
+            capacity) ? 1u : 0u;
+    }
+    catch (...)
+    {
+        return 0u;
+    }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_dismiss_notification(
+    VibranceWin32InteropHandle handle,
+    std::uint32_t notificationId)
+{
+    try
+    {
+        Win32InteropBridge* bridge =
+            static_cast<Win32InteropBridge*>(handle);
+        return bridge && bridge->enqueue_notification_dismissal(
+            notificationId) ? 1u : 0u;
+    }
+    catch (...)
+    {
+        return 0u;
+    }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_activate_notification(VibranceWin32InteropHandle handle,
+    const char* appUserModelId, const char* arguments, std::uint32_t kind)
+{
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return 0u;
+    std::uint32_t result = 0u;
+    try
+    {
+        auto* bridge = static_cast<Win32InteropBridge*>(handle);
+        result = bridge && bridge->activate_notification(appUserModelId, arguments, kind) ? 1u : 0u;
+    }
+    catch (...) {}
+    if (SUCCEEDED(apartment)) CoUninitialize();
+    return result;
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_activate_notification_source(
+    VibranceWin32InteropHandle handle,
+    const char* appUserModelId)
+{
+    const HRESULT apartmentResult = CoInitializeEx(
+        nullptr,
+        COINIT_MULTITHREADED);
+    if (FAILED(apartmentResult) &&
+        apartmentResult != RPC_E_CHANGED_MODE)
+    {
+        return 0u;
+    }
+    try
+    {
+        Win32InteropBridge* bridge =
+            static_cast<Win32InteropBridge*>(handle);
+        const std::uint32_t result = bridge &&
+            bridge->activate_notification_source(appUserModelId) ? 1u : 0u;
+        if (SUCCEEDED(apartmentResult))
+        {
+            CoUninitialize();
+        }
+        return result;
+    }
+    catch (...)
+    {
+        if (SUCCEEDED(apartmentResult))
+        {
+            CoUninitialize();
+        }
+        return 0u;
+    }
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_win32_interop_resolve_application_icon(
+    VibranceWin32InteropHandle handle,
+    const char* appUserModelId,
+    VibranceWin32ApplicationIcon* destination,
+    std::uint32_t destinationSize)
+{
+    const HRESULT apartmentResult = CoInitializeEx(
+        nullptr,
+        COINIT_MULTITHREADED);
+    if (FAILED(apartmentResult) &&
+        apartmentResult != RPC_E_CHANGED_MODE)
+    {
+        return 0u;
+    }
+    try
+    {
+        Win32InteropBridge* bridge =
+            static_cast<Win32InteropBridge*>(handle);
+        const std::uint32_t result = bridge &&
+            bridge->resolve_application_icon(
+                appUserModelId,
+                destination,
+                destinationSize) ? 1u : 0u;
+        if (SUCCEEDED(apartmentResult))
+        {
+            CoUninitialize();
+        }
+        return result;
+    }
+    catch (...)
+    {
+        if (SUCCEEDED(apartmentResult))
+        {
+            CoUninitialize();
+        }
+        return 0u;
+    }
+}
+
+#endif

@@ -1,0 +1,289 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+#define VULKAN_HPP_NO_EXCEPTIONS
+#include "vibranceUI/export.h"
+#include <vulkan/vulkan.hpp>
+#include <glm/glm.hpp>
+#include <cstddef>
+#include <unordered_map>
+#include <vibranceUI/renderer/buffer.h>
+#include <vibranceUI/renderer/render_types.h>
+#include <vibranceUI/renderer/swapchain.h>
+#include <vibranceUI/renderer/renderer2d_components.h>
+#include <vibranceUI/renderer/media2d.h>
+
+class Renderer3D;
+class StorageImage;
+
+
+
+struct Renderer2DTextBatchResources
+{
+    vk::DescriptorSet descriptorSet {};
+    std::byte* glyphConstants = nullptr;
+    uint32_t capacity = 0u;
+    uint32_t writtenGlyphs = 0u;
+};
+
+class ShapePipeline
+{
+public:
+
+    void record(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const std::vector<Renderer2DBatch>& batches,
+        DescriptorScope frameScope = DescriptorScope::eFrame
+    ) const;
+
+    void record_batch(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const Renderer2DBatch& batch,
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        bool synchronize = true
+    ) const;
+};
+
+class ShadowPipeline
+{
+public:
+    void record(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const std::vector<Renderer2DBatch>& batches,
+        DescriptorScope frameScope = DescriptorScope::eFrame
+    ) const;
+
+    void record_batch(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const Renderer2DBatch& batch,
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        bool synchronize = true
+    ) const;
+};
+
+class BlurPipeline
+{
+public:
+
+    void record(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const std::vector<Renderer2DBatch>& batches,
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        DescriptorScope postScope = DescriptorScope::ePost
+    ) const;
+
+    void record_batch(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const Renderer2DBatch& batch,
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        DescriptorScope postScope = DescriptorScope::ePost,
+        bool includeStaticBackdrop = false,
+        bool includeExternalBackdrop = false
+    ) const;
+
+    void record_foreground_group(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const Renderer2DBatch& batch
+    ) const;
+};
+
+class TextPipeline
+{
+public:
+    void record(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const std::vector<Renderer2DBatch>& batches,
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        DescriptorScope postScope = DescriptorScope::ePost
+    ) const;
+
+    void record_batch(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const Renderer2DBatch& batch,
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        DescriptorScope postScope = DescriptorScope::ePost,
+        uint32_t textPass = 0,
+        bool synchronize = true
+    ) const;
+};
+
+class MediaPipeline
+{
+public:
+    void record(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const std::vector<Renderer2DBatch>& batches,
+        std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        DescriptorScope postScope = DescriptorScope::ePost
+    ) const;
+
+    void record_batch(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        const Renderer2DBatch& batch,
+        std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
+        DescriptorScope frameScope = DescriptorScope::eFrame,
+        DescriptorScope postScope = DescriptorScope::ePost,
+        bool synchronize = true
+    ) const;
+};
+
+class CompositePipeline
+{
+public:
+    void record(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        bool useExternalBackdropUnderlay = false,
+        bool writeNativeSurface = true,
+        bool writeCompositionSurface = false,
+        glm::uvec4 contentRect = glm::uvec4(0u),
+        Renderer2DViewportFade viewportFade = {}
+    ) const;
+};
+
+class Hosted3DCompositePipeline
+{
+public:
+    void record(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        DescriptorScope frameScope,
+        DescriptorScope postScope,
+        glm::uvec4 dispatchRect = glm::uvec4(0u)
+    ) const;
+};
+
+class VIBRANCE_ENGINE_API Renderer2D
+{
+public:
+    struct RecordDiagnostics
+    {
+        uint32_t cacheRebuilds = 0u;
+        uint32_t cachedBatchReplays = 0u;
+        uint32_t dynamicBatchReplays = 0u;
+        uint32_t textGlyphs = 0u;
+        uint32_t textDispatches = 0u;
+        uint32_t textBatchDispatches = 0u;
+        uint32_t layeredBarriers = 0u;
+    };
+
+
+    void record(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        Renderer2DScene& scene,
+        double currentTimeSeconds,
+        Renderer3D* renderer3D = nullptr,
+        std::unordered_map<uint32_t, Model3DAsset>* modelAssets = nullptr,
+        std::unordered_map<uint32_t, Media2DAsset>* mediaAssets = nullptr,
+        StorageImage* dynamicRenderTarget = nullptr,
+        StorageImage* staticRenderTarget = nullptr,
+        StorageImage* hosted3DResolveTarget = nullptr,
+        vk::RenderPass hosted3DRenderPass = nullptr,
+        vk::Framebuffer hosted3DFramebuffer = nullptr,
+        bool hosted3DUsesResolveAttachment = false,
+        bool externalBackdropAvailable = false,
+        StorageImage* foregroundBlurRenderTarget = nullptr,
+        Renderer2DTextBatchResources* textBatchResources = nullptr
+    ) const;
+
+    void record_composite(
+        vk::CommandBuffer commandBuffer,
+        Swapchain& swapchain,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        bool useExternalBackdropUnderlay = false,
+        bool writeNativeSurface = true,
+        bool writeCompositionSurface = false,
+        glm::uvec4 contentRect = glm::uvec4(0u)
+    ) const;
+
+
+
+
+    glm::uvec4 content_bounds() const;
+    glm::uvec4 damage_bounds() const;
+    RecordDiagnostics record_diagnostics() const;
+
+
+
+    void invalidate_dynamic_surface();
+
+private:
+    ShapePipeline shapePipeline;
+    ShadowPipeline shadowPipeline;
+    BlurPipeline blurPipeline;
+    TextPipeline textPipeline;
+    MediaPipeline mediaPipeline;
+    Hosted3DCompositePipeline hosted3DCompositePipeline;
+    CompositePipeline compositePipeline;
+    mutable Renderer2DRenderPlan renderPlanCache;
+    mutable Renderer2DRenderPlan cachedLayerPlanCache;
+    mutable RecordDiagnostics recordDiagnostics;
+    mutable uint64_t cachedLayerGeneration = 0;
+    mutable std::vector<std::pair<uint32_t, std::size_t>> cachedLayerReplayBatches;
+    mutable std::vector<std::pair<uint32_t, std::size_t>> currentCachedLayerReplayBatches;
+    mutable bool dynamicSurfaceInitialized = false;
+    mutable std::vector<uint32_t> cachedDynamicEntities;
+    mutable std::vector<std::pair<entt::entity, glm::uvec4>> presentedBounds;
+    mutable std::vector<std::pair<entt::entity, glm::uvec4>> currentEntityBounds;
+    mutable glm::uvec4 dynamicSurfaceBounds { 0u };
+    mutable glm::uvec4 contentBounds { 0u };
+    mutable glm::uvec4 damageBounds { 0u };
+};

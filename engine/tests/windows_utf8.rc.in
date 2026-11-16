@@ -1,0 +1,5 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#include <windows.h>
+1 RT_MANIFEST "@VIBRANCE_TEST_UTF8_MANIFEST@"
