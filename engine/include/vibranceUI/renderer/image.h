@@ -1,0 +1,137 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+#if defined(__APPLE__)
+#include <vibranceUI/renderer/metal/resources.h>
+#else
+#pragma once
+#define VULKAN_HPP_NO_EXCEPTIONS
+#include <vulkan/vulkan.hpp>
+#include <vma/vk_mem_alloc.h>
+#include <deque>
+#include <functional>
+
+class StorageImage {
+
+public:
+
+
+	StorageImage() : descriptor {}, extent {}, image(nullptr), memory(nullptr),
+		view(nullptr), format(vk::Format::eUndefined) {}
+
+	StorageImage(VmaAllocator& allocator,
+		vk::Format format,
+		vk::Extent2D extent,
+		vk::CommandBuffer commandBuffer,
+		vk::Queue queue, vk::Device logicalDevice,
+		std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
+		std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue,
+		vk::ImageUsageFlags extraUsage = vk::ImageUsageFlags(),
+		uint32_t mipLevels = 1,
+		bool storageUsage = true
+	);
+
+	vk::DescriptorImageInfo descriptor {};
+
+	vk::Extent2D extent {};
+
+	vk::Image image {};
+
+	VmaAllocation memory = nullptr;
+
+	vk::ImageView view {};
+
+	vk::Format format = vk::Format::eUndefined;
+
+	uint32_t mipLevels = 1;
+
+private:
+	void initialise(vk::CommandBuffer commandBuffer, vk::Queue queue, vk::Device logicalDevice);
+
+	void make_descriptor();
+};
+
+class DepthImage
+{
+public:
+
+	DepthImage(VmaAllocator& allocator,
+		vk::Format format,
+		vk::Extent2D extent,
+		vk::SampleCountFlagBits samples,
+		vk::Device logicalDevice,
+		std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
+		std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+	);
+
+	vk::Extent2D extent {};
+	vk::Image image {};
+	VmaAllocation memory = nullptr;
+	vk::ImageView view {};
+	vk::Format format = vk::Format::eUndefined;
+};
+
+class ColorAttachmentImage
+{
+public:
+
+	ColorAttachmentImage(VmaAllocator& allocator,
+		vk::Format format,
+		vk::Extent2D extent,
+		vk::SampleCountFlagBits samples,
+		vk::Device logicalDevice,
+		std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
+		std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+	);
+
+	vk::Extent2D extent {};
+	vk::Image image {};
+	VmaAllocation memory = nullptr;
+	vk::ImageView view {};
+	vk::Format format = vk::Format::eUndefined;
+	vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e1;
+};
+
+struct ImageInputChunk
+{
+	vk::Extent2D extent {};
+	vk::ImageTiling tiling = vk::ImageTiling::eOptimal;
+	vk::ImageUsageFlags usage {};
+	vk::MemoryPropertyFlags memoryProperties {};
+	vk::Format format = vk::Format::eUndefined;
+	vk::ImageCreateFlags flags {};
+	uint32_t mipLevels = 1;
+	vk::SampleCountFlagBits samples = vk::SampleCountFlagBits::e1;
+};
+
+void make_image(VmaAllocator& allocator, ImageInputChunk input, vk::Image& image, VmaAllocation& memory);
+
+vk::ImageView create_image_view(
+	vk::Device logicalDevice,
+	vk::Image image,
+	vk::Format format,
+	vk::ImageAspectFlags aspectMask = vk::ImageAspectFlagBits::eColor,
+	uint32_t mipLevels = 1
+);
+
+void transition_image_layout(
+    vk::CommandBuffer commandBuffer, vk::Image image,
+    vk::ImageLayout oldLayout, vk::ImageLayout newLayout,
+    vk::AccessFlags srcAccessMask, vk::AccessFlags dstAccessMask,
+    vk::PipelineStageFlags srcStage, vk::PipelineStageFlags dstStage,
+	vk::ImageAspectFlags aspectMask = vk::ImageAspectFlagBits::eColor,
+	uint32_t baseMipLevel = 0,
+	uint32_t levelCount = 1
+);
+
+void copy_image_to_image(vk::CommandBuffer commandBuffer, vk::Image src, vk::Image dst, vk::Extent2D srcSize, vk::Extent2D dstSize);
+void copy_image_region_to_image(
+    vk::CommandBuffer commandBuffer,
+    vk::Image src,
+    vk::Image dst,
+    vk::Extent2D srcSize,
+    vk::Extent2D dstSize,
+    vk::Rect2D srcRegion);
+
+#endif

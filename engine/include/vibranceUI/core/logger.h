@@ -1,0 +1,189 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+#include "vibranceUI/export.h"
+#include <string>
+#include <filesystem>
+#include <deque>
+#include <functional>
+#include <cstdint>
+#include <iostream>
+#include <fstream>
+#include <chrono>
+#include <vector>
+#include <atomic>
+#include <exception>
+#include <string_view>
+#if !defined(__APPLE__)
+#include <vulkan/vulkan.hpp>
+#include <vma/vk_mem_alloc.h>
+#endif
+
+enum class LogLevel : uint8_t
+{
+
+    eTrace = 0,
+    eDebug,
+    eInfo,
+    eWarning,
+    eError,
+    eFatal
+};
+
+struct LoggerOutputOptions
+{
+
+
+    std::filesystem::path directory {};
+    std::string directoryName = "vibrance-dev/runtime/engine";
+    std::string filePrefix = "vibrance_log";
+};
+
+class VIBRANCE_ENGINE_API Logger
+{
+    public:
+
+    static Logger* logger;
+
+    static Logger* fetch_logger();
+
+    static void configure_output(LoggerOutputOptions options);
+
+
+    static int run_session(std::string component, const std::function<int()>& action);
+
+
+    void set_mode(bool mode);
+
+    bool is_enabled();
+
+    void set_minimum_level(LogLevel level);
+
+    LogLevel minimum_level() const;
+
+
+    void set_vulkan_renderer_logging_mode(bool mode);
+
+    bool is_vulkan_renderer_logging_enabled() const;
+
+    void set_vulkan_validation_mode(bool mode);
+
+    bool is_vulkan_validation_enabled() const;
+
+    bool is_file_open() const { return logFile.is_open(); }
+    std::ofstream& get_file_stream() { return logFile; }
+
+    void write_file_output(std::string_view text);
+    void flush_file_output();
+    const std::filesystem::path& output_path() const { return logPath; }
+
+    ~Logger();
+
+    std::chrono::steady_clock::time_point get_start_time() const { return startTime; }
+
+
+    void log(LogLevel level, std::string message);
+
+    void trace(std::string message);
+
+    void debug(std::string message);
+
+    void info(std::string message);
+
+    void warning(std::string message);
+
+    void error(std::string message);
+
+    void fatal(std::string message);
+
+    void print(std::string message);
+
+    void vulkan(LogLevel level, std::string message);
+
+
+    void vulkan(std::string message);
+
+#if !defined(__APPLE__)
+    void report_version_number(uint32_t version);
+
+    void print_list(const char** list, uint32_t count);
+
+    void print_extensions(std::vector<vk::ExtensionProperties>& extensions);
+
+    void print_layers(std::vector<vk::LayerProperties>& layers);
+
+    vk::DebugUtilsMessengerEXT make_debug_messenger(
+        vk::Instance& instance, vk::detail::DispatchLoaderDynamic& dldi, std::deque<std::function<void(vk::Instance)>>& deletionQueue
+    );
+
+    void log(const vk::PhysicalDevice& device);
+
+    void log(const std::vector<vk::QueueFamilyProperties>& queueFamilies);
+
+    void log(const vk::SurfaceCapabilitiesKHR& capabilities);
+
+    void log(const vk::Extent2D& extent, const char* prefix = "\t");
+
+    void log(const std::vector<std::string>& items, const char* prefix = "\t");
+
+    void log(const std::vector<vk::SurfaceFormatKHR>& formats);
+
+    void log(const std::vector<vk::PresentModeKHR>& modes);
+
+    void log(const VmaAllocationInfo& info);
+
+#endif
+    private:
+    std::atomic<bool> enabled;
+    std::atomic<bool> vulkanRendererLoggingEnabled;
+    std::atomic<bool> vulkanValidationEnabled;
+    std::atomic<LogLevel> minLevel;
+    std::ofstream logFile;
+    LoggerOutputOptions outputOptions {};
+    std::filesystem::path logPath {};
+    std::chrono::steady_clock::time_point startTime;
+    std::chrono::steady_clock::time_point nextRetentionCheck {};
+    std::chrono::steady_clock::time_point nextRotationAttempt {};
+    std::string lastMessage;
+    LogLevel lastMessageLevel = LogLevel::eTrace;
+    unsigned repeatedMessages = 0;
+    std::chrono::steady_clock::time_point lastMessageTime {};
+
+    Logger();
+    void reopen_file();
+
+#if !defined(__APPLE__)
+    std::vector<std::string> parse_transform_bits(vk::SurfaceTransformFlagsKHR bits);
+
+    std::vector<std::string> parse_alpha_composite_bits(vk::CompositeAlphaFlagsKHR bits);
+
+    std::vector<std::string> parse_image_usage_bits(vk::ImageUsageFlags bits);
+#endif
+};
+
+
+
+class VIBRANCE_ENGINE_API LogOperation
+{
+public:
+    explicit LogOperation(std::string name, int exceptions = std::uncaught_exceptions());
+    ~LogOperation() noexcept { finish(std::uncaught_exceptions()); }
+    LogOperation(const LogOperation&) = delete;
+    LogOperation& operator=(const LogOperation&) = delete;
+private:
+    std::string name;
+    int exceptions;
+    std::chrono::steady_clock::time_point started;
+    void finish(int activeExceptions) noexcept;
+};
+
+#if !defined(__APPLE__)
+VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+    VkDebugUtilsMessageTypeFlagsEXT messageType,
+    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+    void* pUserData
+);
+
+#endif

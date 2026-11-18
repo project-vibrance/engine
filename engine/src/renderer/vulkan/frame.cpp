@@ -1,0 +1,929 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#include <vibranceUI/renderer/frame.h>
+#include <vibranceUI/renderer/image.h>
+#include <vibranceUI/renderer/synchronisation.h>
+#include <vibranceUI/core/logger.h>
+#include <vibranceUI/factories/mesh_factory.h>
+#include <vibranceUI/renderer/renderer2d.h>
+#include <vibranceUI/renderer/renderer3d.h>
+#include "timestamp_diagnostics.h"
+#include "composition_readback.h"
+#include <array>
+#include <cstddef>
+#include <stdexcept>
+#include <vector>
+
+namespace
+{
+	bool same_extent(vk::Extent2D a, vk::Extent2D b)
+	{
+		return a.width == b.width && a.height == b.height;
+	}
+
+	void delete_storage_image(StorageImage*& image)
+	{
+		delete image;
+		image = nullptr;
+	}
+
+	void delete_color_attachment_image(ColorAttachmentImage*& image)
+	{
+		delete image;
+		image = nullptr;
+	}
+
+	void create_frame_storage_images(Frame& frame)
+	{
+
+		frame.depthBuffer = new StorageImage(frame.allocator, vk::Format::eR32Uint, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.colorBuffer = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue,
+			vk::ImageUsageFlagBits::eColorAttachment);
+		frame.modelDepthBuffer = new StorageImage(frame.allocator, vk::Format::eR32Uint, frame.modelRenderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.modelColorBuffer = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.modelRenderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue,
+			vk::ImageUsageFlagBits::eColorAttachment);
+		frame.tempSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.compositionSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.uiBlurSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.foregroundBlurSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+
+
+
+		frame.mediaBlurSurface = new StorageImage(frame.allocator, vk::Format::eR16G16B16A16Sfloat, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.uiStaticSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue,
+			vk::ImageUsageFlagBits::eColorAttachment);
+		frame.uiStaticBlurSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		frame.externalBackdropSurface = new StorageImage(frame.allocator, vk::Format::eR8G8B8A8Unorm, frame.renderExtent,
+			frame.commandBuffer, frame.queue, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+		const bool usesHosted3DResolve = frame.hosted3DSamples != vk::SampleCountFlagBits::e1;
+		if (usesHosted3DResolve)
+		{
+			frame.hosted3DColorBuffer = new ColorAttachmentImage(frame.allocator, vk::Format::eR8G8B8A8Unorm,
+				frame.modelRenderExtent, frame.hosted3DSamples, frame.logicalDevice, frame.vmaDeletionQueue,
+				frame.deviceDeletionQueue);
+		}
+		frame.hosted3DDepthBuffer = new DepthImage(frame.allocator, vk::Format::eD32Sfloat, frame.modelRenderExtent,
+			frame.hosted3DSamples, frame.logicalDevice, frame.vmaDeletionQueue, frame.deviceDeletionQueue);
+
+		auto make_hosted3d_framebuffer = [&]() {
+			std::array<vk::ImageView, 3> attachments = {
+				usesHosted3DResolve ? frame.hosted3DColorBuffer->view : frame.modelColorBuffer->view,
+				frame.hosted3DDepthBuffer->view,
+				frame.modelColorBuffer->view
+			};
+
+			vk::FramebufferCreateInfo framebufferInfo = {};
+			framebufferInfo.renderPass = frame.hosted3DRenderPass;
+			framebufferInfo.attachmentCount = usesHosted3DResolve ? 3u : 2u;
+			framebufferInfo.pAttachments = attachments.data();
+			framebufferInfo.width = frame.modelColorBuffer->extent.width;
+			framebufferInfo.height = frame.modelColorBuffer->extent.height;
+			framebufferInfo.layers = 1;
+
+			auto result = frame.logicalDevice.createFramebuffer(framebufferInfo);
+			if (result.result != vk::Result::eSuccess || !result.value)
+			{
+				throw std::runtime_error("Could not create the frame's hosted 3D framebuffer: " +
+					vk::to_string(result.result));
+			}
+
+			VkFramebuffer framebufferHandle = result.value;
+			try
+			{
+				frame.deviceDeletionQueue.push_back([framebufferHandle](vk::Device device) {
+					device.destroyFramebuffer(framebufferHandle);
+				});
+			}
+			catch (...)
+			{
+				frame.logicalDevice.destroyFramebuffer(framebufferHandle);
+				throw;
+			}
+			return result.value;
+		};
+
+		frame.hosted3DFramebuffer = make_hosted3d_framebuffer();
+		frame.uiCacheImagesReady = false;
+	}
+
+	void update_frame_descriptor_sets(Frame& frame)
+	{
+
+		StorageImage* fontAtlasDescriptorImage = frame.fontAtlasImage != nullptr ? frame.fontAtlasImage : frame.uiBlurSurface;
+		std::vector<vk::WriteDescriptorSet> updates;
+		updates.reserve(24);
+
+		auto add_image_write = [&](DescriptorScope scope, uint32_t binding, StorageImage* image) {
+			vk::WriteDescriptorSet writeOp = {};
+			writeOp.dstSet = frame.descriptorSets[scope];
+			writeOp.dstBinding = binding;
+			writeOp.dstArrayElement = 0;
+			writeOp.descriptorCount = 1;
+			writeOp.descriptorType = vk::DescriptorType::eStorageImage;
+			writeOp.pImageInfo = &(image->descriptor);
+			updates.push_back(writeOp);
+		};
+
+		add_image_write(DescriptorScope::eFrame, 0, frame.depthBuffer);
+		add_image_write(DescriptorScope::eFrame, 1, frame.colorBuffer);
+		add_image_write(DescriptorScope::eForegroundBlur, 0, frame.depthBuffer);
+		add_image_write(DescriptorScope::eForegroundBlur, 1, frame.foregroundBlurSurface);
+		add_image_write(DescriptorScope::eModelFrame, 0, frame.modelDepthBuffer);
+		add_image_write(DescriptorScope::eModelFrame, 1, frame.modelColorBuffer);
+		add_image_write(DescriptorScope::ePost, 0, frame.tempSurface);
+		add_image_write(DescriptorScope::ePost, 1, frame.modelColorBuffer);
+		add_image_write(DescriptorScope::ePost, 2, frame.uiBlurSurface);
+		add_image_write(DescriptorScope::ePost, 3, fontAtlasDescriptorImage);
+		add_image_write(DescriptorScope::ePost, 4, frame.uiStaticSurface);
+		add_image_write(DescriptorScope::ePost, 5, frame.uiStaticBlurSurface);
+		add_image_write(DescriptorScope::ePost, 6, frame.externalBackdropSurface);
+		add_image_write(DescriptorScope::ePost, 7, frame.compositionSurface);
+		add_image_write(DescriptorScope::ePost, 8, frame.mediaBlurSurface);
+
+		add_image_write(DescriptorScope::eUICache, 0, frame.depthBuffer);
+		add_image_write(DescriptorScope::eUICache, 1, frame.uiStaticSurface);
+
+		add_image_write(DescriptorScope::eUICachePost, 0, frame.tempSurface);
+		add_image_write(DescriptorScope::eUICachePost, 1, frame.modelColorBuffer);
+		add_image_write(DescriptorScope::eUICachePost, 2, frame.uiStaticBlurSurface);
+		add_image_write(DescriptorScope::eUICachePost, 3, fontAtlasDescriptorImage);
+		add_image_write(DescriptorScope::eUICachePost, 4, frame.uiStaticSurface);
+		add_image_write(DescriptorScope::eUICachePost, 5, frame.uiStaticBlurSurface);
+		add_image_write(DescriptorScope::eUICachePost, 6, frame.externalBackdropSurface);
+		add_image_write(DescriptorScope::eUICachePost, 7, frame.compositionSurface);
+		add_image_write(DescriptorScope::eUICachePost, 8, frame.mediaBlurSurface);
+
+		frame.logicalDevice.updateDescriptorSets(static_cast<uint32_t>(updates.size()), updates.data(), 0, nullptr);
+	}
+}
+
+Frame::Frame(
+	Swapchain& swapchain,
+	vk::Extent2D renderExtent,
+	vk::Extent2D modelRenderExtent,
+	vk::Device& logicalDevice,
+	std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+	vk::RenderPass hosted3DRenderPass,
+	vk::SampleCountFlagBits hosted3DSamples,
+	vk::CommandBuffer commandBuffer,
+	vk::Queue& queue,
+	std::deque<std::function<void(vk::Device)>>& deletionQueue,
+	std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+	std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+	VmaAllocator& allocator,
+	std::unordered_map<uint32_t, Model3DAsset>* modelAssets,
+	std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
+	Renderer2DScene& scene2D,
+	StorageImage* fontAtlasImage) :
+	logicalDevice(logicalDevice),
+	swapchain(swapchain), renderExtent(renderExtent), modelRenderExtent(modelRenderExtent), pipelines(pipelines),
+	hosted3DRenderPass(hosted3DRenderPass),
+	hosted3DSamples(hosted3DSamples),
+	descriptorSets(descriptorSets), 
+	pipelineLayouts(pipelineLayouts),
+	allocator(allocator), fontAtlasImage(fontAtlasImage), modelAssets(modelAssets),
+	mediaAssets(mediaAssets), scene2D(scene2D), queue(queue)
+{   
+	this->commandBuffer = commandBuffer;
+
+	try
+	{
+		imageAcquiredSemaphore = make_semaphore(logicalDevice, deletionQueue);
+		renderFinishedSemaphore = make_semaphore(logicalDevice, deletionQueue);
+		renderFinishedFence = make_fence(logicalDevice, deletionQueue);
+		create_frame_storage_images(*this);
+		update_frame_descriptor_sets(*this);
+	}
+	catch (...)
+	{
+
+
+		free_resources();
+		throw;
+	}
+}
+
+void Frame::prepare_text_batch_resources()
+{
+    if (textBatchAllocationAttempted || scene2D.registry().view<TextComponent>().empty())
+        return;
+    const auto pipeline = pipelines.find(PipelineType::eTextMSDFBatch);
+    const auto descriptor = descriptorSets.find(DescriptorScope::eTextBatch);
+    if (pipeline == pipelines.end() || !pipeline->second ||
+        descriptor == descriptorSets.end() || !descriptor->second)
+        return;
+    textBatchAllocationAttempted = true;
+
+
+
+    constexpr uint32_t capacity = 4096u;
+    static_assert(sizeof(Renderer2DPushConstants) == 128u);
+    VkBufferCreateInfo bufferInfo { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bufferInfo.size = capacity * sizeof(Renderer2DPushConstants);
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo allocationInfo {};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VmaAllocationInfo allocated {};
+    const VkResult result = vmaCreateBuffer(allocator, &bufferInfo, &allocationInfo,
+        &buffer, &allocation, &allocated);
+    if (result != VK_SUCCESS || !allocated.pMappedData)
+    {
+        if (buffer) vmaDestroyBuffer(allocator, buffer, allocation);
+        Logger::fetch_logger()->vulkan("Text batching could not allocate its upload; retaining serial text drawing.");
+        return;
+    }
+    textBatchBuffer.buffer = buffer;
+    textBatchBuffer.allocation = allocation;
+    textBatchBuffer.descriptor.buffer = buffer;
+    textBatchBuffer.descriptor.offset = 0u;
+    textBatchBuffer.descriptor.range = bufferInfo.size;
+    vmaSetAllocationName(allocator, allocation, "Text batch constants");
+    vmaDeletionQueue.push_back([buffer, allocation](VmaAllocator owner) {
+        vmaDestroyBuffer(owner, buffer, allocation);
+    });
+    vk::WriteDescriptorSet write {};
+    write.dstSet = descriptor->second;
+    write.dstBinding = 0u;
+    write.descriptorCount = 1u;
+    write.descriptorType = vk::DescriptorType::eStorageBuffer;
+    write.pBufferInfo = &textBatchBuffer.descriptor;
+    logicalDevice.updateDescriptorSets(1u, &write, 0u, nullptr);
+    textBatchResources.descriptorSet = descriptor->second;
+    textBatchResources.glyphConstants = static_cast<std::byte*>(allocated.pMappedData);
+    textBatchResources.capacity = capacity;
+}
+
+void Frame::record_command_buffer(
+	uint32_t imageIndex,
+	double currentTimeSeconds,
+	bool externalBackdropAvailable,
+	bool useExternalBackdropUnderlay,
+	bool presentNativeSurface,
+	bool clearNativeSurface,
+	vk::Image compositionImage,
+	vk::Buffer compositionReadbackBuffer,
+	bool compositionImageFirstUse,
+	glm::uvec4 pendingCompositionDamageRect,
+	uint32_t graphicsQueueFamilyIndex)
+{
+
+	gpuTimestampsRecorded = false;
+	const bool recordGpuTimestamps = gpuTimestampQueryPool && gpuTimestampSampleEnabled;
+	Logger* logger = Logger::fetch_logger();
+	prepare_text_batch_resources();
+	Swapchain renderTarget;
+	renderTarget.extent = renderExtent;
+
+	vk::Result result = commandBuffer.reset();
+	if (result != vk::Result::eSuccess)
+	{
+		logger->vulkan("Failed to reset command buffer.");
+		return;
+	}
+
+	vk::CommandBufferBeginInfo beginInfo = {};
+	result = commandBuffer.begin(beginInfo);
+	if (result != vk::Result::eSuccess)
+	{
+		logger->vulkan("Failed to begin command buffer.");
+		return;
+	}
+
+	if (recordGpuTimestamps)
+	{
+		commandBuffer.resetQueryPool(gpuTimestampQueryPool, 0u, 4u);
+		commandBuffer.writeTimestamp(
+			vk::PipelineStageFlagBits::eTopOfPipe, gpuTimestampQueryPool, 0u);
+	}
+
+	auto transition_render_target = [&](StorageImage* image, vk::AccessFlags dstAccessMask) {
+		transition_image_layout(commandBuffer, image->image,
+			vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+			vk::AccessFlagBits::eNone, dstAccessMask,
+			vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader
+		);
+	};
+
+	auto barrier_render_target = [&](StorageImage* image, vk::AccessFlags dstAccessMask) {
+		transition_image_layout(commandBuffer, image->image,
+			vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
+			vk::AccessFlagBits::eShaderWrite, dstAccessMask,
+			vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eComputeShader
+		);
+	};
+
+	auto clear_render_target = [&](StorageImage* image, const vk::ClearColorValue& value) {
+		transition_image_layout(commandBuffer, image->image,
+			vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+			vk::AccessFlagBits::eNone, vk::AccessFlagBits::eTransferWrite,
+			vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer
+		);
+		vk::ImageSubresourceRange range {};
+		range.aspectMask = vk::ImageAspectFlagBits::eColor;
+		range.levelCount = 1u;
+		range.layerCount = 1u;
+		commandBuffer.clearColorImage(
+			image->image,
+			vk::ImageLayout::eTransferDstOptimal,
+			value,
+			range);
+		transition_image_layout(commandBuffer, image->image,
+			vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eGeneral,
+			vk::AccessFlagBits::eTransferWrite,
+			vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+			vk::PipelineStageFlagBits::eTransfer,
+			vk::PipelineStageFlagBits::eComputeShader
+		);
+	};
+
+	auto prepare_cache_target = [&](StorageImage* image) {
+		if (!uiCacheImagesReady)
+		{
+			transition_render_target(image, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+			return;
+		}
+
+		transition_image_layout(commandBuffer, image->image,
+			vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
+			vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+			vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite,
+			vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eComputeShader
+		);
+	};
+
+	const bool renderHosted3D =
+		!scene2D.registry().view<Model3DComponent>().empty();
+	const vk::ClearColorValue transparent(
+		std::array<float, 4> { 0.0f, 0.0f, 0.0f, 0.0f });
+	const vk::ClearColorValue farDepth(
+		std::array<std::uint32_t, 4> { 0x3f800000u, 0u, 0u, 0u });
+
+
+
+	prepare_cache_target(colorBuffer);
+	prepare_cache_target(foregroundBlurSurface);
+	if (renderHosted3D)
+	{
+		clear_render_target(modelDepthBuffer, farDepth);
+		clear_render_target(modelColorBuffer, transparent);
+	}
+	const bool writeNativeContent = presentNativeSurface && !clearNativeSurface;
+	if (writeNativeContent)
+	{
+		transition_render_target(tempSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	}
+	const bool writeCompositionSurface =
+		static_cast<bool>(compositionImage) ||
+		static_cast<bool>(compositionReadbackBuffer);
+	if (writeCompositionSurface)
+	{
+		transition_render_target(compositionSurface, vk::AccessFlagBits::eShaderWrite);
+	}
+	transition_render_target(uiBlurSurface, vk::AccessFlagBits::eMemoryWrite);
+	transition_render_target(mediaBlurSurface, vk::AccessFlagBits::eMemoryWrite);
+	prepare_cache_target(uiStaticSurface);
+	prepare_cache_target(uiStaticBlurSurface);
+	uiCacheImagesReady = true;
+
+	barrier_render_target(uiBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	barrier_render_target(mediaBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+	barrier_render_target(foregroundBlurSurface, vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite);
+
+	renderer2D.record(
+		commandBuffer,
+		renderTarget,
+		pipelines,
+		descriptorSets,
+		pipelineLayouts,
+		scene2D,
+		currentTimeSeconds,
+		&renderer3D,
+		modelAssets,
+		mediaAssets,
+		colorBuffer,
+		uiStaticSurface,
+		modelColorBuffer,
+		hosted3DRenderPass,
+		hosted3DFramebuffer,
+		hosted3DSamples != vk::SampleCountFlagBits::e1,
+		externalBackdropAvailable,
+		foregroundBlurSurface,
+		&textBatchResources);
+	if (textBatchResources.writtenGlyphs > 0u)
+	{
+
+
+		const VkResult flushResult = vmaFlushAllocation(allocator,
+			textBatchBuffer.allocation, 0u,
+			textBatchResources.writtenGlyphs * sizeof(Renderer2DPushConstants));
+		if (flushResult != VK_SUCCESS)
+			logger->vulkan("Failed to flush text batch constants.");
+	}
+	if (recordGpuTimestamps)
+	{
+		commandBuffer.writeTimestamp(
+			vk::PipelineStageFlagBits::eBottomOfPipe, gpuTimestampQueryPool, 1u);
+	}
+	glm::uvec4 contentRect = renderer2D.content_bounds();
+	glm::uvec4 damageRect = renderer2D.damage_bounds();
+	if (useExternalBackdropUnderlay)
+	{
+		contentRect = { 0u, 0u, renderExtent.width, renderExtent.height };
+		damageRect = contentRect;
+	}
+	compositionSceneDamageRect = damageRect;
+	auto union_rect = [](glm::uvec4 left, glm::uvec4 right) {
+		if (left.z == 0u || left.w == 0u)
+		{
+			return right;
+		}
+		if (right.z == 0u || right.w == 0u)
+		{
+			return left;
+		}
+		const uint32_t x = std::min(left.x, right.x);
+		const uint32_t y = std::min(left.y, right.y);
+		const uint32_t rightEdge = std::max(left.x + left.z, right.x + right.z);
+		const uint32_t bottomEdge = std::max(left.y + left.w, right.y + right.w);
+		return glm::uvec4 { x, y, rightEdge - x, bottomEdge - y };
+	};
+
+
+
+
+	glm::uvec4 compositionUpdateRect = union_rect(
+		damageRect,
+		pendingCompositionDamageRect);
+    compositionReadbackRect = glm::uvec4(0u);
+    if (compositionReadbackBuffer)
+	{
+        const auto readback = composition_readback_region(renderExtent.width,
+            renderExtent.height, compositionUpdateRect.x, compositionUpdateRect.y,
+            compositionUpdateRect.z, compositionUpdateRect.w, compositionImageFirstUse);
+        compositionReadbackRect = compositionUpdateRect = {
+            readback.x, readback.y, readback.width, readback.height };
+	}
+	if (compositionImageFirstUse)
+	{
+		compositionUpdateRect = union_rect(contentRect, compositionUpdateRect);
+	}
+	compositionContentRect = { 0u, 0u, 0u, 0u };
+	compositionDamageRect = { 0u, 0u, 0u, 0u };
+	if (writeCompositionSurface &&
+		renderExtent.width > 0u && renderExtent.height > 0u)
+	{
+		auto scale_floor = [](uint32_t value, uint32_t destination, uint32_t source) {
+			return static_cast<uint32_t>(
+				(static_cast<uint64_t>(value) * destination) / source);
+		};
+		auto scale_ceil = [](uint32_t value, uint32_t destination, uint32_t source) {
+			return static_cast<uint32_t>(
+				(static_cast<uint64_t>(value) * destination + source - 1u) / source);
+		};
+		auto map_rect = [&](glm::uvec4 rect) {
+			if (rect.z == 0u || rect.w == 0u)
+			{
+				return glm::uvec4(0u);
+			}
+			const uint32_t right = std::min(rect.x + rect.z, renderExtent.width);
+			const uint32_t bottom = std::min(rect.y + rect.w, renderExtent.height);
+			const uint32_t destinationX = scale_floor(
+				std::min(rect.x, renderExtent.width),
+				swapchain.extent.width,
+				renderExtent.width);
+			const uint32_t destinationY = scale_floor(
+				std::min(rect.y, renderExtent.height),
+				swapchain.extent.height,
+				renderExtent.height);
+			const uint32_t destinationRight = scale_ceil(
+				right,
+				swapchain.extent.width,
+				renderExtent.width);
+			const uint32_t destinationBottom = scale_ceil(
+				bottom,
+				swapchain.extent.height,
+				renderExtent.height);
+			return glm::uvec4 {
+				destinationX,
+				destinationY,
+				destinationRight - destinationX,
+				destinationBottom - destinationY
+			};
+		};
+		compositionContentRect = map_rect(contentRect);
+		compositionDamageRect = map_rect(compositionUpdateRect);
+	}
+
+	barrier_render_target(colorBuffer, vk::AccessFlagBits::eShaderRead);
+	if (renderHosted3D)
+	{
+		barrier_render_target(modelColorBuffer, vk::AccessFlagBits::eShaderRead);
+	}
+	barrier_render_target(uiBlurSurface, vk::AccessFlagBits::eShaderRead);
+	barrier_render_target(uiStaticSurface, vk::AccessFlagBits::eShaderRead);
+	barrier_render_target(uiStaticBlurSurface, vk::AccessFlagBits::eShaderRead);
+	if (writeNativeContent)
+	{
+		barrier_render_target(tempSurface, vk::AccessFlagBits::eShaderWrite);
+	}
+
+	if (writeNativeContent || writeCompositionSurface)
+	{
+		renderer2D.record_composite(
+			commandBuffer,
+			renderTarget,
+			pipelines,
+			descriptorSets,
+			pipelineLayouts,
+			useExternalBackdropUnderlay,
+			writeNativeContent,
+			writeCompositionSurface,
+			writeCompositionSurface ? compositionUpdateRect : contentRect);
+	}
+
+	if (recordGpuTimestamps)
+	{
+		commandBuffer.writeTimestamp(
+			vk::PipelineStageFlagBits::eBottomOfPipe, gpuTimestampQueryPool, 2u);
+	}
+
+	if (presentNativeSurface)
+	{
+		transition_image_layout(commandBuffer, swapchain.images[imageIndex],
+			vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+			vk::AccessFlagBits::eNone, vk::AccessFlagBits::eTransferWrite,
+			vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer
+		);
+
+		if (clearNativeSurface)
+		{
+			const vk::ClearColorValue transparent(
+				std::array<float, 4> { 0.0f, 0.0f, 0.0f, 0.0f });
+			vk::ImageSubresourceRange range {};
+			range.aspectMask = vk::ImageAspectFlagBits::eColor;
+			range.levelCount = 1u;
+			range.layerCount = 1u;
+			commandBuffer.clearColorImage(
+				swapchain.images[imageIndex],
+				vk::ImageLayout::eTransferDstOptimal,
+				transparent,
+				range);
+		}
+		else
+		{
+			transition_image_layout(commandBuffer, tempSurface->image,
+				vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
+				vk::AccessFlagBits::eMemoryWrite, vk::AccessFlagBits::eTransferRead,
+				vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer
+			);
+			copy_image_to_image(
+				commandBuffer,
+				tempSurface->image,
+				swapchain.images[imageIndex],
+				tempSurface->extent,
+				swapchain.extent);
+		}
+
+		transition_image_layout(commandBuffer, swapchain.images[imageIndex],
+			vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR,
+			vk::AccessFlagBits::eTransferWrite, vk::AccessFlagBits::eMemoryRead,
+			vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eBottomOfPipe
+		);
+	}
+
+    if (compositionReadbackBuffer &&
+        compositionReadbackRect.z > 0u && compositionReadbackRect.w > 0u)
+	{
+		transition_image_layout(commandBuffer, compositionSurface->image,
+			vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
+			vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eTransferRead,
+			vk::PipelineStageFlagBits::eComputeShader,
+			vk::PipelineStageFlagBits::eTransfer);
+
+		vk::BufferImageCopy copyRegion = {};
+        const auto readback = composition_readback_region(renderExtent.width,
+            renderExtent.height, compositionReadbackRect.x, compositionReadbackRect.y,
+            compositionReadbackRect.z, compositionReadbackRect.w, false);
+        copyRegion.bufferOffset = readback.byteOffset;
+        copyRegion.bufferRowLength = renderExtent.width;
+		copyRegion.bufferImageHeight = 0u;
+		copyRegion.imageSubresource.aspectMask =
+			vk::ImageAspectFlagBits::eColor;
+		copyRegion.imageSubresource.layerCount = 1u;
+        copyRegion.imageOffset = vk::Offset3D {
+            static_cast<std::int32_t>(readback.x), static_cast<std::int32_t>(readback.y), 0 };
+        copyRegion.imageExtent = vk::Extent3D{
+            readback.width, readback.height, 1u };
+		commandBuffer.copyImageToBuffer(
+			compositionSurface->image,
+			vk::ImageLayout::eTransferSrcOptimal,
+			compositionReadbackBuffer,
+			copyRegion);
+
+		vk::BufferMemoryBarrier hostReadBarrier = {};
+		hostReadBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		hostReadBarrier.dstAccessMask = vk::AccessFlagBits::eHostRead;
+		hostReadBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		hostReadBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		hostReadBarrier.buffer = compositionReadbackBuffer;
+        hostReadBarrier.offset = readback.byteOffset;
+        hostReadBarrier.size = readback.byteSpan;
+		commandBuffer.pipelineBarrier(
+			vk::PipelineStageFlagBits::eTransfer,
+			vk::PipelineStageFlagBits::eHost,
+			{},
+			nullptr,
+			hostReadBarrier,
+			nullptr);
+	}
+	else if (compositionImage)
+	{
+		transition_image_layout(commandBuffer, compositionSurface->image,
+			vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
+			vk::AccessFlagBits::eShaderWrite, vk::AccessFlagBits::eTransferRead,
+			vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eTransfer
+		);
+
+		vk::ImageMemoryBarrier acquireBarrier = {};
+
+
+
+
+
+		acquireBarrier.oldLayout = vk::ImageLayout::eGeneral;
+		acquireBarrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+		acquireBarrier.srcAccessMask = {};
+		acquireBarrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+		acquireBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR;
+		acquireBarrier.dstQueueFamilyIndex = graphicsQueueFamilyIndex;
+		acquireBarrier.image = compositionImage;
+		acquireBarrier.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+		acquireBarrier.subresourceRange.levelCount = 1u;
+		acquireBarrier.subresourceRange.layerCount = 1u;
+		commandBuffer.pipelineBarrier(
+			vk::PipelineStageFlagBits::eTopOfPipe,
+			vk::PipelineStageFlagBits::eTransfer,
+			{},
+			nullptr,
+			nullptr,
+			acquireBarrier);
+
+
+
+		vk::ImageSubresourceRange compositionRange {};
+		compositionRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+		compositionRange.levelCount = 1u;
+		compositionRange.layerCount = 1u;
+		if (compositionImageFirstUse)
+		{
+			commandBuffer.clearColorImage(
+				compositionImage,
+				vk::ImageLayout::eTransferDstOptimal,
+				transparent,
+				compositionRange);
+		}
+		if (compositionUpdateRect.z > 0u && compositionUpdateRect.w > 0u)
+		{
+			if (compositionImageFirstUse)
+			{
+				vk::ImageMemoryBarrier clearBarrier = {};
+				clearBarrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+				clearBarrier.newLayout = vk::ImageLayout::eTransferDstOptimal;
+				clearBarrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+				clearBarrier.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+				clearBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				clearBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				clearBarrier.image = compositionImage;
+				clearBarrier.subresourceRange = compositionRange;
+				commandBuffer.pipelineBarrier(
+					vk::PipelineStageFlagBits::eTransfer,
+					vk::PipelineStageFlagBits::eTransfer,
+					{},
+					nullptr,
+					nullptr,
+					clearBarrier);
+			}
+
+			copy_image_region_to_image(
+				commandBuffer,
+				compositionSurface->image,
+				compositionImage,
+				compositionSurface->extent,
+				swapchain.extent,
+				vk::Rect2D {
+					vk::Offset2D {
+						static_cast<int32_t>(compositionUpdateRect.x),
+						static_cast<int32_t>(compositionUpdateRect.y) },
+					vk::Extent2D {
+						compositionUpdateRect.z,
+						compositionUpdateRect.w }
+				});
+		}
+
+		vk::ImageMemoryBarrier releaseBarrier = {};
+		releaseBarrier.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+		releaseBarrier.newLayout = vk::ImageLayout::eGeneral;
+		releaseBarrier.srcAccessMask =
+			compositionImageFirstUse ||
+			(compositionUpdateRect.z > 0u && compositionUpdateRect.w > 0u) ?
+			vk::AccessFlagBits::eTransferWrite : vk::AccessFlags {};
+		releaseBarrier.dstAccessMask = {};
+		releaseBarrier.srcQueueFamilyIndex = graphicsQueueFamilyIndex;
+		releaseBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL_KHR;
+		releaseBarrier.image = compositionImage;
+		releaseBarrier.subresourceRange = acquireBarrier.subresourceRange;
+		commandBuffer.pipelineBarrier(
+			vk::PipelineStageFlagBits::eTransfer,
+			vk::PipelineStageFlagBits::eBottomOfPipe,
+			{},
+			nullptr,
+			nullptr,
+			releaseBarrier);
+	}
+
+	if (recordGpuTimestamps)
+	{
+		commandBuffer.writeTimestamp(
+			vk::PipelineStageFlagBits::eBottomOfPipe, gpuTimestampQueryPool, 3u);
+	}
+
+	result = commandBuffer.end();
+	if (result != vk::Result::eSuccess)
+	{
+		logger->vulkan("Failed to end command buffer.");
+		return;
+	}
+	gpuTimestampsRecorded = recordGpuTimestamps;
+}
+
+bool Frame::enable_gpu_timing(
+	uint32_t timestampValidBits,
+	double timestampPeriodNanoseconds,
+	std::deque<std::function<void(vk::Device)>>& deletionQueue)
+{
+	if (gpuTimestampQueryPool)
+	{
+		return true;
+	}
+	if (!vibrance::renderer_diagnostics::supports_timestamp_clock(
+		timestampValidBits, timestampPeriodNanoseconds))
+	{
+		return false;
+	}
+
+	vk::QueryPoolCreateInfo queryPoolInfo {};
+	queryPoolInfo.queryType = vk::QueryType::eTimestamp;
+	queryPoolInfo.queryCount = 4u;
+	const auto result = logicalDevice.createQueryPool(queryPoolInfo);
+	if (result.result != vk::Result::eSuccess)
+	{
+		Logger::fetch_logger()->warning(
+			"GPU timestamp diagnostics could not create a query pool.");
+		return false;
+	}
+	gpuTimestampQueryPool = result.value;
+	gpuTimestampValidBits = timestampValidBits;
+	gpuTimestampPeriodNanoseconds = timestampPeriodNanoseconds;
+	const VkQueryPool queryPoolHandle = gpuTimestampQueryPool;
+
+	deletionQueue.push_back([queryPoolHandle](vk::Device device) {
+		device.destroyQueryPool(queryPoolHandle);
+	});
+	return true;
+}
+
+void Frame::set_gpu_timing_sample_enabled(bool enabled)
+{
+	gpuTimestampSampleEnabled = enabled;
+}
+
+void Frame::mark_gpu_timing_submitted()
+{
+	gpuTimestampsPending = gpuTimestampsRecorded;
+}
+
+bool Frame::take_completed_gpu_timings(GpuRenderTimings& timings)
+{
+	if (!gpuTimestampsPending)
+	{
+		return false;
+	}
+	gpuTimestampsPending = false;
+	std::array<uint64_t, 4> timestamps {};
+
+
+	const VkResult result = vkGetQueryPoolResults(
+		logicalDevice, gpuTimestampQueryPool, 0u,
+		static_cast<uint32_t>(timestamps.size()), sizeof(timestamps),
+		timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+	if (result != VK_SUCCESS)
+	{
+		return false;
+	}
+
+	auto elapsed = [&](std::size_t begin, std::size_t end) {
+		return vibrance::renderer_diagnostics::timestamp_elapsed_milliseconds(
+			timestamps[begin], timestamps[end], gpuTimestampValidBits,
+			gpuTimestampPeriodNanoseconds);
+	};
+	timings.totalMilliseconds = elapsed(0u, 3u);
+
+
+
+	timings.render2DMilliseconds = elapsed(0u, 1u);
+	timings.compositeMilliseconds = elapsed(1u, 2u);
+	timings.outputMilliseconds = elapsed(2u, 3u);
+	return true;
+}
+
+void Frame::resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModelRenderExtent)
+{
+	if (colorBuffer != nullptr &&
+		modelColorBuffer != nullptr &&
+		same_extent(colorBuffer->extent, newRenderExtent) &&
+		same_extent(modelColorBuffer->extent, newModelRenderExtent))
+	{
+		return;
+	}
+
+	free_resources();
+	renderExtent = newRenderExtent;
+	modelRenderExtent = newModelRenderExtent;
+	try
+	{
+		create_frame_storage_images(*this);
+		update_frame_descriptor_sets(*this);
+	}
+	catch (...)
+	{
+		free_resources();
+		throw;
+	}
+}
+
+void Frame::set_font_atlas_image(StorageImage* image)
+{
+	fontAtlasImage = image;
+	update_frame_descriptor_sets(*this);
+}
+
+void Frame::free_resources()
+{
+	Logger* logger = Logger::fetch_logger();
+	
+	if (queue && queue.waitIdle() != vk::Result::eSuccess)
+	{
+		logger->vulkan("Failed to wait for queue to idle.");
+	}
+
+	while (deviceDeletionQueue.size() > 0)
+	{
+		deviceDeletionQueue.back()(logicalDevice);
+		deviceDeletionQueue.pop_back();
+	}
+
+	while (vmaDeletionQueue.size() > 0)
+	{
+		vmaDeletionQueue.back()(allocator);
+		vmaDeletionQueue.pop_back();
+	}
+	textBatchBuffer = {};
+	textBatchResources = {};
+	textBatchAllocationAttempted = false;
+
+	delete_storage_image(depthBuffer);
+	delete_storage_image(colorBuffer);
+	delete_storage_image(modelDepthBuffer);
+	delete_storage_image(modelColorBuffer);
+	delete_storage_image(tempSurface);
+	delete_storage_image(compositionSurface);
+	delete_storage_image(uiBlurSurface);
+	delete_storage_image(mediaBlurSurface);
+	delete_storage_image(foregroundBlurSurface);
+	delete_storage_image(uiStaticSurface);
+	delete_storage_image(uiStaticBlurSurface);
+	delete_storage_image(externalBackdropSurface);
+	delete_color_attachment_image(hosted3DColorBuffer);
+	delete hosted3DDepthBuffer;
+	hosted3DDepthBuffer = nullptr;
+	hosted3DFramebuffer = nullptr;
+	renderer2D.invalidate_dynamic_surface();
+	uiCacheImagesReady = false;
+}

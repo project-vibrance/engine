@@ -1,0 +1,39 @@
+vibranceUI
+Copyright 2026 59xa
+
+Original vibranceUI code is licensed under the Apache License, Version 2.0.
+See LICENCE for the full licence text.
+
+Third-party code retains its original copyright and licence terms. The
+Apache-2.0 identifiers on original engine code do not replace those terms.
+
+Microsoft Detours
+-----------------
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+The files in engine/third_party/detours are licensed under the MIT licence.
+The complete upstream notice is in engine/licences/detours.txt in the source
+tree and licences/detours.txt alongside this file in the installed SDK.
+
+LiquidGlassWinUI
+---------------
+Copyright (c) 2026 luckyelysia
+
+The squircle geometry and analytical corner normals in
+engine/shaders/liquid_glass_win32.hlsl are adapted from LiquidGlassWinUI
+under the MIT licence. Original vibranceUI additions are under Apache-2.0;
+the adapted portions retain their MIT terms and attribution.
+The complete upstream notice is in engine/licences/liquid-glass-winui.txt
+in the source tree and licences/liquid-glass-winui.txt alongside this file
+in the installed SDK.
+
+External dependencies
+---------------------
+Dependencies supplied through local source trees, SDKs or system packages
+remain under their respective upstream licences. These include GLM, EnTT,
+stb, GLFW, HarfBuzz, FreeType, Vulkan headers, Vulkan Memory Allocator,
+NanoSVG, simdjson, fastgltf, SoLoud and its bundled decoders, FFmpeg,
+metal-cpp and mediaremote-adapter, depending on the build configuration.
+Retain the applicable upstream licence and attribution notices when
+redistributing these components. Their code is not relicensed by the
+Apache-2.0 headers in this repository.

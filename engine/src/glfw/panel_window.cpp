@@ -1,0 +1,2443 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#include <vibranceUI/core/path_utf8.h>
+#include <vibranceUI/glfw/panel_window.h>
+#include "cursor_macos.h"
+
+#include <vibranceUI/ui/builder.h>
+#include <vibranceUI/ui/controls.h>
+#include <vibranceUI/ui/liquid_controls.h>
+#include <vibranceUI/ui/styles.h>
+#include <vibranceUI/ui/surfaces.h>
+#include <vibranceUI/ui/text.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <sstream>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <commctrl.h>
+
+
+
+struct GlfwPanelWindowWin32Drag
+{
+    static LRESULT CALLBACK process(HWND window, UINT message, WPARAM wParam,
+        LPARAM lParam, UINT_PTR id, DWORD_PTR reference)
+    {
+        if (message == WM_NCDESTROY)
+            RemoveWindowSubclass(window, process, id);
+        auto* panel = reinterpret_cast<GlfwPanelWindow*>(reference);
+        if (message == WM_MOUSEMOVE &&
+            panel->windowPointerAction == GlfwPanelWindow::WindowPointerAction::eMove)
+            panel->update_window_action();
+        if (message == WM_LBUTTONUP &&
+            panel->windowPointerAction == GlfwPanelWindow::WindowPointerAction::eMove)
+            panel->update_window_action(true);
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+
+    static void update_frame_rate(GlfwPanelWindow& panel, double now)
+    {
+        if (now < panel.actionMonitorCheckSeconds) return;
+        panel.actionMonitorCheckSeconds = now + 0.1;
+        const HMONITOR monitor = MonitorFromWindow(
+            static_cast<HWND>(glfw_native_window_handle(panel.window)), MONITOR_DEFAULTTONEAREST);
+        if (monitor == panel.actionMonitor) return;
+        panel.actionMonitor = monitor;
+        MONITORINFOEXW info {};
+        info.cbSize = sizeof(info);
+        DEVMODEW mode {};
+        mode.dmSize = sizeof(mode);
+        panel.windowMoveFrameRate = GetMonitorInfoW(monitor, &info) &&
+            EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+            mode.dmDisplayFrequency > 1u ? std::clamp(mode.dmDisplayFrequency, 1ul, 1000ul) : 60u;
+        panel.nextWindowMoveSeconds = -1.0;
+    }
+
+    static void attach(GlfwPanelWindow& panel)
+    {
+        SetWindowSubclass(static_cast<HWND>(glfw_native_window_handle(panel.window)),
+            process, reinterpret_cast<UINT_PTR>(&panel), reinterpret_cast<DWORD_PTR>(&panel));
+    }
+
+    static void detach(GlfwPanelWindow& panel)
+    {
+        RemoveWindowSubclass(static_cast<HWND>(glfw_native_window_handle(panel.window)),
+            process, reinterpret_cast<UINT_PTR>(&panel));
+    }
+};
+#endif
+
+namespace
+{
+    constexpr int kFallbackMaxWindowSize = 1000000;
+
+    enum class PanelUiCpuPhase : std::size_t
+    {
+        eUiWork,
+        eWindowAction,
+        ePointerSample,
+        eTimedControls,
+        eDragInputs,
+        eHover,
+        eHoverHitTest,
+        eWindowBlockHitTests,
+        eInputHover,
+        eResizeRebuild,
+        eBeforeDraw,
+        eRendererDraw,
+        eCount
+    };
+
+    struct PanelUiCpuTiming
+    {
+        uint64_t samples = 0u;
+        double totalMilliseconds = 0.0;
+        double maxMilliseconds = 0.0;
+    };
+
+    struct PanelUiDiagnostics
+    {
+        std::array<PanelUiCpuTiming,
+            static_cast<std::size_t>(PanelUiCpuPhase::eCount)> timings {};
+        std::chrono::steady_clock::time_point intervalStart {};
+        uint64_t pointerSamples = 0u;
+        uint64_t unchangedPointerSamples = 0u;
+        uint64_t focusedSamples = 0u;
+        uint64_t hoveredSamples = 0u;
+        GlfwUiPointerSample previousPointer {};
+        bool previousFocused = false;
+        bool previousHovered = false;
+        bool hasPreviousPointer = false;
+    };
+
+    bool panel_ui_diagnostics_enabled()
+    {
+        static const bool enabled = [] {
+            const char* value = std::getenv("VIBRANCE_RENDER_DIAGNOSTICS");
+            return value && std::strcmp(value, "0") != 0;
+        }();
+        return enabled;
+    }
+
+    thread_local std::unordered_map<const GlfwPanelWindow*, PanelUiDiagnostics> panelUiDiagnostics;
+
+    PanelUiDiagnostics* panel_ui_diagnostics(const GlfwPanelWindow* panel)
+    {
+        return panel_ui_diagnostics_enabled() ? &panelUiDiagnostics[panel] : nullptr;
+    }
+
+    class PanelUiTimingScope
+    {
+    public:
+        PanelUiTimingScope(PanelUiDiagnostics* diagnostics, PanelUiCpuPhase phase,
+            double* drawMilliseconds = nullptr) : diagnostics_(diagnostics),
+            phase_(phase), drawMilliseconds_(drawMilliseconds)
+        {
+            if (diagnostics_)
+            {
+                start_ = std::chrono::steady_clock::now();
+            }
+        }
+
+        ~PanelUiTimingScope()
+        {
+            if (!diagnostics_)
+            {
+                return;
+            }
+            double milliseconds = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start_).count();
+            if (drawMilliseconds_)
+            {
+                if (phase_ == PanelUiCpuPhase::eRendererDraw)
+                    *drawMilliseconds_ += milliseconds;
+                else if (phase_ == PanelUiCpuPhase::eUiWork)
+                    milliseconds = std::max(0.0, milliseconds - *drawMilliseconds_);
+            }
+            auto& timing = diagnostics_->timings[static_cast<std::size_t>(phase_)];
+            ++timing.samples;
+            timing.totalMilliseconds += milliseconds;
+            timing.maxMilliseconds = std::max(timing.maxMilliseconds, milliseconds);
+        }
+
+        PanelUiTimingScope(const PanelUiTimingScope&) = delete;
+        PanelUiTimingScope& operator=(const PanelUiTimingScope&) = delete;
+
+    private:
+        PanelUiDiagnostics* diagnostics_ = nullptr;
+        PanelUiCpuPhase phase_;
+        double* drawMilliseconds_ = nullptr;
+        std::chrono::steady_clock::time_point start_ {};
+    };
+
+    void report_panel_ui_diagnostics(PanelUiDiagnostics* diagnostics,
+        Logger* logger, const std::string& title)
+    {
+        if (!diagnostics)
+        {
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (diagnostics->intervalStart.time_since_epoch().count() == 0)
+        {
+            diagnostics->intervalStart = now;
+        }
+        else if (now - diagnostics->intervalStart >= std::chrono::seconds(1))
+        {
+            static constexpr std::array<const char*,
+                static_cast<std::size_t>(PanelUiCpuPhase::eCount)> names {
+                "UI work excluding draw", "window action", "pointer sample",
+                "timed controls", "drag inputs", "hover and cursor",
+                "shared hover hit test", "window action hit tests", "input hover", "resize/rebuild",
+                "beforeDraw", "renderer draw including pacing"
+            };
+            std::ostringstream message;
+            message.setf(std::ios::fixed, std::ios::floatfield);
+            message.precision(3);
+            message << "Panel UI diagnostics \"" << title
+                << "\": pointer samples " << diagnostics->pointerSamples
+                << ", unchanged pointer/focus/hover " << diagnostics->unchangedPointerSamples
+                << ", focused " << diagnostics->focusedSamples
+                << ", hovered " << diagnostics->hoveredSamples
+                << ", last pointer " << diagnostics->previousPointer.hasPoint
+                << " at (" << diagnostics->previousPointer.point.x
+                << ',' << diagnostics->previousPointer.point.y << ')'
+                << ". CPU wall timings (mean/max ms, samples): ";
+            bool first = true;
+            for (std::size_t phase = 0u; phase < diagnostics->timings.size(); ++phase)
+            {
+                const auto& timing = diagnostics->timings[phase];
+                if (timing.samples == 0u)
+                    continue;
+                if (!first)
+                    message << "; ";
+                first = false;
+                message << names[phase] << ' '
+                    << timing.totalMilliseconds / static_cast<double>(timing.samples)
+                    << '/' << timing.maxMilliseconds << " ms, " << timing.samples;
+            }
+            message << '.';
+            logger->info(message.str());
+            diagnostics->intervalStart = now;
+            diagnostics->timings = {};
+            diagnostics->pointerSamples = 0u;
+            diagnostics->unchangedPointerSamples = 0u;
+            diagnostics->focusedSamples = 0u;
+            diagnostics->hoveredSamples = 0u;
+        }
+    }
+
+    int option_min(int value)
+    {
+        return std::max(value, 1);
+    }
+
+    int option_max(int value, int minValue)
+    {
+        return value > 0 ? std::max(value, minValue) : kFallbackMaxWindowSize;
+    }
+
+    int clamp_window_dimension(int value, int minValue, int maxValue)
+    {
+        return std::clamp(value, option_min(minValue), option_max(maxValue, minValue));
+    }
+
+
+    struct PanelGeometry
+    {
+        LayoutScale scale {};
+        glm::vec2 framebufferSize { 0.0f };
+        glm::vec2 logicalSize { 0.0f };
+        glm::vec4 logicalInset { 0.0f };
+        glm::vec4 inset { 0.0f };
+        glm::vec2 position { 0.0f };
+        glm::vec2 size { 1.0f };
+        glm::vec2 logicalPanelSize { 1.0f };
+    };
+
+    LayoutScale panel_window_layout_scale(GLFWwindow* window, int framebufferWidth, int framebufferHeight, float uiScale)
+    {
+        LayoutScale scale = {};
+
+        int windowWidth = 0;
+        int windowHeight = 0;
+        if (!glfw_window_size(window, windowWidth, windowHeight))
+        {
+            windowWidth = std::max(framebufferWidth, 1);
+            windowHeight = std::max(framebufferHeight, 1);
+        }
+        if (framebufferWidth <= 0)
+        {
+            framebufferWidth = windowWidth;
+        }
+        if (framebufferHeight <= 0)
+        {
+            framebufferHeight = windowHeight;
+        }
+
+        scale.factor = {
+            static_cast<float>(std::max(framebufferWidth, 1)) / static_cast<float>(std::max(windowWidth, 1)),
+            static_cast<float>(std::max(framebufferHeight, 1)) / static_cast<float>(std::max(windowHeight, 1))
+        };
+        uiScale = std::isfinite(uiScale) ? std::clamp(uiScale, 0.1f, 5.0f) : 1.0f;
+        scale.factor *= uiScale;
+        scale.contentScale = glfw_content_scale(window);
+        scale.logicalSize = {
+            static_cast<float>(std::max(windowWidth, 1)),
+            static_cast<float>(std::max(windowHeight, 1))
+        };
+        scale.logicalSize /= uiScale;
+        return scale;
+    }
+
+    PanelGeometry make_panel_geometry(GLFWwindow* window, int framebufferWidth, int framebufferHeight, glm::vec4 panelInset, float uiScale)
+    {
+
+        PanelGeometry geometry = {};
+        geometry.scale = panel_window_layout_scale(window, framebufferWidth, framebufferHeight, uiScale);
+        geometry.framebufferSize = {
+            static_cast<float>(std::max(framebufferWidth, 1)),
+            static_cast<float>(std::max(framebufferHeight, 1))
+        };
+        geometry.logicalSize = geometry.scale.logicalSize;
+        geometry.logicalInset = glm::max(panelInset, glm::vec4(0.0f));
+        geometry.inset = scaled_edges(
+            geometry.logicalInset.x,
+            geometry.logicalInset.y,
+            geometry.logicalInset.z,
+            geometry.logicalInset.w,
+            geometry.scale);
+        geometry.position = { geometry.inset.x, geometry.inset.y };
+        geometry.size = {
+            std::max(1.0f, geometry.framebufferSize.x - geometry.inset.x - geometry.inset.z),
+            std::max(1.0f, geometry.framebufferSize.y - geometry.inset.y - geometry.inset.w)
+        };
+        geometry.logicalPanelSize = {
+            std::max(1.0f, geometry.logicalSize.x - geometry.logicalInset.x - geometry.logicalInset.z),
+            std::max(1.0f, geometry.logicalSize.y - geometry.logicalInset.y - geometry.logicalInset.w)
+        };
+        return geometry;
+    }
+
+    bool panel_geometry_for_window(GLFWwindow* window, glm::vec4 panelInset, float uiScale, PanelGeometry& geometry)
+    {
+        int width = 0;
+        int height = 0;
+        if (!glfw_framebuffer_size(window, width, height))
+        {
+            return false;
+        }
+
+        geometry = make_panel_geometry(window, width, height, panelInset, uiScale);
+        return true;
+    }
+
+    float logical_title_height(const GlfwPanelWindowTemplateOptions& options)
+    {
+
+        const float trafficLightHeight = options.trafficLights.visible ?
+            options.trafficLights.firstCenter.y * 2.0f :
+            0.0f;
+        return std::max(
+            std::max(options.titleHeight, options.contentMargin.y),
+            trafficLightHeight);
+    }
+
+    glm::vec2 traffic_light_center_at_index(
+        const GlfwPanelWindowTrafficLightOptions& options,
+        int index,
+        const PanelGeometry& panelGeometry)
+    {
+        glm::vec2 center = scaled_offset(
+            options.firstCenter.x,
+            options.firstCenter.y,
+            panelGeometry.scale);
+        const float spacing = scaled_scalar(options.spacing, panelGeometry.scale);
+        if (options.placement == GlfwPanelWindowTrafficLightPlacement::eTopLeft)
+        {
+            center.x += static_cast<float>(index) * spacing;
+        }
+        else
+        {
+            center.x = panelGeometry.size.x - center.x - static_cast<float>(index) * spacing;
+        }
+        return panelGeometry.position + center;
+    }
+
+    TextStyleComponent panel_text_style(std::string_view color)
+    {
+        TextStyleComponent style = {};
+        style.set_color(color);
+        style.shadowColor = glm::vec4(0.0f);
+        style.effectColor = glm::vec4(0.0f);
+        style.outlineWidth = 0.0f;
+        style.shadowBlur = 0.0f;
+        style.glowRadius = 0.0f;
+        style.blurRadius = 0.0f;
+        return style;
+    }
+
+}
+
+GlfwPanelWindow::GlfwPanelWindow(GLFWwindow* window, Engine* engine, GlfwPanelWindowTemplateOptions options)
+    : window(window),
+      engine(engine),
+      logger(Logger::fetch_logger()),
+      options(std::move(options))
+{
+    set_glfw_window_user_pointer(window, this);
+    GlfwCallbackSet callbacks = {};
+    callbacks.framebufferSize = framebuffer_resize_callback;
+    callbacks.contentScale = content_scale_callback;
+    callbacks.mouseButton = mouse_button_callback;
+    callbacks.scroll = scroll_callback;
+    callbacks.key = key_callback;
+    callbacks.character = char_callback;
+    set_glfw_callbacks(window, callbacks);
+    cursors = create_glfw_standard_cursors();
+
+    try
+    {
+
+        if (engine && !this->options.localisationDirectory.empty())
+        {
+            engine->load_localisation_directory(this->options.localisationDirectory);
+            engine->set_locale(Engine::shared_locale());
+        }
+
+        load_template_font();
+
+        load_traffic_light_icons();
+        apply_initial_size();
+        build_scene();
+#if defined(_WIN32)
+        if (window) GlfwPanelWindowWin32Drag::attach(*this);
+#endif
+    }
+    catch (...)
+    {
+
+
+        clear_glfw_cursor(window);
+        set_glfw_callbacks(window, {});
+        set_glfw_window_user_pointer(window, nullptr);
+        destroy_glfw_standard_cursors(cursors);
+        throw;
+    }
+}
+
+GlfwPanelWindow::~GlfwPanelWindow()
+{
+    if (panel_ui_diagnostics_enabled())
+    {
+        panelUiDiagnostics.erase(this);
+    }
+    if (window)
+    {
+#if defined(_WIN32)
+        GlfwPanelWindowWin32Drag::detach(*this);
+#endif
+        clear_glfw_cursor(window);
+        set_glfw_callbacks(window, {});
+        set_glfw_window_user_pointer(window, nullptr);
+    }
+    destroy_glfw_standard_cursors(cursors);
+}
+
+bool GlfwPanelWindow::should_close() const
+{
+    return glfw_window_should_close(window);
+}
+
+bool GlfwPanelWindow::is_hovered() const
+{
+    return glfw_window_hovered(window);
+}
+
+void GlfwPanelWindow::play_visibility_transition(const DisplayTransition2DComponent& authored, bool appearing)
+{
+    auto& scene = engine->renderer2d_scene();
+    auto& registry = scene.registry();
+    if (!registry.valid(panelRoot)) return;
+    entt::entity probe = panelRoot;
+    if (const auto* paint = registry.try_get<ShapeStyleComponent>(probe); paint && paint->opacity <= 0.0f)
+    {
+        probe = registry.valid(panelOutline) ? panelOutline : panelRoot;
+        if (const auto* paint = registry.try_get<ShapeStyleComponent>(probe); !paint || paint->opacity <= 0.0f)
+            for (const auto entity : registry.view<ShapeComponent, ShapeStyleComponent, Parent2DComponent>())
+                if (registry.get<Parent2DComponent>(entity).parent == panelRoot &&
+                    registry.get<ShapeStyleComponent>(entity).opacity > 0.0f)
+                { probe = entity; break; }
+    }
+    auto transition = authored;
+    transition.inheritToChildren = true;
+    transition.removeWhenComplete = appearing;
+    transition.destroyEntityTreeOnComplete = false;
+    if (!appearing)
+    {
+        if (const auto current = scene.last_resolved_shape_visual_state(probe))
+        {
+            const auto* paint = registry.try_get<ShapeStyleComponent>(probe);
+            transition.fromOpacity = current->opacity / std::max(paint ? paint->opacity : 1.0f, .001f);
+            transition.fromScale = glm::vec2(current->rect.z /
+                std::max(registry.get<ShapeComponent>(probe).size.x, 1.0f));
+            transition.toScale *= transition.fromScale;
+        }
+        if (openingPending && options.openingTransition)
+        {
+            transition.fromOpacity = options.openingTransition->fromOpacity;
+            transition.fromScale = options.openingTransition->fromScale;
+            transition.toScale = authored.toScale * transition.fromScale;
+        }
+    }
+    scene.play_display_transition(panelRoot, transition, 0.0);
+    if (registry.valid(panelOutline)) scene.play_display_transition(panelOutline, transition, 0.0);
+}
+
+void GlfwPanelWindow::update_visibility()
+{
+    if (!openingPending || closing) return;
+    if (options.openingTransition) play_visibility_transition(*options.openingTransition, true);
+    openingPending = false;
+}
+
+void GlfwPanelWindow::request_close()
+{
+    if (closing || !window || !engine) return;
+    set_glfw_window_should_close(window, false);
+    closing = true;
+    closeAwaitingPresentation = false;
+    clear_window_action();
+    inputState = {};
+    auto& registry = engine->renderer2d_scene().registry();
+    for (const auto entity : registry.view<ButtonInputComponent>()) registry.get<ButtonInputComponent>(entity).enabled = false;
+    for (const auto entity : registry.view<TextInputComponent>()) registry.get<TextInputComponent>(entity).enabled = false;
+    for (const auto entity : registry.view<SliderInputComponent>()) registry.get<SliderInputComponent>(entity).enabled = false;
+    for (const auto entity : registry.view<ScrollInputComponent>()) registry.get<ScrollInputComponent>(entity).enabled = false;
+    if (options.closingTransition) play_visibility_transition(*options.closingTransition, false);
+}
+
+bool GlfwPanelWindow::is_closing() const { return closing; }
+
+bool GlfwPanelWindow::close_ready()
+{
+    if (!closing || !engine) return false;
+    if (!closeAwaitingPresentation)
+    {
+        const auto& scene = engine->renderer2d_scene();
+        if (options.closingTransition &&
+            (!scene.display_transition_finished(panelRoot) || !scene.display_transition_finished(panelOutline))) return false;
+        closeAwaitingPresentation = true;
+    }
+    return !engine->poll_pending_presentation();
+}
+
+void GlfwPanelWindow::tick()
+{
+    if (!window || !engine || glfw_window_should_close(window))
+    {
+        return;
+    }
+
+    glfw_reconcile_ui_mouse_events(window, inputState);
+    if (glfw_window_should_close(window)) return;
+
+    PanelUiDiagnostics* diagnostics = panel_ui_diagnostics(this);
+    report_panel_ui_diagnostics(diagnostics, logger, options.title);
+    double drawMilliseconds = 0.0;
+    const PanelUiTimingScope tickTiming(diagnostics,
+        PanelUiCpuPhase::eUiWork, &drawMilliseconds);
+    const auto draw = [&] {
+        if (options.beforeDraw)
+        {
+            const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eBeforeDraw);
+            options.beforeDraw(*engine);
+        }
+        update_visibility();
+        const PanelUiTimingScope timing(diagnostics,
+            PanelUiCpuPhase::eRendererDraw, &drawMilliseconds);
+        engine->draw();
+    };
+
+    const double now = glfw_time_seconds();
+    engine->update_timing(now);
+    if (closing)
+    {
+        draw();
+        return;
+    }
+
+
+
+    if (windowPointerAction == WindowPointerAction::eMove)
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eWindowAction);
+        update_window_action();
+    }
+
+    const uint32_t uiUpdateRate = engine->recommended_ui_update_rate();
+    const double uiUpdateInterval = 1.0 / static_cast<double>(uiUpdateRate);
+    if (hasUiUpdateSample &&
+        now - lastUiUpdateSeconds < uiUpdateInterval)
+    {
+        draw();
+        return;
+    }
+    lastUiUpdateSeconds = now;
+    hasUiUpdateSample = true;
+    if (windowPointerAction != WindowPointerAction::eMove)
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eWindowAction);
+        update_window_action();
+    }
+    GlfwUiPointerSample pointer;
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::ePointerSample);
+        pointer = glfw_ui_pointer_sample(window, engine, true);
+    }
+    if (diagnostics)
+    {
+        const bool focused = glfw_window_focused(window);
+        const bool hovered = glfw_window_hovered(window);
+        const auto& previous = diagnostics->previousPointer;
+        ++diagnostics->pointerSamples;
+        diagnostics->focusedSamples += focused ? 1u : 0u;
+        diagnostics->hoveredSamples += hovered ? 1u : 0u;
+        if (diagnostics->hasPreviousPointer &&
+            pointer.hasPoint == previous.hasPoint &&
+            pointer.point.x == previous.point.x && pointer.point.y == previous.point.y &&
+            pointer.renderWidth == previous.renderWidth && pointer.renderHeight == previous.renderHeight &&
+            focused == diagnostics->previousFocused && hovered == diagnostics->previousHovered)
+        {
+            ++diagnostics->unchangedPointerSamples;
+        }
+        diagnostics->previousPointer = pointer;
+        diagnostics->previousFocused = focused;
+        diagnostics->previousHovered = hovered;
+        diagnostics->hasPreviousPointer = true;
+    }
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eTimedControls);
+        glfw_update_ui_timed_controls(*engine, inputState, now);
+    }
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eDragInputs);
+        glfw_update_ui_drag_inputs(window, *engine, inputState, pointer);
+    }
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eHover);
+        if (windowPointerAction != WindowPointerAction::eNone ||
+            inputState.draggedPanel != entt::null ||
+            inputState.resizingPanel != entt::null ||
+            inputState.pointerInputCapture != entt::null ||
+            inputState.activeSlider != entt::null ||
+            inputState.activeScrollBar != entt::null ||
+            glfw_window_focused(window) ||
+            glfw_window_hovered(window))
+        {
+            update_hover_cursor();
+        }
+        else
+        {
+            ui_update_hover_regions(engine->renderer2d_scene(), false, {}, now);
+            ui_update_input_hover(
+                engine->renderer2d_scene(),
+                engine->renderer2d_font_atlas(),
+                inputState,
+                false,
+                glm::vec2(0.0f));
+            set_hovered_traffic_light(TrafficLightKind::eNone);
+            clear_glfw_cursor(window);
+        }
+    }
+    {
+        const PanelUiTimingScope timing(diagnostics, PanelUiCpuPhase::eResizeRebuild);
+        int width = pointer.renderWidth;
+        int height = pointer.renderHeight;
+        engine->resize(static_cast<uint32_t>(std::max(width, 0)), static_cast<uint32_t>(std::max(height, 0)));
+        if (width > 0 && height > 0 && (width != lastRenderWidth || height != lastRenderHeight))
+        {
+            build_scene();
+        }
+    }
+
+    draw();
+}
+
+const GlfwPanelWindowTemplateOptions& GlfwPanelWindow::template_options() const
+{
+    return options;
+}
+
+void GlfwPanelWindow::set_template_options(GlfwPanelWindowTemplateOptions nextOptions)
+{
+
+    restore_traffic_light_maximise();
+    options = std::move(nextOptions);
+    load_template_font();
+    load_traffic_light_icons();
+    apply_initial_size();
+    build_scene();
+}
+
+void GlfwPanelWindow::set_content_builder(GlfwPanelWindowContentBuilder builder)
+{
+    options.buildContent = std::move(builder);
+    build_scene();
+}
+
+void GlfwPanelWindow::set_size(int width, int height)
+{
+    if (!window)
+    {
+        return;
+    }
+
+    const int clampedWidth = clamp_window_dimension(width, options.minSize.x, options.maxSize.x);
+    const int clampedHeight = clamp_window_dimension(height, options.minSize.y, options.maxSize.y);
+    set_glfw_window_size(window, clampedWidth, clampedHeight);
+}
+
+void GlfwPanelWindow::set_ui_scale(float scale)
+{
+    scale = std::isfinite(scale) ? std::clamp(scale, 0.1f, 5.0f) : 1.0f;
+    if (options.uiScale != scale)
+    {
+        options.uiScale = scale;
+        build_scene();
+    }
+}
+
+bool GlfwPanelWindow::has_pointer_capture() const
+{
+    return glfw_ui_input_has_pointer_capture(inputState);
+}
+
+UiInputState& GlfwPanelWindow::input_state()
+{
+    return inputState;
+}
+
+const UiInputState& GlfwPanelWindow::input_state() const
+{
+    return inputState;
+}
+
+void GlfwPanelWindow::rebuild()
+{
+    build_scene();
+}
+
+void GlfwPanelWindow::framebuffer_resize_callback(GLFWwindow* window, int width, int height)
+{
+    GlfwPanelWindow* app = static_cast<GlfwPanelWindow*>(glfw_window_user_pointer(window));
+    if (!app || !app->engine)
+    {
+        return;
+    }
+
+    app->engine->resize(static_cast<uint32_t>(std::max(width, 0)), static_cast<uint32_t>(std::max(height, 0)));
+    app->build_scene();
+}
+
+void GlfwPanelWindow::content_scale_callback(GLFWwindow* window, float xscale, float yscale)
+{
+    (void)xscale;
+    (void)yscale;
+
+    GlfwPanelWindow* app = static_cast<GlfwPanelWindow*>(glfw_window_user_pointer(window));
+    if (app)
+    {
+        app->build_scene();
+    }
+}
+
+void GlfwPanelWindow::mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
+{
+    GlfwPanelWindow* app = static_cast<GlfwPanelWindow*>(glfw_window_user_pointer(window));
+    if (!app)
+    {
+        return;
+    }
+
+    app->handle_mouse_button(button, action, mods);
+}
+
+void GlfwPanelWindow::scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    GlfwPanelWindow* app = static_cast<GlfwPanelWindow*>(glfw_window_user_pointer(window));
+    if (app)
+    {
+        app->handle_scroll(xoffset, yoffset);
+    }
+}
+
+void GlfwPanelWindow::key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+    GlfwPanelWindow* app = static_cast<GlfwPanelWindow*>(glfw_window_user_pointer(window));
+    if (app)
+    {
+        app->handle_key(key, scancode, action, mods);
+    }
+}
+
+void GlfwPanelWindow::char_callback(GLFWwindow* window, unsigned int codepoint)
+{
+    GlfwPanelWindow* app = static_cast<GlfwPanelWindow*>(glfw_window_user_pointer(window));
+    if (app)
+    {
+        app->handle_char(codepoint);
+    }
+}
+
+void GlfwPanelWindow::handle_mouse_button(int button, int action, int mods)
+{
+    if (closing) return;
+    if (!engine || !window || (action != GLFW_PRESS && action != GLFW_RELEASE))
+    {
+        return;
+    }
+
+    if (button != GLFW_MOUSE_BUTTON_LEFT)
+    {
+        int renderWidth = 0;
+        int renderHeight = 0;
+        glfw_framebuffer_size(window, renderWidth, renderHeight);
+        const UiPointerButtonInput input = glfw_pointer_button_input(window, button, action, mods, renderWidth, renderHeight);
+        ui_handle_pointer_button(
+            engine->renderer2d_scene(),
+            engine->renderer2d_font_atlas(),
+            inputState,
+            input);
+        return;
+    }
+
+    if (action == GLFW_PRESS)
+    {
+        int renderWidth = 0;
+        int renderHeight = 0;
+        glfw_framebuffer_size(window, renderWidth, renderHeight);
+        const UiPointerButtonInput input = glfw_pointer_button_input(window, button, action, mods, renderWidth, renderHeight);
+        if (input.hasPoint)
+        {
+            const bool sceneBlocksWindowAction =
+                scene_blocks_window_action(input.point);
+            const TrafficLightKind light = !sceneBlocksWindowAction ?
+                traffic_light_at(input.point) : TrafficLightKind::eNone;
+            if (light != TrafficLightKind::eNone)
+            {
+
+
+                glfw_handle_ui_pointer_button(window, *engine, inputState, button, action, mods);
+                return;
+            }
+
+            if (!sceneBlocksWindowAction &&
+                handle_window_action_press(input))
+            {
+                return;
+            }
+        }
+
+        clear_window_action();
+        glfw_handle_ui_pointer_button(window, *engine, inputState, button, action, mods);
+    }
+    else if (action == GLFW_RELEASE)
+    {
+        glfw_handle_ui_pointer_button(window, *engine, inputState, button, action, mods);
+        clear_window_action();
+    }
+}
+
+void GlfwPanelWindow::handle_scroll(double xoffset, double yoffset)
+{
+    if (closing) return;
+    if (!engine || !window)
+    {
+        return;
+    }
+
+    glfw_handle_ui_scroll(window, *engine, xoffset, yoffset);
+}
+
+void GlfwPanelWindow::handle_key(int key, int scancode, int action, int mods)
+{
+    if (closing) return;
+    (void)scancode;
+    if (!engine || !window)
+    {
+        return;
+    }
+
+    glfw_handle_ui_key(window, *engine, inputState, key, action, mods);
+
+    if (options.closeOnEscape && action == GLFW_PRESS && key == GLFW_KEY_ESCAPE)
+    {
+        set_glfw_window_should_close(window, true);
+    }
+}
+
+void GlfwPanelWindow::handle_char(unsigned int codepoint)
+{
+    if (closing) return;
+    if (!engine)
+    {
+        return;
+    }
+
+    glfw_handle_ui_char(*engine, inputState, codepoint);
+}
+
+void GlfwPanelWindow::apply_initial_size()
+{
+    if (!window || options.initialSize.x <= 0 || options.initialSize.y <= 0)
+    {
+        return;
+    }
+
+    set_size(options.initialSize.x, options.initialSize.y);
+}
+
+void GlfwPanelWindow::load_template_font()
+{
+    if (!engine ||
+        (
+        options.fontPath.empty() &&
+        options.fallbackFontPaths.empty() &&
+        options.fontProfilePath.empty()))
+    {
+        return;
+    }
+
+    Renderer2DFontAtlasLoadOptions fontOptions = {};
+    fontOptions.fontWeight = options.fontWeight;
+    fontOptions.preloadText = engine->localisation().locale_text();
+    fontOptions.requireRequestedGlyphs =
+        options.requireLocalisedGlyphs &&
+        !fontOptions.preloadText.empty();
+
+    std::filesystem::path primaryFontPath = options.fontPath;
+    fontOptions.fallbackFontPaths = options.fallbackFontPaths;
+    fontOptions.emojiFontPaths = options.emojiFontPaths;
+    std::filesystem::path fontDirectory = options.fontDirectory;
+    if (fontDirectory.empty() && !options.fontPath.empty())
+    {
+        fontDirectory = options.fontPath.parent_path();
+    }
+    if (fontDirectory.empty() && !fontOptions.fallbackFontPaths.empty())
+    {
+        fontDirectory = fontOptions.fallbackFontPaths.front().parent_path();
+    }
+    Renderer2DFontProfile fontProfile = {};
+    const bool hasFontProfile = renderer2d_load_font_profile(
+        options.fontProfilePath,
+        fontDirectory,
+        fontProfile);
+
+    auto addFallback = [&fontOptions](const std::filesystem::path& path) {
+        if (!path.empty() &&
+            std::find(fontOptions.fallbackFontPaths.begin(), fontOptions.fallbackFontPaths.end(), path) ==
+                fontOptions.fallbackFontPaths.end())
+        {
+            fontOptions.fallbackFontPaths.push_back(path);
+        }
+    };
+    if (hasFontProfile)
+    {
+        if (fontOptions.emojiFontPaths.empty()) fontOptions.emojiFontPaths = fontProfile.emojiFontCandidates;
+        if (!fontProfile.defaultFontPath.empty())
+        {
+            if (primaryFontPath.empty())
+            {
+                primaryFontPath = fontProfile.defaultFontPath;
+            }
+            else if (primaryFontPath != fontProfile.defaultFontPath)
+            {
+                addFallback(fontProfile.defaultFontPath);
+            }
+        }
+        for (const std::filesystem::path& path : fontProfile.fallbackFontPaths)
+        {
+            addFallback(path);
+        }
+    }
+    else if (!options.fontProfilePath.empty() && logger)
+    {
+        logger->warning("Panel window could not load font profile: " + vibrance::path_utf8(options.fontProfilePath));
+    }
+
+
+
+    for (const std::filesystem::path& path :
+        renderer2d_common_font_fallbacks(fontDirectory))
+    {
+        addFallback(path);
+    }
+    if (primaryFontPath.empty() && !fontOptions.fallbackFontPaths.empty())
+    {
+        primaryFontPath = fontOptions.fallbackFontPaths.front();
+        fontOptions.fallbackFontPaths.erase(fontOptions.fallbackFontPaths.begin());
+    }
+    if (options.useLocalePrimaryFont)
+    {
+        const std::filesystem::path localeFontPath = hasFontProfile ?
+            renderer2d_primary_font_for_locale(
+                fontProfile,
+                engine->localisation().locale(),
+                primaryFontPath) :
+            renderer2d_primary_font_for_locale(
+                fontDirectory,
+                engine->localisation().locale(),
+                primaryFontPath);
+        if (!localeFontPath.empty() && localeFontPath != primaryFontPath)
+        {
+            addFallback(primaryFontPath);
+            primaryFontPath = localeFontPath;
+        }
+    }
+    if (primaryFontPath.empty())
+    {
+        return;
+    }
+
+    if (engine->load_renderer2d_font(primaryFontPath, fontOptions))
+    {
+        return;
+    }
+
+    if (fontOptions.requireRequestedGlyphs)
+    {
+        fontOptions.requireRequestedGlyphs = false;
+        if (engine->load_renderer2d_font(primaryFontPath, fontOptions))
+        {
+            return;
+        }
+    }
+
+    if (logger)
+    {
+        logger->warning("Panel window could not load a font covering the active localisation text");
+    }
+}
+
+void GlfwPanelWindow::build_scene()
+{
+    if (!window || !engine)
+    {
+        return;
+    }
+
+    int renderWidth = 0;
+    int renderHeight = 0;
+    if (!glfw_framebuffer_size(window, renderWidth, renderHeight))
+    {
+        return;
+    }
+    lastRenderWidth = renderWidth;
+    lastRenderHeight = renderHeight;
+
+    Renderer2DScene& scene = engine->renderer2d_scene();
+    const Renderer2DFontAtlas& fontAtlas = engine->renderer2d_font_atlas();
+    const Localisation& localisation = engine->localisation();
+    std::optional<DisplayTransition2DComponent> retainedTransition;
+    if (const auto* transition = scene.registry().try_get<DisplayTransition2DComponent>(panelRoot))
+        retainedTransition = *transition;
+    scene.clear();
+    panelRoot = panelOutline = entt::null;
+    inputState = {};
+    trafficLightEntities.fill(entt::null);
+    trafficLightIconEntities.fill(entt::null);
+    const PanelGeometry panelGeometry = make_panel_geometry(window, renderWidth, renderHeight, options.panelInset, options.uiScale);
+    engine->renderer2d_font_atlas().set_pixel_scale(panelGeometry.scale.contentScale.x);
+    UiBuilder ui(scene, panelGeometry.scale);
+
+    ShapeStyleComponent panelStyle = options.panelStyle.value_or(UiPanelAppearance::surface_style(options.theme));
+    std::optional<ShapeStyleComponent> panelOutlineStyle;
+    if (panelStyle.outlineWidth > 0.0f && panelStyle.outlineColor.a > 0.0f)
+    {
+        panelOutlineStyle = panelStyle;
+        panelOutlineStyle->fill = Renderer2DFill::eNone;
+        panelOutlineStyle->color0 = panelOutlineStyle->color1 = glm::vec4(0.0f);
+        panelStyle.outlineWidth = 0.0f;
+    }
+
+    if (options.panelBackgroundLayersReplacePanelFill && !options.panelBackgroundLayers.empty())
+    {
+        panelStyle = make_solid_style("rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)", 0.0f, 0.0f);
+    }
+
+    entt::entity panel = scene.create_shape(
+        panelGeometry.position,
+        panelGeometry.size,
+        panelStyle,
+        options.panelPrimitive);
+    panelRoot = panel;
+    ui.set_layer(panel, -4, 0u);
+    ui.set_shape(panel, options.cornerRadius);
+    ui.set_shape_squircle(panel, options.panelSquircleAmount, options.panelSquirclePower);
+    if (options.panelShadow)
+    {
+        ShadowComponent shadow = *options.panelShadow;
+        shadow.offset = scaled_offset(shadow.offset.x, shadow.offset.y, ui.scale());
+        shadow.blurRadius = scaled_scalar(shadow.blurRadius, ui.scale());
+        shadow.spread = scaled_scalar(shadow.spread, ui.scale());
+        scene.registry().emplace_or_replace<ShadowComponent>(panel, shadow);
+    }
+    scene.enable_mask(panel, false);
+
+    std::vector<entt::entity> panelBackgroundLayerEntities;
+    if (!options.panelBackgroundLayers.empty())
+    {
+        panelBackgroundLayerEntities = ui_create_panel_background_layers(ui, panel, options.panelBackgroundLayers, -4, 0u);
+    }
+
+    entt::entity titleBar = scene.create_shape(
+        panelGeometry.position,
+        { panelGeometry.size.x, std::min(scaled_scalar(options.titleHeight, ui.scale()), panelGeometry.size.y) },
+        make_solid_style("#00000000"),
+        Renderer2DPrimitive::eRectangle);
+    ui.set_layer(titleBar, -3, 0u);
+
+    if (options.trafficLights.visible)
+    {
+        const std::array<TrafficLightKind, 3> lights {
+            TrafficLightKind::eClose,
+            TrafficLightKind::eMinimise,
+            TrafficLightKind::eMaximise
+        };
+        for (std::size_t i = 0; i < lights.size(); ++i)
+        {
+            const TrafficLightKind kind = lights[i];
+            const bool enabled = traffic_light_enabled(kind);
+            const auto themedLights = UiPanelAppearance::traffic_lights(options.theme);
+            const auto resolveColour = [](const std::string& authored, const std::string& fallback) -> const std::string& {
+                return authored.empty() ? fallback : authored;
+            };
+            const std::string color = kind == TrafficLightKind::eClose ?
+                resolveColour(options.trafficLights.closeColor, themedLights.closeColor) :
+                kind == TrafficLightKind::eMinimise ?
+                    resolveColour(options.trafficLights.minimiseColor, themedLights.minimiseColor) :
+                    resolveColour(options.trafficLights.maximiseColor, themedLights.maximiseColor);
+
+            const glm::vec4 outlineColor = renderer2d_hex_color(
+                options.trafficLights.outlineColor,
+                glm::vec4(0.0f));
+            const float outlineWidth = outlineColor.a > 0.001f ?
+                std::max(scaled_scalar(options.trafficLights.outlineWidth, ui.scale()), 0.0f) :
+                0.0f;
+            ShapeStyleComponent dotStyle = make_solid_style(
+                renderer2d_hex_color(enabled ? color : resolveColour(options.trafficLights.disabledColor, themedLights.disabledColor)),
+                outlineColor,
+                outlineWidth,
+                enabled ? 1.0f : 0.58f);
+            dotStyle.edgeSoftness = std::max(scaled_scalar(options.trafficLights.edgeSoftness, ui.scale()), 0.0f);
+            const float lightRadius = std::max(scaled_scalar(options.trafficLights.radius, ui.scale()), 1.0f);
+
+            entt::entity dot = scene.create_shape(
+                traffic_light_center(kind) - glm::vec2(lightRadius),
+                glm::vec2(lightRadius * 2.0f),
+                dotStyle,
+                Renderer2DPrimitive::eEllipse);
+            ui.set_layer(dot, 100, static_cast<uint32_t>(i), true);
+            trafficLightEntities[i] = dot;
+            scene.registry().emplace<Parent2DComponent>(dot, Parent2DComponent { panel });
+            ButtonInputComponent input {};
+            input.enabled = enabled && options.trafficLights.accessible;
+            input.onClick = [this, kind](const PointerInputEvent&) { perform_traffic_light_action(kind); };
+            scene.registry().emplace<ButtonInputComponent>(dot, std::move(input));
+            scene.registry().emplace<ButtonVisualComponent>(dot,
+                ui_fixed_colour_button_visual(dotStyle));
+            StretchDynamicsOptions stretch {};
+            stretch.enabled = false;
+            stretch.grabScale = 1.04f;
+            stretch.dragResponse = 0.10f;
+            stretch.maximumStretch = 0.035f;
+            stretch.maximumCompression = 0.02f;
+            stretch.returnResponse = 0.22f;
+            stretch.returnDampingFraction = 0.78f;
+            stretch.consumeClickAfterDrag = true;
+            ui_enable_stretch_dynamics(scene, dot, stretch);
+            scene.registry().emplace<UiLiquidControlSurface>(dot,
+                UiLiquidControlSurface { false, false, true });
+
+            if (enabled && options.trafficLights.showIconsOnHover)
+            {
+                const Media2DHandle iconHandle = traffic_light_icon(kind);
+                if (iconHandle.valid())
+                {
+                    const glm::vec2 iconSize = glm::max(
+                        scaled_size(options.trafficLights.iconSize.x, options.trafficLights.iconSize.y, ui.scale()),
+                        glm::vec2(1.0f));
+                    entt::entity icon = scene.create_media(
+                        traffic_light_center(kind) - iconSize * 0.5f,
+                        iconSize,
+                        iconHandle,
+                        Media2DFit::eContain);
+                    if (Media2DComponent* media = scene.registry().try_get<Media2DComponent>(icon))
+                    {
+                        if (options.trafficLights.matchIconTintToButton)
+                        {
+                            auto tint = renderer2d_hex_color(color);
+                            tint *= glm::vec4(0.35f, 0.35f, 0.35f, 1.0f);
+                            media->set_tint(tint);
+                            media->set_tint_as_mask(true);
+                        }
+                        else media->set_mask_tint(resolveColour(options.trafficLights.iconTint, themedLights.iconTint));
+                    }
+                    RenderLayer2DComponent& iconLayer = ui.set_layer(icon, 101, static_cast<uint32_t>(i), true);
+                    iconLayer.visible = hoveredTrafficLight != TrafficLightKind::eNone;
+                    ui.attach_aligned(icon, dot, UiAlignment::eCentre, glm::vec2(0.0f), iconSize);
+                    trafficLightIconEntities[i] = icon;
+                }
+            }
+        }
+    }
+
+    entt::entity titleText = entt::null;
+    if (options.showTitleText)
+    {
+        entt::entity titleParent = panel;
+        UiAlignment titleAlignment = options.titleAlignment;
+        glm::vec2 titleOffset = options.titleOffset;
+        if (options.titleBackgroundLayerIndex &&
+            *options.titleBackgroundLayerIndex < options.panelBackgroundLayers.size())
+        {
+            const UiPanelBackgroundLayer& titleLayer = options.panelBackgroundLayers[*options.titleBackgroundLayerIndex];
+            const glm::vec4 rect = titleLayer.rect;
+            const glm::vec2 anchorMin {
+                std::clamp(rect.x, 0.0f, 1.0f),
+                std::clamp(rect.y, 0.0f, 1.0f)
+            };
+            const glm::vec2 fixedSize {
+                titleLayer.fixedSize.x > 0.0f ? titleLayer.fixedSize.x * ui.scale().factor.x : 0.0f,
+                titleLayer.fixedSize.y > 0.0f ? titleLayer.fixedSize.y * ui.scale().factor.y : 0.0f
+            };
+            const glm::vec2 anchorMax {
+                fixedSize.x > 0.0f ? anchorMin.x : std::clamp(rect.x + rect.z, 0.0f, 1.0f),
+                fixedSize.y > 0.0f ? anchorMin.y : std::clamp(rect.y + rect.w, 0.0f, 1.0f)
+            };
+            const bool validX = fixedSize.x > 0.0f || anchorMax.x > anchorMin.x;
+            const bool validY = fixedSize.y > 0.0f || anchorMax.y > anchorMin.y;
+            if (validX && validY)
+            {
+                const float titleRowHeight = std::clamp(
+                    scaled_scalar(
+                        options.trafficLights.visible ?
+                            options.trafficLights.firstCenter.y * 2.0f :
+                            options.titleHeight,
+                        ui.scale()),
+                    1.0f,
+                    panelGeometry.size.y);
+                const float titleRowFraction = titleRowHeight / std::max(panelGeometry.size.y, 1.0f);
+                const glm::vec2 titleAnchorMax {
+                    anchorMax.x,
+                    fixedSize.y > 0.0f ?
+                        anchorMax.y :
+                        std::max(anchorMin.y, std::min(anchorMax.y, anchorMin.y + titleRowFraction))
+                };
+                const glm::vec4 titleMargin = scaled_edges(
+                    titleLayer.margin.x,
+                    titleLayer.margin.y,
+                    titleLayer.margin.z,
+                    titleLayer.margin.w,
+                    ui.scale());
+                titleParent = scene.create_shape(
+                    { 0.0f, 0.0f },
+                    glm::vec2(1.0f),
+                    make_solid_style("#00000000", "#00000000", 0.0f, 0.0f),
+                    Renderer2DPrimitive::eRectangle);
+                ui.set_layer(titleParent, -3, 1u);
+                ui.attach_stretch(
+                    titleParent,
+                    panel,
+                    anchorMin,
+                    titleAnchorMax,
+                    titleLayer.pivot,
+                    titleMargin,
+                    scaled_offset(titleLayer.offset.x, titleLayer.offset.y, ui.scale()),
+                    fixedSize);
+                titleAlignment = options.titleAlignment;
+            }
+        }
+        else
+        {
+            const bool trafficOnLeft = options.trafficLights.visible &&
+                options.trafficLights.placement == GlfwPanelWindowTrafficLightPlacement::eTopLeft;
+            const float titleX = trafficOnLeft ?
+                options.trafficLights.firstCenter.x + options.trafficLights.spacing * 3.0f + 8.0f :
+                24.0f;
+            const float anchor = ui_alignment_anchor(titleAlignment).x;
+            titleAlignment = anchor == .5f ? UiAlignment::eMiddleCentre :
+                anchor == 1.0f ? UiAlignment::eMiddleRight : UiAlignment::eMiddleLeft;
+            titleOffset += glm::vec2(
+                anchor == .5f ? 0.0f : anchor == 1.0f ? -24.0f : titleX,
+                (options.trafficLights.visible ?
+                    options.trafficLights.firstCenter.y :
+                    options.titleHeight * 0.5f) - panelGeometry.logicalPanelSize.y * 0.5f);
+        }
+
+        const float titleFontSize = std::max(options.titleFontSize, 1.0f);
+        const TextStyleComponent titleStyle = options.titleStyle.value_or(options.theme.text_style(UiPanelAppearance::titleFontWeight));
+        titleText = ui.create_aligned_text(
+            options.title,
+            fontAtlas,
+            titleParent,
+            titleAlignment,
+            titleFontSize,
+            titleStyle,
+            2,
+            0u,
+            titleOffset);
+    }
+
+    entt::entity contentRoot = scene.create_shape(
+        { 0.0f, 0.0f },
+        glm::vec2(1.0f),
+        make_solid_style("#00000000", "#00000000", 0.0f, 0.0f),
+        Renderer2DPrimitive::eRectangle);
+    ui.set_layer(contentRoot, -2, 0u);
+
+    ui.attach_fill(contentRoot, panel, options.contentMargin);
+
+    const glm::vec2 contentSize {
+        std::max(0.0f, panelGeometry.logicalPanelSize.x - options.contentMargin.x - options.contentMargin.z),
+        std::max(0.0f, panelGeometry.logicalPanelSize.y - options.contentMargin.y - options.contentMargin.w)
+    };
+    GlfwPanelWindowTemplateContext context {
+        ui,
+        scene,
+        fontAtlas,
+        localisation,
+        panel,
+        titleBar,
+        titleText,
+        contentRoot,
+        panelBackgroundLayerEntities,
+        panelGeometry.logicalSize,
+        contentSize,
+        options
+    };
+
+    if (options.buildContent)
+    {
+        options.buildContent(context);
+    }
+    else
+    {
+        build_default_content(context);
+    }
+
+    if (panelOutlineStyle)
+    {
+
+
+        panelOutlineStyle->outlineWidth = scaled_scalar(panelOutlineStyle->outlineWidth, ui.scale());
+        panelOutlineStyle->edgeSoftness = scaled_scalar(panelOutlineStyle->edgeSoftness, ui.scale());
+        const auto outline = scene.create_shape(panelGeometry.position, panelGeometry.size,
+            *panelOutlineStyle, options.panelPrimitive);
+        panelOutline = outline;
+        ui.set_layer(outline, 99, 0u, true);
+        ui.set_shape(outline, options.cornerRadius);
+        ui.set_shape_squircle(outline, options.panelSquircleAmount, options.panelSquirclePower);
+        scene.registry().emplace<InputTransparent2DComponent>(outline);
+
+
+
+    }
+
+    if (retainedTransition)
+    {
+        scene.registry().emplace_or_replace<DisplayTransition2DComponent>(panelRoot, *retainedTransition);
+        if (scene.registry().valid(panelOutline))
+            scene.registry().emplace_or_replace<DisplayTransition2DComponent>(panelOutline, *retainedTransition);
+    }
+    scene.mark_dirty();
+}
+
+void GlfwPanelWindow::build_default_content(GlfwPanelWindowTemplateContext& context)
+{
+    UiBuilder& ui = context.ui;
+    Renderer2DScene& scene = context.scene;
+
+    entt::entity card = scene.create_shape(
+        { 0.0f, 0.0f },
+        glm::vec2(1.0f),
+        make_solid_style("#111A24D8", "#FFFFFF24", 0.8f, 0.96f),
+        Renderer2DPrimitive::eSquircle);
+    ui.set_layer(card, 0, 0u);
+    ui.set_shape(card, 18.0f);
+    ui.attach_fill(card, context.contentRoot);
+    ui.set_padding(card, 20.0f, 18.0f, 20.0f, 18.0f, true);
+
+    ui.create_aligned_text(
+        "Content Slot",
+        context.fontAtlas,
+        card,
+        UiAlignment::eTopLeft,
+        18.0f,
+        panel_text_style("#F5FFFCF0"),
+        2,
+        0u,
+        { 20.0f, 18.0f });
+    ui.create_aligned_text(
+        "Attach your own builder to draw controls, panels, media, or tools here.",
+        context.fontAtlas,
+        card,
+        UiAlignment::eTopLeft,
+        13.0f,
+        panel_text_style("#AFC2C9D8"),
+        2,
+        1u,
+        { 20.0f, 48.0f });
+}
+
+void GlfwPanelWindow::load_traffic_light_icons()
+{
+    trafficLightIcons = {};
+    if (!engine || !options.trafficLights.visible)
+    {
+        return;
+    }
+
+    Media2DLoadOptions mediaOptions = {};
+
+    mediaOptions.rasterWidth = std::max(
+        16u,
+        static_cast<uint32_t>(std::round(std::max(options.trafficLights.iconSize.x, 1.0f) * 4.0f)));
+    mediaOptions.rasterHeight = std::max(
+        16u,
+        static_cast<uint32_t>(std::round(std::max(options.trafficLights.iconSize.y, 1.0f) * 4.0f)));
+    mediaOptions.premultiplyAlpha = true;
+
+    const std::array<std::vector<std::filesystem::path>, 3> candidates {
+        options.trafficLights.closeIconCandidates,
+        options.trafficLights.minimiseIconCandidates,
+        options.trafficLights.maximiseIconCandidates
+    };
+
+    for (std::size_t i = 0; i < candidates.size(); ++i)
+    {
+        for (const std::filesystem::path& path : candidates[i])
+        {
+            trafficLightIcons[i] = engine->load_media_2d(path, mediaOptions);
+            if (trafficLightIcons[i].drawable)
+            {
+                break;
+            }
+        }
+    }
+}
+
+bool GlfwPanelWindow::handle_window_action_press(const UiPointerButtonInput& input)
+{
+    if (!input.hasPoint || scene_blocks_window_action(input.point))
+    {
+        return false;
+    }
+
+    return begin_window_action(input.point);
+}
+
+bool GlfwPanelWindow::begin_window_action(glm::vec2 framebufferPoint)
+{
+    clear_window_action();
+
+    activeResizeEdges = resize_edges_at(framebufferPoint);
+    const bool resize = activeResizeEdges != eResizeNone;
+    const bool move = !resize && title_hit_test(framebufferPoint);
+    if (!resize && !move)
+    {
+        return false;
+    }
+
+    if (move)
+    {
+
+
+
+        if (begin_glfw_native_window_drag(window))
+        {
+            return true;
+        }
+    }
+
+    if (!cursor_screen_point(actionStartCursorScreen) ||
+        !glfw_window_position(window, actionStartWindowPosition.x, actionStartWindowPosition.y) ||
+        !glfw_window_size(window, actionStartWindowSize.x, actionStartWindowSize.y))
+    {
+        clear_window_action();
+        return false;
+    }
+
+    actionLastWindowPosition = actionStartWindowPosition;
+#if defined(_WIN32)
+    actionMonitor = nullptr;
+    actionMonitorCheckSeconds = -1.0;
+    nextWindowMoveSeconds = -1.0;
+#endif
+    windowPointerAction = resize ? WindowPointerAction::eResize : WindowPointerAction::eMove;
+    return true;
+}
+
+void GlfwPanelWindow::clear_window_action()
+{
+    windowPointerAction = WindowPointerAction::eNone;
+    activeResizeEdges = eResizeNone;
+}
+
+void GlfwPanelWindow::update_window_action(bool finishMove)
+{
+    if (windowPointerAction == WindowPointerAction::eNone)
+    {
+        return;
+    }
+
+    if (!finishMove && !glfw_left_mouse_pressed(window))
+    {
+        clear_window_action();
+        return;
+    }
+
+#if defined(_WIN32)
+    const double now = glfw_time_seconds();
+    if (windowPointerAction == WindowPointerAction::eMove)
+    {
+        GlfwPanelWindowWin32Drag::update_frame_rate(*this, now);
+
+
+        if (!finishMove && now < nextWindowMoveSeconds) return;
+    }
+#else
+    (void)finishMove;
+#endif
+
+    glm::vec2 currentScreen(0.0f);
+    if (!cursor_screen_point(currentScreen))
+    {
+        return;
+    }
+
+    const glm::vec2 delta = currentScreen - actionStartCursorScreen;
+    if (windowPointerAction == WindowPointerAction::eMove)
+    {
+        const glm::ivec2 position {
+            actionStartWindowPosition.x + static_cast<int>(std::round(delta.x)),
+            actionStartWindowPosition.y + static_cast<int>(std::round(delta.y)) };
+        if (position != actionLastWindowPosition)
+        {
+#if defined(_WIN32)
+            const double interval = 1.0 / static_cast<double>(windowMoveFrameRate);
+            if (nextWindowMoveSeconds < 0.0 || now - nextWindowMoveSeconds > 2.0 * interval)
+                nextWindowMoveSeconds = now + interval;
+            else
+            {
+                nextWindowMoveSeconds += interval;
+                if (nextWindowMoveSeconds <= now)
+                    nextWindowMoveSeconds += (std::floor((now - nextWindowMoveSeconds) / interval) + 1.0) * interval;
+            }
+#endif
+
+
+            actionLastWindowPosition = position;
+            set_glfw_window_position(window, position.x, position.y);
+        }
+        return;
+    }
+
+    if (windowPointerAction != WindowPointerAction::eResize)
+    {
+        return;
+    }
+
+    int newX = actionStartWindowPosition.x;
+    int newY = actionStartWindowPosition.y;
+    int newWidth = actionStartWindowSize.x;
+    int newHeight = actionStartWindowSize.y;
+    const int dx = static_cast<int>(std::round(delta.x));
+    const int dy = static_cast<int>(std::round(delta.y));
+    const int minWidth = option_min(options.minSize.x);
+    const int minHeight = option_min(options.minSize.y);
+    const int maxWidth = option_max(options.maxSize.x, minWidth);
+    const int maxHeight = option_max(options.maxSize.y, minHeight);
+
+    if ((activeResizeEdges & eResizeLeft) != 0u)
+    {
+        newWidth = std::clamp(actionStartWindowSize.x - dx, minWidth, maxWidth);
+        newX = actionStartWindowPosition.x + actionStartWindowSize.x - newWidth;
+    }
+    if ((activeResizeEdges & eResizeRight) != 0u)
+    {
+        newWidth = std::clamp(actionStartWindowSize.x + dx, minWidth, maxWidth);
+    }
+    if ((activeResizeEdges & eResizeTop) != 0u)
+    {
+        newHeight = std::clamp(actionStartWindowSize.y - dy, minHeight, maxHeight);
+        newY = actionStartWindowPosition.y + actionStartWindowSize.y - newHeight;
+    }
+    if ((activeResizeEdges & eResizeBottom) != 0u)
+    {
+        newHeight = std::clamp(actionStartWindowSize.y + dy, minHeight, maxHeight);
+    }
+
+    set_glfw_window_position(window, newX, newY);
+    set_glfw_window_size(window, newWidth, newHeight);
+}
+
+void GlfwPanelWindow::update_hover_cursor()
+{
+    if (!window)
+    {
+        return;
+    }
+
+    if (windowPointerAction == WindowPointerAction::eResize)
+    {
+        set_hovered_traffic_light(TrafficLightKind::eNone);
+        set_glfw_cursor_for_kind(window, cursors, cursor_for_resize_edges(activeResizeEdges));
+        return;
+    }
+    if (windowPointerAction == WindowPointerAction::eMove)
+    {
+        set_hovered_traffic_light(TrafficLightKind::eNone);
+        set_glfw_cursor_for_kind(window, cursors, UiCursorKind::ePointer);
+        return;
+    }
+
+    glm::vec2 point(0.0f);
+    if (!cursor_framebuffer_point(point))
+    {
+        ui_update_hover_regions(engine->renderer2d_scene(), false, {}, glfw_time_seconds());
+        ui_update_input_hover(
+            engine->renderer2d_scene(),
+            engine->renderer2d_font_atlas(),
+            inputState,
+            false,
+            glm::vec2(0.0f));
+        set_hovered_traffic_light(TrafficLightKind::eNone);
+        clear_glfw_cursor(window);
+        return;
+    }
+
+    update_hover_cursor_at(point);
+}
+
+void GlfwPanelWindow::update_hover_cursor_at(glm::vec2 point)
+{
+    Renderer2DScene& scene = engine->renderer2d_scene();
+
+
+    ui_update_hover_regions(scene, true, point, glfw_time_seconds());
+#if defined(__APPLE__)
+    if (glfw_left_mouse_pressed(window))
+    {
+        if (const auto cursor = macos_captured_cursor_kind(scene.registry(), inputState))
+        {
+            ui_update_input_hover(scene, engine->renderer2d_font_atlas(), inputState, true, point);
+            set_hovered_traffic_light(TrafficLightKind::eNone);
+            set_glfw_cursor_for_kind(window, cursors, *cursor);
+            return;
+        }
+    }
+#endif
+    const auto readHit = [&] {
+        const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eHoverHitTest);
+        return scene.entity_at(point);
+    };
+    entt::entity hit = readHit();
+    const uint64_t hitGeneration = scene.frame_generation();
+    const bool blocksWindowAction = [&] {
+        const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eWindowBlockHitTests);
+        return ui_hit_blocks_window_action(scene, inputState, point, hit);
+    }();
+    const TrafficLightKind light = !blocksWindowAction ?
+        traffic_light_at(point) : TrafficLightKind::eNone;
+    if (light != TrafficLightKind::eNone)
+    {
+        const std::size_t lightIndex =
+            light == TrafficLightKind::eClose ? 0u :
+            light == TrafficLightKind::eMinimise ? 1u : 2u;
+        ui_update_input_hover_from_hit(
+            scene,
+            engine->renderer2d_font_atlas(),
+            inputState,
+            true,
+            point,
+            trafficLightEntities[lightIndex]);
+        set_hovered_traffic_light(light);
+        set_glfw_cursor_for_kind(
+            window,
+            cursors,
+            traffic_light_enabled(light) ? UiCursorKind::ePointer : UiCursorKind::eUnavailable);
+        return;
+    }
+    const uint32_t edges = resize_edges_at(point);
+    if (!blocksWindowAction && edges != eResizeNone)
+    {
+        set_hovered_traffic_light(TrafficLightKind::eNone);
+        ui_update_input_hover(
+            engine->renderer2d_scene(),
+            engine->renderer2d_font_atlas(),
+            inputState,
+            false,
+            glm::vec2(0.0f));
+        set_glfw_cursor_for_kind(window, cursors, cursor_for_resize_edges(edges));
+        return;
+    }
+    if (!blocksWindowAction && title_hit_test(point))
+    {
+        set_hovered_traffic_light(TrafficLightKind::eNone);
+        ui_update_input_hover(
+            engine->renderer2d_scene(),
+            engine->renderer2d_font_atlas(),
+            inputState,
+            false,
+            glm::vec2(0.0f));
+        set_glfw_cursor_for_kind(window, cursors, UiCursorKind::ePointer);
+        return;
+    }
+
+    UiHoverResult hover;
+    {
+
+
+        if (scene.frame_generation() != hitGeneration)
+            hit = readHit();
+        const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eInputHover);
+        hover = ui_update_input_hover_from_hit(
+            scene,
+            engine->renderer2d_font_atlas(),
+            inputState,
+            true,
+            point,
+            hit);
+    }
+
+
+
+
+    TrafficLightKind hoveredLight = TrafficLightKind::eNone;
+    for (std::size_t index = 0; index < trafficLightEntities.size(); ++index)
+        if (inputState.hoveredButton == trafficLightEntities[index] && inputState.hoveredButton != entt::null)
+            hoveredLight = index == 0 ? TrafficLightKind::eClose :
+                index == 1 ? TrafficLightKind::eMinimise : TrafficLightKind::eMaximise;
+    set_hovered_traffic_light(hoveredLight);
+    if (hover.cursor != UiCursorKind::eDefault)
+    {
+        set_glfw_cursor_for_kind(window, cursors, hover.cursor);
+        return;
+    }
+
+    if (!blocksWindowAction && edges != eResizeNone)
+    {
+        set_glfw_cursor_for_kind(window, cursors, cursor_for_resize_edges(edges));
+    }
+    else if (!blocksWindowAction && title_hit_test(point))
+    {
+        set_glfw_cursor_for_kind(window, cursors, UiCursorKind::ePointer);
+    }
+    else
+    {
+        clear_glfw_cursor(window);
+    }
+}
+
+bool GlfwPanelWindow::cursor_framebuffer_point(glm::vec2& point) const
+{
+    int renderWidth = 0;
+    int renderHeight = 0;
+    if (!glfw_framebuffer_size(window, renderWidth, renderHeight))
+    {
+        return false;
+    }
+    return glfw_cursor_framebuffer_point(window, renderWidth, renderHeight, point);
+}
+
+bool GlfwPanelWindow::cursor_screen_point(glm::vec2& point) const
+{
+    glm::vec2 cursorPoint(0.0f);
+    int windowX = 0;
+    int windowY = 0;
+    if (!glfw_cursor_window_point(window, cursorPoint) || !glfw_window_position(window, windowX, windowY))
+    {
+        return false;
+    }
+
+    point = {
+        static_cast<float>(windowX) + cursorPoint.x,
+        static_cast<float>(windowY) + cursorPoint.y
+    };
+    return true;
+}
+
+uint32_t GlfwPanelWindow::resize_edges_at(glm::vec2 windowPoint) const
+{
+    if (!options.resizable || glfw_window_maximized(window) || trafficLightMaximiseActive)
+    {
+        return eResizeNone;
+    }
+
+    PanelGeometry panelGeometry = {};
+    if (!panel_geometry_for_window(window, options.panelInset, options.uiScale, panelGeometry))
+    {
+        return eResizeNone;
+    }
+
+    const float panelX = panelGeometry.position.x;
+    const float panelY = panelGeometry.position.y;
+    const float panelWidth = panelGeometry.size.x;
+    const float panelHeight = panelGeometry.size.y;
+    const float panelRight = panelX + panelWidth;
+    const float panelBottom = panelY + panelHeight;
+    const float thickness = std::max(scaled_scalar(options.resizeEdgeThickness, panelGeometry.scale), 1.0f);
+    const float halfThickness = thickness * 0.5f;
+
+    if (windowPoint.x < panelX - halfThickness ||
+        windowPoint.x > panelRight + halfThickness ||
+        windowPoint.y < panelY - halfThickness ||
+        windowPoint.y > panelBottom + halfThickness)
+    {
+        return eResizeNone;
+    }
+
+    uint32_t edges = eResizeNone;
+    if (windowPoint.x >= panelX - halfThickness && windowPoint.x <= panelX + halfThickness)
+    {
+        edges |= eResizeLeft;
+    }
+    else if (windowPoint.x >= panelRight - halfThickness && windowPoint.x <= panelRight + halfThickness)
+    {
+        edges |= eResizeRight;
+    }
+
+    if (windowPoint.y >= panelY - halfThickness && windowPoint.y <= panelY + halfThickness)
+    {
+        edges |= eResizeTop;
+    }
+    else if (windowPoint.y >= panelBottom - halfThickness && windowPoint.y <= panelBottom + halfThickness)
+    {
+        edges |= eResizeBottom;
+    }
+    return edges;
+}
+
+bool GlfwPanelWindow::title_hit_test(glm::vec2 windowPoint) const
+{
+    if (!options.draggable)
+    {
+        return false;
+    }
+
+    PanelGeometry panelGeometry = {};
+    if (!panel_geometry_for_window(window, options.panelInset, options.uiScale, panelGeometry))
+    {
+        return false;
+    }
+
+    const float panelX = panelGeometry.position.x;
+    const float panelY = panelGeometry.position.y;
+    const float panelWidth = panelGeometry.size.x;
+    const float panelHeight = panelGeometry.size.y;
+    const float dragHeight = options.topDragHeight.value_or(
+        logical_title_height(options));
+    if (dragHeight <= 0.0f)
+    {
+        return false;
+    }
+    const float titleBottom = panelY +
+        std::min(
+            scaled_scalar(dragHeight, panelGeometry.scale),
+            panelHeight);
+    return windowPoint.x >= panelX &&
+        windowPoint.x <= panelX + panelWidth &&
+        windowPoint.y >= panelY &&
+        windowPoint.y <= titleBottom;
+}
+
+bool GlfwPanelWindow::scene_blocks_window_action(glm::vec2 framebufferPoint) const
+{
+    const PanelUiTimingScope timing(panel_ui_diagnostics(this), PanelUiCpuPhase::eWindowBlockHitTests);
+    if (!engine)
+    {
+        return true;
+    }
+
+    Renderer2DScene& scene = engine->renderer2d_scene();
+    if (ui_pointer_capture_blocks_window_action(inputState))
+        return true;
+    return ui_hit_blocks_window_action(scene, inputState, framebufferPoint,
+        scene.entity_at(framebufferPoint));
+}
+
+GlfwPanelWindow::TrafficLightKind GlfwPanelWindow::traffic_light_at(glm::vec2 windowPoint) const
+{
+    if (!options.trafficLights.visible || !options.trafficLights.accessible)
+    {
+        return TrafficLightKind::eNone;
+    }
+
+    PanelGeometry panelGeometry = {};
+    if (!panel_geometry_for_window(window, options.panelInset, options.uiScale, panelGeometry))
+    {
+        return TrafficLightKind::eNone;
+    }
+
+    const std::array<TrafficLightKind, 3> lights {
+        TrafficLightKind::eClose,
+        TrafficLightKind::eMinimise,
+        TrafficLightKind::eMaximise
+    };
+    const float hitRadius = std::max(
+        scaled_scalar(options.trafficLights.radius + 4.0f, panelGeometry.scale),
+        scaled_scalar(10.0f, panelGeometry.scale));
+    for (std::size_t i = 0; i < lights.size(); ++i)
+    {
+        const glm::vec2 center = traffic_light_center_at_index(
+            options.trafficLights,
+            static_cast<int>(i),
+            panelGeometry);
+        const glm::vec2 delta = windowPoint - center;
+        if (glm::dot(delta, delta) <= hitRadius * hitRadius)
+        {
+            return lights[i];
+        }
+    }
+    return TrafficLightKind::eNone;
+}
+
+glm::vec2 GlfwPanelWindow::traffic_light_center(TrafficLightKind kind) const
+{
+    PanelGeometry panelGeometry = {};
+    if (!panel_geometry_for_window(window, options.panelInset, options.uiScale, panelGeometry))
+    {
+        return glm::vec2(0.0f);
+    }
+
+    const int index = kind == TrafficLightKind::eClose ?
+        0 :
+        kind == TrafficLightKind::eMinimise ?
+            1 :
+            2;
+
+    auto centre = traffic_light_center_at_index(options.trafficLights, index, panelGeometry);
+    if (engine && ui_layout_is_rtl(engine->renderer2d_scene().registry()))
+        centre.x = panelGeometry.position.x * 2.0f + panelGeometry.size.x - centre.x;
+    return centre;
+}
+
+bool GlfwPanelWindow::traffic_light_enabled(TrafficLightKind kind) const
+{
+    if (!options.trafficLights.visible || !options.trafficLights.accessible)
+    {
+        return false;
+    }
+
+    switch (kind)
+    {
+    case TrafficLightKind::eClose:
+        return true;
+    case TrafficLightKind::eMinimise:
+        return options.trafficLights.minimiseEnabled;
+    case TrafficLightKind::eMaximise:
+        return options.trafficLights.maximiseEnabled;
+    default:
+        return false;
+    }
+}
+
+Media2DHandle GlfwPanelWindow::traffic_light_icon(TrafficLightKind kind) const
+{
+    switch (kind)
+    {
+    case TrafficLightKind::eClose:
+        return trafficLightIcons[0];
+    case TrafficLightKind::eMinimise:
+        return trafficLightIcons[1];
+    case TrafficLightKind::eMaximise:
+        return trafficLightIcons[2];
+    default:
+        return {};
+    }
+}
+
+void GlfwPanelWindow::set_hovered_traffic_light(TrafficLightKind kind)
+{
+    if (hoveredTrafficLight == kind)
+    {
+        return;
+    }
+
+    const bool previouslyVisible = hoveredTrafficLight != TrafficLightKind::eNone;
+    hoveredTrafficLight = kind;
+    const bool visible = kind != TrafficLightKind::eNone;
+
+
+    if (!engine || previouslyVisible == visible) return;
+
+    Renderer2DScene& scene = engine->renderer2d_scene();
+    entt::registry& registry = scene.registry();
+    for (const entt::entity icon : trafficLightIconEntities)
+    {
+        if (icon == entt::null || !registry.valid(icon))
+        {
+            continue;
+        }
+
+        RenderLayer2DComponent* layer = registry.try_get<RenderLayer2DComponent>(icon);
+        if (!layer || layer->visible == visible)
+        {
+            continue;
+        }
+
+        layer->visible = visible;
+        scene.mark_dirty(icon);
+    }
+}
+
+void GlfwPanelWindow::perform_traffic_light_action(TrafficLightKind kind)
+{
+    if (!traffic_light_enabled(kind))
+    {
+        return;
+    }
+
+    switch (kind)
+    {
+    case TrafficLightKind::eClose:
+        set_glfw_window_should_close(window, true);
+        break;
+    case TrafficLightKind::eMinimise:
+        iconify_glfw_window(window);
+        break;
+    case TrafficLightKind::eMaximise:
+        if (trafficLightMaximiseActive)
+        {
+            restore_traffic_light_maximise();
+        }
+        else
+        {
+            if (glfw_window_maximized(window))
+            {
+                restore_glfw_window(window);
+                break;
+            }
+
+            int windowX = 0;
+            int windowY = 0;
+            int windowWidth = 0;
+            int windowHeight = 0;
+            if (!glfw_window_position(window, windowX, windowY) ||
+                !glfw_window_size(window, windowWidth, windowHeight))
+            {
+                break;
+            }
+            trafficLightRestorePosition = { windowX, windowY };
+            trafficLightRestoreSize = { windowWidth, windowHeight };
+            activeTrafficLightMaximiseMode = options.trafficLights.maximiseMode;
+
+            if (activeTrafficLightMaximiseMode ==
+                GlfwPanelWindowMaximiseMode::eFullscreen)
+            {
+                if (!set_glfw_window_fullscreen(window, true))
+                {
+                    break;
+                }
+                trafficLightMaximiseActive = true;
+                break;
+            }
+
+            glm::ivec2 workPosition(0);
+            glm::ivec2 workSize(0);
+            if (!glfw_window_monitor_work_area(window, workPosition, workSize))
+            {
+                break;
+            }
+            if (activeTrafficLightMaximiseMode ==
+                GlfwPanelWindowMaximiseMode::eWidthAndHeight)
+            {
+                maximize_glfw_window(window);
+            }
+            else if (activeTrafficLightMaximiseMode ==
+                GlfwPanelWindowMaximiseMode::eWidth)
+            {
+                set_glfw_window_position(window, workPosition.x, windowY);
+                set_glfw_window_size(window, workSize.x, windowHeight);
+            }
+            else
+            {
+                set_glfw_window_position(window, windowX, workPosition.y);
+                set_glfw_window_size(window, windowWidth, workSize.y);
+            }
+            trafficLightMaximiseActive = true;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+void GlfwPanelWindow::restore_traffic_light_maximise()
+{
+    if (!window || !trafficLightMaximiseActive)
+    {
+        return;
+    }
+
+    if (activeTrafficLightMaximiseMode ==
+        GlfwPanelWindowMaximiseMode::eFullscreen)
+    {
+        set_glfw_window_fullscreen(
+            window,
+            false,
+            trafficLightRestorePosition,
+            trafficLightRestoreSize);
+    }
+    else
+    {
+        if (glfw_window_maximized(window))
+        {
+            restore_glfw_window(window);
+        }
+        set_glfw_window_position(
+            window,
+            trafficLightRestorePosition.x,
+            trafficLightRestorePosition.y);
+        set_glfw_window_size(
+            window,
+            trafficLightRestoreSize.x,
+            trafficLightRestoreSize.y);
+    }
+    trafficLightMaximiseActive = false;
+}
+
+UiCursorKind GlfwPanelWindow::cursor_for_resize_edges(uint32_t edges) const
+{
+    const bool left = (edges & eResizeLeft) != 0u;
+    const bool right = (edges & eResizeRight) != 0u;
+    const bool top = (edges & eResizeTop) != 0u;
+    const bool bottom = (edges & eResizeBottom) != 0u;
+
+    if ((left && top) || (right && bottom))
+    {
+        return UiCursorKind::eResizeNwse;
+    }
+    if ((right && top) || (left && bottom))
+    {
+        return UiCursorKind::eResizeNesw;
+    }
+    if (left || right)
+    {
+        return UiCursorKind::eResizeEw;
+    }
+    if (top || bottom)
+    {
+        return UiCursorKind::eResizeNs;
+    }
+    return UiCursorKind::eDefault;
+}
+
+GlfwPanelWindowHost::GlfwPanelWindowHost(GlfwPanelWindowHostOptions options) :
+    hostOptions(std::move(options))
+{
+}
+
+GlfwPanelWindowHost::~GlfwPanelWindowHost()
+{
+    close();
+}
+
+void GlfwPanelWindowHost::set_options(GlfwPanelWindowHostOptions options)
+{
+    const bool wasOpen = is_open();
+    if (wasOpen)
+    {
+        close();
+    }
+    hostOptions = std::move(options);
+    if (wasOpen)
+    {
+        request_open();
+    }
+}
+
+const GlfwPanelWindowHostOptions& GlfwPanelWindowHost::options() const
+{
+    return hostOptions;
+}
+
+void GlfwPanelWindowHost::request_open()
+{
+    openRequested = true;
+}
+
+bool GlfwPanelWindowHost::open()
+{
+    openRequested = false;
+    if (hostedPanel && !hostedPanel->should_close())
+    {
+        return true;
+    }
+
+    close();
+
+    GlfwWindowPositionOptions positioning =
+        hostOptions.positioning.value_or(GlfwWindowPositionOptions {});
+    if (hostOptions.fitToWorkArea)
+    {
+        positioning.margins = glm::max(
+            positioning.margins,
+            hostOptions.workAreaMargins);
+    }
+    glm::ivec2 requestedSize {
+        std::max(hostOptions.width, 1),
+        std::max(hostOptions.height, 1)
+    };
+    if (hostOptions.fitToWorkArea)
+    {
+        if (const std::optional<glm::ivec2> fitted =
+                resolve_glfw_window_size(requestedSize, positioning))
+        {
+            requestedSize = *fitted;
+        }
+    }
+
+    GlfwWindowCreateInfo windowCreateInfo = {};
+    windowCreateInfo.width = requestedSize.x;
+    windowCreateInfo.height = requestedSize.y;
+    windowCreateInfo.name = hostOptions.title.c_str();
+    windowCreateInfo.transparentFramebuffer = hostOptions.transparentFramebuffer;
+    windowCreateInfo.windowsCompositionSurface =
+        hostOptions.transparentFramebuffer &&
+        hostOptions.presentationBackend ==
+            PresentationBackend::eWindowsCompositionD3D11;
+    windowCreateInfo.decorated = hostOptions.decorated;
+    windowCreateInfo.alwaysOnTop = hostOptions.alwaysOnTop;
+    windowCreateInfo.focusOnShow = hostOptions.focusOnShow;
+    windowCreateInfo.showInTaskbar = hostOptions.showInTaskbar;
+    windowCreateInfo.showInAltTab = hostOptions.showInAltTab;
+    if (hostOptions.positioning)
+    {
+        windowCreateInfo.position = resolve_glfw_window_position(
+            requestedSize,
+            positioning);
+    }
+    if (!windowCreateInfo.position && hostOptions.hasInitialPosition)
+    {
+        windowCreateInfo.position = { hostOptions.x, hostOptions.y };
+    }
+
+    hostedWindow = build_glfw_window(windowCreateInfo);
+    if (!hostedWindow)
+    {
+        if (Logger* logger = Logger::fetch_logger())
+        {
+            logger->error("Panel window host could not create a GLFW window.");
+        }
+        return false;
+    }
+
+    try
+    {
+        hostedEngine = build_engine_for_window();
+        if (!hostedEngine || !hostedEngine->ready())
+        {
+            Logger::fetch_logger()->error(
+                "Panel window host renderer initialisation did not complete.");
+            close();
+            return false;
+        }
+
+        hostedPanel = std::make_unique<GlfwPanelWindow>(
+            hostedWindow,
+            hostedEngine,
+            make_template_options());
+    }
+    catch (const std::exception& error)
+    {
+        Logger::fetch_logger()->error(
+            std::string("Panel window host could not initialise: ") + error.what());
+        close();
+        return false;
+    }
+    catch (...)
+    {
+        Logger::fetch_logger()->error(
+            "Panel window host could not initialise: unknown exception.");
+        close();
+        return false;
+    }
+    return true;
+}
+
+void GlfwPanelWindowHost::close()
+{
+    hostedPanel.reset();
+    delete hostedEngine;
+    hostedEngine = nullptr;
+    if (hostedWindow)
+    {
+        destroy_glfw_window(hostedWindow);
+        hostedWindow = nullptr;
+    }
+    openRequested = false;
+}
+
+void GlfwPanelWindowHost::request_close()
+{
+    if (hostedPanel) hostedPanel->request_close();
+}
+
+bool GlfwPanelWindowHost::is_closing() const
+{
+    return hostedPanel && hostedPanel->is_closing();
+}
+
+bool GlfwPanelWindowHost::close_ready()
+{
+    return hostedPanel && hostedPanel->close_ready();
+}
+
+void GlfwPanelWindowHost::tick()
+{
+    if (openRequested)
+    {
+        open();
+    }
+    if (!hostedPanel)
+    {
+        return;
+    }
+    if (hostedPanel->is_closing())
+    {
+        set_glfw_window_should_close(hostedWindow, false);
+        if (!hostedPanel->closeAwaitingPresentation) hostedPanel->tick();
+        if (!hostOptions.deferCloseToOwner && hostedPanel->close_ready()) close();
+        return;
+    }
+    if (hostedPanel->should_close())
+    {
+        if (!hostOptions.deferCloseToOwner)
+        {
+            if (hostedPanel->template_options().closingTransition) request_close();
+            else close();
+        }
+        return;
+    }
+    hostedPanel->tick();
+    if (hostedPanel && hostedPanel->should_close())
+    {
+        if (!hostOptions.deferCloseToOwner)
+        {
+            if (hostedPanel->template_options().closingTransition) request_close();
+            else close();
+        }
+    }
+}
+
+bool GlfwPanelWindowHost::is_open() const
+{
+    return hostedPanel != nullptr;
+}
+
+bool GlfwPanelWindowHost::should_close() const
+{
+    return hostedPanel && hostedPanel->should_close();
+}
+
+bool GlfwPanelWindowHost::refresh_template()
+{
+    if (!hostedPanel || !hostedEngine || hostedPanel->is_closing())
+    {
+        return false;
+    }
+    hostedPanel->set_template_options(make_template_options());
+    return true;
+}
+
+bool GlfwPanelWindowHost::is_hovered() const
+{
+    return hostedPanel && hostedPanel->is_hovered();
+}
+
+GLFWwindow* GlfwPanelWindowHost::window() const
+{
+    return hostedWindow;
+}
+
+Engine* GlfwPanelWindowHost::engine() const
+{
+    return hostedEngine;
+}
+
+GlfwPanelWindow* GlfwPanelWindowHost::panel() const
+{
+    return hostedPanel.get();
+}
+
+Engine* GlfwPanelWindowHost::build_engine_for_window()
+{
+    if (!hostedWindow)
+    {
+        return nullptr;
+    }
+
+    int framebufferWidth = 0;
+    int framebufferHeight = 0;
+    if (!glfw_framebuffer_size(hostedWindow, framebufferWidth, framebufferHeight))
+    {
+        return nullptr;
+    }
+
+    uint32_t glfwExtensionCount = 0;
+    const char** glfwExtensions = glfw_required_instance_extensions(glfwExtensionCount);
+
+    EngineCreateInfo engineCreateInfo = {};
+    engineCreateInfo.applicationName = hostOptions.title.c_str();
+    engineCreateInfo.framebufferWidth = static_cast<uint32_t>(framebufferWidth);
+    engineCreateInfo.framebufferHeight = static_cast<uint32_t>(framebufferHeight);
+    engineCreateInfo.maxRenderPixels = hostOptions.maxRenderPixels;
+    engineCreateInfo.msaaSamples = hostOptions.msaaSamples;
+    engineCreateInfo.presentMode = hostOptions.presentMode;
+    engineCreateInfo.renderBackend = hostOptions.renderBackend;
+    engineCreateInfo.presentationBackend = hostOptions.presentationBackend;
+    engineCreateInfo.targetFrameRate = hostOptions.targetFrameRate;
+    engineCreateInfo.instanceExtensionCount = glfwExtensionCount;
+    engineCreateInfo.instanceExtensions = glfwExtensions;
+    engineCreateInfo.surfaceUserData = hostedWindow;
+    engineCreateInfo.nativeWindowHandle = glfw_native_window_handle(hostedWindow);
+    engineCreateInfo.createSurface = vibrance_glfw_create_surface;
+    engineCreateInfo.transparentFramebuffer = hostOptions.transparentFramebuffer;
+    engineCreateInfo.enableAudio = hostOptions.enableAudio;
+    if (hostOptions.configureEngine)
+    {
+        hostOptions.configureEngine(engineCreateInfo);
+    }
+    return new Engine(engineCreateInfo);
+}
+
+GlfwPanelWindowTemplateOptions GlfwPanelWindowHost::make_template_options()
+{
+    GlfwPanelWindowTemplateOptions options = {};
+    if (hostedEngine && hostOptions.makeTemplateOptions)
+    {
+        options = hostOptions.makeTemplateOptions(*hostedEngine);
+    }
+    if (hostOptions.topDragHeight)
+    {
+        options.topDragHeight = std::max(
+            *hostOptions.topDragHeight,
+            0.0f);
+        options.draggable = *options.topDragHeight > 0.0f;
+    }
+    return options;
+}

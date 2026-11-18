@@ -1,0 +1,274 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#include <vibranceUI/engine.h>
+#include <vibranceUI/renderer/dispatch_bounds.h>
+
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <string>
+#include <string_view>
+
+namespace
+{
+    bool expect(bool condition, std::string_view message)
+    {
+        if (!condition)
+        {
+            std::cerr << "simple UI builder test failed: "
+                      << message << '\n';
+        }
+        return condition;
+    }
+
+    bool close(float left, float right)
+    {
+        return std::abs(left - right) <= 0.001f;
+    }
+}
+
+int main()
+{
+    Renderer2DScene scene;
+    LayoutScale scale = {};
+    scale.factor = { 2.0f, 3.0f };
+    scale.contentScale = { 2.0f, 3.0f };
+    scale.logicalSize = { 400.0f, 240.0f };
+    UiBuilder ui(scene, scale);
+
+    bool passed = true;
+    passed &= expect(renderer2d_dispatch_axis_extent(5u, 9u, 100u) == 9u,
+        "text shader extent must stop at the clipping edge, not the workgroup edge");
+    passed &= expect(renderer2d_dispatch_axis_extent(95u, 9u, 100u) == 5u &&
+        renderer2d_dispatch_axis_extent(100u, 9u, 100u) == 0u,
+        "text shader extent must respect the render surface");
+
+
+
+    passed &= expect(renderer2d_dispatch_axis_coverage(5u, 9u, 100u) == 16u,
+        "unaligned scrollbar dispatches must retain their trailing workgroup pixels");
+    for (uint32_t origin = 0u; origin < 32u; ++origin)
+    {
+        for (uint32_t length = 1u; length <= 65u; ++length)
+        {
+            for (uint32_t surfaceLength : { 37u, 100u })
+            {
+                const uint32_t coverage = renderer2d_dispatch_axis_coverage(
+                    origin, length, surfaceLength);
+                const uint32_t invocationCount = ((length + 7u) / 8u) * 8u;
+                const uint32_t exact = renderer2d_dispatch_axis_extent(origin, length, surfaceLength);
+                for (uint32_t invocation = 0u; invocation < invocationCount; ++invocation)
+                {
+                    passed &= expect((invocation < exact) ==
+                        (invocation < length && origin + invocation < surfaceLength),
+                        "text must reject every invocation outside its exact clip");
+                    if (origin + invocation < surfaceLength)
+                    {
+                        passed &= expect(invocation < coverage,
+                            "clear/damage bounds must cover every on-screen GPU invocation");
+                    }
+                }
+                passed &= expect(origin + coverage <= surfaceLength,
+                    "dispatch coverage must remain within the render surface");
+            }
+        }
+    }
+    passed &= expect(renderer2d_dispatch_axis_coverage(5u, 0u, 100u) == 0u &&
+        renderer2d_dispatch_axis_coverage(100u, 8u, 100u) == 0u,
+        "empty and offscreen dispatches must not add damage");
+    const entt::entity root = ui.root(-2, 4u);
+    passed &= expect(
+        root != entt::null && scene.registry().valid(root),
+        "root should create a valid transparent layout entity");
+
+    const entt::entity card = ui.block("#223344FF", 12.0f);
+    ui.place(card)
+        .inside(root)
+        .at(UiAlignment::eCenter)
+        .size(100.0f, 50.0f)
+        .offset(10.0f, -5.0f)
+        .padding(glm::vec4(4.0f, 5.0f, 6.0f, 7.0f))
+        .layer(3, 8u, true);
+
+    const entt::registry& registry = scene.registry();
+    const Parent2DComponent& parent =
+        registry.get<Parent2DComponent>(card);
+    const Layout2DComponent& layout =
+        registry.get<Layout2DComponent>(card);
+    const LayoutRect2DComponent& content =
+        registry.get<LayoutRect2DComponent>(card);
+    const ShapeComponent& shape = registry.get<ShapeComponent>(card);
+    const RenderLayer2DComponent& layer =
+        registry.get<RenderLayer2DComponent>(card);
+
+    passed &= expect(parent.parent == root, "inside should assign the parent");
+    passed &= expect(
+        close(layout.anchorMin.x, 0.5f) &&
+            close(layout.anchorMin.y, 0.5f) &&
+            close(layout.pivot.x, 0.5f) &&
+            close(layout.pivot.y, 0.5f),
+        "at should assign matching center anchor and pivot");
+    passed &= expect(
+        close(layout.size.x, 200.0f) &&
+            close(layout.size.y, 150.0f),
+        "size should convert logical dimensions once");
+    passed &= expect(
+        close(layout.offset.x, 20.0f) &&
+            close(layout.offset.y, -15.0f),
+        "offset should convert logical coordinates once");
+    passed &= expect(
+        close(content.padding.x, 8.0f) &&
+            close(content.padding.y, 15.0f) &&
+            close(content.padding.z, 12.0f) &&
+            close(content.padding.w, 21.0f),
+        "padding should preserve per-edge DPI scaling");
+    passed &= expect(
+        close(shape.cornerRadius, 24.0f),
+        "block corner radius should use logical pixels");
+    passed &= expect(
+        layer.layer == 3 && layer.order == 8u && layer.alwaysOnTop,
+        "layer should set stacking in one call");
+
+    const entt::entity group = ui.layout_group(1, 6u);
+    ui.place(group)
+        .inside(root)
+        .at(UiAlignment::eCenter)
+        .size(120.0f, 90.0f);
+    const entt::entity groupedChild = ui.block("#FFFFFFFF");
+    ui.place(groupedChild)
+        .inside(group)
+        .at(UiAlignment::eBottomCenter)
+        .size(100.0f, 60.0f);
+    const Layout2DComponent& groupLayout =
+        registry.get<Layout2DComponent>(group);
+    const Layout2DComponent& groupedChildLayout =
+        registry.get<Layout2DComponent>(groupedChild);
+    passed &= expect(
+        registry.all_of<InputTransparent2DComponent>(group) &&
+            registry.get<Parent2DComponent>(group).parent == root &&
+            registry.get<Parent2DComponent>(groupedChild).parent == group &&
+            close(groupLayout.size.x, 240.0f) &&
+            close(groupLayout.size.y, 270.0f) &&
+            groupedChildLayout.anchorMin == glm::vec2(0.5f, 1.0f) &&
+            groupedChildLayout.pivot == glm::vec2(0.5f, 1.0f),
+        "a layout group should centre measured bounds without constraining child placement");
+
+    const entt::entity background = ui.block("#000000FF");
+    ui.place(background).inside(root).fill(6.0f).grid(1u, 2u, 2u, 3u);
+    const Layout2DComponent& fill =
+        registry.get<Layout2DComponent>(background);
+    const GridCell2DComponent& cell =
+        registry.get<GridCell2DComponent>(background);
+    passed &= expect(
+        fill.anchorMin == glm::vec2(0.0f) &&
+            fill.anchorMax == glm::vec2(1.0f) &&
+            close(fill.margin.x, 12.0f) &&
+            close(fill.margin.y, 18.0f),
+        "fill should stretch and scale margins");
+    passed &= expect(
+        cell.column == 1u && cell.row == 2u &&
+            cell.columnSpan == 2u && cell.rowSpan == 3u,
+        "grid should assign cell and span");
+
+    UiStackLayout vertical({
+        .axis = UiStackAxis::eVertical,
+        .gap = 6.0f,
+        .padding = { 10.0f, 20.0f, 0.0f, 0.0f }
+    });
+    const UiStackPlacement first = vertical.append({ 80.0f, 20.0f });
+    const UiStackPlacement second = vertical.append({ 100.0f, 30.0f });
+    passed &= expect(
+        close(first.offset.x, 10.0f) && close(first.offset.y, 20.0f) &&
+            close(second.offset.x, 10.0f) && close(second.offset.y, 46.0f),
+        "vertical stack should derive each row offset from measured content");
+    passed &= expect(
+        close(vertical.content_size().x, 110.0f) &&
+            close(vertical.content_size().y, 76.0f),
+        "vertical stack should expose its measured content size");
+
+    UiStackLayout horizontal({
+        .axis = UiStackAxis::eHorizontal,
+        .gap = 4.0f
+    });
+    horizontal.append({ 12.0f, 8.0f });
+    const UiStackPlacement horizontalSecond = horizontal.append({ 20.0f, 10.0f });
+    passed &= expect(
+        close(horizontalSecond.offset.x, 16.0f) &&
+            close(horizontal.content_size().x, 36.0f) &&
+            close(horizontal.content_size().y, 10.0f),
+        "horizontal stack should advance and measure on the horizontal axis");
+
+    const Renderer2DFontAtlas unloadedAtlas;
+    const std::string arabicWithNumber =
+        "\xD9\x85\xD8\xB1\xD8\xAD\xD8\xA8\xD8\xA7 123";
+    const entt::entity rtlText = ui.text(
+        arabicWithNumber,
+        unloadedAtlas,
+        14.0f);
+    ui.place(rtlText)
+        .inside(root)
+        .at(UiAlignment::eTopLeft);
+    passed &= expect(
+        unloadedAtlas.layout_text(
+            arabicWithNumber,
+            14.0f).rightToLeft &&
+            registry.get<Layout2DComponent>(rtlText).anchorMin ==
+                glm::vec2(0.0f) &&
+            registry.get<Layout2DComponent>(rtlText).pivot ==
+                glm::vec2(0.0f) &&
+            !unloadedAtlas.layout_text(
+                "Latin 123",
+                14.0f).rightToLeft,
+        "RTL shaping should preserve explicitly authored UI placement");
+
+    const std::string multilingualLiteral =
+        "Espa\xC3\xB1ol \xE7\xAE\x80\xE4\xBD\x93\xE4\xB8\xAD\xE6\x96\x87 "
+        "\xE0\xA4\xB9\xE0\xA4\xBF\xE0\xA4\xA8\xE0\xA5\x8D\xE0\xA4\xA6\xE0\xA5\x80";
+    const std::vector<uint32_t> missing =
+        unloadedAtlas.missing_codepoints(multilingualLiteral);
+    passed &= expect(
+        !unloadedAtlas.covers_text(multilingualLiteral) &&
+            std::find(missing.begin(), missing.end(), 0x00F1u) != missing.end() &&
+            std::find(missing.begin(), missing.end(), 0x7B80u) != missing.end() &&
+            std::find(missing.begin(), missing.end(), 0x0939u) != missing.end(),
+        "font coverage should report missing literal UTF-8 code points without losing them to question marks");
+
+
+
+    {
+        Renderer2DScene liveScene;
+        UiBuilder liveUi(liveScene, LayoutScale {});
+        const auto liveRoot = liveScene.create_shape(
+            { 0.0f, 0.0f }, { 360.0f, 210.0f }, make_solid_style("#FFFFFFFF"));
+        liveUi.set_dynamic_cache(liveRoot);
+        const auto button = liveScene.create_shape(
+            { 30.0f, 150.0f }, { 126.0f, 38.0f }, make_solid_style("#007AFFFF"));
+        liveScene.registry().emplace<Parent2DComponent>(button, Parent2DComponent { liveRoot });
+        liveScene.activate_dynamic(button, 0.35f);
+        const auto unrelated = liveScene.create_shape(
+            { 400.0f, 0.0f }, { 200.0f, 40.0f }, make_solid_style("#EEEEEEFF"));
+        DisplayTransition2DComponent entrance {};
+        entrance.inheritToChildren = true;
+        entrance.durationSeconds = 0.24f;
+        entrance.fromOpacity = 0.0f;
+        entrance.toOpacity = 1.0f;
+        liveScene.play_display_transition(liveRoot, entrance, 1.0);
+        liveScene.build_render_plan(1.0, 0u);
+        for (const double time : { 1.25, 3.0, 10.0 })
+        {
+            liveScene.activate_dynamic(unrelated, 0.35f);
+            const auto plan = liveScene.build_render_plan(time, 0u);
+            for (const auto entity : { liveRoot, button })
+            {
+                const auto contains = [entity](const auto& batches) {
+                    return std::any_of(batches.begin(), batches.end(),
+                        [entity](const auto& batch) { return batch.entity == entity; });
+                };
+                passed &= expect(contains(plan.shapes) && !contains(plan.cachedShapes),
+                    "dialog/nav children must remain live after animations and unrelated focus changes");
+            }
+        }
+    }
+    return passed ? 0 : 1;
+}

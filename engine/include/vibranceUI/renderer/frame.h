@@ -1,0 +1,154 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+#define VULKAN_HPP_NO_EXCEPTIONS
+#include <vulkan/vulkan.hpp>
+#include <deque>
+#include <functional>
+#include <unordered_map>
+#include <vector>
+#include <vibranceUI/renderer/image.h>
+#include <vibranceUI/renderer/swapchain.h>
+#include <vibranceUI/renderer/buffer.h>
+#include <vma/vk_mem_alloc.h>
+#include <vibranceUI/factories/mesh_factory.h>
+#include <vibranceUI/renderer/render_types.h>
+#include <vibranceUI/renderer/renderer2d.h>
+#include <vibranceUI/renderer/renderer3d.h>
+
+class Frame
+{
+    public:
+
+    Frame(
+        Swapchain& swapchain,
+        vk::Extent2D renderExtent,
+        vk::Extent2D modelRenderExtent,
+        vk::Device& logicalDevice,
+        std::unordered_map<PipelineType, vk::Pipeline>& pipelines,
+        vk::RenderPass hosted3DRenderPass,
+        vk::SampleCountFlagBits hosted3DSamples,
+        vk::CommandBuffer commandBuffer,
+        vk::Queue& queue,
+        std::deque<std::function<void(vk::Device)>>& deletionQueue,
+        std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets,
+        std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts,
+        VmaAllocator& allocator,
+        std::unordered_map<uint32_t, Model3DAsset>* modelAssets,
+        std::unordered_map<uint32_t, Media2DAsset>* mediaAssets,
+        Renderer2DScene& scene2D,
+        StorageImage* fontAtlasImage
+    );
+
+    void record_command_buffer(
+        uint32_t imageIndex,
+        double currentTimeSeconds,
+        bool externalBackdropAvailable,
+        bool useExternalBackdropUnderlay,
+        bool presentNativeSurface,
+        bool clearNativeSurface,
+        vk::Image compositionImage = {},
+        vk::Buffer compositionReadbackBuffer = {},
+        bool compositionImageFirstUse = true,
+        glm::uvec4 pendingCompositionDamageRect = glm::uvec4(0u),
+        uint32_t graphicsQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
+    );
+
+    void resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModelRenderExtent);
+
+    struct GpuRenderTimings
+    {
+        double totalMilliseconds = 0.0;
+        double render2DMilliseconds = 0.0;
+        double compositeMilliseconds = 0.0;
+        double outputMilliseconds = 0.0;
+    };
+
+
+
+    bool enable_gpu_timing(
+        uint32_t timestampValidBits,
+        double timestampPeriodNanoseconds,
+        std::deque<std::function<void(vk::Device)>>& deletionQueue);
+    void set_gpu_timing_sample_enabled(bool enabled);
+    void mark_gpu_timing_submitted();
+    bool take_completed_gpu_timings(GpuRenderTimings& timings);
+
+
+
+
+    void set_font_atlas_image(StorageImage* image);
+
+    void free_resources();
+
+    vk::Device& logicalDevice;
+
+    vk::CommandBuffer commandBuffer;
+
+    Swapchain& swapchain;
+    vk::Extent2D renderExtent;
+    vk::Extent2D modelRenderExtent;
+    std::unordered_map<PipelineType, vk::Pipeline>& pipelines;
+    vk::RenderPass hosted3DRenderPass = nullptr;
+    vk::SampleCountFlagBits hosted3DSamples = vk::SampleCountFlagBits::e1;
+
+    vk::Semaphore imageAcquiredSemaphore;
+
+    vk::Semaphore renderFinishedSemaphore;
+
+    vk::Fence renderFinishedFence;
+
+
+
+
+    glm::uvec4 compositionContentRect { 0u };
+    glm::uvec4 compositionDamageRect { 0u };
+    glm::uvec4 compositionSceneDamageRect { 0u };
+
+    glm::uvec4 compositionReadbackRect { 0u };
+
+
+    std::vector<SystemBackdropRegion> compositionBackdropRegions;
+
+    std::unordered_map<DescriptorScope, vk::DescriptorSet>& descriptorSets;
+    std::unordered_map<PipelineType, vk::PipelineLayout>& pipelineLayouts;
+
+    VmaAllocator& allocator;
+
+    StorageImage* depthBuffer = nullptr, *colorBuffer = nullptr, *modelDepthBuffer = nullptr, *modelColorBuffer = nullptr, *tempSurface = nullptr;
+
+
+
+    StorageImage* compositionSurface = nullptr;
+    StorageImage* uiBlurSurface = nullptr, *mediaBlurSurface = nullptr;
+    StorageImage* foregroundBlurSurface = nullptr;
+    StorageImage* uiStaticSurface = nullptr, *uiStaticBlurSurface = nullptr;
+    StorageImage* externalBackdropSurface = nullptr, *fontAtlasImage = nullptr;
+    ColorAttachmentImage* hosted3DColorBuffer = nullptr;
+    DepthImage* hosted3DDepthBuffer = nullptr;
+    vk::Framebuffer hosted3DFramebuffer = nullptr;
+    std::unordered_map<uint32_t, Model3DAsset>* modelAssets = nullptr;
+    std::unordered_map<uint32_t, Media2DAsset>* mediaAssets = nullptr;
+    Renderer2D renderer2D;
+    Renderer3D renderer3D;
+    Renderer2DScene& scene2D;
+
+    std::deque<std::function<void(VmaAllocator)>> vmaDeletionQueue;
+    std::deque<std::function<void(vk::Device)>> deviceDeletionQueue;
+
+    vk::Queue queue;
+    bool uiCacheImagesReady = false;
+
+private:
+    void prepare_text_batch_resources();
+    StorageBuffer textBatchBuffer;
+    Renderer2DTextBatchResources textBatchResources;
+    bool textBatchAllocationAttempted = false;
+    vk::QueryPool gpuTimestampQueryPool;
+    uint32_t gpuTimestampValidBits = 0u;
+    double gpuTimestampPeriodNanoseconds = 0.0;
+    bool gpuTimestampSampleEnabled = false;
+    bool gpuTimestampsRecorded = false;
+    bool gpuTimestampsPending = false;
+};

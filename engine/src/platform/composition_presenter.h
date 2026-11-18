@@ -1,0 +1,72 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#pragma once
+
+#include <vibranceUI/graphics/backdrop.h>
+#include <glm/glm.hpp>
+
+#if defined(_WIN32) && !defined(VK_USE_PLATFORM_WIN32_KHR)
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
+#define VULKAN_HPP_NO_EXCEPTIONS
+#include <vulkan/vulkan.hpp>
+
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+class CompositionPresenter
+{
+public:
+    enum class PresentResult : std::uint8_t
+    {
+        eFailed,
+        ePresented,
+        eDeferred
+    };
+
+    CompositionPresenter();
+    ~CompositionPresenter();
+
+    CompositionPresenter(const CompositionPresenter&) = delete;
+    CompositionPresenter& operator=(const CompositionPresenter&) = delete;
+
+    bool initialise(
+        void* nativeWindow,
+        vk::PhysicalDevice physicalDevice,
+        vk::Device logicalDevice,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t bufferCount,
+        std::uint32_t graphicsQueueFamilyIndex,
+        bool transparentFramebuffer,
+        bool enableVulkanInterop);
+    void shutdown(vk::Device logicalDevice);
+
+    bool available() const;
+    bool gpu_interop() const;
+    std::uint32_t buffer_count() const;
+    vk::Image image(std::uint32_t index) const;
+    vk::DeviceMemory memory(std::uint32_t index) const;
+    bool first_use(std::uint32_t index) const;
+    void mark_used(std::uint32_t index);
+    bool acquire(std::uint32_t index);
+    PresentResult present(
+        std::uint32_t index,
+        bool synchronize = false,
+        glm::uvec4 contentRect = glm::uvec4(0u),
+        glm::uvec4 damageRect = glm::uvec4(0u));
+    bool upload(
+        std::uint32_t index,
+        const void* rgba,
+        std::uint32_t width,
+        std::uint32_t height,
+        std::uint32_t rowPitch,
+        glm::uvec4 sourceDamageRect = glm::uvec4(0u));
+    bool set_regions(const std::vector<SystemBackdropRegion>& regions);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+};

@@ -1,0 +1,2604 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#include <vibranceUI/core/path_utf8.h>
+#include <vibranceUI/renderer/font_atlas.h>
+#include <vibranceUI/renderer/image.h>
+#include <vibranceUI/core/file.h>
+#include <vibranceUI/core/logger.h>
+#include "text_direction.h"
+#include "emoji_shaper.h"
+#include "colour_bitmap.h"
+#include "font_metrics.h"
+#include "font_positioning.h"
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <span>
+#include <unordered_set>
+#include <vector>
+
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include FT_MULTIPLE_MASTERS_H
+#include FT_TRUETYPE_TABLES_H
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
+namespace
+{
+    constexpr bool is_decimal_digit(uint32_t codepoint)
+    {
+        return codepoint >= '0' && codepoint <= '9';
+    }
+
+    constexpr std::array<uint32_t, 4> kAtlasSides {
+        512u,
+        1024u,
+        2048u,
+        4096u
+    };
+
+
+
+
+    constexpr int kSdfPadding = 24;
+    constexpr unsigned char kSdfOnEdgeValue = 180;
+
+#if !defined(__APPLE__)
+#include "../vulkan/font_upload.inc"
+#endif
+
+    void add_existing_font_path(std::vector<std::filesystem::path>& paths, const std::filesystem::path& path)
+    {
+        if (path.empty() || !std::filesystem::exists(path))
+        {
+            return;
+        }
+        if (std::find(paths.begin(), paths.end(), path) == paths.end())
+        {
+            paths.push_back(path);
+        }
+    }
+
+    std::filesystem::path existing_font_path(const std::filesystem::path& path)
+    {
+        return !path.empty() && std::filesystem::exists(path) ? path : std::filesystem::path {};
+    }
+
+    std::string normalised_locale(std::string_view locale)
+    {
+        std::string value(locale);
+        for (char& character : value)
+        {
+            character = character == '-' ?
+                '_' :
+                static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+        }
+        return value;
+    }
+
+    bool locale_starts_with(std::string_view locale, std::string_view prefix)
+    {
+        return locale.size() >= prefix.size() && locale.substr(0u, prefix.size()) == prefix;
+    }
+
+    std::vector<std::filesystem::path> resolve_profile_font_paths(
+        const std::vector<std::filesystem::path>& assetFontDirectories,
+        const std::string& value)
+    {
+
+
+        if (value.empty())
+        {
+            return {};
+        }
+
+        std::vector<std::filesystem::path> paths;
+        std::filesystem::path path(value);
+        if (path.is_absolute())
+        {
+            add_existing_font_path(paths, path);
+            return paths;
+        }
+        for (auto it = assetFontDirectories.rbegin(); it != assetFontDirectories.rend(); ++it)
+        {
+            add_existing_font_path(paths, *it / path);
+        }
+        add_existing_font_path(paths, path);
+        return paths;
+    }
+
+    class FontProfileJsonParser
+    {
+    public:
+        FontProfileJsonParser(
+            std::string_view input,
+            const std::vector<std::filesystem::path>& assetFontDirectories) :
+            input(input),
+            assetFontDirectories(assetFontDirectories)
+        {
+        }
+
+        bool parse(Renderer2DFontProfile& outProfile)
+        {
+
+            outProfile = {};
+            skip_whitespace();
+            if (!consume('{'))
+            {
+                return false;
+            }
+
+            while (position < input.size())
+            {
+                skip_whitespace();
+                if (consume('}'))
+                {
+                    return true;
+                }
+
+                std::string key;
+                if (!parse_string(key))
+                {
+                    return false;
+                }
+                skip_whitespace();
+                if (!consume(':'))
+                {
+                    return false;
+                }
+                if (!parse_profile_value(outProfile, key))
+                {
+                    return false;
+                }
+                skip_whitespace();
+                if (consume('}'))
+                {
+                    return true;
+                }
+                if (!consume(','))
+                {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+    private:
+        std::string_view input;
+        const std::vector<std::filesystem::path>& assetFontDirectories;
+        std::size_t position = 0u;
+
+        void skip_whitespace()
+        {
+            while (position < input.size() &&
+                std::isspace(static_cast<unsigned char>(input[position])))
+            {
+                ++position;
+            }
+        }
+
+        bool consume(char expected)
+        {
+            skip_whitespace();
+            if (position >= input.size() || input[position] != expected)
+            {
+                return false;
+            }
+            ++position;
+            return true;
+        }
+
+        bool parse_string(std::string& out)
+        {
+            skip_whitespace();
+            if (position >= input.size() || input[position] != '"')
+            {
+                return false;
+            }
+            ++position;
+            out.clear();
+            while (position < input.size())
+            {
+                const char character = input[position++];
+                if (character == '"')
+                {
+                    return true;
+                }
+                if (character != '\\')
+                {
+                    out.push_back(character);
+                    continue;
+                }
+                if (position >= input.size())
+                {
+                    return false;
+                }
+                const char escaped = input[position++];
+                switch (escaped)
+                {
+                    case '"':
+                    case '\\':
+                    case '/':
+                        out.push_back(escaped);
+                        break;
+                    case 'b':
+                        out.push_back('\b');
+                        break;
+                    case 'f':
+                        out.push_back('\f');
+                        break;
+                    case 'n':
+                        out.push_back('\n');
+                        break;
+                    case 'r':
+                        out.push_back('\r');
+                        break;
+                    case 't':
+                        out.push_back('\t');
+                        break;
+                    case 'u':
+                        position = std::min(position + 4u, input.size());
+                        out.push_back('?');
+                        break;
+                    default:
+                        out.push_back(escaped);
+                        break;
+                }
+            }
+            return false;
+        }
+
+        bool skip_value()
+        {
+
+            skip_whitespace();
+            if (position >= input.size())
+            {
+                return false;
+            }
+            if (input[position] == '"')
+            {
+                std::string ignored;
+                return parse_string(ignored);
+            }
+            if (input[position] == '{')
+            {
+                ++position;
+                while (position < input.size())
+                {
+                    skip_whitespace();
+                    if (consume('}'))
+                    {
+                        return true;
+                    }
+                    std::string key;
+                    if (!parse_string(key) || !consume(':') || !skip_value())
+                    {
+                        return false;
+                    }
+                    skip_whitespace();
+                    if (consume('}'))
+                    {
+                        return true;
+                    }
+                    if (!consume(','))
+                    {
+                        return false;
+                    }
+                }
+                return false;
+            }
+            if (input[position] == '[')
+            {
+                ++position;
+                while (position < input.size())
+                {
+                    skip_whitespace();
+                    if (consume(']'))
+                    {
+                        return true;
+                    }
+                    if (!skip_value())
+                    {
+                        return false;
+                    }
+                    skip_whitespace();
+                    if (consume(']'))
+                    {
+                        return true;
+                    }
+                    if (!consume(','))
+                    {
+                        return false;
+                    }
+                }
+                return false;
+            }
+
+            while (position < input.size() &&
+                input[position] != ',' &&
+                input[position] != '}' &&
+                input[position] != ']')
+            {
+                ++position;
+            }
+            return true;
+        }
+
+        bool parse_string_array(std::vector<std::string>& out)
+        {
+            out.clear();
+            if (!consume('['))
+            {
+                return false;
+            }
+            while (position < input.size())
+            {
+                skip_whitespace();
+                if (consume(']'))
+                {
+                    return true;
+                }
+                std::string value;
+                if (!parse_string(value))
+                {
+                    return false;
+                }
+                out.push_back(std::move(value));
+                skip_whitespace();
+                if (consume(']'))
+                {
+                    return true;
+                }
+                if (!consume(','))
+                {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        bool parse_locales(Renderer2DFontProfile& profile)
+        {
+
+            if (!consume('{'))
+            {
+                return false;
+            }
+            while (position < input.size())
+            {
+                skip_whitespace();
+                if (consume('}'))
+                {
+                    return true;
+                }
+                std::string locale;
+                std::string value;
+                if (!parse_string(locale) || !consume(':') || !parse_string(value))
+                {
+                    return false;
+                }
+                std::vector<std::filesystem::path> paths =
+                    resolve_profile_font_paths(assetFontDirectories, value);
+                if (!paths.empty())
+                {
+                    const std::string key = normalised_locale(locale);
+                    profile.localeFontPaths[key] = paths.front();
+                    profile.localeFontCandidates[key] = std::move(paths);
+                }
+                skip_whitespace();
+                if (consume('}'))
+                {
+                    return true;
+                }
+                if (!consume(','))
+                {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        bool parse_profile_value(Renderer2DFontProfile& profile, const std::string& key)
+        {
+            if (key == "default" || key == "defaultFont" || key == "primary" || key == "font")
+            {
+                std::string value;
+                if (!parse_string(value))
+                {
+                    return false;
+                }
+                profile.defaultFontCandidates =
+                    resolve_profile_font_paths(assetFontDirectories, value);
+                profile.defaultFontPath = profile.defaultFontCandidates.empty()
+                    ? std::filesystem::path {}
+                    : profile.defaultFontCandidates.front();
+                return true;
+            }
+            if (key == "emoji" || key == "emojiFont")
+            {
+                std::string value;
+                if (!parse_string(value)) return false;
+                profile.emojiFontCandidates = resolve_profile_font_paths(assetFontDirectories, value);
+                return true;
+            }
+            if (key == "fallbacks" || key == "fallbackFonts")
+            {
+                std::vector<std::string> values;
+                if (!parse_string_array(values))
+                {
+                    return false;
+                }
+                for (const std::string& value : values)
+                {
+                    for (const std::filesystem::path& path :
+                        resolve_profile_font_paths(assetFontDirectories, value))
+                    {
+                        add_existing_font_path(profile.fallbackFontPaths, path);
+                    }
+                }
+                return true;
+            }
+            if (key == "locales" || key == "localeFonts")
+            {
+                return parse_locales(profile);
+            }
+            return skip_value();
+        }
+    };
+
+    uint64_t kerning_key(uint32_t left, uint32_t right)
+    {
+        return (static_cast<uint64_t>(left) << 32u) | static_cast<uint64_t>(right);
+    }
+
+    std::vector<uint32_t> build_codepoint_list(const Renderer2DFontAtlasLoadOptions& options)
+    {
+        std::vector<uint32_t> codepoints;
+        std::unordered_set<uint32_t> seen;
+
+        auto add_codepoint = [&](uint32_t codepoint) {
+            if (codepoint == 0u || codepoint == '\n' || codepoint == '\r' || codepoint == '\t' ||
+                seen.contains(codepoint))
+            {
+                return;
+            }
+            seen.insert(codepoint);
+            codepoints.push_back(codepoint);
+        };
+
+        if (options.includeBasicLatin)
+        {
+            for (uint32_t codepoint = 32u; codepoint <= 126u; ++codepoint)
+            {
+                add_codepoint(codepoint);
+            }
+        }
+
+        for (const Renderer2DCodepointRange& range : options.ranges)
+        {
+            const uint32_t first = std::min(range.first, range.last);
+            const uint32_t last = std::max(range.first, range.last);
+            for (uint32_t codepoint = first; codepoint <= last; ++codepoint)
+            {
+                add_codepoint(codepoint);
+                if (codepoint == UINT32_MAX)
+                {
+                    break;
+                }
+            }
+        }
+
+        for (uint32_t codepoint : renderer2d_decode_utf8(options.preloadText))
+        {
+            add_codepoint(codepoint);
+        }
+
+
+        for (uint32_t codepoint : renderer2d_visual_codepoints(options.preloadText))
+        {
+            add_codepoint(codepoint);
+        }
+
+        add_codepoint('?');
+        std::sort(codepoints.begin(), codepoints.end());
+        return codepoints;
+    }
+
+    float ft_26_6_to_float(FT_Pos value)
+    {
+        return static_cast<float>(value) / 64.0f;
+    }
+
+    int clamped_font_weight(int weight)
+    {
+        return weight > 0 ? std::clamp(weight, 1, 1000) : 0;
+    }
+
+    std::string lowercase_string(const char* value)
+    {
+        std::string out = value ? value : "";
+        for (char& c : out)
+        {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return out;
+    }
+
+    int inferred_face_weight(FT_Face face)
+    {
+        if (TT_OS2* os2 = static_cast<TT_OS2*>(FT_Get_Sfnt_Table(face, ft_sfnt_os2));
+            os2 && os2->usWeightClass > 0)
+        {
+            return static_cast<int>(os2->usWeightClass);
+        }
+
+        const std::string style = lowercase_string(face ? face->style_name : nullptr);
+        if (style.find("black") != std::string::npos)
+        {
+            return 900;
+        }
+        if (style.find("extra bold") != std::string::npos || style.find("extrabold") != std::string::npos)
+        {
+            return 800;
+        }
+        if (style.find("bold") != std::string::npos)
+        {
+            return 700;
+        }
+        if (style.find("semi bold") != std::string::npos || style.find("semibold") != std::string::npos)
+        {
+            return 600;
+        }
+        if (style.find("medium") != std::string::npos)
+        {
+            return 500;
+        }
+        if (style.find("light") != std::string::npos)
+        {
+            return 300;
+        }
+        if (style.find("thin") != std::string::npos)
+        {
+            return 100;
+        }
+        if (style.find("regular") != std::string::npos || style.find("normal") != std::string::npos)
+        {
+            return 400;
+        }
+        return 0;
+    }
+
+    FT_Long choose_weighted_face_index(
+        FT_Library library,
+        std::span<const unsigned char> fontData,
+        int requestedWeight)
+    {
+        requestedWeight = clamped_font_weight(requestedWeight);
+        if (requestedWeight <= 0)
+        {
+            return 0;
+        }
+
+        FT_Face firstFace = nullptr;
+        if (FT_New_Memory_Face(
+            library,
+            fontData.data(),
+            static_cast<FT_Long>(fontData.size()),
+            0,
+            &firstFace) != 0)
+        {
+            return 0;
+        }
+
+        const FT_Long faceCount = std::max<FT_Long>(firstFace->num_faces, 1);
+        FT_Done_Face(firstFace);
+        if (faceCount <= 1)
+        {
+            return 0;
+        }
+
+        FT_Long bestIndex = 0;
+        int bestScore = std::numeric_limits<int>::max();
+        for (FT_Long index = 0; index < faceCount; ++index)
+        {
+            FT_Face candidate = nullptr;
+            if (FT_New_Memory_Face(
+                library,
+                fontData.data(),
+                static_cast<FT_Long>(fontData.size()),
+                index,
+                &candidate) != 0)
+            {
+                continue;
+            }
+
+            const int faceWeight = inferred_face_weight(candidate);
+            if (faceWeight > 0)
+            {
+                const int score = std::abs(faceWeight - requestedWeight);
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    bestIndex = index;
+                }
+            }
+            FT_Done_Face(candidate);
+        }
+
+        return bestIndex;
+    }
+
+    int apply_font_weight_axis(
+        FT_Library library,
+        FT_Face face,
+        int requestedWeight)
+    {
+
+        requestedWeight = clamped_font_weight(requestedWeight);
+        if (requestedWeight <= 0 || !face)
+        {
+            return 0;
+        }
+
+        FT_MM_Var* variation = nullptr;
+        if (FT_Get_MM_Var(face, &variation) != 0 || variation == nullptr)
+        {
+            return 0;
+        }
+
+        std::vector<FT_Fixed> coordinates(variation->num_axis, 0);
+        bool foundWeightAxis = false;
+        int appliedWeight = 0;
+        for (FT_UInt axisIndex = 0; axisIndex < variation->num_axis; ++axisIndex)
+        {
+            const FT_Var_Axis& axis = variation->axis[axisIndex];
+            coordinates[axisIndex] = axis.def;
+            if (axis.tag == FT_MAKE_TAG('w', 'g', 'h', 't'))
+            {
+                const FT_Fixed requested = static_cast<FT_Fixed>(requestedWeight << 16);
+                coordinates[axisIndex] = std::clamp(requested, axis.minimum, axis.maximum);
+                appliedWeight = static_cast<int>(std::lround(double(coordinates[axisIndex]) / 65536.0));
+                foundWeightAxis = true;
+            }
+        }
+
+        const bool applied = foundWeightAxis &&
+            FT_Set_Var_Design_Coordinates(face, variation->num_axis, coordinates.data()) == 0;
+        FT_Done_MM_Var(library, variation);
+        return applied ? appliedWeight : 0;
+    }
+
+    unsigned char clamp_sdf_value(float value)
+    {
+        return static_cast<unsigned char>(std::clamp(std::round(value), 0.0f, 255.0f));
+    }
+
+    unsigned char bitmap_alpha_at(const FT_Bitmap& bitmap, uint32_t x, uint32_t y)
+    {
+
+        if (bitmap.buffer == nullptr || x >= bitmap.width || y >= bitmap.rows)
+        {
+            return 0;
+        }
+
+        const int pitch = bitmap.pitch;
+        const unsigned char* row = pitch >= 0
+            ? bitmap.buffer + static_cast<size_t>(y) * static_cast<size_t>(pitch)
+            : bitmap.buffer + static_cast<size_t>(bitmap.rows - 1u - y) * static_cast<size_t>(-pitch);
+
+        switch (bitmap.pixel_mode)
+        {
+        case FT_PIXEL_MODE_GRAY:
+            if (bitmap.num_grays > 1 && bitmap.num_grays != 256)
+            {
+                return static_cast<unsigned char>(
+                    (static_cast<uint32_t>(row[x]) * 255u) / static_cast<uint32_t>(bitmap.num_grays - 1));
+            }
+            return row[x];
+        case FT_PIXEL_MODE_MONO:
+            return (row[x >> 3u] & (0x80u >> (x & 7u))) != 0 ? 255 : 0;
+        default:
+            return 0;
+        }
+    }
+
+    std::vector<unsigned char> padded_glyph_alpha(const FT_Bitmap& bitmap, uint32_t width, uint32_t height)
+    {
+
+        std::vector<unsigned char> alpha(static_cast<size_t>(width) * static_cast<size_t>(height), 0);
+        for (uint32_t y = 0; y < bitmap.rows; ++y)
+        {
+            for (uint32_t x = 0; x < bitmap.width; ++x)
+            {
+                const uint32_t dstX = x + static_cast<uint32_t>(kSdfPadding);
+                const uint32_t dstY = y + static_cast<uint32_t>(kSdfPadding);
+                alpha[static_cast<size_t>(dstY) * width + dstX] = bitmap_alpha_at(bitmap, x, y);
+            }
+        }
+        return alpha;
+    }
+
+    void distance_transform_1d(const std::vector<float>& source, std::vector<float>& distances, uint32_t count)
+    {
+
+        constexpr float inf = 1.0e20f;
+        std::vector<uint32_t> locations(count, 0u);
+        std::vector<float> boundaries(static_cast<size_t>(count) + 1u, 0.0f);
+
+        uint32_t k = 0u;
+        locations[0] = 0u;
+        boundaries[0] = -inf;
+        boundaries[1] = inf;
+
+        for (uint32_t q = 1u; q < count; ++q)
+        {
+            float intersection = 0.0f;
+            for (;;)
+            {
+                const uint32_t location = locations[k];
+                const float qf = static_cast<float>(q);
+                const float lf = static_cast<float>(location);
+                intersection = ((source[q] + qf * qf) - (source[location] + lf * lf)) /
+                    (2.0f * qf - 2.0f * lf);
+
+                if (intersection > boundaries[k])
+                {
+                    break;
+                }
+                if (k == 0u)
+                {
+                    break;
+                }
+                --k;
+            }
+
+            if (intersection <= boundaries[k])
+            {
+                locations[0] = q;
+                boundaries[0] = -inf;
+                boundaries[1] = inf;
+                k = 0u;
+            }
+            else
+            {
+                ++k;
+                locations[k] = q;
+                boundaries[k] = intersection;
+                boundaries[k + 1u] = inf;
+            }
+        }
+
+        k = 0u;
+        for (uint32_t q = 0u; q < count; ++q)
+        {
+            while (boundaries[k + 1u] < static_cast<float>(q))
+            {
+                ++k;
+            }
+            const float distance = static_cast<float>(q) - static_cast<float>(locations[k]);
+            distances[q] = distance * distance + source[locations[k]];
+        }
+    }
+
+    void distance_transform_2d(
+        const std::vector<float>& source,
+        uint32_t width,
+        uint32_t height,
+        std::vector<float>& distances)
+    {
+
+        std::vector<float> temp(source.size(), 0.0f);
+        std::vector<float> line(std::max(width, height), 0.0f);
+        std::vector<float> lineDistances(std::max(width, height), 0.0f);
+
+        for (uint32_t x = 0u; x < width; ++x)
+        {
+            for (uint32_t y = 0u; y < height; ++y)
+            {
+                line[y] = source[static_cast<size_t>(y) * width + x];
+            }
+            distance_transform_1d(line, lineDistances, height);
+            for (uint32_t y = 0u; y < height; ++y)
+            {
+                temp[static_cast<size_t>(y) * width + x] = lineDistances[y];
+            }
+        }
+
+        for (uint32_t y = 0u; y < height; ++y)
+        {
+            for (uint32_t x = 0u; x < width; ++x)
+            {
+                line[x] = temp[static_cast<size_t>(y) * width + x];
+            }
+            distance_transform_1d(line, lineDistances, width);
+            for (uint32_t x = 0u; x < width; ++x)
+            {
+                distances[static_cast<size_t>(y) * width + x] = lineDistances[x];
+            }
+        }
+    }
+
+    std::vector<unsigned char> make_sdf_from_alpha(
+        const std::vector<unsigned char>& alpha,
+        uint32_t width,
+        uint32_t height)
+    {
+
+        constexpr float inf = 1.0e20f;
+        const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+        std::vector<float> insideSource(pixelCount, inf);
+        std::vector<float> outsideSource(pixelCount, inf);
+        bool hasInside = false;
+        bool hasOutside = false;
+
+        for (size_t i = 0u; i < pixelCount; ++i)
+        {
+            const bool inside = alpha[i] >= 128u;
+            if (inside)
+            {
+                insideSource[i] = 0.0f;
+                hasInside = true;
+            }
+            else
+            {
+                outsideSource[i] = 0.0f;
+                hasOutside = true;
+            }
+        }
+
+        if (!hasInside || !hasOutside)
+        {
+            return {};
+        }
+
+        std::vector<float> distanceToInside(pixelCount, 0.0f);
+        std::vector<float> distanceToOutside(pixelCount, 0.0f);
+        distance_transform_2d(insideSource, width, height, distanceToInside);
+        distance_transform_2d(outsideSource, width, height, distanceToOutside);
+
+        const float pixelDistScale = static_cast<float>(kSdfOnEdgeValue) / static_cast<float>(kSdfPadding);
+        std::vector<unsigned char> sdf(pixelCount, 0);
+        for (size_t i = 0u; i < pixelCount; ++i)
+        {
+            float signedDistance = std::sqrt(distanceToOutside[i]) - std::sqrt(distanceToInside[i]);
+            if (alpha[i] != 0u && alpha[i] != 255u)
+            {
+                signedDistance += static_cast<float>(alpha[i]) / 255.0f - 0.5f;
+            }
+            sdf[i] = clamp_sdf_value(static_cast<float>(kSdfOnEdgeValue) + signedDistance * pixelDistScale);
+        }
+        return sdf;
+    }
+
+    struct LoadedFontFace
+    {
+        std::filesystem::path path;
+        std::vector<unsigned char> data;
+        std::shared_ptr<const unsigned char> mappedData;
+        std::span<const unsigned char> bytes;
+        FT_Face face = nullptr;
+        int weight = 400;
+    };
+
+    std::vector<std::filesystem::path> font_candidate_paths(
+        const std::filesystem::path& primaryPath,
+        const Renderer2DFontAtlasLoadOptions& options)
+    {
+
+        std::vector<std::filesystem::path> paths;
+        auto add_path = [&paths](const std::filesystem::path& candidate) {
+            if (candidate.empty())
+            {
+                return;
+            }
+            if (std::find(paths.begin(), paths.end(), candidate) == paths.end())
+            {
+                paths.push_back(candidate);
+            }
+        };
+
+        add_path(primaryPath);
+        for (const auto& emoji : options.emojiFontPaths) add_path(emoji);
+        if (options.emojiFontPaths.empty())
+            add_path(primaryPath.parent_path() / "AppleColorEmoji.ttf");
+        for (const std::filesystem::path& fallback : options.fallbackFontPaths)
+        {
+            add_path(fallback);
+        }
+        return paths;
+    }
+
+    bool load_font_face(
+        FT_Library library,
+        const std::filesystem::path& path,
+        int requestedFontWeight,
+        float pixelHeight,
+        LoadedFontFace& out)
+    {
+        Logger* logger = Logger::fetch_logger();
+        out.path = path;
+        std::span<const unsigned char> fontData;
+#if defined(_WIN32)
+
+
+
+        const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            LARGE_INTEGER size {};
+            if (GetFileSizeEx(file, &size) && size.QuadPart > 0 &&
+                static_cast<uint64_t>(size.QuadPart) <=
+                    static_cast<uint64_t>(std::numeric_limits<FT_Long>::max()))
+            {
+                const HANDLE mapping = CreateFileMappingW(
+                    file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+                if (mapping)
+                {
+                    const auto* bytes = static_cast<const unsigned char*>(
+                        MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
+                    if (bytes)
+                    {
+                        out.mappedData = std::shared_ptr<const unsigned char>(
+                            bytes, [](const unsigned char* view) {
+                                UnmapViewOfFile(view);
+                            });
+                        fontData = { bytes, static_cast<std::size_t>(size.QuadPart) };
+                    }
+                    CloseHandle(mapping);
+                }
+            }
+            CloseHandle(file);
+        }
+#elif defined(__APPLE__)
+
+
+
+        const int descriptor = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (descriptor >= 0)
+        {
+            struct stat status {};
+            if (::fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) &&
+                status.st_size > 0 && static_cast<uint64_t>(status.st_size) <=
+                    static_cast<uint64_t>(std::numeric_limits<FT_Long>::max()))
+            {
+                const auto size = static_cast<size_t>(status.st_size);
+                void* mapping = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, descriptor, 0);
+                if (mapping != MAP_FAILED)
+                {
+                    const auto* bytes = static_cast<const unsigned char*>(mapping);
+                    out.mappedData = std::shared_ptr<const unsigned char>(bytes,
+                        [size](const unsigned char* view) {
+                            ::munmap(const_cast<unsigned char*>(view), size);
+                        });
+                    fontData = {bytes, size};
+                }
+            }
+            ::close(descriptor);
+        }
+#endif
+        if (fontData.empty())
+        {
+            out.data = read_binary_file(path);
+            fontData = out.data;
+        }
+        if (fontData.empty() || fontData.size() >
+            static_cast<std::size_t>(std::numeric_limits<FT_Long>::max()))
+        {
+            logger->print("Failed to read Renderer2D font: " + vibrance::path_utf8(path));
+            return false;
+        }
+
+        out.bytes = fontData;
+        if (FT_New_Memory_Face(
+            library,
+            fontData.data(),
+            static_cast<FT_Long>(fontData.size()),
+            choose_weighted_face_index(library, fontData, requestedFontWeight),
+            &out.face) != 0)
+        {
+            logger->print("Failed to initialise Renderer2D font face: " + vibrance::path_utf8(path));
+            return false;
+        }
+
+        if (FT_Select_Charmap(out.face, FT_ENCODING_UNICODE) != 0 && out.face->num_charmaps > 0)
+        {
+            FT_Set_Charmap(out.face, out.face->charmaps[0]);
+        }
+
+        const int appliedVariableWeight = apply_font_weight_axis(library, out.face, requestedFontWeight);
+        const int selectedWeight = appliedVariableWeight > 0 ? appliedVariableWeight : inferred_face_weight(out.face);
+        out.weight = selectedWeight > 0 ? selectedWeight : 400;
+        if (requestedFontWeight > 0)
+        {
+
+            const int selectedStaticWeight = inferred_face_weight(out.face);
+            if (appliedVariableWeight)
+            {
+                logger->print("Applied Renderer2D font variable weight " +
+                    std::to_string(requestedFontWeight) + " for " + vibrance::path_utf8(path) + ".");
+            }
+            else if (selectedStaticWeight > 0)
+            {
+                logger->print("Selected Renderer2D font face weight " +
+                    std::to_string(selectedStaticWeight) + " for requested weight " +
+                    std::to_string(requestedFontWeight) + ": " + vibrance::path_utf8(path) + ".");
+            }
+        }
+
+        if (FT_Set_Pixel_Sizes(out.face, 0, static_cast<FT_UInt>(std::max(pixelHeight, 1.0f))) != 0)
+        {
+            if (out.face->num_fixed_sizes == 0)
+            {
+                logger->print("Failed to set Renderer2D font size: " + vibrance::path_utf8(path));
+                FT_Done_Face(out.face); out.face = nullptr;
+                return false;
+            }
+            int selected = 0;
+            for (int i = 1; i < out.face->num_fixed_sizes; ++i)
+                if (std::abs(ft_26_6_to_float(out.face->available_sizes[i].y_ppem) - pixelHeight) <
+                    std::abs(ft_26_6_to_float(out.face->available_sizes[selected].y_ppem) - pixelHeight)) selected = i;
+            if (FT_Select_Size(out.face, selected) != 0)
+            { FT_Done_Face(out.face); out.face = nullptr; return false; }
+        }
+
+        return true;
+    }
+
+    std::size_t choose_face_for_codepoint(const std::vector<LoadedFontFace>& faces, uint32_t codepoint)
+    {
+        for (std::size_t i = 0u; i < faces.size(); ++i)
+        {
+            if (faces[i].face && FT_Get_Char_Index(faces[i].face, codepoint) != 0u)
+            {
+                return i;
+            }
+        }
+        return static_cast<std::size_t>(-1);
+    }
+}
+
+std::vector<std::filesystem::path> renderer2d_common_font_fallbacks(
+    const std::filesystem::path& assetFontDirectory)
+{
+    return renderer2d_common_font_fallbacks(
+        assetFontDirectory.empty()
+            ? std::vector<std::filesystem::path> {}
+            : std::vector<std::filesystem::path> { assetFontDirectory });
+}
+
+std::vector<std::filesystem::path> renderer2d_font_candidates(
+    const std::vector<std::filesystem::path>& assetFontDirectories,
+    const std::filesystem::path& relativeFontPath)
+{
+    std::vector<std::filesystem::path> paths;
+    if (relativeFontPath.is_absolute())
+    {
+        add_existing_font_path(paths, relativeFontPath);
+        return paths;
+    }
+    for (auto it = assetFontDirectories.rbegin(); it != assetFontDirectories.rend(); ++it)
+    {
+        add_existing_font_path(paths, *it / relativeFontPath);
+    }
+    return paths;
+}
+
+std::vector<std::filesystem::path> renderer2d_common_font_fallbacks(
+    const std::vector<std::filesystem::path>& assetFontDirectories)
+{
+    std::vector<std::filesystem::path> paths;
+    const auto addLayeredFont = [&paths, &assetFontDirectories](std::string_view fileName) {
+        for (std::filesystem::path& candidate :
+            renderer2d_font_candidates(assetFontDirectories, std::filesystem::path(fileName)))
+        {
+            add_existing_font_path(paths, candidate);
+        }
+    };
+
+
+    addLayeredFont("NotoSans-Variable.ttf");
+    addLayeredFont("NotoSansSC-VariableFont_wght.ttf");
+    addLayeredFont("NotoSansTC-VariableFont_wght.ttf");
+    addLayeredFont("NotoSansJP-VariableFont_wght.ttf");
+    addLayeredFont("NotoSansKR-Regular.ttf");
+    addLayeredFont("NotoSansArabic-Variable.ttf");
+    addLayeredFont("NotoSansDevanagari-Variable.ttf");
+    addLayeredFont("NotoSansDevanagari-VariableFont_wght.ttf");
+    addLayeredFont("NotoSansDevanagari-Regular.ttf");
+    addLayeredFont("NotoSansThai-Variable.ttf");
+
+
+    add_existing_font_path(paths, std::filesystem::path("C:/Windows/Fonts/Nirmala.ttc"));
+    add_existing_font_path(paths, std::filesystem::path("C:/Windows/Fonts/Mangal.ttf"));
+    add_existing_font_path(paths, std::filesystem::path("C:/Windows/Fonts/arial.ttf"));
+    add_existing_font_path(paths, std::filesystem::path("C:/Windows/Fonts/segoeui.ttf"));
+    add_existing_font_path(paths, std::filesystem::path("C:/Windows/Fonts/msyh.ttc"));
+    add_existing_font_path(paths, std::filesystem::path("C:/Windows/Fonts/YuGothR.ttc"));
+    add_existing_font_path(paths, std::filesystem::path("C:/Windows/Fonts/malgun.ttf"));
+
+    return paths;
+}
+
+bool renderer2d_load_font_profile(
+    const std::filesystem::path& profilePath,
+    const std::filesystem::path& assetFontDirectory,
+    Renderer2DFontProfile& outProfile)
+{
+    return renderer2d_load_font_profile(
+        profilePath,
+        assetFontDirectory.empty()
+            ? std::vector<std::filesystem::path> {}
+            : std::vector<std::filesystem::path> { assetFontDirectory },
+        outProfile);
+}
+
+bool renderer2d_load_font_profile(
+    const std::filesystem::path& profilePath,
+    const std::vector<std::filesystem::path>& assetFontDirectories,
+    Renderer2DFontProfile& outProfile)
+{
+    outProfile = {};
+    if (profilePath.empty())
+    {
+        return false;
+    }
+
+    std::vector<unsigned char> data = read_binary_file(profilePath);
+    if (data.empty())
+    {
+        return false;
+    }
+
+    const std::string json(data.begin(), data.end());
+    FontProfileJsonParser parser(json, assetFontDirectories);
+    return parser.parse(outProfile);
+}
+
+bool renderer2d_load_font_profile_layers(
+    const std::vector<std::filesystem::path>& profilePaths,
+    const std::vector<std::filesystem::path>& assetFontDirectories,
+    Renderer2DFontProfile& outProfile)
+{
+    outProfile = {};
+    bool loadedAny = false;
+    for (const std::filesystem::path& profilePath : profilePaths)
+    {
+        Renderer2DFontProfile layer = {};
+        if (!renderer2d_load_font_profile(profilePath, assetFontDirectories, layer))
+        {
+            if (Logger* logger = Logger::fetch_logger())
+            {
+                logger->warning(
+                    "Ignoring invalid font profile layer and keeping lower-priority defaults: " +
+                    vibrance::path_utf8(profilePath));
+            }
+            continue;
+        }
+
+        loadedAny = true;
+        if (!layer.emojiFontCandidates.empty())
+            outProfile.emojiFontCandidates = std::move(layer.emojiFontCandidates);
+        if (!layer.defaultFontPath.empty())
+        {
+            outProfile.defaultFontPath = std::move(layer.defaultFontPath);
+            outProfile.defaultFontCandidates = std::move(layer.defaultFontCandidates);
+        }
+        for (std::filesystem::path& path : layer.fallbackFontPaths)
+        {
+            if (std::find(outProfile.fallbackFontPaths.begin(), outProfile.fallbackFontPaths.end(), path) ==
+                outProfile.fallbackFontPaths.end())
+            {
+                outProfile.fallbackFontPaths.push_back(std::move(path));
+            }
+        }
+        for (auto& [locale, path] : layer.localeFontPaths)
+        {
+            outProfile.localeFontPaths[locale] = std::move(path);
+        }
+        for (auto& [locale, paths] : layer.localeFontCandidates)
+        {
+            outProfile.localeFontCandidates[locale] = std::move(paths);
+        }
+    }
+    return loadedAny;
+}
+
+std::vector<std::filesystem::path> renderer2d_emoji_font_candidates(
+    const Renderer2DFontProfile& profile,
+    const std::vector<std::filesystem::path>& assetFontDirectories)
+{
+    auto candidates = profile.emojiFontCandidates;
+    for (const auto& path : renderer2d_font_candidates(assetFontDirectories, "AppleColorEmoji.ttf"))
+        add_existing_font_path(candidates, path);
+    return candidates;
+}
+
+std::filesystem::path renderer2d_primary_font_for_locale(
+    const std::filesystem::path& assetFontDirectory,
+    std::string_view locale,
+    const std::filesystem::path& defaultFontPath)
+{
+    return renderer2d_primary_font_for_locale(
+        assetFontDirectory.empty()
+            ? std::vector<std::filesystem::path> {}
+            : std::vector<std::filesystem::path> { assetFontDirectory },
+        locale,
+        defaultFontPath);
+}
+
+std::filesystem::path renderer2d_primary_font_for_locale(
+    const std::vector<std::filesystem::path>& assetFontDirectories,
+    std::string_view locale,
+    const std::filesystem::path& defaultFontPath)
+{
+    const std::string value = normalised_locale(locale);
+    auto font = [&assetFontDirectories](std::string_view filename) {
+        for (auto it = assetFontDirectories.rbegin(); it != assetFontDirectories.rend(); ++it)
+        {
+            if (std::filesystem::path path = existing_font_path(*it / std::string(filename)); !path.empty())
+            {
+                return path;
+            }
+        }
+        return std::filesystem::path {};
+    };
+
+    if (locale_starts_with(value, "zh_cn") || locale_starts_with(value, "zh_sg"))
+    {
+        if (std::filesystem::path path = font("NotoSansSC-VariableFont_wght.ttf"); !path.empty())
+        {
+            return path;
+        }
+    }
+    if (locale_starts_with(value, "zh_tw") ||
+        locale_starts_with(value, "zh_hk") ||
+        locale_starts_with(value, "zh_mo"))
+    {
+        if (std::filesystem::path path = font("NotoSansTC-VariableFont_wght.ttf"); !path.empty())
+        {
+            return path;
+        }
+    }
+    if (locale_starts_with(value, "ja"))
+    {
+        if (std::filesystem::path path = font("NotoSansJP-VariableFont_wght.ttf"); !path.empty())
+        {
+            return path;
+        }
+    }
+    if (locale_starts_with(value, "ko"))
+    {
+        if (std::filesystem::path path = font("NotoSansKR-Regular.ttf"); !path.empty())
+        {
+            return path;
+        }
+    }
+    if (locale_starts_with(value, "ar"))
+    {
+        if (std::filesystem::path path = font("NotoSansArabic-Variable.ttf"); !path.empty())
+        {
+            return path;
+        }
+    }
+    if (locale_starts_with(value, "hi"))
+    {
+        if (std::filesystem::path path = existing_font_path("C:/Windows/Fonts/Nirmala.ttc"); !path.empty())
+        {
+            return path;
+        }
+        if (std::filesystem::path path = existing_font_path("C:/Windows/Fonts/Mangal.ttf"); !path.empty())
+        {
+            return path;
+        }
+        if (std::filesystem::path path = font("NotoSans-Variable.ttf"); !path.empty())
+        {
+            return path;
+        }
+    }
+    if (locale_starts_with(value, "ru") ||
+        locale_starts_with(value, "uk") ||
+        locale_starts_with(value, "bg") ||
+        locale_starts_with(value, "sr"))
+    {
+        if (std::filesystem::path path = font("NotoSans-Variable.ttf"); !path.empty())
+        {
+            return path;
+        }
+    }
+
+    if (!defaultFontPath.empty())
+    {
+        return defaultFontPath;
+    }
+    if (std::filesystem::path path = font("Inter.ttc"); !path.empty())
+    {
+        return path;
+    }
+    if (std::filesystem::path path = font("NotoSans-Variable.ttf"); !path.empty())
+    {
+        return path;
+    }
+    return {};
+}
+
+std::filesystem::path renderer2d_primary_font_for_locale(
+    const Renderer2DFontProfile& profile,
+    std::string_view locale,
+    const std::filesystem::path& defaultFontPath)
+{
+    const std::string value = normalised_locale(locale);
+    auto findProfileFont = [&profile](std::string_view key) -> std::filesystem::path {
+        const auto found = profile.localeFontPaths.find(std::string(key));
+        return found == profile.localeFontPaths.end() ? std::filesystem::path {} : found->second;
+    };
+
+    if (std::filesystem::path path = findProfileFont(value); !path.empty())
+    {
+        return path;
+    }
+
+    const std::size_t separator = value.find('_');
+    if (separator != std::string::npos)
+    {
+        if (std::filesystem::path path = findProfileFont(std::string_view(value).substr(0u, separator)); !path.empty())
+        {
+            return path;
+        }
+    }
+
+    if (!defaultFontPath.empty())
+    {
+        return defaultFontPath;
+    }
+    return profile.defaultFontPath;
+}
+
+bool Renderer2DFontAtlas::load_from_file(
+    const std::filesystem::path& path,
+    const Renderer2DFontAtlasLoadOptions& options,
+#if defined(__APPLE__)
+    const MetalTextureUpload& upload
+#else
+    VmaAllocator& allocator,
+    vk::CommandBuffer commandBuffer,
+    vk::Queue queue,
+    vk::Device logicalDevice,
+    std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
+    std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+#endif
+)
+{
+    Logger* logger = Logger::fetch_logger();
+    glyphs.clear();
+    emojiShaper = std::make_shared<Renderer2DEmojiShaper>();
+    kerningTable.clear();
+    faceTracking.clear();
+    faceTrackingUnitsToBakedPixels.clear();
+    bakedFontWeight = 400;
+    isLoaded = false;
+    const int requestedFontWeight = clamped_font_weight(options.fontWeight);
+    const std::vector<std::filesystem::path> fontPaths = font_candidate_paths(path, options);
+    fontName = fontPaths.empty() ? vibrance::path_utf8(path.filename()) : vibrance::path_utf8(fontPaths.front().filename());
+    if (fontPaths.size() > 1u)
+    {
+        fontName += "+fallbacks";
+    }
+    if (requestedFontWeight > 0)
+    {
+        fontName += "@wght";
+        fontName += std::to_string(requestedFontWeight);
+    }
+    std::vector<uint32_t> requestedCodepoints = build_codepoint_list(options);
+    struct PendingAtlasGlyph
+    {
+        uint32_t codepoint = 0u;
+        uint32_t width = 0u;
+        uint32_t height = 0u;
+        int bitmapLeft = 0;
+        int bitmapTop = 0;
+        std::vector<unsigned char> sdf {};
+        bool coloured = false;
+        float scale = 1.0f;
+    };
+    struct AtlasPlacement
+    {
+        uint32_t x = 0u;
+        uint32_t y = 0u;
+        bool packed = false;
+    };
+    std::vector<PendingAtlasGlyph> pendingGlyphs;
+    pendingGlyphs.reserve(requestedCodepoints.size());
+    std::vector<unsigned char> packedSdf;
+    FT_Library library = nullptr;
+    if (FT_Init_FreeType(&library) != 0)
+    {
+        logger->print("Failed to initialise FreeType for Renderer2D font loading.");
+    }
+    else
+    {
+        std::vector<LoadedFontFace> faces;
+        faces.reserve(fontPaths.size());
+        int fallbackFontWeight = requestedFontWeight;
+        bool primaryTextFaceLoaded = false;
+        for (const std::filesystem::path& fontPath : fontPaths)
+        {
+            LoadedFontFace loadedFace = {};
+            if (load_font_face(library, fontPath, fallbackFontWeight, bakedPixelHeight, loadedFace))
+            {
+                if (!primaryTextFaceLoaded && !FT_HAS_COLOR(loadedFace.face))
+                {
+                    bakedFontWeight = loadedFace.weight;
+                    fallbackFontWeight = loadedFace.weight;
+                    primaryTextFaceLoaded = true;
+                }
+                faces.push_back(std::move(loadedFace));
+            }
+        }
+
+        if (!faces.empty())
+        {
+            const auto reference = std::find_if(faces.begin(), faces.end(), [](const LoadedFontFace& candidate) {
+                return vibrance_text::ui_font_reference_face(candidate.face);
+            });
+            if (reference != faces.end())
+            {
+                const float scale = vibrance_text::normalise_ui_font(faces.front().face, reference->face, bakedPixelHeight);
+                if (scale != 1.0f)
+                    logger->print("Normalised Renderer2D primary font visible size by " + std::to_string(scale) +
+                        " for " + vibrance::path_utf8(faces.front().path) + ".");
+            }
+        }
+
+
+
+        for (unsigned pass = 0; pass < 2; ++pass)
+        for (unsigned i = 0; i < faces.size(); ++i)
+        {
+            auto& face = faces[i];
+            const bool explicitEmoji = std::find(options.emojiFontPaths.begin(), options.emojiFontPaths.end(), face.path) != options.emojiFontPaths.end();
+            if ((pass == 0 && !explicitEmoji) || (pass == 1 && explicitEmoji) ||
+                (!explicitEmoji && !FT_HAS_COLOR(face.face))) continue;
+            auto owner = face.mappedData;
+            if (!owner)
+            {
+                auto bytes = std::make_shared<std::vector<unsigned char>>(std::move(face.data));
+                owner = std::shared_ptr<const unsigned char>(bytes, bytes->data());
+            }
+            emojiShaper->add(face.bytes, std::move(owner), unsigned(face.face->face_index & 0xffff), i);
+        }
+
+
+        std::vector<uint32_t> shapedRequests;
+        for (auto cp : requestedCodepoints)
+        {
+            if (cp == 0xfe0e || Renderer2DEmojiShaper::extension(cp)) continue;
+            std::string literal;
+            Renderer2DEmojiShaper::append_utf8(literal, cp);
+            const auto run = visual_glyph_codepoints(literal);
+            shapedRequests.insert(shapedRequests.end(), run.begin(), run.end());
+        }
+        std::sort(shapedRequests.begin(), shapedRequests.end());
+        shapedRequests.erase(std::unique(shapedRequests.begin(), shapedRequests.end()), shapedRequests.end());
+        requestedCodepoints = std::move(shapedRequests);
+        const auto shaped = visual_glyph_codepoints(options.preloadText);
+        for (auto cp : shaped)
+            if (cp != '\n' && cp != '\r' && cp != '\t' &&
+                std::find(requestedCodepoints.begin(), requestedCodepoints.end(), cp) == requestedCodepoints.end())
+                requestedCodepoints.push_back(cp);
+
+        if (faces.empty())
+        {
+            logger->print("Renderer2D font atlas has no usable font faces.");
+        }
+        else
+        {
+            baseline = ft_26_6_to_float(faces.front().face->size->metrics.ascender);
+            lineHeight = ft_26_6_to_float(faces.front().face->size->metrics.height);
+            for (const LoadedFontFace& loadedFace : faces)
+            {
+                if (!FT_HAS_COLOR(loadedFace.face))
+                    lineHeight = std::max(lineHeight, ft_26_6_to_float(loadedFace.face->size->metrics.height));
+            }
+            if (lineHeight <= 0.0f)
+            {
+                lineHeight = std::max(baseline, bakedPixelHeight);
+            }
+            sdfPixelRange = static_cast<float>(kSdfPadding);
+
+            uint32_t renderedGlyphs = 0;
+            uint32_t missingGlyphs = 0;
+
+            for (uint32_t codepoint : requestedCodepoints)
+            {
+                GlyphRecord& record = glyphs[codepoint];
+                const std::size_t faceIndex = codepoint >= 0x110000u
+                    ? (codepoint - 0x110000u) >> 16
+                    : choose_face_for_codepoint(faces, codepoint);
+                if (faceIndex >= faces.size())
+                {
+                    ++missingGlyphs;
+                    continue;
+                }
+
+                FT_Face face = faces[faceIndex].face;
+                const FT_UInt glyphIndex = codepoint >= 0x110000u
+                    ? (codepoint - 0x110000u) & 0xffffu : FT_Get_Char_Index(face, codepoint);
+                vibrance_text::ColourBitmap colour;
+                const unsigned strikeHeight = std::max(unsigned(face->size->metrics.y_ppem), 1u);
+                bool hasColour = vibrance_text::load_cbdt_bitmap(faces[faceIndex].bytes,
+                    unsigned(face->face_index & 0xffff), glyphIndex, strikeHeight, colour);
+                if (!hasColour && FT_HAS_COLOR(face) &&
+                    FT_Load_Glyph(face, glyphIndex, FT_LOAD_COLOR | FT_LOAD_RENDER) == 0 &&
+                    face->glyph->bitmap.pixel_mode == FT_PIXEL_MODE_BGRA)
+                {
+                    const auto& bitmap = face->glyph->bitmap;
+                    colour.width = bitmap.width; colour.height = bitmap.rows;
+                    colour.left = face->glyph->bitmap_left; colour.top = face->glyph->bitmap_top;
+                    colour.advance = ft_26_6_to_float(face->glyph->advance.x);
+                    colour.rgba.resize(std::size_t(bitmap.width) * bitmap.rows * 4);
+                    for (unsigned y = 0; y < bitmap.rows; ++y)
+                        for (unsigned x = 0; x < bitmap.width; ++x)
+                        {
+                            const auto* pixel = bitmap.buffer + y * bitmap.pitch + x * 4;
+                            auto* destination = colour.rgba.data() + (std::size_t(y) * bitmap.width + x) * 4;
+                            destination[0] = pixel[2]; destination[1] = pixel[1];
+                            destination[2] = pixel[0]; destination[3] = pixel[3];
+                        }
+                    hasColour = true;
+                }
+                if (hasColour)
+                {
+                    constexpr unsigned padding = 2;
+                    const unsigned width = (colour.width + padding * 2) * 4;
+                    const unsigned height = colour.height + padding * 2;
+                    std::vector<unsigned char> pixels(std::size_t(width) * height, 0);
+                    for (unsigned y = 0; y < colour.height; ++y)
+                        std::copy_n(colour.rgba.data() + std::size_t(y) * colour.width * 4,
+                            colour.width * 4, pixels.data() + std::size_t(y + padding) * width + padding * 4);
+                    const float metricScale = bakedPixelHeight / float(strikeHeight);
+                    record.advance = colour.advance * metricScale;
+                    record.sourceFace = uint32_t(faceIndex); record.valid = true; record.coloured = true;
+                    record.bakedFontWeight = static_cast<float>(faces[faceIndex].weight);
+                    pendingGlyphs.push_back({ codepoint, width, height, colour.left, colour.top,
+                        std::move(pixels), true, metricScale });
+                    continue;
+                }
+                if (FT_Load_Glyph(
+                        face,
+                        glyphIndex,
+                        FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING) != 0)
+                {
+                    ++missingGlyphs;
+                    continue;
+                }
+
+                record.advance = ft_26_6_to_float(face->glyph->advance.x);
+                record.sourceFace = static_cast<uint32_t>(faceIndex);
+                record.bakedFontWeight = static_cast<float>(faces[faceIndex].weight);
+                record.valid = true;
+
+                if (codepoint == ' ')
+                {
+                    continue;
+                }
+
+                if (FT_Render_Glyph(face->glyph, FT_RENDER_MODE_NORMAL) != 0)
+                {
+                    continue;
+                }
+
+                const FT_Bitmap& bitmap = face->glyph->bitmap;
+                if (bitmap.width == 0u || bitmap.rows == 0u)
+                {
+                    continue;
+                }
+
+                const uint32_t glyphWidth = bitmap.width + static_cast<uint32_t>(kSdfPadding * 2);
+                const uint32_t glyphHeight = bitmap.rows + static_cast<uint32_t>(kSdfPadding * 2);
+                const std::vector<unsigned char> alpha = padded_glyph_alpha(bitmap, glyphWidth, glyphHeight);
+                std::vector<unsigned char> sdf = make_sdf_from_alpha(alpha, glyphWidth, glyphHeight);
+                if (sdf.empty())
+                {
+                    continue;
+                }
+
+                pendingGlyphs.push_back(PendingAtlasGlyph {
+                    codepoint,
+                    glyphWidth,
+                    glyphHeight,
+                    face->glyph->bitmap_left,
+                    face->glyph->bitmap_top,
+                    std::move(sdf)
+                });
+            }
+
+
+
+
+
+
+            const uint32_t existingSide = atlasImage == nullptr ? 0u :
+                std::max(atlasImage->extent.width, atlasImage->extent.height);
+            std::vector<AtlasPlacement> placements;
+            const auto pack_atlas = [
+                &pendingGlyphs,
+                &placements](uint32_t side) {
+                placements.assign(pendingGlyphs.size(), AtlasPlacement {});
+                uint32_t cursorX = 1u;
+                uint32_t cursorY = 1u;
+                uint32_t rowHeight = 0u;
+                bool packedAll = true;
+                for (std::size_t index = 0u;
+                    index < pendingGlyphs.size(); ++index)
+                {
+                    const PendingAtlasGlyph& glyph = pendingGlyphs[index];
+                    if (glyph.width + 2u >= side || glyph.height + 2u >= side)
+                    {
+                        packedAll = false;
+                        continue;
+                    }
+                    if (glyph.coloured) cursorX = (cursorX + 3u) & ~3u;
+                    if (cursorX + glyph.width + 1u >= side)
+                    {
+                        cursorX = glyph.coloured ? 4u : 1u;
+                        cursorY += rowHeight + 1u;
+                        rowHeight = 0u;
+                    }
+                    if (cursorY + glyph.height + 1u >= side)
+                    {
+                        packedAll = false;
+                        continue;
+                    }
+                    placements[index] = { cursorX, cursorY, true };
+                    cursorX += glyph.width + 1u;
+                    rowHeight = std::max(rowHeight, glyph.height);
+                }
+                return packedAll;
+            };
+
+            uint32_t atlasSide = kAtlasSides.back();
+            bool packedAllGlyphs = false;
+            for (uint32_t candidate : kAtlasSides)
+            {
+                if (candidate < existingSide)
+                {
+                    continue;
+                }
+                atlasSide = candidate;
+                packedAllGlyphs = pack_atlas(candidate);
+                if (packedAllGlyphs)
+                {
+                    break;
+                }
+            }
+            atlasSize = { atlasSide, atlasSide };
+
+
+
+
+            packedSdf.assign(
+                static_cast<std::size_t>(atlasSide) * atlasSide,
+                0u);
+
+            for (std::size_t index = 0u;
+                index < pendingGlyphs.size(); ++index)
+            {
+                PendingAtlasGlyph& glyph = pendingGlyphs[index];
+                const AtlasPlacement placement = placements[index];
+                GlyphRecord& record = glyphs[glyph.codepoint];
+                if (!placement.packed)
+                {
+                    record = {};
+                    continue;
+                }
+                for (uint32_t y = 0u; y < glyph.height; ++y)
+                {
+                    for (uint32_t x = 0u; x < glyph.width; ++x)
+                    {
+                        const std::size_t destination =
+                            (static_cast<std::size_t>(placement.y + y) *
+                                atlasSide + placement.x + x);
+                        const unsigned char value = glyph.sdf[
+                            static_cast<std::size_t>(y) * glyph.width + x];
+                        packedSdf[destination] = value;
+                    }
+                }
+                const int padding = glyph.coloured ? 2 : kSdfPadding;
+
+
+
+                record.sdfPadding = glyph.coloured ? 0.0f : static_cast<float>(kSdfPadding);
+                record.sdfAtlasSize = glyph.coloured ? glm::vec2(0.0f) :
+                    glm::vec2(static_cast<float>(glyph.width), static_cast<float>(glyph.height));
+                record.offset = {
+                    static_cast<float>(glyph.bitmapLeft - padding) * glyph.scale,
+                    static_cast<float>(-glyph.bitmapTop - padding) * glyph.scale
+                };
+                record.size = {
+                    static_cast<float>(glyph.coloured ? glyph.width / 4 : glyph.width) * glyph.scale,
+                    static_cast<float>(glyph.height) * glyph.scale
+                };
+                record.uvMin = {
+                    static_cast<float>(placement.x) /
+                        static_cast<float>(atlasSide),
+                    static_cast<float>(placement.y) /
+                        static_cast<float>(atlasSide)
+                };
+                record.uvMax = {
+                    static_cast<float>(placement.x + glyph.width) /
+                        static_cast<float>(atlasSide),
+                    static_cast<float>(placement.y + glyph.height) /
+                        static_cast<float>(atlasSide)
+                };
+                record.drawable = true;
+                ++renderedGlyphs;
+            }
+
+            std::vector<vibrance_text::FontPositioning> facePositioning;
+            facePositioning.reserve(faces.size());
+            faceTracking.resize(faces.size());
+            faceTrackingUnitsToBakedPixels.resize(faces.size(), 0.0f);
+            for (std::size_t index = 0u; index < faces.size(); ++index)
+            {
+                const auto* face = faces[index].face;
+                facePositioning.emplace_back(faces[index].bytes, unsigned(face->face_index & 0xffff));
+                faceTrackingUnitsToBakedPixels[index] = float(face->size->metrics.x_scale) / (65536.0f * 64.0f);
+                for (const auto& point : facePositioning.back().tracking_points())
+                    faceTracking[index].emplace_back(point.first, point.second);
+            }
+            if (std::all_of(faceTracking.begin(), faceTracking.end(), [](const auto& points) { return points.empty(); }))
+            {
+                faceTracking.clear();
+                faceTrackingUnitsToBakedPixels.clear();
+            }
+
+            for (uint32_t left : requestedCodepoints)
+            {
+                const auto leftIt = glyphs.find(left);
+                if (leftIt == glyphs.end() || !leftIt->second.valid)
+                {
+                    continue;
+                }
+                for (uint32_t right : requestedCodepoints)
+                {
+                    const auto rightIt = glyphs.find(right);
+                    if (rightIt == glyphs.end() ||
+                        !rightIt->second.valid ||
+                        leftIt->second.sourceFace != rightIt->second.sourceFace ||
+                        leftIt->second.sourceFace >= faces.size())
+                    {
+                        continue;
+                    }
+
+                    FT_Face face = faces[leftIt->second.sourceFace].face;
+                    if (!FT_HAS_KERNING(face) && !facePositioning[leftIt->second.sourceFace].has_pair_adjustments())
+                        continue;
+                    const FT_UInt leftGlyph = FT_Get_Char_Index(face, left);
+                    const FT_UInt rightGlyph = FT_Get_Char_Index(face, right);
+                    if (leftGlyph == 0u || rightGlyph == 0u)
+                    {
+                        continue;
+                    }
+
+                    FT_Vector kerning = {};
+                    if (!FT_HAS_KERNING(face))
+                    {
+                        const auto faceIndex = leftIt->second.sourceFace;
+                        const int adjustment = facePositioning[faceIndex].pair_adjustment(
+                            static_cast<std::uint16_t>(leftGlyph), static_cast<std::uint16_t>(rightGlyph));
+                        if (adjustment != 0)
+                            kerningTable[kerning_key(left, right)] = float(adjustment) *
+                                float(face->size->metrics.x_scale) / (65536.0f * 64.0f);
+                        continue;
+                    }
+
+
+                    if (FT_Get_Kerning(face, leftGlyph, rightGlyph, FT_KERNING_DEFAULT, &kerning) == 0 &&
+                        kerning.x != 0)
+                    {
+                        kerningTable[kerning_key(left, right)] = ft_26_6_to_float(kerning.x);
+                    }
+                }
+            }
+
+            const bool incompleteRequiredGlyphs =
+                options.requireRequestedGlyphs &&
+                (missingGlyphs > 0u || !packedAllGlyphs);
+            isLoaded = renderedGlyphs > 0u && !incompleteRequiredGlyphs;
+            if (isLoaded)
+            {
+                logger->print("Loaded Renderer2D SDF font atlas from " + fontName + ".");
+                if (!packedAllGlyphs)
+                {
+                    logger->print("Renderer2D font atlas did not fit every requested glyph: " + fontName + ".");
+                }
+            }
+            else if (incompleteRequiredGlyphs)
+            {
+                logger->print("Renderer2D font is missing or could not pack required glyphs: " + fontName + ".");
+            }
+            else if (!packedAllGlyphs)
+            {
+                logger->print("Renderer2D font atlas was too small for every glyph in " + fontName + ".");
+            }
+            else
+            {
+                logger->print("Renderer2D font produced no drawable glyphs: " + fontName + ".");
+            }
+
+            if (missingGlyphs > 0u)
+            {
+                logger->print("Renderer2D font is missing " + std::to_string(missingGlyphs) +
+                    " requested glyphs: " + fontName + ".");
+            }
+        }
+
+        for (LoadedFontFace& loadedFace : faces)
+        {
+            if (loadedFace.face != nullptr)
+            {
+                FT_Done_Face(loadedFace.face);
+                loadedFace.face = nullptr;
+            }
+        }
+        FT_Done_FreeType(library);
+    }
+
+    if (packedSdf.empty())
+    {
+        atlasSize = { kAtlasSides.front(), kAtlasSides.front() };
+        packedSdf.assign(
+            static_cast<std::size_t>(atlasSize.x) * atlasSize.y,
+            0u);
+    }
+#if defined(__APPLE__)
+    metalAtlasImage = upload(std::max(atlasSize.x / 4u, 1u), std::max(atlasSize.y, 1u), packedSdf, false, false);
+    atlasImage = metalAtlasImage.get();
+    if (!atlasImage) isLoaded = false;
+#else
+    const vk::Extent2D packedAtlasExtent {
+        std::max(atlasSize.x / 4u, 1u),
+        std::max(atlasSize.y, 1u)
+    };
+    if (atlasImage == nullptr ||
+        atlasImage->extent.width != packedAtlasExtent.width ||
+        atlasImage->extent.height != packedAtlasExtent.height)
+    {
+        atlasImage = new StorageImage(allocator, vk::Format::eR8G8B8A8Unorm,
+            packedAtlasExtent, commandBuffer, queue,
+            logicalDevice, vmaDeletionQueue, deviceDeletionQueue);
+    }
+    if (!upload_atlas_to_image(
+            allocator,
+            commandBuffer,
+            queue,
+            *atlasImage,
+            packedSdf))
+    {
+        logger->print("Failed to upload Renderer2D font atlas.");
+        isLoaded = false;
+    }
+
+#endif
+
+    if (isLoaded) update_tabular_digit_metrics();
+    return isLoaded;
+}
+
+void Renderer2DFontAtlas::update_tabular_digit_metrics()
+{
+    tabularDigitAdvance = 0.0f;
+    for (uint32_t codepoint = '0'; codepoint <= '9'; ++codepoint)
+        if (const auto* glyph = glyph_for(codepoint); glyph && glyph->valid)
+            tabularDigitAdvance = std::max(tabularDigitAdvance, glyph->advance);
+    tabularDigitLeft = 0.0f;
+    tabularDigitRight = tabularDigitAdvance;
+    for (uint32_t codepoint = '0'; codepoint <= '9'; ++codepoint)
+    {
+        const auto* glyph = glyph_for(codepoint);
+        if (!glyph || !glyph->valid || !glyph->drawable) continue;
+        const float inset = std::min(glyph->coloured ? 2.0f : sdfPixelRange,
+            std::max(std::min(glyph->size.x, glyph->size.y) * 0.45f, 0.0f));
+        const float centreOffset = (tabularDigitAdvance - glyph->advance) * 0.5f;
+
+
+
+        tabularDigitLeft = std::min(tabularDigitLeft,
+            centreOffset + glyph->offset.x + inset);
+        tabularDigitRight = std::max(tabularDigitRight,
+            centreOffset + glyph->offset.x + glyph->size.x - inset);
+    }
+}
+
+bool Renderer2DFontAtlas::load_from_file(
+    const std::filesystem::path& path,
+#if defined(__APPLE__)
+    const MetalTextureUpload& upload
+#else
+    VmaAllocator& allocator,
+    vk::CommandBuffer commandBuffer,
+    vk::Queue queue,
+    vk::Device logicalDevice,
+    std::deque<std::function<void(VmaAllocator)>>& vmaDeletionQueue,
+    std::deque<std::function<void(vk::Device)>>& deviceDeletionQueue
+#endif
+)
+{
+    Renderer2DFontAtlasLoadOptions options = {};
+    return load_from_file(
+        path,
+        options,
+#if defined(__APPLE__)
+        upload);
+#else
+        allocator,
+        commandBuffer,
+        queue,
+        logicalDevice,
+        vmaDeletionQueue,
+        deviceDeletionQueue);
+#endif
+}
+
+Renderer2DTextLayout Renderer2DFontAtlas::layout_text(std::string_view text, float fontSize) const
+{
+    Renderer2DTextLayout layout;
+    layout.rightToLeft = renderer2d_text_is_right_to_left(text);
+    layout.lineCount = 1u + static_cast<uint32_t>(
+        std::count(text.begin(), text.end(), '\n'));
+    if (!isLoaded || fontSize <= 0.0f)
+    {
+        return layout;
+    }
+
+    const float scale = fontSize / std::max(bakedPixelHeight, 1.0f);
+    const float scaledLineHeight = lineHeight * scale;
+    const float scaledBaseline = baseline * scale;
+    float penX = 0.0f;
+    float penY = 0.0f;
+    float maxX = 0.0f;
+    glm::vec2 inkMin { std::numeric_limits<float>::max() };
+    glm::vec2 inkMax { std::numeric_limits<float>::lowest() };
+    uint32_t previous = 0;
+
+    for (uint32_t codepoint : visual_glyph_codepoints(text))
+    {
+        if (codepoint == '\n')
+        {
+            maxX = std::max(maxX, penX);
+            penX = 0.0f;
+            penY += scaledLineHeight;
+            previous = 0;
+            continue;
+        }
+
+        const GlyphRecord* glyph = glyph_for(codepoint);
+        if (glyph == nullptr || !glyph->valid)
+        {
+            glyph = glyph_for('?');
+            codepoint = '?';
+        }
+        if (glyph == nullptr || !glyph->valid)
+        {
+            continue;
+        }
+
+        const bool tabularDigit = is_decimal_digit(codepoint) && tabularDigitAdvance > 0.0f;
+        const float advance = tabularDigit ? tabularDigitAdvance : glyph->advance;
+        const float centreOffset = tabularDigit ? (advance - glyph->advance) * 0.5f : 0.0f;
+        if (previous != 0 && !is_decimal_digit(previous) && !tabularDigit)
+        {
+            penX += (kerning(previous, codepoint) + tracking(previous, codepoint, fontSize, true)) * scale;
+        }
+
+        if (glyph->drawable)
+        {
+            MSDFGlyph outGlyph = {};
+            outGlyph.codepoint = codepoint;
+            outGlyph.position = {
+                penX + (glyph->offset.x + centreOffset) * scale,
+                penY + scaledBaseline + glyph->offset.y * scale
+            };
+            outGlyph.size = glyph->size * scale;
+            outGlyph.uvMin = glyph->uvMin;
+            outGlyph.uvMax = glyph->uvMax;
+            outGlyph.advance = advance * scale;
+            outGlyph.coloured = glyph->coloured;
+            outGlyph.bakedFontWeight = glyph->bakedFontWeight;
+            outGlyph.sdfPadding = glyph->sdfPadding;
+            outGlyph.sdfAtlasSize = glyph->sdfAtlasSize;
+            outGlyph.sdfUvRect = { glyph->uvMin.x, glyph->uvMin.y, glyph->uvMax.x, glyph->uvMax.y };
+
+            const float inkInset = std::min(
+                (glyph->coloured ? 2.0f : sdfPixelRange) * scale,
+                std::max(std::min(outGlyph.size.x, outGlyph.size.y) * 0.45f, 0.0f));
+            const glm::vec2 glyphInkMin = outGlyph.position + glm::vec2(inkInset);
+            const glm::vec2 glyphInkMax = outGlyph.position + outGlyph.size - glm::vec2(inkInset);
+            if (glyphInkMax.x > glyphInkMin.x && glyphInkMax.y > glyphInkMin.y)
+            {
+                inkMin = glm::min(inkMin, glyphInkMin);
+                inkMax = glm::max(inkMax, glyphInkMax);
+            }
+            else
+            {
+                inkMin = glm::min(inkMin, outGlyph.position);
+                inkMax = glm::max(inkMax, outGlyph.position + outGlyph.size);
+            }
+            layout.glyphs.push_back(outGlyph);
+        }
+
+        if (tabularDigit)
+        {
+            inkMin.x = std::min(inkMin.x, penX + tabularDigitLeft * scale);
+            inkMax.x = std::max(inkMax.x, penX + tabularDigitRight * scale);
+        }
+
+        penX += advance * scale;
+        maxX = std::max(maxX, penX);
+        previous = codepoint;
+    }
+
+    layout.lineHeight = scaledLineHeight;
+    layout.baseline = scaledBaseline;
+    layout.advanceWidth = std::max(maxX, penX);
+    if (!layout.glyphs.empty())
+    {
+        const glm::vec2 origin = (std::isfinite(inkMin.x) && std::isfinite(inkMin.y)) ? inkMin : glm::vec2(0.0f);
+        layout.inkOffset = origin;
+        layout.baseline -= origin.y;
+        for (MSDFGlyph& glyph : layout.glyphs)
+        {
+            glyph.position -= origin;
+        }
+        layout.bounds = glm::max(inkMax - origin, glm::vec2(0.0f));
+    }
+    else
+    {
+        layout.bounds = {
+            std::max(maxX, penX),
+            penY + scaledLineHeight
+        };
+    }
+    return layout;
+}
+
+Renderer2DTextLayout Renderer2DFontAtlas::layout_text(
+    std::string_view text,
+    float fontSize,
+    const TextLayout2DOptions& options) const
+{
+    const bool legacyLayout =
+        options.opticalPointSize <= 0.0f &&
+        options.maximumWidth <= 0.0f &&
+        options.wrapMode == TextWrapMode2D::eNone &&
+        options.horizontalAlignment == TextHorizontalAlignment2D::eStart &&
+        std::abs(options.lineHeightMultiplier - 1.0f) <= 0.0001f &&
+        std::abs(options.lineSpacing) <= 0.0001f &&
+        std::abs(options.paragraphSpacing) <= 0.0001f &&
+        std::abs(options.characterSpacing) <= 0.0001f &&
+        std::abs(options.wordSpacing) <= 0.0001f;
+    if (legacyLayout && options.tabularDigits)
+    {
+        return layout_text(text, fontSize);
+    }
+
+    Renderer2DTextLayout layout = {};
+    layout.rightToLeft = renderer2d_text_is_right_to_left(text);
+    if (!isLoaded || fontSize <= 0.0f)
+    {
+        layout.lineCount = 1u + static_cast<uint32_t>(
+            std::count(text.begin(), text.end(), '\n'));
+        layout.bounds.x = std::max(options.maximumWidth, 0.0f);
+        return layout;
+    }
+
+    const float scale = fontSize / std::max(bakedPixelHeight, 1.0f);
+    const float scaledLineHeight = lineHeight * scale;
+    const float scaledBaseline = baseline * scale;
+    const float maximumWidth = std::max(options.maximumWidth, 0.0f);
+    const float characterSpacing = std::max(
+        options.characterSpacing,
+        -fontSize * 0.45f);
+    const float wordSpacing = std::max(
+        options.wordSpacing,
+        -fontSize * 0.75f);
+    const float resolvedLineHeight = std::max(
+        scaledLineHeight * std::max(options.lineHeightMultiplier, 0.2f) +
+            options.lineSpacing,
+        fontSize * 0.2f);
+    const float paragraphSpacing = std::max(
+        options.paragraphSpacing,
+        -resolvedLineHeight * 0.8f);
+
+    const auto is_wrap_space = [](uint32_t codepoint) {
+        return codepoint == ' ' || codepoint == '\t' ||
+            codepoint == 0x00A0u || codepoint == 0x3000u;
+    };
+    const bool tabularDigits = options.tabularDigits && tabularDigitAdvance > 0.0f;
+    const auto advanceFor = [this, tabularDigits](uint32_t codepoint, const GlyphRecord& glyph) {
+        return tabularDigits && is_decimal_digit(codepoint) ? tabularDigitAdvance : glyph.advance;
+    };
+    const auto kerningFor = [this, tabularDigits, fontSize, pointSize = options.opticalPointSize](uint32_t previous, uint32_t current) {
+        return tabularDigits && (is_decimal_digit(previous) || is_decimal_digit(current)) ?
+            0.0f : kerning(previous, current) + tracking(previous, current, fontSize, tabularDigits, pointSize);
+    };
+    const auto glyph_for_layout = [this](
+        uint32_t codepoint,
+        uint32_t& resolvedCodepoint) -> const GlyphRecord* {
+        resolvedCodepoint = codepoint;
+        const GlyphRecord* glyph = glyph_for(codepoint);
+        if (glyph == nullptr || !glyph->valid)
+        {
+            resolvedCodepoint = '?';
+            glyph = glyph_for('?');
+        }
+        return glyph && glyph->valid ? glyph : nullptr;
+    };
+    const auto measure_range = [
+        this,
+        &glyph_for_layout,
+        &is_wrap_space,
+        &advanceFor,
+        &kerningFor,
+        characterSpacing,
+        wordSpacing,
+        scale](const std::vector<uint32_t>& codepoints,
+               std::size_t begin,
+               std::size_t end) {
+        float width = 0.0f;
+        uint32_t previous = 0u;
+        for (std::size_t index = begin; index < end; ++index)
+        {
+            uint32_t resolved = 0u;
+            const GlyphRecord* glyph =
+                glyph_for_layout(codepoints[index], resolved);
+            if (!glyph)
+            {
+                continue;
+            }
+            if (previous != 0u)
+            {
+                width += kerningFor(previous, resolved) * scale +
+                    characterSpacing;
+            }
+            width += advanceFor(resolved, *glyph) * scale;
+            if (is_wrap_space(codepoints[index]))
+            {
+                width += wordSpacing;
+            }
+            previous = resolved;
+        }
+        return std::max(width, 0.0f);
+    };
+
+    struct FlowLine
+    {
+        std::vector<uint32_t> codepoints;
+        bool lastInParagraph = true;
+        bool paragraphBreakAfter = false;
+    };
+
+    std::vector<std::vector<uint32_t>> paragraphs(1u);
+    for (uint32_t codepoint : visual_glyph_codepoints(text))
+    {
+        if (codepoint == '\n')
+        {
+            paragraphs.emplace_back();
+        }
+        else if (codepoint != '\r')
+        {
+            if (codepoint == '\t')
+            {
+                paragraphs.back().insert(paragraphs.back().end(), 4u, ' ');
+            }
+            else
+            {
+                paragraphs.back().push_back(codepoint);
+            }
+        }
+    }
+
+    std::vector<FlowLine> lines;
+    for (std::size_t paragraphIndex = 0u;
+        paragraphIndex < paragraphs.size(); ++paragraphIndex)
+    {
+        const std::vector<uint32_t>& paragraph = paragraphs[paragraphIndex];
+        const std::size_t firstLine = lines.size();
+        const bool shouldWrap = maximumWidth > 0.0f &&
+            options.wrapMode != TextWrapMode2D::eNone;
+        if (!shouldWrap || paragraph.empty())
+        {
+            lines.push_back({ paragraph, true, false });
+        }
+        else
+        {
+            std::size_t start = 0u;
+            while (start < paragraph.size())
+            {
+                while (start < paragraph.size() &&
+                    is_wrap_space(paragraph[start]))
+                {
+                    ++start;
+                }
+                if (start >= paragraph.size())
+                {
+                    break;
+                }
+
+                std::size_t end = start;
+                std::size_t lastSpace = paragraph.size();
+                bool emitted = false;
+                while (end < paragraph.size())
+                {
+                    if (is_wrap_space(paragraph[end]))
+                    {
+                        lastSpace = end;
+                    }
+                    const float candidateWidth =
+                        measure_range(paragraph, start, end + 1u);
+                    if (candidateWidth > maximumWidth)
+                    {
+                        std::size_t lineEnd = end;
+                        std::size_t nextStart = end;
+                        if (options.wrapMode == TextWrapMode2D::eWord &&
+                            lastSpace != paragraph.size() &&
+                            lastSpace >= start)
+                        {
+                            lineEnd = lastSpace;
+                            nextStart = lastSpace + 1u;
+                        }
+                        else if (end == start)
+                        {
+                            lineEnd = start + 1u;
+                            nextStart = lineEnd;
+                        }
+
+                        while (lineEnd > start &&
+                            is_wrap_space(paragraph[lineEnd - 1u]))
+                        {
+                            --lineEnd;
+                        }
+                        lines.push_back({
+                            std::vector<uint32_t>(
+                                paragraph.begin() + static_cast<std::ptrdiff_t>(start),
+                                paragraph.begin() + static_cast<std::ptrdiff_t>(lineEnd)),
+                            false,
+                            false
+                        });
+                        start = nextStart;
+                        emitted = true;
+                        break;
+                    }
+                    ++end;
+                }
+
+                if (!emitted)
+                {
+                    std::size_t lineEnd = paragraph.size();
+                    while (lineEnd > start &&
+                        is_wrap_space(paragraph[lineEnd - 1u]))
+                    {
+                        --lineEnd;
+                    }
+                    lines.push_back({
+                        std::vector<uint32_t>(
+                            paragraph.begin() + static_cast<std::ptrdiff_t>(start),
+                            paragraph.begin() + static_cast<std::ptrdiff_t>(lineEnd)),
+                        false,
+                        false
+                    });
+                    break;
+                }
+            }
+        }
+
+        if (lines.size() == firstLine)
+        {
+            lines.push_back({ {}, true, false });
+        }
+        lines.back().lastInParagraph = true;
+        lines.back().paragraphBreakAfter =
+            paragraphIndex + 1u < paragraphs.size();
+    }
+
+    layout.lineCount = static_cast<uint32_t>(lines.size());
+    layout.lineHeight = resolvedLineHeight;
+    float penY = 0.0f;
+    float maximumVisibleX = 0.0f;
+    float inkMinY = std::numeric_limits<float>::max();
+    float inkMaxY = std::numeric_limits<float>::lowest();
+    bool hasInk = false;
+
+    for (const FlowLine& line : lines)
+    {
+        const float lineAdvance = measure_range(
+            line.codepoints,
+            0u,
+            line.codepoints.size());
+        const std::size_t spaceCount = static_cast<std::size_t>(
+            std::count_if(
+                line.codepoints.begin(),
+                line.codepoints.end(),
+                is_wrap_space));
+        const bool justify =
+            options.horizontalAlignment ==
+                TextHorizontalAlignment2D::eJustify &&
+            !line.lastInParagraph && maximumWidth > 0.0f &&
+            spaceCount > 0u;
+        const float justifySpacing = justify ?
+            std::max(maximumWidth - lineAdvance, 0.0f) /
+                static_cast<float>(spaceCount) :
+            0.0f;
+
+        struct PendingGlyph
+        {
+            MSDFGlyph glyph;
+            float inkInset = 0.0f;
+        };
+        std::vector<PendingGlyph> pending;
+        float penX = 0.0f;
+        float lineInkMin = std::numeric_limits<float>::max();
+        float lineInkMax = std::numeric_limits<float>::lowest();
+        bool hasTabularDigits = false;
+        uint32_t previous = 0u;
+        for (uint32_t codepoint : line.codepoints)
+        {
+            uint32_t resolved = 0u;
+            const GlyphRecord* glyph = glyph_for_layout(codepoint, resolved);
+            if (!glyph)
+            {
+                continue;
+            }
+            if (previous != 0u)
+            {
+                penX += kerningFor(previous, resolved) * scale +
+                    characterSpacing;
+            }
+            const bool tabularDigit = tabularDigits && is_decimal_digit(resolved);
+            const float advance = advanceFor(resolved, *glyph);
+            const float centreOffset = tabularDigit ? (advance - glyph->advance) * 0.5f : 0.0f;
+            if (glyph->drawable)
+            {
+                PendingGlyph out = {};
+                out.glyph.codepoint = resolved;
+                out.glyph.position = {
+                    penX + (glyph->offset.x + centreOffset) * scale,
+                    penY + scaledBaseline + glyph->offset.y * scale
+                };
+                out.glyph.size = glyph->size * scale;
+                out.glyph.uvMin = glyph->uvMin;
+                out.glyph.uvMax = glyph->uvMax;
+                out.glyph.advance = advance * scale;
+                out.glyph.coloured = glyph->coloured;
+                out.glyph.bakedFontWeight = glyph->bakedFontWeight;
+                out.glyph.sdfPadding = glyph->sdfPadding;
+                out.glyph.sdfAtlasSize = glyph->sdfAtlasSize;
+                out.glyph.sdfUvRect = { glyph->uvMin.x, glyph->uvMin.y, glyph->uvMax.x, glyph->uvMax.y };
+                out.inkInset = std::min(
+                    (glyph->coloured ? 2.0f : sdfPixelRange) * scale,
+                    std::max(
+                        std::min(out.glyph.size.x, out.glyph.size.y) * 0.45f,
+                        0.0f));
+                lineInkMin = std::min(
+                    lineInkMin,
+                    out.glyph.position.x + out.inkInset);
+                lineInkMax = std::max(
+                    lineInkMax,
+                    out.glyph.position.x + out.glyph.size.x - out.inkInset);
+                pending.push_back(out);
+            }
+            if (tabularDigit)
+            {
+                hasTabularDigits = true;
+                lineInkMin = std::min(lineInkMin, penX + tabularDigitLeft * scale);
+                lineInkMax = std::max(lineInkMax, penX + tabularDigitRight * scale);
+            }
+            penX += advance * scale;
+            if (is_wrap_space(codepoint))
+            {
+                penX += wordSpacing + justifySpacing;
+            }
+            previous = resolved;
+        }
+
+        const bool lineHasInk = !pending.empty() &&
+            std::isfinite(lineInkMin) && std::isfinite(lineInkMax);
+        const float visibleWidth = lineHasInk ?
+            std::max(lineInkMax - lineInkMin, 0.0f) :
+            std::max(lineAdvance, 0.0f);
+        const float alignmentWidth = maximumWidth > 0.0f ?
+            maximumWidth : visibleWidth;
+        float alignedLeft = 0.0f;
+        switch (options.horizontalAlignment)
+        {
+        case TextHorizontalAlignment2D::eCenter:
+            alignedLeft = (alignmentWidth - visibleWidth) * 0.5f;
+            break;
+        case TextHorizontalAlignment2D::eEnd:
+            alignedLeft = layout.rightToLeft ?
+                0.0f : alignmentWidth - visibleWidth;
+            break;
+        case TextHorizontalAlignment2D::eJustify:
+            alignedLeft = 0.0f;
+            break;
+        case TextHorizontalAlignment2D::eStart:
+        default:
+            alignedLeft = layout.rightToLeft ?
+                alignmentWidth - visibleWidth : 0.0f;
+            break;
+        }
+        alignedLeft = std::max(alignedLeft, 0.0f);
+        if (hasTabularDigits)
+            maximumVisibleX = std::max(maximumVisibleX, alignedLeft + visibleWidth);
+        const float lineShift = lineHasInk ?
+            alignedLeft - lineInkMin : alignedLeft;
+
+        for (PendingGlyph& pendingGlyph : pending)
+        {
+            pendingGlyph.glyph.position.x += lineShift;
+            const float glyphInkMinY =
+                pendingGlyph.glyph.position.y + pendingGlyph.inkInset;
+            const float glyphInkMaxY =
+                pendingGlyph.glyph.position.y + pendingGlyph.glyph.size.y -
+                    pendingGlyph.inkInset;
+            inkMinY = std::min(inkMinY, glyphInkMinY);
+            inkMaxY = std::max(inkMaxY, glyphInkMaxY);
+            maximumVisibleX = std::max(
+                maximumVisibleX,
+                pendingGlyph.glyph.position.x +
+                    pendingGlyph.glyph.size.x - pendingGlyph.inkInset);
+            layout.glyphs.push_back(std::move(pendingGlyph.glyph));
+            hasInk = true;
+        }
+
+        if (&line != &lines.back())
+        {
+            penY += resolvedLineHeight;
+            if (line.paragraphBreakAfter)
+            {
+                penY += paragraphSpacing;
+            }
+        }
+    }
+
+    const float typographicHeight = lines.empty() ? 0.0f :
+        penY + scaledLineHeight *
+            std::max(options.lineHeightMultiplier, 0.2f);
+    layout.baseline = scaledBaseline;
+    if (hasInk)
+    {
+        layout.baseline -= inkMinY;
+        for (MSDFGlyph& glyph : layout.glyphs)
+        {
+            glyph.position.y -= inkMinY;
+        }
+        layout.bounds.y = std::max(
+            inkMaxY - inkMinY,
+            typographicHeight);
+    }
+    else
+    {
+        layout.bounds.y = typographicHeight;
+    }
+    layout.bounds.x = maximumWidth > 0.0f ?
+        maximumWidth : maximumVisibleX;
+    layout.bounds = glm::max(layout.bounds, glm::vec2(0.0f));
+    return layout;
+}
+
+std::vector<uint32_t> Renderer2DFontAtlas::visual_glyph_codepoints(std::string_view text) const
+{
+    return emojiShaper && !emojiShaper->faces.empty()
+        ? emojiShaper->visual(text) : renderer2d_visual_codepoints(text);
+}
+
+bool Renderer2DFontAtlas::covers_text(std::string_view text) const
+{
+    return missing_codepoints(text).empty();
+}
+
+std::vector<uint32_t> Renderer2DFontAtlas::missing_codepoints(
+    std::string_view text) const
+{
+    std::vector<uint32_t> missing;
+    std::unordered_set<uint32_t> seen;
+    for (const uint32_t codepoint : visual_glyph_codepoints(text))
+    {
+
+        if (codepoint == '\n' || codepoint == 0u || seen.contains(codepoint))
+        {
+            continue;
+        }
+        seen.insert(codepoint);
+        const GlyphRecord* glyph = glyph_for(codepoint);
+        if (glyph == nullptr || !glyph->valid)
+        {
+            missing.push_back(codepoint);
+        }
+    }
+    return missing;
+}
+
+StorageImage* Renderer2DFontAtlas::image() const
+{
+    return atlasImage;
+}
+
+bool Renderer2DFontAtlas::loaded() const
+{
+    return isLoaded;
+}
+
+uint32_t Renderer2DFontAtlas::atlas_id() const
+{
+    return atlasId;
+}
+
+glm::uvec2 Renderer2DFontAtlas::texture_size() const
+{
+    return atlasSize;
+}
+
+float Renderer2DFontAtlas::pixel_range() const
+{
+    return sdfPixelRange;
+}
+
+int Renderer2DFontAtlas::font_weight() const
+{
+    return bakedFontWeight;
+}
+
+void Renderer2DFontAtlas::set_pixel_scale(float scale)
+{
+    opticalPixelScale = std::isfinite(scale) && scale > 0.0f ? std::clamp(scale, 0.25f, 8.0f) : 1.0f;
+}
+
+const std::string& Renderer2DFontAtlas::name() const
+{
+    return fontName;
+}
+
+const Renderer2DFontAtlas::GlyphRecord* Renderer2DFontAtlas::glyph_for(uint32_t codepoint) const
+{
+    const auto it = glyphs.find(codepoint);
+    return it != glyphs.end() ? &it->second : nullptr;
+}
+
+float Renderer2DFontAtlas::kerning(uint32_t left, uint32_t right) const
+{
+    const auto it = kerningTable.find(kerning_key(left, right));
+    return it != kerningTable.end() ? it->second : 0.0f;
+}
+
+float Renderer2DFontAtlas::tracking(uint32_t left, uint32_t right, float fontSize,
+    bool tabularDigits, float pointSize) const
+{
+    if (faceTracking.empty() || (tabularDigits && (is_decimal_digit(left) || is_decimal_digit(right)))) return 0.0f;
+    const auto* previous = glyph_for(left);
+    const auto* current = glyph_for(right);
+    if (!previous || !current || previous->coloured || current->coloured ||
+        previous->sourceFace != current->sourceFace || current->sourceFace >= faceTracking.size()) return 0.0f;
+    const auto face = current->sourceFace;
+    return vibrance_text::FontPositioning::tracking_value(faceTracking[face],
+        pointSize > 0.0f ? pointSize : fontSize / opticalPixelScale) * faceTrackingUnitsToBakedPixels[face];
+}

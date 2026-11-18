@@ -1,0 +1,40 @@
+// Copyright 2026 59xa
+// SPDX-License-Identifier: Apache-2.0
+
+#include <vibranceUI/notifications/provider.h>
+
+#include <iostream>
+
+int main()
+{
+    SystemNotificationProvider provider;
+
+#if defined(_WIN32)
+    if (!SystemNotificationProvider::platform_supported())
+    {
+        std::cerr << "Win32 notification provider was not enabled\n";
+        return 1;
+    }
+    if (!provider.bridge_loaded())
+    {
+        std::cerr << "Win32 interop companion did not load: "
+            << provider.snapshot().diagnostic << '\n';
+        return 1;
+    }
+#else
+    if (SystemNotificationProvider::platform_supported() ||
+        provider.bridge_loaded())
+    {
+        std::cerr << "portable notification provider advertised Win32\n";
+        return 1;
+    }
+#endif
+    if (provider.activate_notification("Vibrance.Tests.MissingSender", "", SystemNotificationActivationKind::eApplication) ||
+        provider.activate_notification("Vibrance.Tests.MissingSender", "", SystemNotificationActivationKind::eForeground))
+    {
+        std::cerr << "An unavailable notification action was treated as successful activation\n";
+        return 1;
+    }
+
+    return 0;
+}

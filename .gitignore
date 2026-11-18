@@ -1,0 +1,11 @@
+/.vscode/c_cpp_properties.json
+/build/
+/*.obj
+/install/
+/install-*/
+/media-fence-logs
+.env.cmake
+.DS_Store
+
+/dist/
+/scripts/windows-app-sdk/obj/
