@@ -986,7 +986,7 @@ private:
 	void make_pipelines();
 	bool ensure_model_pipelines();
 	bool initialise_composition_presenter();
-	bool rebuild_composition_presenter();
+	bool rebuild_composition_presenter(bool retainTarget = false);
 	bool ensure_composition_readback(vk::Extent2D extent);
 	void destroy_composition_readback();
     bool upload_software_composition(std::uint32_t bufferIndex, glm::uvec4 damage);
@@ -1010,7 +1010,9 @@ private:
 	PresentationBackend requestedPresentationBackend = PresentationBackend::eNative;
 	PresentationBackend activePresentationBackend = PresentationBackend::eNative;
 	void* nativeWindowHandle = nullptr;
+	vk::Extent2D outputExtent = {};
 	vk::Extent2D renderExtent = {};
+	bool nativeSwapchainOutdated = false;
 	vk::Extent2D modelRenderExtent = {};
 
 	std::deque<std::function<void(vk::Instance)>> instanceDeletionQueue;
@@ -1615,6 +1617,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		logger->vulkan("Swapchain creation produced no drawable images.");
 		return;
 	}
+	outputExtent = swapchain.extent;
 	if (compositionRequested && initialise_composition_presenter())
 	{
 		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
@@ -1632,7 +1635,7 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 			transparentFramebuffer);
 #endif
 	}
-	renderExtent = choose_render_extent(swapchain.extent.width, swapchain.extent.height, maxRenderPixels);
+	renderExtent = choose_render_extent(outputExtent.width, outputExtent.height, maxRenderPixels);
 	modelRenderExtent = hosted_3d_extent(renderExtent, renderer2DScene);
 	if (compositionPresenter.available() &&
 		!compositionPresenter.gpu_interop() &&
@@ -1991,7 +1994,7 @@ bool Engine::Impl::initialise_composition_presenter()
 {
 	const auto initialise = [this] {
 		return compositionPresenter.initialise(nativeWindowHandle, physicalDevice,
-			logicalDevice, swapchain.extent.width, swapchain.extent.height,
+			logicalDevice, outputExtent.width, outputExtent.height,
 			kCompositionBufferCount, graphicsQueueFamilyIndex,
 			transparentFramebuffer, compositionGpuInterop);
 	};
@@ -2006,9 +2009,13 @@ bool Engine::Impl::initialise_composition_presenter()
 	return initialise();
 }
 
-bool Engine::Impl::rebuild_composition_presenter()
+bool Engine::Impl::rebuild_composition_presenter(bool retainTarget)
 {
-	compositionPresenter.shutdown(logicalDevice);
+	const bool wasPrimed = nativeTransparencyPrimed;
+	const bool resized = retainTarget && compositionPresenter.available() &&
+		compositionPresenter.resize(physicalDevice, logicalDevice,
+			outputExtent.width, outputExtent.height);
+	if (!resized) compositionPresenter.shutdown(logicalDevice);
 	nativeTransparencyPrimed = false;
 	nextCompositionSubmitDeadline = {};
 	nextCompositionPollDeadline = {};
@@ -2033,10 +2040,10 @@ bool Engine::Impl::rebuild_composition_presenter()
 	{
 		return false;
 	}
-	if (initialise_composition_presenter())
+	if (resized || initialise_composition_presenter())
 	{
 		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
-		nativeTransparencyPrimed = transparentFramebuffer;
+		nativeTransparencyPrimed = transparentFramebuffer || (resized && wasPrimed);
 		if (!compositionPresenter.gpu_interop() &&
 			!ensure_composition_readback(renderExtent))
 		{
@@ -2199,9 +2206,9 @@ Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 		const RenderLayer2DComponent>();
 	orderedRegions.reserve(view.size_hint());
 	const float outputScaleX = renderExtent.width > 0u ?
-		static_cast<float>(swapchain.extent.width) / static_cast<float>(renderExtent.width) : 1.0f;
+		static_cast<float>(outputExtent.width) / static_cast<float>(renderExtent.width) : 1.0f;
 	const float outputScaleY = renderExtent.height > 0u ?
-		static_cast<float>(swapchain.extent.height) / static_cast<float>(renderExtent.height) : 1.0f;
+		static_cast<float>(outputExtent.height) / static_cast<float>(renderExtent.height) : 1.0f;
 	view.each([&](
 		entt::entity entity,
 		const Transform2DComponent& transform,
@@ -2780,6 +2787,9 @@ void Engine::Impl::draw()
 		(void)rebuild_composition_presenter();
 		renderer2DScene.mark_dirty();
 	}
+	if (nativeSwapchainOutdated &&
+		(!compositionPresenter.available() || !nativeTransparencyPrimed))
+		swapchain.outdated = true;
 
 	{
 		const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eRetainedCheck);
@@ -2828,24 +2838,39 @@ void Engine::Impl::draw()
 
 	if (swapchain.outdated) 
 	{
-		swapchain.rebuild(logicalDevice, physicalDevice, surface, framebufferWidth, framebufferHeight, transparentFramebuffer);
-		if (!swapchain.chain || swapchain.images.empty())
+		const bool retainNativeSurface = compositionPresenter.available() && nativeTransparencyPrimed;
+		if (retainNativeSurface)
 		{
-			if (!recreate_surface())
-			{
-				return;
-			}
+			if (logicalDevice.waitIdle() != vk::Result::eSuccess) return;
+			publish_completed_composition_frames();
+			outputExtent = vk::Extent2D { framebufferWidth, framebufferHeight };
+			nativeSwapchainOutdated = true;
+			swapchain.outdated = false;
+		}
+		else
+		{
 			swapchain.rebuild(logicalDevice, physicalDevice, surface, framebufferWidth, framebufferHeight, transparentFramebuffer);
 			if (!swapchain.chain || swapchain.images.empty())
 			{
-				return;
+				if (!recreate_surface()) return;
+				swapchain.rebuild(logicalDevice, physicalDevice, surface, framebufferWidth, framebufferHeight, transparentFramebuffer);
+				if (!swapchain.chain || swapchain.images.empty()) return;
 			}
+			if (compositionPresenter.available()) publish_completed_composition_frames();
+			outputExtent = swapchain.extent;
+			nativeSwapchainOutdated = false;
 		}
-		renderExtent = choose_render_extent(swapchain.extent.width, swapchain.extent.height, maxRenderPixels);
+		renderExtent = choose_render_extent(outputExtent.width, outputExtent.height, maxRenderPixels);
 		modelRenderExtent = hosted_3d_extent(renderExtent, renderer2DScene);
 		if (requestedPresentationBackend == PresentationBackend::eWindowsCompositionD3D11)
 		{
-			rebuild_composition_presenter();
+			rebuild_composition_presenter(true);
+		}
+		if (nativeSwapchainOutdated &&
+			(!compositionPresenter.available() || !nativeTransparencyPrimed))
+		{
+			swapchain.outdated = true;
+			return;
 		}
 		for (Frame& frame : frames)
 		{
@@ -3231,7 +3256,8 @@ void Engine::Impl::draw()
 				compositionReadbackBuffer : vk::Buffer {},
 			compositionImageFirstUse,
 			pendingCompositionDamageRect,
-			graphicsQueueFamilyIndex);
+			graphicsQueueFamilyIndex,
+			outputExtent);
 	}
 	if (compositionBufferAcquired)
 	{

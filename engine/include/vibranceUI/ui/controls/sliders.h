@@ -23,16 +23,16 @@ struct UiSliderOptions
     bool enabled = true;
     bool dimWhenDisabled = true;
     UiSliderFillStyle fillStyle = UiSliderFillStyle::eFlatFillClippedByTrack;
-    float thumbDiameter = 22.0f;
+    float thumbDiameter = 0.0f;
     glm::vec2 thumbSize { 0.0f, 0.0f };
     bool insetThumb = false;
 
     float hoveredTrackHeight = 0.0f;
     float hoveredThumbScale = 1.0f;
-    std::string trackColor = "#E2E2E4FF";
+    std::string trackColor = "rgba(231, 231, 234, 0.94)";
     std::string fillColor = "#007AFFFF";
     std::string thumbColor = "#FFFFFFFF";
-    std::string outlineColor = "#00000014";
+    std::string outlineColor = "rgba(0, 0, 0, 0.07)";
     std::string thumbOutlineColor = "#00000000";
     float outlineWidth = 0.8f;
     float thumbOutlineWidth = 0.0f;
@@ -77,7 +77,7 @@ inline UiControlHandle ui_create_slider(
     const float trackHeight = std::max(size.y, 4.0f);
     const glm::vec2 requestedThumbSize = options.thumbSize.x > 0.0f && options.thumbSize.y > 0.0f ?
         options.thumbSize :
-        glm::vec2(options.thumbDiameter);
+        options.thumbDiameter > 0.0f ? glm::vec2(options.thumbDiameter) : UiControlAppearance::sliderThumbSize;
     const glm::vec2 thumbSize {
         std::min(std::max(requestedThumbSize.x, options.insetThumb ? 1.0f : trackHeight), std::max(size.x, 0.0f)),
         std::max(requestedThumbSize.y, options.insetThumb ? 1.0f : trackHeight)

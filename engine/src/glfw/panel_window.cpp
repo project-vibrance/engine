@@ -1590,8 +1590,7 @@ void GlfwPanelWindow::update_window_action(bool finishMove)
         newHeight = std::clamp(actionStartWindowSize.y + dy, minHeight, maxHeight);
     }
 
-    set_glfw_window_position(window, newX, newY);
-    set_glfw_window_size(window, newWidth, newHeight);
+    set_glfw_window_bounds(window, newX, newY, newWidth, newHeight);
 }
 
 void GlfwPanelWindow::update_hover_cursor()

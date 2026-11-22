@@ -68,6 +68,13 @@ if(WIN32)
             $<TARGET_FILE_DIR:vibrance_countdown_timer_tests>
         VERBATIM)
     add_dependencies(vibrance_engine_test_runtime vibrance_engine)
+    if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
+        add_custom_command(TARGET vibrance_engine_test_runtime POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${VIBRANCE_COMPOSITION_DLL}"
+                $<TARGET_FILE_DIR:vibrance_countdown_timer_tests>
+            VERBATIM)
+    endif()
 endif()
 
 function(vibrance_add_engine_test test_name source_file)
@@ -514,9 +521,36 @@ if(WIN32)
     set_tests_properties(vibrance_glfw_panel_initialisation_tests
         vibrance_glfw_panel_initialisation_renderer_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     vibrance_add_engine_test(vibrance_glfw_panel_drag_tests glfw_panel_drag_tests.cpp)
-    target_link_libraries(vibrance_glfw_panel_drag_tests PRIVATE user32 comctl32)
+    target_link_libraries(vibrance_glfw_panel_drag_tests PRIVATE user32 comctl32 dwmapi gdi32)
     set_tests_properties(vibrance_glfw_panel_drag_tests PROPERTIES
         SKIP_RETURN_CODE 77 TIMEOUT 30 RESOURCE_LOCK desktop_cursor)
+    add_test(NAME vibrance_glfw_panel_native_resize_tests
+        COMMAND vibrance_glfw_panel_drag_tests --native-resize)
+    set_tests_properties(vibrance_glfw_panel_native_resize_tests PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 30 RESOURCE_LOCK desktop_cursor)
+    if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
+        add_test(NAME vibrance_glfw_panel_retained_resize_tests
+            COMMAND vibrance_glfw_panel_drag_tests --retained-resize)
+        add_test(NAME vibrance_glfw_panel_retained_resize_upload_tests
+            COMMAND vibrance_glfw_panel_drag_tests --retained-resize)
+        set_tests_properties(vibrance_glfw_panel_retained_resize_tests
+            vibrance_glfw_panel_retained_resize_upload_tests PROPERTIES
+            SKIP_RETURN_CODE 77 TIMEOUT 30 RESOURCE_LOCK desktop_cursor)
+        set_tests_properties(vibrance_glfw_panel_retained_resize_upload_tests PROPERTIES
+            ENVIRONMENT "VIBRANCE_FORCE_VULKAN_12=1;VIBRANCE_FORCE_COMPOSITION_HOST_UPLOAD=1")
+        add_test(NAME vibrance_glfw_panel_transparent_drag_tests
+            COMMAND vibrance_glfw_panel_drag_tests --transparent)
+        add_test(NAME vibrance_glfw_panel_transparent_resize_upload_tests
+            COMMAND vibrance_glfw_panel_drag_tests --transparent)
+        add_test(NAME vibrance_glfw_panel_backdrop_resize_tests
+            COMMAND vibrance_glfw_panel_drag_tests --transparent-backdrop)
+        set_tests_properties(vibrance_glfw_panel_transparent_drag_tests
+            vibrance_glfw_panel_transparent_resize_upload_tests
+            vibrance_glfw_panel_backdrop_resize_tests PROPERTIES
+            SKIP_RETURN_CODE 77 TIMEOUT 30 RESOURCE_LOCK desktop_cursor)
+        set_tests_properties(vibrance_glfw_panel_transparent_resize_upload_tests PROPERTIES
+            ENVIRONMENT "VIBRANCE_FORCE_VULKAN_12=1;VIBRANCE_FORCE_COMPOSITION_HOST_UPLOAD=1")
+    endif()
     vibrance_add_engine_test(vibrance_glfw_event_wait_tests glfw_event_wait_tests.cpp)
     target_link_libraries(vibrance_glfw_event_wait_tests PRIVATE user32)
     set_tests_properties(vibrance_glfw_event_wait_tests PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)

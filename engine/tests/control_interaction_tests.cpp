@@ -5,6 +5,7 @@
 #include <vibranceUI/ui/liquid_controls.h>
 #include <vibranceUI/ui/surfaces.h>
 #include <vibranceUI/ui/surface_paint.h>
+#include <vibranceUI/ui/control_appearance.h>
 
 #include <chrono>
 #include <filesystem>
@@ -256,6 +257,85 @@ namespace
 int main()
 {
     bool passed = true;
+    for (const float dpi : { 1.0f, 2.0f })
+        for (const auto& theme : { ui_light_theme(), ui_dark_theme() })
+        {
+            Renderer2DScene defaults;
+            LayoutScale scale;
+            scale.logicalSize = { 700, 500 };
+            scale.factor = glm::vec2(dpi);
+            UiBuilder ui(defaults, scale);
+            Renderer2DFontAtlas font;
+            auto& registry = defaults.registry();
+            unsigned clicks = 0;
+            auto options = ui_button_options_from_theme(theme);
+            options.onClick = [&](const PointerInputEvent&) { ++clicks; };
+            const auto button = ui_create_aligned_text_button(ui, font, ui.root(),
+                UiAlignment::eTopLeft, { 20, 20 }, "Action", { 140, 36 }, 2, 0, options);
+            const auto raw = ui_create_text_button(ui, font, "Default", { 140, 36 }, 2, 1);
+            for (const auto root : { button.root, raw.root })
+            {
+                const auto& shape = registry.get<ShapeComponent>(root);
+                const auto& visual = registry.get<ButtonVisualComponent>(root);
+                passed &= expect(shape.primitive == Renderer2DPrimitive::eSquircle &&
+                    std::abs(shape.squircleAmount - 0.74f) < .001f &&
+                    std::abs(shape.squirclePower - 4.7f) < .001f &&
+                    visual.idle.outlineWidth == 0 && visual.idle.color0 == visual.hovered.color0,
+                    "Default and themed buttons must use the panel squircle and retain idle paint on hover");
+            }
+            passed &= expect(registry.get<TextStyleComponent>(button.label).fontWeight == 460 &&
+                registry.get<TextStyleComponent>(button.label).color0 == renderer2d_hex_color(theme.text),
+                "Default button typography must retain the active theme at each display scale");
+            defaults.build_render_plan(0.0, 0);
+            UiInputState input;
+            const auto rect = ui_entity_framebuffer_rect(registry, button.root);
+            const glm::vec2 point = glm::vec2(rect) + glm::vec2(rect.z, rect.w) * .5f;
+            ui_update_input_hover_from_hit(defaults, font, input, true, point, button.root);
+            passed &= expect(input.hoveredButton == button.root && registry.get<ButtonInputComponent>(button.root).hovered &&
+                registry.get<ShapeStyleComponent>(button.root).color0 == renderer2d_hex_color(theme.surfaceMuted),
+                "Quiet default hover paint must preserve input ownership");
+            ui_handle_pointer_button(defaults, font, input, { true, point, PointerButton::eLeft, 0, UiInputAction::ePress });
+            passed &= expect(registry.get<ShapeStyleComponent>(button.root).color0 == renderer2d_hex_color(theme.settingsPanel.cardSurface),
+                "Default buttons must retain distinct press feedback");
+            ui_handle_pointer_button(defaults, font, input, { true, point, PointerButton::eLeft, 0, UiInputAction::eRelease });
+            passed &= expect(clicks == 1, "Default styled buttons must dispatch clicks");
+            const auto submenu = ui_create_submenu_row(ui, font, ui.root(), 200,
+                "Software Update", 2, 0);
+            passed &= expect(registry.get<TextComponent>(submenu.label).text == "Software Update",
+                "Stretching submenu rows must keep their labels before their final width is resolved");
+            auto custom = options;
+            custom.cornerRadius = 3;
+            custom.fontWeight = 700;
+            custom.hoveredBackgroundColor = "#E53266FF";
+            const auto customised = ui_create_text_button(ui, font, "Custom", { 140, 36 }, 2, 2, custom);
+            passed &= expect(registry.get<ShapeComponent>(customised.root).cornerRadius == 3 * dpi &&
+                registry.get<TextStyleComponent>(customised.label).fontWeight == 700 &&
+                registry.get<ButtonVisualComponent>(customised.root).hovered.color0 == renderer2d_hex_color(custom.hoveredBackgroundColor),
+                "Explicit control geometry, text and hover overrides must remain available");
+            const auto slider = ui_create_slider(ui, ui.root(), UiAlignment::eTopLeft,
+                { 20, 90 }, { 300, 7 }, 2, 0);
+            passed &= expect(registry.get<SliderInputComponent>(slider.root).thumbSize == glm::vec2(24, 18) * dpi,
+                "Sliders must use the compact panel thumb without a preset helper");
+            const auto dropdown = ui_create_dropdown(ui, font, ui.root(), UiAlignment::eTopLeft,
+                { 20, 150 }, { 160, 36 }, { "First", "Second" }, 2, 0, ui_dropdown_options_from_theme(theme));
+            const auto& menu = registry.get<UiDropdownControlComponent>(dropdown.root);
+            passed &= expect(registry.get<ShapeComponent>(menu.itemRows.front()).size.y == 28 * dpi &&
+                registry.get<ButtonVisualComponent>(menu.itemRows.front()).hovered.color0.a == 0,
+                "Dropdown rows must use the panel spacing without adding hover tint over translucent menus");
+            UiThemePreviewOptions previewOptions;
+            previewOptions.theme = theme;
+            previewOptions.label = "Light";
+            previewOptions.selected = true;
+            previewOptions.automatic = true;
+            const auto preview = ui_create_theme_preview(ui, font, ui.root(), { 400, 20 }, previewOptions);
+            passed &= expect(registry.all_of<Mask2DComponent>(preview.image) &&
+                registry.get<ShapeComponent>(preview.image).primitive == Renderer2DPrimitive::eSquircle &&
+                registry.get<ShapeComponent>(preview.image).size == UiChoicePreviewAppearance::imageSize * dpi &&
+                registry.get<Layout2DComponent>(preview.label).anchorMin == glm::vec2(.5f, 0) &&
+                registry.get<TextStyleComponent>(preview.label).fontWeight == 650 &&
+                registry.get<ButtonVisualComponent>(preview.root).pressed.color0.a == 0,
+                "Preview defaults must clip artwork to a compact squircle and centre the caption without hover or press paint");
+        }
     {
         for (const bool desktop : { false, true })
         {

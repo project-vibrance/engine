@@ -12,6 +12,8 @@ CompositionPresenter::CompositionPresenter() = default;
 CompositionPresenter::~CompositionPresenter() = default;
 bool CompositionPresenter::initialise(void*, vk::PhysicalDevice, vk::Device,
     std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, bool, bool) { return false; }
+bool CompositionPresenter::resize(vk::PhysicalDevice, vk::Device,
+    std::uint32_t, std::uint32_t) { return false; }
 void CompositionPresenter::shutdown(vk::Device) {}
 bool CompositionPresenter::available() const { return false; }
 bool CompositionPresenter::gpu_interop() const { return false; }

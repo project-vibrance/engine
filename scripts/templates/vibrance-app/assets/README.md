@@ -25,9 +25,14 @@ JSON object:
 Select the locale with `Engine::set_shared_locale("en_gb")` and resolve
 `ui_tr("home.greeting", "Hello")` through the window's localisation context.
 Localisation-aware builder overloads retain bindings for later locale changes.
-Supply your own fonts, icons, images and their notices. The starter's first
-window uses shapes so it can run before you add a font.
+Supply your own fonts, icons, images and their notices. The starter also searches
+installed system fonts when no application font is provided. System fonts are
+used in place rather than copied into this directory.
 
-See [Applications](../../../../docs/applications.md) and
-[User interface](../../../../docs/user-interface.md) for complete setup and
-appearance APIs.
+`images/sample.svg`, `audio/sample.wav` and the English/German dictionaries are
+original starter assets, Copyright 2026 59xa, licensed under Apache-2.0 as supplied
+in the project's `LICENCE`. The sound is a short synthesised tone and only plays
+when the user presses the playback button.
+
+The generated project's `README.md` describes its working examples and the wider
+SDK. Installed API guides are under `<SDK>/share/vibrance_engine/docs`.

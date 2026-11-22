@@ -281,8 +281,10 @@ void Frame::record_command_buffer(
 	vk::Buffer compositionReadbackBuffer,
 	bool compositionImageFirstUse,
 	glm::uvec4 pendingCompositionDamageRect,
-	uint32_t graphicsQueueFamilyIndex)
+	uint32_t graphicsQueueFamilyIndex,
+	vk::Extent2D compositionExtent)
 {
+	if (!compositionExtent.width || !compositionExtent.height) compositionExtent = swapchain.extent;
 
 	gpuTimestampsRecorded = false;
 	const bool recordGpuTimestamps = gpuTimestampQueryPool && gpuTimestampSampleEnabled;
@@ -506,19 +508,19 @@ void Frame::record_command_buffer(
 			const uint32_t bottom = std::min(rect.y + rect.w, renderExtent.height);
 			const uint32_t destinationX = scale_floor(
 				std::min(rect.x, renderExtent.width),
-				swapchain.extent.width,
+				compositionExtent.width,
 				renderExtent.width);
 			const uint32_t destinationY = scale_floor(
 				std::min(rect.y, renderExtent.height),
-				swapchain.extent.height,
+				compositionExtent.height,
 				renderExtent.height);
 			const uint32_t destinationRight = scale_ceil(
 				right,
-				swapchain.extent.width,
+				compositionExtent.width,
 				renderExtent.width);
 			const uint32_t destinationBottom = scale_ceil(
 				bottom,
-				swapchain.extent.height,
+				compositionExtent.height,
 				renderExtent.height);
 			return glm::uvec4 {
 				destinationX,
@@ -726,7 +728,7 @@ void Frame::record_command_buffer(
 				compositionSurface->image,
 				compositionImage,
 				compositionSurface->extent,
-				swapchain.extent,
+				compositionExtent,
 				vk::Rect2D {
 					vk::Offset2D {
 						static_cast<int32_t>(compositionUpdateRect.x),

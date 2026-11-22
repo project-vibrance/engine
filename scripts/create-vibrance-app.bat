@@ -60,7 +60,10 @@ if errorlevel 1 goto :fail
 
 echo.
 echo Starter application created successfully.
+echo Includes: controls, materials, colour picking, media, audio, countdown and platform services.
 echo Source: "%TARGET_DIR%"
+echo Guide:  "%TARGET_DIR%\README.md"
+echo SDK:    "%SDK_DIR%\share\vibrance_engine\docs"
 echo Run:    "%INSTALL_DIR%\bin\hello_vibrance.exe"
 exit /b 0
 

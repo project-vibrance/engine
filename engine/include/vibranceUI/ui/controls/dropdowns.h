@@ -35,25 +35,21 @@ struct UiDropdownOptions
     Media2DHandle checkIcon {};
     int selectedIndex = 0;
     bool enabled = true;
-    Renderer2DPrimitive buttonPrimitive = Renderer2DPrimitive::eSquircle;
-#if defined(__APPLE__)
-    float buttonCornerRadius = 8.0f;
-#else
-    float buttonCornerRadius = 18.0f;
-#endif
-    float buttonSquircleAmount = 0.74f;
-    float buttonSquirclePower = 4.7f;
-    float buttonFontSize = 13.5f;
-    float buttonFontWeight = 460.0f;
+    Renderer2DPrimitive buttonPrimitive = UiControlAppearance::buttonPrimitive;
+    float buttonCornerRadius = UiControlAppearance::buttonCornerRadius;
+    float buttonSquircleAmount = UiControlAppearance::buttonSquircleAmount;
+    float buttonSquirclePower = UiControlAppearance::buttonSquirclePower;
+    float buttonFontSize = UiControlAppearance::buttonFontSize;
+    float buttonFontWeight = UiControlAppearance::buttonFontWeight;
     float buttonIconSize = 14.0f;
 
     glm::vec4 buttonPadding { 4.0f, 0.0f, 4.0f, 0.0f };
     float buttonTextIconGap = 18.0f;
     std::string buttonTextColor = "#1D1D1FFF";
-    std::string buttonIconTint = "#1D1D1FFF";
-    std::string buttonBackgroundColor = "#F2F2F4FF";
-    std::string buttonHoveredBackgroundColor = "#EAEAECFF";
-    std::string buttonPressedBackgroundColor = "#E2E2E4FF";
+    std::string buttonIconTint = "rgba(29, 29, 31, 0.85)";
+    std::string buttonBackgroundColor = "rgba(231, 231, 234, 0.94)";
+    std::string buttonHoveredBackgroundColor = "rgba(231, 231, 234, 0.94)";
+    std::string buttonPressedBackgroundColor = "#FAFAFBFF";
     std::string buttonOutlineColor = "#00000000";
     std::string buttonHoveredOutlineColor = "#00000000";
     std::string buttonPressedOutlineColor = "#00000000";
@@ -65,7 +61,7 @@ struct UiDropdownOptions
     UiAlignment buttonLabelAlignment = UiAlignment::eMiddleLeft;
     glm::vec2 buttonLabelOffset { 8.0f, 0.0f };
     std::size_t maxSelectedCharacters = 0u;
-    float rowHeight = 24.0f;
+    float rowHeight = UiControlAppearance::menuRowHeight;
     float menuGap = 4.0f;
     float menuWidth = 0.0f;
     uint32_t maxVisibleItems = 8u;
@@ -73,15 +69,15 @@ struct UiDropdownOptions
     std::size_t maxRowCharacters = 0u;
     bool openAbove = false;
     std::function<void(int, std::string_view, const PointerInputEvent&)> onChanged;
-    std::string backgroundColor = "rgba(176, 176, 176, 1)";
+    std::string backgroundColor = "rgba(231, 231, 234, 0.94)";
     std::string menuOutlineColor = "rgba(0, 0, 0, 0)";
     float menuOutlineWidth = 0.0f;
-    std::string rowTextColor = "#1A1A1AFF";
-    std::string rowHoveredTextColor = "#FFFFFFFF";
-    std::string rowCheckTint = "#000000FF";
-    std::string rowHoveredCheckTint = "#FFFFFFFF";
-    std::string rowHoveredColor = "#0069E0FF";
-    std::string rowPressedColor = "#0069E0FF";
+    std::string rowTextColor = "#1D1D1FFF";
+    std::string rowHoveredTextColor = "#1D1D1FFF";
+    std::string rowCheckTint = "#1D1D1FFF";
+    std::string rowHoveredCheckTint = "#1D1D1FFF";
+    std::string rowHoveredColor = "#00000000";
+    std::string rowPressedColor = "#0068DDFF";
 };
 
 inline UiDropdownOptions ui_dropdown_options_from_theme(
@@ -96,15 +92,15 @@ inline UiDropdownOptions ui_dropdown_options_from_theme(
     options.buttonTextColor = theme.text;
     options.buttonIconTint = theme.icon;
     options.buttonBackgroundColor = theme.surfaceMuted;
-    options.buttonHoveredBackgroundColor = theme.surfaceElevated;
+    options.buttonHoveredBackgroundColor = options.buttonBackgroundColor;
     options.buttonPressedBackgroundColor = theme.settingsPanel.cardSurface;
     options.backgroundColor = theme.surfaceMuted;
-    options.rowHoveredColor = theme.accent;
+    options.rowHoveredColor = "#00000000";
     options.rowPressedColor = theme.accentPressed;
     options.rowTextColor = theme.text;
-    options.rowHoveredTextColor = theme.settingsPanel.sidebarSelectedLabel;
+    options.rowHoveredTextColor = options.rowTextColor;
     options.rowCheckTint = theme.text;
-    options.rowHoveredCheckTint = theme.settingsPanel.sidebarSelectedLabel;
+    options.rowHoveredCheckTint = options.rowCheckTint;
     return options;
 }
 

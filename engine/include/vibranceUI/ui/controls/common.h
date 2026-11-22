@@ -30,6 +30,22 @@
 #include <vibranceUI/ui/surfaces.h>
 #include <vibranceUI/ui/visuals.h>
 
+struct UiControlAppearance
+{
+    static constexpr Renderer2DPrimitive buttonPrimitive = Renderer2DPrimitive::eSquircle;
+#if defined(__APPLE__)
+    static constexpr float buttonCornerRadius = 8.0f;
+#else
+    static constexpr float buttonCornerRadius = 18.0f;
+#endif
+    static constexpr float buttonSquircleAmount = 0.74f;
+    static constexpr float buttonSquirclePower = 4.7f;
+    static constexpr float buttonFontSize = 13.5f;
+    static constexpr float buttonFontWeight = 460.0f;
+    static constexpr float menuRowHeight = 28.0f;
+    static constexpr glm::vec2 sliderThumbSize { 24.0f, 18.0f };
+};
+
 struct UiControlHandle
 {
 
@@ -196,21 +212,13 @@ inline ShapeStyleComponent ui_macos26_frosted_control_style(
 
 inline ButtonVisualComponent ui_macos26_button_visual(UiBuilder& ui, bool primary = false)
 {
+    static const UiTheme theme;
     ButtonVisualComponent visual = {};
-    if (primary)
-    {
-        visual.idle = ui_macos26_control_style(ui, "#007AFFFF", "#0068D8FF", 0.8f, 1.0f);
-        visual.hovered = ui_macos26_control_style(ui, "#1387FFFF", "#006FE8FF", 0.9f, 1.0f);
-        visual.pressed = ui_macos26_control_style(ui, "#0068DDFF", "#0057BDFF", 1.0f, 1.0f);
-        visual.disabled = ui_macos26_control_style(ui, "#BFC7D0A8", "#00000010", 0.6f, 1.0f);
-    }
-    else
-    {
-        visual.idle = ui_macos26_control_style(ui, "#F8F8F8F0", "#0000001F", 0.8f, 1.0f);
-        visual.hovered = ui_macos26_control_style(ui, "#FFFFFFFF", "#0000002A", 0.9f, 1.0f);
-        visual.pressed = ui_macos26_control_style(ui, "#E9E9EBF5", "#00000030", 1.0f, 1.0f);
-        visual.disabled = ui_macos26_control_style(ui, "#F2F2F280", "#00000010", 0.6f, 1.0f);
-    }
+    visual.idle = ui_macos26_control_style(ui, primary ? theme.accent : theme.surfaceMuted, "#00000000", 0.0f);
+    visual.hovered = visual.idle;
+    visual.pressed = ui_macos26_control_style(ui,
+        primary ? theme.accentPressed : theme.settingsPanel.cardSurface, "#00000000", 0.0f);
+    visual.disabled = ui_macos26_control_style(ui, theme.surfaceMuted, "#00000000", 0.0f, 0.5f);
     visual.hasDisabled = true;
     return visual;
 }

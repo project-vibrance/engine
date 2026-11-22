@@ -56,6 +56,7 @@ install_dir="${target_dir}/install"
 
 echo "Creating the starter project in: ${target_dir}"
 cmake -E copy_directory "${template_dir}" "${target_dir}"
+chmod +x -- "${target_dir}/unixBuild.sh"
 
 echo "Configuring ${build_type} against: ${sdk_dir}"
 cmake -S "${target_dir}" -B "${build_dir}" \
@@ -66,5 +67,8 @@ cmake --install "${build_dir}" --prefix "${install_dir}"
 
 echo
 echo "Starter application created successfully."
+echo "Includes: controls, materials, colour picking, media, audio, countdown and platform services."
 echo "Source: ${target_dir}"
+echo "Guide:  ${target_dir}/README.md"
+echo "SDK:    ${sdk_dir}/share/vibrance_engine/docs"
 echo "Run:    ${install_dir}/bin/hello_vibrance"

@@ -15,13 +15,13 @@ struct UiButtonOptions
 
 
     bool fitContentWidth = false;
-    bool truncateLabel = false;
-    Renderer2DPrimitive primitive = Renderer2DPrimitive::eRoundedRectangle;
-    float squircleAmount = 0.0f;
-    float squirclePower = 4.0f;
-    float cornerRadius = 10.0f;
-    float fontSize = 13.0f;
-    float fontWeight = 400.0f;
+    bool truncateLabel = true;
+    Renderer2DPrimitive primitive = UiControlAppearance::buttonPrimitive;
+    float squircleAmount = UiControlAppearance::buttonSquircleAmount;
+    float squirclePower = UiControlAppearance::buttonSquirclePower;
+    float cornerRadius = UiControlAppearance::buttonCornerRadius;
+    float fontSize = UiControlAppearance::buttonFontSize;
+    float fontWeight = UiControlAppearance::buttonFontWeight;
     float iconSize = 14.0f;
     float leadingIconSize = 0.0f;
     float trailingIconSize = 0.0f;
@@ -40,10 +40,10 @@ struct UiButtonOptions
     std::string hoveredOutlineColor {};
     std::string pressedOutlineColor {};
     std::string disabledOutlineColor {};
-    float outlineWidth = 0.8f;
-    float hoveredOutlineWidth = 0.9f;
-    float pressedOutlineWidth = 1.0f;
-    float disabledOutlineWidth = 0.6f;
+    float outlineWidth = 0.0f;
+    float hoveredOutlineWidth = 0.0f;
+    float pressedOutlineWidth = 0.0f;
+    float disabledOutlineWidth = 0.0f;
     UiGlassOptions glass {};
 
 
@@ -59,24 +59,27 @@ inline UiButtonOptions ui_button_options_from_theme(
     UiButtonOptions options;
     options.primary = primary;
 
-    options.cornerRadius = 1000.0f;
     options.textColor = primary ? "#FFFFFFFF" : theme.text;
     options.iconTint = primary ? "#FFFFFFFF" : theme.icon;
     options.backgroundColor = primary ? theme.accent : theme.surfaceMuted;
-    options.hoveredBackgroundColor = primary ? theme.accentHover : theme.surfaceElevated;
-    options.pressedBackgroundColor = primary ? theme.accentPressed : theme.surface;
+    options.hoveredBackgroundColor = options.backgroundColor;
+    options.pressedBackgroundColor = primary ? theme.accentPressed : theme.settingsPanel.cardSurface;
     options.disabledBackgroundColor = theme.surfaceMuted;
-    options.outlineColor = primary ? "#FFFFFF38" : theme.outline;
-    options.hoveredOutlineColor = primary ? "#FFFFFF55" : theme.outlineStrong;
-    options.pressedOutlineColor = primary ? "#00000018" : theme.outlineStrong;
-    options.disabledOutlineColor = theme.outline;
+    options.outlineColor = "#00000000";
+    options.hoveredOutlineColor = options.outlineColor;
+    options.pressedOutlineColor = options.outlineColor;
+    options.disabledOutlineColor = options.outlineColor;
     return options;
 }
 
 struct UiSubmenuRowOptions
 {
 
-    UiButtonOptions button {};
+    UiButtonOptions button = [] {
+        UiButtonOptions options;
+        options.truncateLabel = false;
+        return options;
+    }();
     float horizontalInset = 8.0f;
     float height = 42.0f;
 };
@@ -96,7 +99,7 @@ struct UiIconButtonOptions
     float iconSize = 16.0f;
     std::string backgroundColor = "rgba(255, 255, 255, 0.90)";
     std::string backgroundBottomColor {};
-    std::string hoveredBackgroundColor = "rgba(255, 255, 255, 1)";
+    std::string hoveredBackgroundColor {};
     std::string pressedBackgroundColor = "rgba(233, 233, 235, 0.96)";
     std::string disabledBackgroundColor = "rgba(242, 242, 242, 0.50)";
     std::string outlineColor = "#00000018";
@@ -134,7 +137,7 @@ inline ButtonVisualComponent ui_button_visual_from_options(
     };
 
     visual.idle = style(options.backgroundColor, options.outlineColor, options.outlineWidth, visual.idle);
-    visual.hovered = style(options.hoveredBackgroundColor, options.hoveredOutlineColor, options.hoveredOutlineWidth, visual.hovered);
+    visual.hovered = style(options.hoveredBackgroundColor, options.hoveredOutlineColor, options.hoveredOutlineWidth, visual.idle);
     visual.pressed = style(options.pressedBackgroundColor, options.pressedOutlineColor, options.pressedOutlineWidth, visual.pressed);
     visual.disabled = style(options.disabledBackgroundColor, options.disabledOutlineColor, options.disabledOutlineWidth, visual.disabled);
     visual.hasDisabled = true;
@@ -304,7 +307,8 @@ inline UiControlHandle ui_create_icon_button(
 
     ButtonVisualComponent visual = {};
     visual.idle = ui_icon_button_style(ui, options, options.backgroundColor);
-    visual.hovered = ui_icon_button_style(ui, options, options.hoveredBackgroundColor);
+    visual.hovered = options.hoveredBackgroundColor.empty() ? visual.idle :
+        ui_icon_button_style(ui, options, options.hoveredBackgroundColor);
     visual.pressed = ui_icon_button_style(ui, options, options.pressedBackgroundColor);
     visual.disabled = ui_icon_button_style(ui, options, options.disabledBackgroundColor);
     visual.hasDisabled = true;

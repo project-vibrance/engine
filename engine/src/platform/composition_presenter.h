@@ -42,6 +42,8 @@ public:
         std::uint32_t graphicsQueueFamilyIndex,
         bool transparentFramebuffer,
         bool enableVulkanInterop);
+    bool resize(vk::PhysicalDevice physicalDevice, vk::Device logicalDevice,
+        std::uint32_t width, std::uint32_t height);
     void shutdown(vk::Device logicalDevice);
 
     bool available() const;

@@ -11,54 +11,18 @@
 inline UiDropdownOptions ui_panel_dropdown_options(const UiTheme& theme,
     Media2DHandle chevron = {}, Media2DHandle check = {})
 {
-    auto options = ui_dropdown_options_from_theme(theme, chevron, check);
-    options.rowHeight = 28.0f;
-    options.buttonHoveredBackgroundColor = options.buttonBackgroundColor;
-    options.buttonHoveredOutlineColor = options.buttonOutlineColor;
-    options.buttonHoveredOutlineWidth = options.buttonOutlineWidth;
-    options.rowHoveredColor = options.backgroundColor;
-    options.rowHoveredTextColor = options.rowTextColor;
-    options.rowHoveredCheckTint = options.rowCheckTint;
-    return options;
+    return ui_dropdown_options_from_theme(theme, chevron, check);
 }
 
 inline UiButtonOptions ui_panel_button_options(const UiTheme& theme, bool primary = false)
 {
-    const auto dropdown = ui_panel_dropdown_options(theme);
-    UiButtonOptions options;
-    options.primary = primary;
-    options.primitive = dropdown.buttonPrimitive;
-    options.cornerRadius = dropdown.buttonCornerRadius;
-    options.squircleAmount = dropdown.buttonSquircleAmount;
-    options.squirclePower = dropdown.buttonSquirclePower;
-    options.fontSize = dropdown.buttonFontSize;
-    options.fontWeight = dropdown.buttonFontWeight;
-    options.truncateLabel = true;
-    options.textColor = primary ? "#FFFFFFFF" : dropdown.buttonTextColor;
-    options.iconTint = primary ? "#FFFFFFFF" : dropdown.buttonIconTint;
-    options.backgroundColor = primary ? theme.accent : dropdown.buttonBackgroundColor;
-    options.hoveredBackgroundColor = options.backgroundColor;
-    options.pressedBackgroundColor = primary ? theme.accentPressed : dropdown.buttonPressedBackgroundColor;
-    options.outlineColor = dropdown.buttonOutlineColor;
-    options.hoveredOutlineColor = options.outlineColor;
-    options.pressedOutlineColor = dropdown.buttonPressedOutlineColor;
-    options.outlineWidth = dropdown.buttonOutlineWidth;
-    options.hoveredOutlineWidth = options.outlineWidth;
-    options.pressedOutlineWidth = dropdown.buttonPressedOutlineWidth;
-    return options;
+    return ui_button_options_from_theme(theme, primary);
 }
 
 inline UiControlHandle ui_create_panel_text_button(UiBuilder& ui, const Renderer2DFontAtlas& font,
     entt::entity parent, UiAlignment alignment, glm::vec2 offset, std::string text,
     glm::vec2 size, int32_t layer, uint32_t order, UiButtonOptions options = {})
 {
-    const UiDropdownOptions dropdown;
-    options.primitive = dropdown.buttonPrimitive;
-    options.cornerRadius = dropdown.buttonCornerRadius;
-    options.squircleAmount = dropdown.buttonSquircleAmount;
-    options.squirclePower = dropdown.buttonSquirclePower;
-    options.fontWeight = dropdown.buttonFontWeight;
-    options.truncateLabel = true;
     return ui_create_aligned_text_button(ui, font, parent, alignment, offset,
         std::move(text), size, layer, order, std::move(options));
 }
@@ -87,8 +51,6 @@ inline void ui_panel_transitions(GlfwPanelWindowTemplateOptions& options)
 
 inline UiSliderOptions ui_panel_slider_options(const UiTheme& theme, float value)
 {
-    auto options = ui_slider_options_from_theme(theme, value);
-    options.thumbSize = { 24.0f, 18.0f };
-    return options;
+    return ui_slider_options_from_theme(theme, value);
 }
 

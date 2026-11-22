@@ -17,8 +17,29 @@ bash /path/to/sdk/share/vibrance_engine/tools/create-vibrance-app.sh \
   "$HOME/hello" /path/to/sdk Release
 ```
 
-The destination must be empty. The generator creates, builds and installs the
-starter. Its first window draws shapes and does not require a bundled font.
+The destination must be empty. The generator creates, builds and installs an
+interactive starter with three retained pages:
+
+- **Controls:** buttons, switches, checkboxes, dropdowns, editable text, sliders
+  and circular progress.
+- **Graphics:** bundled SVG media, solid and scene Liquid Glass materials,
+  independent blur/refraction, a colour picker and bounded media importing.
+- **Services:** a countdown, optional sound playback, native folder actions,
+  an explicit media-session query and platform support reporting.
+
+Light/dark themes and English (`en_gb`)/German (`de_de`) locale switching retain
+edited values through rebuilds. Original SVG, sound and dictionary assets and a
+generated `README.md` explain the examples and the wider SDK APIs.
+
+The starter uses `assets/fonts/Starter.ttf` when supplied, otherwise an installed
+system font. `VIBRANCE_STARTER_FONT` selects another font path. System fonts are
+not copied or redistributed. Asset paths resolve beside the executable.
+
+Run the generated executable with `--smoke-test` to check runtime staging, assets,
+fonts, callbacks, retained pages, materials, themes, the German dictionary,
+resizing and the colour-picker window.
+The check opens and closes a real window without playing sound or requesting
+native provider access. It requires a working graphical session.
 
 For a project created by hand:
 

@@ -1096,6 +1096,75 @@ public:
         return true;
     }
 
+    bool resize(std::uint32_t width, std::uint32_t height,
+        VibranceCompositionBuffer* outputBuffers, std::uint32_t outputCount)
+    {
+        if (!width || !height || !outputBuffers || outputCount < bufferCount_ || !device_)
+            return false;
+        try
+        {
+            VibranceCompositionCreateInfo info {};
+            info.width = width;
+            info.height = height;
+            info.bufferCount = bufferCount_;
+            if (cpuUpload_) info.flags = VIBRANCE_COMPOSITION_CREATE_CPU_UPLOAD;
+            CompositionBridge replacement(info);
+            replacement.device_ = device_;
+            replacement.context_ = context_;
+            winrt::com_ptr<IDXGIFactory2> factory;
+            winrt::check_hresult(CreateDXGIFactory2(0u, __uuidof(IDXGIFactory2), factory.put_void()));
+            if (!replacement.initialise_buffers(factory.get())) return false;
+            winrt::com_ptr<ABI::Windows::UI::Composition::ICompositionSurface> surface;
+            winrt::check_hresult(compositor_.as<ABI::Windows::UI::Composition::ICompositorInterop>()->
+                CreateCompositionSurfaceForSwapChain(replacement.swapchain_.get(), surface.put()));
+            pendingSurface_ = surface.as<composition::ICompositionSurface>();
+
+            std::swap(width_, replacement.width_);
+            std::swap(height_, replacement.height_);
+            std::swap(swapchain_, replacement.swapchain_);
+            std::swap(swapchain3_, replacement.swapchain3_);
+            std::swap(backBuffers_, replacement.backBuffers_);
+            std::swap(backBufferInitialised_, replacement.backBufferInitialised_);
+            std::swap(backBufferContentRects_, replacement.backBufferContentRects_);
+            std::swap(sharedTextures_, replacement.sharedTextures_);
+            std::swap(sharedMutexes_, replacement.sharedMutexes_);
+            std::swap(sharedHandles_, replacement.sharedHandles_);
+            std::swap(queries_, replacement.queries_);
+            std::swap(queryPending_, replacement.queryPending_);
+            std::swap(frameLatencyWaitableObject_, replacement.frameLatencyWaitableObject_);
+            presentDamage_.reset();
+            presentRetry_ = {};
+            presentStall_ = {};
+            latencyHint_ = {};
+            frameLatencyReady_ = false;
+            cpuUploadPixels_.clear();
+            cpuUploadDamage_ = {};
+            cpuUploadConverter_ = {};
+            pendingPresentBackBuffer_ = 0;
+            pendingPresentDamage_ = {};
+            reset_liquid_ui_transport();
+            pendingRegions_.clear();
+            pendingRegionsValid_ = true;
+            for (std::uint32_t index = 0; index < bufferCount_; ++index)
+            {
+                outputBuffers[index].structSize = sizeof(VibranceCompositionBuffer);
+                outputBuffers[index].index = index;
+                outputBuffers[index].sharedHandle = sharedHandles_[index];
+            }
+            return true;
+        }
+        catch (const winrt::hresult_error& error)
+        {
+            set_last_error("resize composition buffers", error);
+            return false;
+        }
+        catch (...)
+        {
+            lastCompositionError = "resize composition buffers: unknown exception";
+            return false;
+        }
+    }
+
     bool acquire(std::uint32_t index)
     {
         if (index >= queries_.size())
@@ -1424,11 +1493,18 @@ public:
 
     bool set_regions(
         const VibranceCompositionRegion* regions,
-        std::uint32_t count)
+        std::uint32_t count, bool commit = true)
     {
         if (!regions_ || !compositor_)
         {
             return false;
+        }
+        if (pendingSurface_)
+        {
+            pendingRegions_.clear();
+            if (count) pendingRegions_.assign(regions, regions + count);
+            pendingRegionsValid_ = true;
+            return true;
         }
         std::vector<std::uint32_t> shaderSlots(count,
             vibrance::win32::liquidDwmRegionSlots);
@@ -1559,7 +1635,7 @@ public:
                         update_region_geometry(regionVisuals_[index], regions[index]);
                     }
                 }
-                return commit_composition_changes();
+                return !commit || commit_composition_changes();
             }
 
             regions_.Children().RemoveAll();
@@ -1599,7 +1675,7 @@ public:
                     continue;
                 }
             }
-            return commit_composition_changes();
+            return !commit || commit_composition_changes();
         }
         catch (const winrt::hresult_error& error)
         {
@@ -1639,6 +1715,29 @@ private:
         frameLatencyReady_ = false;
         if (SUCCEEDED(result))
         {
+            if (pendingSurface_)
+            {
+                try
+                {
+                    auto surface = std::move(pendingSurface_);
+                    root_.Size({ static_cast<float>(width_), static_cast<float>(height_) });
+                    regions_.Size(root_.Size());
+                    content_.Size(root_.Size());
+                    content_.Brush().as<composition::CompositionSurfaceBrush>().Surface(surface);
+                    if (pendingRegionsValid_ && !set_regions(pendingRegions_.data(),
+                            static_cast<std::uint32_t>(pendingRegions_.size()), false))
+                        return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+                    if (!commit_composition_changes()) return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+                    visibleSwapchain_ = swapchain_;
+                    pendingRegions_.clear();
+                    pendingRegionsValid_ = false;
+                }
+                catch (const winrt::hresult_error& error)
+                {
+                    set_last_error("activate resized composition surface", error);
+                    return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+                }
+            }
             presentDamage_.commit(pendingPresentBackBuffer_);
             copyDiagnostics_.presented(window_);
             return VIBRANCE_COMPOSITION_PRESENTED;
@@ -1648,6 +1747,26 @@ private:
             std::to_string(static_cast<std::int32_t>(result)) + ")";
         context_->Flush();
         return VIBRANCE_COMPOSITION_PRESENT_FAILED;
+    }
+
+    void reset_liquid_ui_transport()
+    {
+        for (HANDLE& handle : uiMirrorHandles_)
+        {
+            if (handle) CloseHandle(handle);
+            handle = nullptr;
+        }
+        uiMirrorMutexes_ = {};
+        uiMirrorTextures_ = {};
+        uiMirrorAttempted_ = false;
+        if (uiCpuView_) UnmapViewOfFile(uiCpuView_);
+        if (uiCpuMapping_) CloseHandle(uiCpuMapping_);
+        uiCpuView_ = nullptr;
+        uiCpuMapping_ = nullptr;
+        uiCpuStaging_ = {};
+        uiCpuPending_ = {};
+        uiCpuSourceFrame_ = {};
+        uiCpuLastScheduleTick_ = 0;
     }
 
     bool ensure_liquid_cpu_ui()
@@ -2537,6 +2656,11 @@ private:
             return false;
         }
 
+        return initialise_buffers(factory.get());
+    }
+
+    bool initialise_buffers(IDXGIFactory2* factory)
+    {
         DXGI_SWAP_CHAIN_DESC1 swapchainDescription {};
         swapchainDescription.Width = width_;
         swapchainDescription.Height = height_;
@@ -2881,6 +3005,7 @@ private:
         content_ = compositor_.CreateSpriteVisual();
         content_.Size(root_.Size());
         content_.Brush(surfaceBrush);
+        visibleSwapchain_ = swapchain_;
         root_.Children().InsertAtBottom(regions_);
         root_.Children().InsertAtTop(content_);
         target_.Root(root_);
@@ -3448,6 +3573,7 @@ private:
     ULONGLONG uiCpuLastScheduleTick_ = 0;
     winrt::com_ptr<ID3D11DeviceContext4> context_;
     winrt::com_ptr<IDXGISwapChain1> swapchain_;
+    winrt::com_ptr<IDXGISwapChain1> visibleSwapchain_;
     winrt::com_ptr<IDXGISwapChain3> swapchain3_;
     std::vector<winrt::com_ptr<ID3D11Texture2D>> backBuffers_;
     std::vector<bool> backBufferInitialised_;
@@ -3479,6 +3605,9 @@ private:
     composition::ContainerVisual root_ { nullptr };
     composition::ContainerVisual regions_ { nullptr };
     composition::SpriteVisual content_ { nullptr };
+    composition::ICompositionSurface pendingSurface_ { nullptr };
+    std::vector<VibranceCompositionRegion> pendingRegions_;
+    bool pendingRegionsValid_ = false;
     composition::CompositionEffectFactory rawBackdropEffectFactory_ { nullptr };
     bool contentHasShaderRegion_ = false;
     std::vector<RegionVisualState> regionVisuals_;
@@ -3530,6 +3659,15 @@ extern "C" __declspec(dllexport) void __cdecl
 vibrance_composition_destroy(VibranceCompositionHandle handle)
 {
     delete static_cast<CompositionBridge*>(handle);
+}
+
+extern "C" __declspec(dllexport) std::uint32_t __cdecl
+vibrance_composition_resize(VibranceCompositionHandle handle,
+    std::uint32_t width, std::uint32_t height,
+    VibranceCompositionBuffer* buffers, std::uint32_t bufferCount)
+{
+    auto* bridge = static_cast<CompositionBridge*>(handle);
+    return bridge && bridge->resize(width, height, buffers, bufferCount) ? 1u : 0u;
 }
 
 extern "C" __declspec(dllexport) std::uint32_t __cdecl

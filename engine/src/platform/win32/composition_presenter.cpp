@@ -62,6 +62,7 @@ struct CompositionPresenter::Impl
     HMODULE module = nullptr;
     VibranceCompositionHandle bridge = nullptr;
     VibranceCompositionDestroyFn destroy = nullptr;
+    VibranceCompositionResizeFn resize = nullptr;
     VibranceCompositionAcquireFn acquire = nullptr;
     VibranceCompositionPresentFn present = nullptr;
     VibranceCompositionUploadFn upload = nullptr;
@@ -310,6 +311,8 @@ bool CompositionPresenter::initialise(
     impl->destroy = Impl::load_function<VibranceCompositionDestroyFn>(
         impl->module,
         VIBRANCE_COMPOSITION_DESTROY_SYMBOL);
+    impl->resize = Impl::load_function<VibranceCompositionResizeFn>(
+        impl->module, VIBRANCE_COMPOSITION_RESIZE_SYMBOL);
     impl->acquire = Impl::load_function<VibranceCompositionAcquireFn>(
         impl->module,
         VIBRANCE_COMPOSITION_ACQUIRE_SYMBOL);
@@ -322,7 +325,7 @@ bool CompositionPresenter::initialise(
     impl->setRegions = Impl::load_function<VibranceCompositionSetRegionsFn>(
         impl->module,
         VIBRANCE_COMPOSITION_SET_REGIONS_SYMBOL);
-    if (!abiVersion || !create || !impl->destroy || !impl->acquire ||
+    if (!abiVersion || !create || !impl->destroy || !impl->resize || !impl->acquire ||
         !impl->present || !impl->upload || !impl->setRegions ||
         abiVersion() != VIBRANCE_COMPOSITION_ABI_VERSION)
     {
@@ -425,6 +428,38 @@ bool CompositionPresenter::initialise(
 #endif
 }
 
+bool CompositionPresenter::resize(vk::PhysicalDevice physicalDevice,
+    vk::Device logicalDevice, std::uint32_t width, std::uint32_t height)
+{
+    if (!available() || !physicalDevice || !logicalDevice || !width || !height)
+        return false;
+    if (logicalDevice.waitIdle() != vk::Result::eSuccess) return false;
+    std::vector<VibranceCompositionBuffer> buffers(impl->images.size());
+    if (!impl->resize(impl->bridge, width, height, buffers.data(),
+            static_cast<std::uint32_t>(buffers.size())))
+        return false;
+    impl->destroy_vulkan_images(logicalDevice);
+    impl->width = width;
+    impl->height = height;
+    impl->images.resize(buffers.size());
+    if (impl->gpuInterop)
+    {
+        for (std::size_t index = 0; index < buffers.size(); ++index)
+        {
+            if (!buffers[index].sharedHandle || !impl->import_image(physicalDevice,
+                    logicalDevice, static_cast<HANDLE>(buffers[index].sharedHandle),
+                    impl->images[index]))
+            {
+                impl->ready = false;
+                return false;
+            }
+        }
+    }
+    impl->lastRegionError.clear();
+    impl->lastPresentError.clear();
+    return true;
+}
+
 void CompositionPresenter::shutdown(vk::Device logicalDevice)
 {
     if (!impl)
@@ -444,6 +479,7 @@ void CompositionPresenter::shutdown(vk::Device logicalDevice)
     }
     impl->bridge = nullptr;
     impl->destroy = nullptr;
+    impl->resize = nullptr;
     impl->acquire = nullptr;
     impl->present = nullptr;
     impl->upload = nullptr;

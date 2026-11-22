@@ -52,7 +52,8 @@ class Frame
         vk::Buffer compositionReadbackBuffer = {},
         bool compositionImageFirstUse = true,
         glm::uvec4 pendingCompositionDamageRect = glm::uvec4(0u),
-        uint32_t graphicsQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED
+        uint32_t graphicsQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        vk::Extent2D compositionExtent = {}
     );
 
     void resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModelRenderExtent);

@@ -14,7 +14,7 @@ struct UiNavClusterOptions
     bool backEnabled = true;
     bool forwardEnabled = true;
     float cornerRadius = 0.0f;
-    float iconSize = 16.0f;
+    float iconSize = 19.0f;
     std::string backgroundColor = "rgba(255, 255, 255, 0.90)";
     std::string backgroundBottomColor {};
     float backgroundOpacity = 1.0f;
@@ -32,6 +32,7 @@ struct UiNavClusterOptions
     bool useHistory = false;
     std::size_t initialPage = 0u;
     std::function<void(std::size_t, const PointerInputEvent&)> onNavigatePage;
+    std::string hoveredBackgroundColour {};
 };
 
 struct UiSidebarNavItemHandle
@@ -96,9 +97,9 @@ struct UiSidebarNavItemOptions
     std::string mediaIconTint;
     std::string selectedMediaIconTint;
     std::string selectedRowColor = "rgba(0, 113, 227, 1)";
-    std::string selectedHoveredRowColor = "rgba(0, 103, 207, 1)";
+    std::string selectedHoveredRowColor = "rgba(0, 113, 227, 1)";
     std::string selectedPressedRowColor = "rgba(0, 92, 190, 1)";
-    std::string hoveredRowColor = "rgba(255, 255, 255, 0.55)";
+    std::string hoveredRowColor = "rgba(255, 255, 255, 0.002)";
     std::string pressedRowColor = "rgba(230, 230, 232, 0.75)";
     std::string clearRowColor = "rgba(255, 255, 255, 0.002)";
     std::string selectedIconColor = "#111111FF";
@@ -106,8 +107,8 @@ struct UiSidebarNavItemOptions
     float iconOutlineWidth = 0.6f;
     std::string selectedLabelColor = "#FFFFFFFF";
     std::string labelColor = "#2C2D30FF";
-    float selectedLabelWeight = 590.0f;
-    float labelWeight = 450.0f;
+    float selectedLabelWeight = 700.0f;
+    float labelWeight = 400.0f;
     std::function<void(const PointerInputEvent&)> onClick;
 };
 
@@ -135,9 +136,9 @@ struct UiSidebarRichButtonOptions
     std::size_t maxTitleCharacters = 0u;
     std::size_t maxSubtitleCharacters = 0u;
     std::string selectedRowColor = "rgba(0, 113, 227, 1)";
-    std::string selectedHoveredRowColor = "rgba(0, 103, 207, 1)";
+    std::string selectedHoveredRowColor = "rgba(0, 113, 227, 1)";
     std::string selectedPressedRowColor = "rgba(0, 92, 190, 1)";
-    std::string hoveredRowColor = "rgba(255, 255, 255, 0.55)";
+    std::string hoveredRowColor = "rgba(255, 255, 255, 0.002)";
     std::string pressedRowColor = "rgba(230, 230, 232, 0.75)";
     std::string clearRowColor = "rgba(255, 255, 255, 0.002)";
     std::string avatarBackgroundColor = "rgba(222, 166, 130, 1)";
@@ -155,9 +156,9 @@ inline void ui_apply_sidebar_nav_palette(const UiTheme& theme, UiSidebarNavItemO
 {
 
     options.selectedRowColor = theme.settingsPanel.sidebarRowSelected;
-    options.selectedHoveredRowColor = theme.settingsPanel.sidebarRowSelectedHover;
+    options.selectedHoveredRowColor = options.selectedRowColor;
     options.selectedPressedRowColor = theme.settingsPanel.sidebarRowSelectedPressed;
-    options.hoveredRowColor = theme.settingsPanel.sidebarRowHover;
+    options.hoveredRowColor = options.clearRowColor;
     options.pressedRowColor = theme.settingsPanel.sidebarRowPressed;
     options.labelColor = theme.settingsPanel.sidebarLabel;
     options.selectedLabelColor = theme.settingsPanel.sidebarSelectedLabel;
@@ -173,9 +174,9 @@ inline void ui_apply_rich_sidebar_row_palette(const UiTheme& theme, UiSidebarRic
 {
 
     options.selectedRowColor = theme.settingsPanel.sidebarRowSelected;
-    options.selectedHoveredRowColor = theme.settingsPanel.sidebarRowSelectedHover;
+    options.selectedHoveredRowColor = options.selectedRowColor;
     options.selectedPressedRowColor = theme.settingsPanel.sidebarRowSelectedPressed;
-    options.hoveredRowColor = theme.settingsPanel.sidebarRowHover;
+    options.hoveredRowColor = options.clearRowColor;
     options.pressedRowColor = theme.settingsPanel.sidebarRowPressed;
     options.titleColor = theme.settingsPanel.sidebarLabel;
     options.subtitleColor = theme.settingsPanel.sidebarSubLabel;
@@ -624,10 +625,11 @@ inline UiControlHandle ui_create_nav_cluster(
     const auto iconColour = renderer2d_hex_color(options.iconTint);
     const bool lightIcons = iconColour.r * 0.2126f + iconColour.g * 0.7152f +
         iconColour.b * 0.0722f > 0.5f;
-    auto make_button_visual = [&ui, lightIcons]() {
+    auto make_button_visual = [&ui, lightIcons, &options]() {
         ButtonVisualComponent visual = {};
         visual.idle = ui_macos26_control_style(ui, "#FFFFFF00", "#00000000", 0.0f, 1.0f);
-        visual.hovered = ui_macos26_control_style(ui, lightIcons ? "#FFFFFF14" : "#0000000A", "#00000000", 0.0f, 1.0f);
+        visual.hovered = options.hoveredBackgroundColour.empty() ? visual.idle :
+            ui_macos26_control_style(ui, options.hoveredBackgroundColour, "#00000000", 0.0f, 1.0f);
         visual.pressed = ui_macos26_control_style(ui, lightIcons ? "#FFFFFF26" : "#00000018", "#00000000", 0.0f, 1.0f);
         visual.disabled = ui_macos26_control_style(ui, "#FFFFFF00", "#00000000", 0.0f, 1.0f);
         visual.hasDisabled = true;

@@ -1407,8 +1407,57 @@ void set_glfw_window_size(GLFWwindow* window, int width, int height)
 {
     if (window)
     {
+#if defined(_WIN32)
+        if (!glfwGetWindowMonitor(window))
+        {
+            int x = 0, y = 0;
+            glfwGetWindowPos(window, &x, &y);
+            set_glfw_window_bounds(window, x, y, width, height);
+            return;
+        }
+#endif
         glfwSetWindowSize(window, std::max(width, 1), std::max(height, 1));
     }
+}
+
+void set_glfw_window_bounds(GLFWwindow* window, int x, int y, int width, int height)
+{
+    if (!window) return;
+    width = std::max(width, 1);
+    height = std::max(height, 1);
+    int currentX = 0, currentY = 0, currentWidth = 0, currentHeight = 0;
+    glfwGetWindowPos(window, &currentX, &currentY);
+    glfwGetWindowSize(window, &currentWidth, &currentHeight);
+    const bool moved = currentX != x || currentY != y;
+    const bool resized = currentWidth != width || currentHeight != height;
+    if (!moved && !resized) return;
+#if defined(_WIN32)
+    if (!glfwGetWindowMonitor(window))
+    {
+        const HWND nativeWindow = glfwGetWin32Window(window);
+        const auto style = static_cast<DWORD>(GetWindowLongPtrW(nativeWindow, GWL_STYLE));
+        const auto extendedStyle = static_cast<DWORD>(GetWindowLongPtrW(nativeWindow, GWL_EXSTYLE));
+        RECT bounds { 0, 0, width, height };
+        const auto user32 = GetModuleHandleW(L"user32.dll");
+        const auto getDpi = reinterpret_cast<UINT(WINAPI*)(HWND)>(
+            GetProcAddress(user32, "GetDpiForWindow"));
+        const auto adjustForDpi = reinterpret_cast<BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT)>(
+            GetProcAddress(user32, "AdjustWindowRectExForDpi"));
+        if (getDpi && adjustForDpi)
+            adjustForDpi(&bounds, style, GetMenu(nativeWindow) != nullptr, extendedStyle, getDpi(nativeWindow));
+        else
+            AdjustWindowRectEx(&bounds, style, GetMenu(nativeWindow) != nullptr, extendedStyle);
+        UINT flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER;
+        if (!moved) flags |= SWP_NOMOVE;
+        if (!resized) flags |= SWP_NOSIZE;
+        else flags |= SWP_NOCOPYBITS;
+        SetWindowPos(nativeWindow, nullptr, x + bounds.left, y + bounds.top,
+            bounds.right - bounds.left, bounds.bottom - bounds.top, flags);
+        return;
+    }
+#endif
+    if (moved) glfwSetWindowPos(window, x, y);
+    if (resized) glfwSetWindowSize(window, width, height);
 }
 
 void set_glfw_window_should_close(GLFWwindow* window, bool shouldClose)

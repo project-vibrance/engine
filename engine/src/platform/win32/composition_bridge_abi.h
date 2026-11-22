@@ -13,7 +13,7 @@
 #define VIBRANCE_COMPOSITION_CALL
 #endif
 
-constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 23u;
+constexpr std::uint32_t VIBRANCE_COMPOSITION_ABI_VERSION = 24u;
 constexpr std::uint32_t VIBRANCE_COMPOSITION_MAX_BUFFERS = 3u;
 
 constexpr std::uint32_t VIBRANCE_COMPOSITION_CREATE_TRANSPARENT_FRAMEBUFFER =
@@ -172,6 +172,9 @@ using VibranceCompositionCreateFn =
     std::uint32_t);
 using VibranceCompositionDestroyFn =
     void(VIBRANCE_COMPOSITION_CALL*)(VibranceCompositionHandle);
+using VibranceCompositionResizeFn =
+    std::uint32_t(VIBRANCE_COMPOSITION_CALL*)(VibranceCompositionHandle,
+        std::uint32_t, std::uint32_t, VibranceCompositionBuffer*, std::uint32_t);
 using VibranceCompositionAcquireFn =
     std::uint32_t(VIBRANCE_COMPOSITION_CALL*)(
         VibranceCompositionHandle,
@@ -200,6 +203,8 @@ constexpr const char* VIBRANCE_COMPOSITION_CREATE_SYMBOL =
     "vibrance_composition_create";
 constexpr const char* VIBRANCE_COMPOSITION_DESTROY_SYMBOL =
     "vibrance_composition_destroy";
+constexpr const char* VIBRANCE_COMPOSITION_RESIZE_SYMBOL =
+    "vibrance_composition_resize";
 constexpr const char* VIBRANCE_COMPOSITION_ACQUIRE_SYMBOL =
     "vibrance_composition_acquire";
 constexpr const char* VIBRANCE_COMPOSITION_PRESENT_SYMBOL =
