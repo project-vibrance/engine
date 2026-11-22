@@ -34,6 +34,15 @@ bool glfw_macos_native_window_drag_active();
 
 namespace
 {
+    bool glfw_supports_window_position()
+    {
+#if defined(__unix__) && !defined(__APPLE__) && defined(GLFW_PLATFORM_WAYLAND)
+        return glfwGetPlatform() != GLFW_PLATFORM_WAYLAND;
+#else
+        return true;
+#endif
+    }
+
 #if defined(_WIN32) && defined(__MINGW32__)
     thread_local bool createCompositionWindow = false;
 
@@ -140,7 +149,11 @@ namespace
         int windowY = 0;
         int windowWidth = 0;
         int windowHeight = 0;
-        glfwGetWindowPos(window, &windowX, &windowY);
+        if (!glfw_window_position(window, windowX, windowY))
+        {
+            auto* monitor = glfwGetWindowMonitor(window);
+            return monitor ? monitor : glfwGetPrimaryMonitor();
+        }
         glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
         int monitorCount = 0;
@@ -351,7 +364,7 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
 #endif
         if (createInfo.position)
         {
-            glfwSetWindowPos(
+            set_glfw_window_position(
                 window,
                 createInfo.position->x,
                 createInfo.position->y);
@@ -957,15 +970,14 @@ bool glfw_screen_cursor_position(
         return true;
     }
 #endif
-    if (!referenceWindow)
+    int windowX = 0;
+    int windowY = 0;
+    if (!glfw_window_position(referenceWindow, windowX, windowY))
     {
         return false;
     }
-    int windowX = 0;
-    int windowY = 0;
     double cursorX = 0.0;
     double cursorY = 0.0;
-    glfwGetWindowPos(referenceWindow, &windowX, &windowY);
     glfwGetCursorPos(referenceWindow, &cursorX, &cursorY);
     position = {
         windowX + static_cast<int>(cursorX),
@@ -1026,7 +1038,7 @@ bool glfw_window_position(GLFWwindow* window, int& x, int& y)
 {
     x = 0;
     y = 0;
-    if (!window)
+    if (!window || !glfw_supports_window_position())
     {
         return false;
     }
@@ -1384,7 +1396,7 @@ bool apply_glfw_window_placement(
 #else
 
 
-    glfwSetWindowPos(window, placement.position.x, placement.position.y);
+    set_glfw_window_position(window, placement.position.x, placement.position.y);
     glfwSetWindowSize(window, placement.size.x, placement.size.y);
     glfwSetWindowAttrib(
         window,
@@ -1397,7 +1409,7 @@ bool apply_glfw_window_placement(
 
 void set_glfw_window_position(GLFWwindow* window, int x, int y)
 {
-    if (window)
+    if (window && glfw_supports_window_position())
     {
         glfwSetWindowPos(window, x, y);
     }
@@ -1426,9 +1438,9 @@ void set_glfw_window_bounds(GLFWwindow* window, int x, int y, int width, int hei
     width = std::max(width, 1);
     height = std::max(height, 1);
     int currentX = 0, currentY = 0, currentWidth = 0, currentHeight = 0;
-    glfwGetWindowPos(window, &currentX, &currentY);
+    const bool positioned = glfw_window_position(window, currentX, currentY);
     glfwGetWindowSize(window, &currentWidth, &currentHeight);
-    const bool moved = currentX != x || currentY != y;
+    const bool moved = positioned && (currentX != x || currentY != y);
     const bool resized = currentWidth != width || currentHeight != height;
     if (!moved && !resized) return;
 #if defined(_WIN32)

@@ -40,6 +40,11 @@ path on a newer GPU. This does not reproduce an older GPU's limits or performanc
 The shader/profile and renderer tests validate both profiles. See
 [Diagnostics](diagnostics.md#renderer-checks) for targeted commands.
 
+On Wayland, the compositor controls window placement. The engine uses the primary
+monitor for windowed monitor queries that need screen coordinates. Open Wayland
+windows share compatible Vulkan instances to avoid a crash on affected NVIDIA
+drivers when another window closes.
+
 ## Glass and presentation
 
 `GlassMaterial` selects off, system glass or Liquid Glass. Backend selection and

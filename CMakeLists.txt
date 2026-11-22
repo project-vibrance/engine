@@ -24,6 +24,9 @@ project(vibrance_engine VERSION ${VIBRANCE_MAJOR}.${VIBRANCE_MINOR}.${VIBRANCE_P
 
 include(cmake/build/Platform.cmake)
 include(CTest)
+if(UNIX AND NOT APPLE)
+    set(CMAKE_INSTALL_LIBDIR "lib" CACHE PATH "SDK library directory")
+endif()
 include(GNUInstallDirs)
 include(cmake/build/Metadata.cmake)
 include(cmake/build/Options.cmake)

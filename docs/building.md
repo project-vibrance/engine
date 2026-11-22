@@ -16,23 +16,23 @@ for multiple architectures.
 | GLFW | `GLFW_PATH`; architecture overrides where needed | Windows, input and monitors |
 | GLM | `GLM_PATH` or system discovery | Public maths types |
 | EnTT | `ENTT_PATH` or system discovery | Scene registry |
-| stb | `STB_PATH` | Image decode, resize and supporting assets; includes `stb_image_resize2.h` |
-| HarfBuzz | `HARFBUZZ_PATH` | Text shaping; source must contain `src/harfbuzz.cc`, `src/hb.h` and `COPYING` |
+| stb | `STB_PATH` or system discovery | Image decoding and resizing, including `stb_image_resize2.h` |
+| HarfBuzz | `HARFBUZZ_PATH` or a system package on Linux and other non-macOS Unix targets | Text shaping |
 | FreeType | `FREETYPE_PATH` or system discovery | Font rasterisation |
-| Vulkan SDK | `VULKAN_SDK_PATH` or SDK environment | Vulkan builds, headers and `glslc` |
-| Vulkan Memory Allocator | `VMA_PATH` | Vulkan resource allocation |
+| Vulkan SDK | `VULKAN_SDK_PATH`, SDK environment or system packages | Vulkan headers, loader and `glslc` |
+| Vulkan Memory Allocator | `VMA_PATH` or system discovery | Vulkan resource allocation |
 | Metal-cpp | `METAL_CPP_PATH` or `~/dev/metal-cpp` | Metal builds, with Metal 3 headers |
 | MediaRemote adapter | `MEDIAREMOTE_ADAPTER_ROOT` | macOS media-session companion |
-| NanoSVG | `NANOSVG_PATH` | Optional SVG rasterisation |
-| simdjson | `SIMDJSON_PATH` | JSON support used by asset loading |
+| NanoSVG | `NANOSVG_PATH` or system discovery on non-macOS Unix targets | Optional SVG rasterisation |
+| simdjson | `SIMDJSON_PATH` or a system package on non-macOS Unix targets | Required for Lottie and used by optional fastgltf support |
 | fastgltf | `GLTF_PATH` | Optional hosted glTF support |
 | SoLoud | `SOLOUD_PATH` | Optional audio backend |
 | Static FFmpeg SDK | `FFMPEG_PATH` and architecture overrides | Optional video decoding |
 
 The root `cmake/dependencies` modules validate paths and decide which optional
-features are available. Configuration output reports the result. Headers exposed
-by the public API are copied into the installed SDK; compiled dependencies remain
-private to the engine.
+features are available. Configuration output reports the result. The installed SDK
+includes the dependency headers used by its public API. When the engine links to a
+shared system library, that library must also be available at runtime.
 
 ## Windows
 
@@ -86,15 +86,30 @@ CMake path expressions use `$ENV{HOME}`; shell `~` is not expanded in a CMake va
 
 ## Linux
 
-Provide the Vulkan SDK/tooling and the common dependencies, then run:
+On Fedora, install the development packages from a host terminal.
 
 ```sh
-./unixBuild.sh Release /path/to/vibrance-sdk
+sudo dnf install cmake gcc-c++ glfw-devel glm-devel freetype-devel harfbuzz-devel \
+  simdjson-devel stb_image-devel stb_image_resize2-devel vulkan-headers \
+  vulkan-loader-devel glslc VulkanMemoryAllocator-devel nanosvg-devel
 ```
 
-A renderer build does not imply that every desktop integration is available.
-See the [native feature table](platforms.md#native-services) before depending on
-a platform provider.
+Copy `envUnixExample.cmake` to `.env.cmake` and set `ENTT_PATH` to the EnTT checkout.
+The example also picks up fastgltf and SoLoud checkouts under `~/dev` when present.
+NanoSVG is optional for the engine and required by the starter application's SVG
+smoke test. Local source trees can override system packages with the paths above.
+For example, when using a standalone Vulkan SDK, set `VULKAN_SDK_PATH` to its
+architecture directory containing `include`, `lib` and `bin`.
+
+```sh
+./unixBuild.sh Release
+ctest --test-dir build/Release --output-on-failure
+```
+
+The script installs into `install/` by default, with the CMake package under
+`lib/cmake/vibrance_engine`. Pass a path as the second argument to select another
+SDK prefix. For desktop integrations, see the
+[native feature table](platforms.md#native-services).
 
 ## Direct CMake and tests
 

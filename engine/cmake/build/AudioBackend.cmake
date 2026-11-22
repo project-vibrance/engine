@@ -29,6 +29,6 @@ if(SOLOUD_FOUND AND NOT TARGET soloud)
             "-framework AudioUnit"
             "-framework CoreServices")
     else()
-        target_link_libraries(soloud PRIVATE pthread dl m)
+        target_link_libraries(soloud PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
     endif()
 endif()

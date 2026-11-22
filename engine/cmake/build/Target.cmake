@@ -50,7 +50,7 @@ target_include_directories(vibrance_engine
         "${STB_INCLUDE_DIR}"
         ${FREETYPE_INCLUDE_DIRS})
 
-if(DEFINED NANOSVG_INCLUDE_DIR)
+if(NANOSVG_INCLUDE_DIR)
     target_include_directories(vibrance_engine PRIVATE "${NANOSVG_INCLUDE_DIR}")
     target_compile_definitions(vibrance_engine PRIVATE VIBRANCE_HAS_NANOSVG=1)
 endif()

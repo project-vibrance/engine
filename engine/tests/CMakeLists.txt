@@ -158,7 +158,7 @@ endif()
 set(VIBRANCE_EMOJI_TEST_FONT "${_vibrance_test_fonts}/AppleColorEmoji.ttf"
     CACHE FILEPATH "Colour emoji font used by the shaping and bitmap regression test")
 vibrance_add_engine_test(vibrance_emoji_font_tests emoji_font_tests.cpp "${VIBRANCE_EMOJI_TEST_FONT}")
-target_link_libraries(vibrance_emoji_font_tests PRIVATE vibrance_harfbuzz)
+target_link_libraries(vibrance_emoji_font_tests PRIVATE ${HARFBUZZ_TARGET})
 target_include_directories(vibrance_emoji_font_tests PRIVATE "${STB_INCLUDE_DIR}")
 target_sources(vibrance_emoji_font_tests PRIVATE ../src/renderer/common/text_direction.cpp)
 set_tests_properties(vibrance_emoji_font_tests PROPERTIES SKIP_RETURN_CODE 77)

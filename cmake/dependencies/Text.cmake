@@ -1,26 +1,37 @@
 # Copyright 2026 59xa
 # SPDX-License-Identifier: Apache-2.0
 
-if(NOT HARFBUZZ_PATH)
+if(HARFBUZZ_PATH)
+    cmake_path(ABSOLUTE_PATH HARFBUZZ_PATH BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        NORMALIZE OUTPUT_VARIABLE _vibrance_harfbuzz_source_dir)
+    foreach(_harfbuzz_required_file src/harfbuzz.cc src/hb.h COPYING)
+        if(NOT EXISTS "${_vibrance_harfbuzz_source_dir}/${_harfbuzz_required_file}")
+            message(FATAL_ERROR
+                "HARFBUZZ_PATH must point to a HarfBuzz source tree containing "
+                "${_harfbuzz_required_file}: ${_vibrance_harfbuzz_source_dir}")
+        endif()
+    endforeach()
+    message(STATUS "HarfBuzz local source: ${_vibrance_harfbuzz_source_dir}")
+    add_library(vibrance_harfbuzz STATIC "${_vibrance_harfbuzz_source_dir}/src/harfbuzz.cc")
+    target_include_directories(vibrance_harfbuzz SYSTEM PUBLIC "${_vibrance_harfbuzz_source_dir}/src")
+    target_compile_definitions(vibrance_harfbuzz PRIVATE HB_NO_SUBSET HB_NO_DRAW HB_NO_PAINT)
+    target_compile_options(vibrance_harfbuzz PRIVATE $<$<CXX_COMPILER_ID:Clang,GNU,AppleClang>:-w>)
+    set_target_properties(vibrance_harfbuzz PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    install(FILES "${_vibrance_harfbuzz_source_dir}/COPYING"
+        DESTINATION "share/vibrance_engine/licences" RENAME HarfBuzz.txt)
+    set(HARFBUZZ_TARGET vibrance_harfbuzz)
+elseif(UNIX AND NOT APPLE)
+    find_package(harfbuzz CONFIG QUIET)
+    if(TARGET harfbuzz::harfbuzz)
+        set(HARFBUZZ_TARGET harfbuzz::harfbuzz)
+    else()
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(HarfBuzz REQUIRED IMPORTED_TARGET harfbuzz)
+        set(HARFBUZZ_TARGET PkgConfig::HarfBuzz)
+    endif()
+else()
     message(FATAL_ERROR "Set HARFBUZZ_PATH in .env.cmake to the local HarfBuzz source tree.")
 endif()
-cmake_path(ABSOLUTE_PATH HARFBUZZ_PATH BASE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    NORMALIZE OUTPUT_VARIABLE _vibrance_harfbuzz_source_dir)
-foreach(_harfbuzz_required_file src/harfbuzz.cc src/hb.h COPYING)
-    if(NOT EXISTS "${_vibrance_harfbuzz_source_dir}/${_harfbuzz_required_file}")
-        message(FATAL_ERROR
-            "HARFBUZZ_PATH must point to a HarfBuzz source tree containing "
-            "${_harfbuzz_required_file}: ${_vibrance_harfbuzz_source_dir}")
-    endif()
-endforeach()
-message(STATUS "HarfBuzz local source: ${_vibrance_harfbuzz_source_dir}")
-add_library(vibrance_harfbuzz STATIC "${_vibrance_harfbuzz_source_dir}/src/harfbuzz.cc")
-target_include_directories(vibrance_harfbuzz SYSTEM PUBLIC "${_vibrance_harfbuzz_source_dir}/src")
-target_compile_definitions(vibrance_harfbuzz PRIVATE HB_NO_SUBSET HB_NO_DRAW HB_NO_PAINT)
-target_compile_options(vibrance_harfbuzz PRIVATE $<$<CXX_COMPILER_ID:Clang,GNU,AppleClang>:-w>)
-set_target_properties(vibrance_harfbuzz PROPERTIES POSITION_INDEPENDENT_CODE ON)
-install(FILES "${_vibrance_harfbuzz_source_dir}/COPYING"
-    DESTINATION "share/vibrance_engine/licences" RENAME HarfBuzz.txt)
 
 
 

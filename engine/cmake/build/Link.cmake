@@ -2,16 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 target_link_libraries(vibrance_engine PRIVATE
-    vibrance_harfbuzz
+    ${HARFBUZZ_TARGET}
     $<$<NOT:$<PLATFORM_ID:Darwin>>:Vulkan::Vulkan>
     ${FREETYPE_LIBRARIES}
-    ${GLFW_LIBRARIES})
-
-if(TARGET simdjson::simdjson)
-
-
-    target_link_libraries(vibrance_engine PRIVATE simdjson::simdjson)
-endif()
+    ${GLFW_LIBRARIES}
+    simdjson::simdjson)
 
 if(SOLOUD_FOUND)
     target_compile_definitions(vibrance_engine PRIVATE VIBRANCE_HAS_SOLOUD=1)
@@ -58,7 +53,7 @@ elseif(APPLE)
         "-framework QuartzCore"
         "-framework Security")
 else()
-    target_link_libraries(vibrance_engine PRIVATE pthread dl m)
+    target_link_libraries(vibrance_engine PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
 endif()
 
 if(WIN32 AND MINGW AND VIBRANCE_STATIC_MINGW_RUNTIME)

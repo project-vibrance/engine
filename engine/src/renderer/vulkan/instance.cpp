@@ -9,6 +9,60 @@
 #include <cstdlib>
 #include "vulkan_api_policy.h"
 
+#if defined(__unix__) && !defined(__APPLE__)
+#include <algorithm>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <tuple>
+
+namespace
+{
+    using WaylandInstanceKey = std::tuple<uint32_t, bool, std::vector<std::string>>;
+    using WaylandInstances = std::map<WaylandInstanceKey, vk::UniqueInstance>;
+
+    std::mutex waylandInstancesMutex;
+    std::weak_ptr<WaylandInstances> waylandInstances;
+
+    vk::Instance acquire_wayland_instance(
+        const vk::InstanceCreateInfo& createInfo,
+        const std::vector<const char*>& enabledExtensions,
+        uint32_t version,
+        std::deque<std::function<void(vk::Instance)>>& deletionQueue)
+    {
+        std::vector<std::string> extensions(enabledExtensions.begin(), enabledExtensions.end());
+        std::sort(extensions.begin(), extensions.end());
+        WaylandInstanceKey key(version, createInfo.enabledLayerCount != 0, std::move(extensions));
+
+        std::lock_guard lock(waylandInstancesMutex);
+        auto instances = waylandInstances.lock();
+        if (!instances)
+        {
+            instances = std::make_shared<WaylandInstances>();
+            waylandInstances = instances;
+        }
+
+        auto& sharedInstance = (*instances)[std::move(key)];
+        if (!sharedInstance)
+        {
+            auto attempt = vk::createInstanceUnique(createInfo);
+            if (attempt.result != vk::Result::eSuccess)
+            {
+                return nullptr;
+            }
+            sharedInstance = std::move(attempt.value);
+        }
+
+        const auto instance = sharedInstance.get();
+        deletionQueue.emplace_back([instances = std::move(instances)](vk::Instance) mutable {
+            std::lock_guard lock(waylandInstancesMutex);
+            instances.reset();
+        });
+        return instance;
+    }
+}
+#endif
+
 bool supported_by_instance(const char* const* extensionNames, uint32_t extensionCount, const char* const* layerNames, uint32_t layerCount)
 {
 
@@ -199,6 +253,20 @@ vk::Instance make_instance(
         static_cast<uint32_t>(enabledLayers.size()), enabledLayers.data(),
         static_cast<uint32_t>(enabledExtensions.size()), enabledExtensions.data()
     );
+
+#if defined(__unix__) && !defined(__APPLE__)
+    if (isEnabledExtension("VK_KHR_wayland_surface"))
+    {
+        const auto instance = acquire_wayland_instance(createInfo, enabledExtensions, version, deletionQueue);
+        if (!instance)
+        {
+            logger->vulkan(LogLevel::eError, "Unable to create instance.");
+            return nullptr;
+        }
+        if (negotiatedApiVersion) *negotiatedApiVersion = version;
+        return instance;
+    }
+#endif
 
     vk::ResultValue<vk::Instance> instanceAttempt = vk::createInstance(createInfo);
     if (instanceAttempt.result != vk::Result::eSuccess)

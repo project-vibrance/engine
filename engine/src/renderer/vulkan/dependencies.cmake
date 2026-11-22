@@ -4,23 +4,32 @@
 
 if(DEFINED VMA_PATH)
     if(EXISTS "${VMA_PATH}/include/vma/vk_mem_alloc.h")
-        set(VMA_INCLUDE_DIR "${VMA_PATH}/include")
         set(VMA_HEADER_TO_INSTALL "${VMA_PATH}/include/vma/vk_mem_alloc.h")
     elseif(EXISTS "${VMA_PATH}/include/vk_mem_alloc.h")
-        set(VMA_INCLUDE_DIR "${CMAKE_BINARY_DIR}/external/vma")
         set(VMA_HEADER_TO_INSTALL "${VMA_PATH}/include/vk_mem_alloc.h")
-        file(MAKE_DIRECTORY "${VMA_INCLUDE_DIR}/vma")
-        file(CONFIGURE
-            OUTPUT "${VMA_INCLUDE_DIR}/vma/vk_mem_alloc.h"
-            CONTENT "#pragma once\n#include \"${VMA_PATH}/include/vk_mem_alloc.h\"\n")
     else()
         message(FATAL_ERROR "VMA_PATH must point to a VMA checkout containing include/vk_mem_alloc.h or include/vma/vk_mem_alloc.h.")
     endif()
+elseif(UNIX)
+    find_file(VMA_HEADER_TO_INSTALL NAMES vk_mem_alloc.h
+        HINTS "${VULKAN_SDK_PATH}/include" "$ENV{VULKAN_SDK}/include"
+        PATH_SUFFIXES vma REQUIRED)
 else()
     find_path(VMA_INCLUDE_DIR NAMES vma/vk_mem_alloc.h REQUIRED)
     set(VMA_HEADER_TO_INSTALL "${VMA_INCLUDE_DIR}/vma/vk_mem_alloc.h")
 endif()
 
+get_filename_component(VMA_HEADER_TO_INSTALL "${VMA_HEADER_TO_INSTALL}" ABSOLUTE)
+get_filename_component(_vibrance_vma_header_dir "${VMA_HEADER_TO_INSTALL}" DIRECTORY)
+get_filename_component(_vibrance_vma_header_dir_name "${_vibrance_vma_header_dir}" NAME)
+if(_vibrance_vma_header_dir_name STREQUAL "vma")
+    get_filename_component(VMA_INCLUDE_DIR "${_vibrance_vma_header_dir}" DIRECTORY)
+else()
+    set(VMA_INCLUDE_DIR "${CMAKE_BINARY_DIR}/external/vma")
+    file(CONFIGURE
+        OUTPUT "${VMA_INCLUDE_DIR}/vma/vk_mem_alloc.h"
+        CONTENT "#pragma once\n#include \"${VMA_HEADER_TO_INSTALL}\"\n")
+endif()
 
 
 if(WIN32 AND MINGW)
@@ -91,6 +100,9 @@ if(WIN32 AND MINGW)
             INTERFACE_LINK_LIBRARIES "${VULKAN_DLL}")
     endif()
 else()
+    if(UNIX AND VULKAN_SDK_PATH)
+        set(Vulkan_ROOT "${VULKAN_SDK_PATH}")
+    endif()
     find_package(Vulkan REQUIRED)
 endif()
 
@@ -99,4 +111,5 @@ endif()
 find_program(GLSLC_EXECUTABLE
     NAMES glslc glslc.exe
     HINTS "${VULKAN_SDK_PATH}/Bin" "$ENV{VULKAN_SDK}/Bin"
+          "${VULKAN_SDK_PATH}/bin" "$ENV{VULKAN_SDK}/bin"
     REQUIRED)

@@ -30,6 +30,7 @@ std::filesystem::path find_font(const std::filesystem::path& assets)
     candidates.emplace_back("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
     candidates.emplace_back("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf");
     candidates.emplace_back("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf");
+    candidates.emplace_back("/usr/share/fonts/google-noto/NotoSans-Regular.ttf");
     candidates.emplace_back("/usr/share/fonts/TTF/DejaVuSans.ttf");
 #endif
     for (const auto& path : candidates)
