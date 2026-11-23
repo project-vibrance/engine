@@ -27,6 +27,7 @@ include(cmake/platform/WindowsInterop.cmake)
 include(cmake/build/Target.cmake)
 include(cmake/build/AudioBackend.cmake)
 include(cmake/build/Link.cmake)
+include(cmake/platform/Unix.cmake)
 include(cmake/build/Install.cmake)
 
 if(BUILD_TESTING)

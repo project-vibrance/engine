@@ -13,17 +13,32 @@ cd "${SCRIPT_DIR}"
 
 
 
+KWIN_GLASS=
+BUILD_ARGS=()
+for argument in "$@"; do
+  case "${argument}" in
+    --kwin-glass) KWIN_GLASS=${KWIN_GLASS:-build} ;;
+    --install-kwin-glass) KWIN_GLASS=install ;;
+    *) BUILD_ARGS+=("${argument}") ;;
+  esac
+done
+set -- "${BUILD_ARGS[@]}"
+
 case "${1:-Debug}" in
   Debug|debug) BUILD_TYPE=Debug ;;
   Release|release) BUILD_TYPE=Release ;;
   *) echo "Expected Debug or Release as the first argument." >&2; exit 1 ;;
 esac
 if (( $# > 3 )); then
-  echo "Usage: $0 [Debug|Release] [SDK install prefix|platform] [platform]" >&2
+  echo "Usage: $0 [Debug|Release] [SDK install prefix|platform] [platform] [--kwin-glass|--install-kwin-glass]" >&2
   exit 1
 fi
 
 PLATFORM=$(uname -s)
+if [[ -n "${KWIN_GLASS}" && "${PLATFORM}" != Linux ]]; then
+  echo "The KWin Liquid Glass build options require Linux." >&2
+  exit 1
+fi
 ARCH=native
 INSTALL_DIR="${SCRIPT_DIR}/install"
 
@@ -89,4 +104,7 @@ for TARGET_ARCH in "${ARCHITECTURES[@]}"; do
     ${CONFIGURE_ARGS[@]+"${CONFIGURE_ARGS[@]}"}
   cmake --build "${TARGET_DIR}" --config "${BUILD_TYPE}" --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" --verbose
   cmake --install "${TARGET_DIR}" --prefix "${PREFIX}" --config "${BUILD_TYPE}"
+  if [[ -n "${KWIN_GLASS}" ]]; then
+    bash "${SCRIPT_DIR}/scripts/build-kwin-liquid-glass.sh" "${PREFIX}" "${SCRIPT_DIR}/${TARGET_DIR}/kwin-liquid-glass" "${KWIN_GLASS}"
+  fi
 done

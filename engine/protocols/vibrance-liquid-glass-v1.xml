@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="vibrance_liquid_glass_v1">
+  <copyright>Copyright 2026 59xa. SPDX-License-Identifier: MIT</copyright>
+  <interface name="vibrance_liquid_glass_v1" version="1">
+    <request name="destroy" type="destructor"/>
+    <request name="set_surface">
+      <description summary="set optical material for a surface">
+        The array starts with refraction, blur and dispersion as unsigned
+        percentages and a corner radius in surface-local pixels. The rest
+        contains x, y, width and height for each surface-local rectangle as
+        unsigned 32-bit integers. An empty array removes the effect. The
+        request is applied with the next wl_surface.commit.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="material" type="array"/>
+    </request>
+  </interface>
+</protocol>

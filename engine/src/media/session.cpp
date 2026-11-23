@@ -22,6 +22,8 @@
 
 #if defined(__APPLE__) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
 #include "session_macos.h"
+#elif defined(VIBRANCE_HAS_GIO) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+#include "session_unix.h"
 #endif
 
 
@@ -296,6 +298,11 @@ struct GlobalMediaSession::Impl
     bool refresh() { return provider.refresh(snapshot); }
     bool send(MediaSessionCommand command) { return provider.send(command); }
     bool seek(std::int64_t position) { return provider.seek(position); }
+#elif defined(VIBRANCE_HAS_GIO) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+    UnixMediaSession provider;
+    bool refresh() { return provider.refresh(snapshot); }
+    bool send(MediaSessionCommand command) { return provider.send(snapshot, command); }
+    bool seek(std::int64_t position) { return provider.seek(snapshot, position); }
 #else
     Impl()
     {
@@ -323,8 +330,10 @@ struct GlobalMediaSession::Impl
 GlobalMediaSession::GlobalMediaSession() :
     impl(std::make_unique<Impl>())
 {
+#if !defined(VIBRANCE_HAS_GIO)
     provider_diagnostic(!impl->snapshot.bridgeLoaded, impl->snapshot.diagnostic.empty() ?
         "Provider initialised." : impl->snapshot.diagnostic);
+#endif
 }
 
 GlobalMediaSession::~GlobalMediaSession() = default;
@@ -334,7 +343,7 @@ GlobalMediaSession& GlobalMediaSession::operator=(
 
 bool GlobalMediaSession::platform_supported()
 {
-#if (defined(_WIN32) || defined(__APPLE__)) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
+#if (defined(_WIN32) || defined(__APPLE__) || defined(VIBRANCE_HAS_GIO)) && !defined(VIBRANCE_FORCE_PORTABLE_MEDIA_SESSION)
     return true;
 #else
     return false;

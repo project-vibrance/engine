@@ -680,10 +680,14 @@ void CompositePipeline::record(
     constexpr uint32_t useExternalBackdropFlag = 1u << 0u;
     constexpr uint32_t writeCompositionSurfaceFlag = 1u << 1u;
     constexpr uint32_t writeNativeSurfaceFlag = 1u << 2u;
+    constexpr uint32_t premultiplyNativeSurfaceFlag = 1u << 5u;
+    const bool premultiplyNativeSurface = writeNativeSurface &&
+        swapchain.compositeAlpha == vk::CompositeAlphaFlagBitsKHR::ePreMultiplied;
     const uint32_t flags =
         (useExternalBackdropUnderlay ? useExternalBackdropFlag : 0u) |
         (writeCompositionSurface ? writeCompositionSurfaceFlag : 0u) |
-        (writeNativeSurface ? writeNativeSurfaceFlag : 0u);
+        (writeNativeSurface ? writeNativeSurfaceFlag : 0u) |
+        (premultiplyNativeSurface ? premultiplyNativeSurfaceFlag : 0u);
     DispatchBounds bounds = {};
     if (writeNativeSurface || useExternalBackdropUnderlay)
     {

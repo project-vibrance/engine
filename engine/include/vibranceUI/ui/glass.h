@@ -128,12 +128,14 @@ inline void ui_apply_glass_material(
         liquid.rim = options.liquidRim;
         liquid.rimAnimated = options.liquidRimAnimated;
         liquid.dispersion = options.liquidDispersion;
+        const bool compositorGlass =
 #if defined(_WIN32)
-
-
-        if (!options.sceneBackdrop &&
-            (options.liquidBackend == LiquidGlassBackend::eEngineRenderer ||
-            options.liquidBackend == LiquidGlassBackend::eWindowsCompositionShader))
+            options.liquidBackend == LiquidGlassBackend::eEngineRenderer ||
+            options.liquidBackend == LiquidGlassBackend::eWindowsCompositionShader;
+#else
+            options.systemProvider == SystemBackdropProvider::eDesktopCompositor;
+#endif
+        if (!options.sceneBackdrop && compositorGlass)
         {
             SystemBackdropRegion region = {};
             region.material = GlassMaterial::eLiquid;
@@ -141,7 +143,12 @@ inline void ui_apply_glass_material(
 
             region.clipRawBackdropToShape = true;
             region.liquidBackend = options.liquidBackend;
-            region.provider = SystemBackdropProvider::eEngine;
+            region.provider =
+#if defined(_WIN32)
+                SystemBackdropProvider::eEngine;
+#else
+                options.systemProvider;
+#endif
             region.blurRadius = std::max(options.systemBlurRadius, 0.0f);
             region.saturation = std::max(options.systemSaturation, 0.0f);
             region.tint = options.systemTint;
@@ -154,7 +161,6 @@ inline void ui_apply_glass_material(
             registry.emplace_or_replace<SystemBackdropComponent>(
                 entity, SystemBackdropComponent { region });
         }
-#endif
     }
 }
 

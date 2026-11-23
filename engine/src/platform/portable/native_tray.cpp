@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <vibranceUI/platform/native_tray.h>
-#if defined(VIBRANCE_FORCE_PORTABLE_NATIVE_TRAY) || (!defined(_WIN32) && !defined(__APPLE__))
+#if defined(VIBRANCE_FORCE_PORTABLE_NATIVE_TRAY) || (!defined(_WIN32) && !defined(__APPLE__) && !defined(VIBRANCE_HAS_GIO))
 
 
 #include <utility>

@@ -1,0 +1,46 @@
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -60,6 +60,8 @@
+         target_compile_definitions(glass PRIVATE GLASS_KWIN_67)
+     endif()
+     if(GLASS_KWIN_68)
++        find_package(XCB REQUIRED COMPONENTS XCB)
++        target_link_libraries(glass PRIVATE XCB::XCB)
+         target_compile_definitions(glass PRIVATE GLASS_KWIN_68)
+     endif()
+     install(TARGETS glass DESTINATION ${KDE_INSTALL_PLUGINDIR}/kwin/effects/plugins)
+--- a/src/blur.cpp
++++ b/src/blur.cpp
+@@ -42,6 +42,9 @@
+ 
+ #if KWIN_BUILD_X11
+ #include "utils/xcbutils.h"
++#if defined(GLASS_KWIN_68)
++#include "x11window.h"
++#endif
+ #endif
+ 
+ #include <QGuiApplication>
+@@ -443,7 +446,21 @@
+     std::optional<qreal> saturation;
+     std::optional<qreal> contrast;
+ 
+-#ifdef GLASS_X11
++#if KWIN_BUILD_X11 && defined(GLASS_KWIN_68)
++    if (net_wm_blur_region != XCB_ATOM_NONE) {
++        if (const auto* window = qobject_cast<X11Window*>(w->window())) {
++            Xcb::Property property(false, window->window(), net_wm_blur_region,
++                XCB_ATOM_CARDINAL, 0, 32768);
++            if (const auto values = property.array<uint32_t>()) {
++                content.emplace();
++                for (uint i = 0; i + 3 < values->size(); i += 4) {
++                    *content += Xcb::fromXNative(Rect((*values)[i], (*values)[i + 1],
++                        (*values)[i + 2], (*values)[i + 3])).toAlignedRect();
++                }
++            }
++        }
++    }
++#elif defined(GLASS_X11)
+     if (net_wm_blur_region != XCB_ATOM_NONE) {
+         const QByteArray value = w->readProperty(net_wm_blur_region, XCB_ATOM_CARDINAL, 32);
+         BlurRegion region;

@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "scene_helpers.h"
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+#include "../../platform/unix/desktop_backdrop.h"
+#endif
 #include "text_foreground_bounds.h"
 #include <vibranceUI/graphics/liquid_glass_profile.h>
 
@@ -1296,6 +1299,45 @@ void Renderer2DScene::build_render_plan_impl(
             batch.effect0.y = 0.0f;
             batch.flags &= ~eRenderer2DStyleOutline;
         }
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+        if (const auto* desktop = registry_.ctx().find<vibrance::DesktopBackdropPaint>())
+        {
+            const auto* backdrop = registry_.try_get<SystemBackdropComponent>(entity);
+            if (backdrop && backdrop->region.provider == SystemBackdropProvider::eDesktopCompositor)
+            {
+                const auto& region = backdrop->region;
+                const auto tint = liquidSurface ? region.liquidTint : region.tint;
+                const auto paint = [&](glm::vec4 colour) {
+                    if (desktop->opaqueSurface)
+                    {
+                        const float coverage = 1.0f - std::clamp(colour.a, 0.0f, 1.0f);
+                        const glm::vec3 authored(colour);
+                        const glm::vec3 neutral = glm::mix(authored, glm::vec3(0.46f), 0.17f);
+                        const auto tintColour = glm::mix(neutral, glm::vec3(tint.red, tint.green, tint.blue),
+                            std::clamp(tint.alpha, 0.0f, 1.0f));
+                        return glm::vec4(glm::mix(authored, tintColour, coverage), 1.0f);
+                    }
+                    const float baseAlpha = std::clamp(colour.a, 0.18f, 1.0f);
+                    const float tintAlpha = std::clamp(tint.alpha, 0.0f, 1.0f) * (1.0f - baseAlpha);
+                    const float alpha = baseAlpha + tintAlpha;
+                    const glm::vec3 rgb = (glm::vec3(colour) * baseAlpha +
+                        glm::vec3(tint.red, tint.green, tint.blue) * tintAlpha) / alpha;
+                    return glm::vec4(rgb, alpha);
+                };
+                batch.color0 = paint(batch.color0);
+                batch.color1 = paint(batch.color1);
+                if (liquidSurface && region.liquidRim > 0.0f)
+                {
+                    batch.flags |= eRenderer2DStyleOutline;
+                    batch.effect0.y = std::max(batch.effect0.y, 1.3f * region.liquidRim);
+                    const float rimAlpha = 0.42f * region.liquidRim;
+                    batch.color2 = desktop->opaqueSurface
+                        ? glm::vec4(glm::mix(glm::vec3(batch.color1), glm::vec3(1.0f), rimAlpha), 1.0f)
+                        : glm::vec4(1.0f, 1.0f, 1.0f, rimAlpha);
+                }
+            }
+        }
+#endif
         if (const LiquidGlassComponent* liquid =
                 registry_.try_get<LiquidGlassComponent>(entity);
             liquid && liquid->material == GlassMaterial::eLiquid &&
@@ -1464,7 +1506,11 @@ void Renderer2DScene::build_render_plan_impl(
             if (style.backdropBlurReplaceSource && !sceneLiquid)
 #else
             if (style.backdropBlurReplaceSource && !sceneLiquid &&
-                (displayTransition.hasScale || displayTransition.opacity < 1.0f))
+                (displayTransition.hasScale || displayTransition.opacity < 1.0f
+#if defined(__unix__)
+                    || style.backdropBlurClampToClip
+#endif
+                ))
 #endif
                 blurBatch.flags |= eRenderer2DStyleBlurPreserveSourceAlpha;
             const auto* blurParent = registry_.try_get<Parent2DComponent>(entity);

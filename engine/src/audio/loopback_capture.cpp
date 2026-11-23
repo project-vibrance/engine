@@ -17,6 +17,8 @@
 
 #ifdef __APPLE__
 #include "loopback_capture_macos.h"
+#elif defined(VIBRANCE_HAS_PULSE)
+#include "loopback_capture_unix.h"
 #endif
 
 #ifdef _WIN32
@@ -895,6 +897,8 @@ struct AudioLoopbackCapture::Impl
         }
 #elif defined(__APPLE__)
         mac_audio_capture_loop(callbacks, mode, targetProcessId, captureRequested);
+#elif defined(VIBRANCE_HAS_PULSE)
+        unix_audio_capture_loop(callbacks, mode, targetProcessId, captureRequested);
 #endif
     }
 
@@ -944,6 +948,8 @@ bool AudioLoopbackCapture::platform_supported()
     return true;
 #elif defined(__APPLE__)
     return mac_audio_capture_supported();
+#elif defined(VIBRANCE_HAS_PULSE)
+    return true;
 #else
     return false;
 #endif

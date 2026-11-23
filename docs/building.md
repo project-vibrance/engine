@@ -101,6 +101,23 @@ smoke test. Local source trees can override system packages with the paths above
 For example, when using a standalone Vulkan SDK, set `VULKAN_SDK_PATH` to its
 architecture directory containing `include`, `lib` and `bin`.
 
+Build with `glib2-devel` for MPRIS, the tray and desktop portal integration.
+`pulseaudio-libs-devel` enables audio capture, `libsecret-devel` enables secure
+credential storage, and `libxcb-devel` enables X11 fullscreen detection.
+`libXext-devel` and `libXrandr-devel` enable window shaping for X11 Vulkan
+surfaces that cannot display transparency.
+`wayland-devel` and `wayland-protocols-devel` enable native Wayland desktop
+blur when the background effect protocol and `wayland-scanner` are available.
+`stb_image_write-devel` supplies the PNG encoder for copying palette images.
+
+To enable X11 and XWayland desktop glass with per-pixel transparency, set
+`GLFW_PATH` to a GLFW 3.4 source tree. The example picks up
+`~/dev/glfw-3.4` when present. On Fedora, this also requires `libXcursor-devel`,
+`libXi-devel`, `libXinerama-devel`, `libXrandr-devel` and `libxkbcommon-devel`.
+The engine applies the X11 visual change to a build-tree copy of the GLFW
+source. The SDK includes the modified GLFW library. Builds using stock GLFW
+can use the shaped-window fallback.
+
 ```sh
 ./unixBuild.sh Release
 ctest --test-dir build/Release --output-on-failure

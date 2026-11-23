@@ -429,6 +429,9 @@ add_test(
 vibrance_add_engine_test(
     vibrance_media_session_runtime_tests
     media_session_runtime_tests.cpp)
+if(TARGET PkgConfig::VIBRANCE_GIO)
+    target_compile_definitions(vibrance_media_session_runtime_tests PRIVATE VIBRANCE_HAS_GIO=1)
+endif()
 if(VIBRANCE_WIN32_INTEROP_AVAILABLE)
     add_custom_command(
         TARGET vibrance_media_session_runtime_tests
@@ -502,6 +505,9 @@ vibrance_add_engine_test(
 vibrance_add_engine_test(
     vibrance_audio_loopback_capture_tests
     audio_loopback_capture_tests.cpp)
+if(TARGET PkgConfig::VIBRANCE_PULSE)
+    target_compile_definitions(vibrance_audio_loopback_capture_tests PRIVATE VIBRANCE_HAS_PULSE=1)
+endif()
 if(WIN32)
     add_test(NAME vibrance_audio_loopback_format_tests
         COMMAND vibrance_audio_loopback_capture_tests --process-format)

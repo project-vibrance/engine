@@ -14,6 +14,14 @@ install(TARGETS vibrance_engine
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+if(VIBRANCE_BUNDLED_GLFW)
+    set_property(TARGET vibrance_engine APPEND PROPERTY INSTALL_RPATH "$ORIGIN")
+    install(TARGETS glfw EXPORT vibrance_engineTargets
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+    install(FILES "${GLFW_PATH}/LICENSE.md"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/licences"
+        RENAME glfw.txt)
+endif()
 if(VIBRANCE_WIN32_COMPOSITION_AVAILABLE)
     install(FILES "${VIBRANCE_COMPOSITION_DLL}"
         DESTINATION "${CMAKE_INSTALL_BINDIR}")
@@ -125,3 +133,9 @@ install(FILES "${PROJECT_SOURCE_DIR}/README.md" "${PROJECT_SOURCE_DIR}/LICENCE"
 install(DIRECTORY "${PROJECT_SOURCE_DIR}/docs/"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/docs"
     FILES_MATCHING PATTERN "*.md")
+if(UNIX AND NOT APPLE)
+    install(FILES "${PROJECT_SOURCE_DIR}/patches/vibrance-kwin-liquid-glass-6.8.patch"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/patches")
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/protocols/vibrance-liquid-glass-v1.xml"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/vibrance_engine/protocols")
+endif()

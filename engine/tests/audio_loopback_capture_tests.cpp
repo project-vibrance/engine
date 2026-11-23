@@ -168,11 +168,11 @@ int main(int argc, char** argv)
         !emptyCapture.start(),
         "capture should reject a missing sample consumer");
 
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__APPLE__) || defined(VIBRANCE_HAS_PULSE)
     processCapture.set_target_process_id(0u);
     passed &= expect(
         AudioLoopbackCapture::platform_supported(),
-        "Windows and macOS should expose the loopback backend");
+        "The configured platform should expose its loopback backend");
     passed &= expect(
         processCapture.start(),
         "a valid platform capture should start");

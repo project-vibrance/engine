@@ -53,6 +53,7 @@ class Swapchain
     vk::SurfaceFormatKHR format;
 
     vk::CompositeAlphaFlagBitsKHR compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque;
+    bool x11PremultipliedAlpha = false;
 
     RendererPresentMode presentModePreference = RendererPresentMode::eAuto;
 
@@ -65,6 +66,8 @@ class Swapchain
     std::vector<vk::Image> images;
 
     std::vector<vk::ImageView> imageViews;
+
+    std::vector<vk::Semaphore> presentationSemaphores;
 
     bool outdated = false;
 

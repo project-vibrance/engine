@@ -34,7 +34,8 @@ enum class SystemBackdropProvider : std::uint32_t
     eEngine = 0u,
 
     eWindowsAcrylic = 1u,
-    eWindowsMica = 2u
+    eWindowsMica = 2u,
+    eDesktopCompositor = 3u
 };
 
 enum class SystemBackdropShape : std::uint32_t

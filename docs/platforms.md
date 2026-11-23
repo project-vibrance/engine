@@ -45,6 +45,18 @@ monitor for windowed monitor queries that need screen coordinates. Open Wayland
 windows share compatible Vulkan instances to avoid a crash on affected NVIDIA
 drivers when another window closes.
 
+On X11 and XWayland, the optional GLFW source build selects an ARGB visual for
+transparent Vulkan windows. Undecorated windows using an opaque visual fall
+back to X Shape, with binary transparency at their edges.
+
+Linux desktop glass combines Vulkan tint and rim paint with compositor backdrop
+blur. X11 uses the KDE blur region hint for ARGB windows.
+Native Wayland uses the background effect protocol when the compositor advertises
+blur. The [Vibrance KWin effect](liquid-glass.md#linux-desktop-backdrop) adds
+desktop refraction and colour separation for Liquid Glass on Wayland and
+XWayland. Vulkan supplies optical effects directly for materials that sample
+the app's own scene.
+
 ## Glass and presentation
 
 `GlassMaterial` selects off, system glass or Liquid Glass. Backend selection and
@@ -81,10 +93,13 @@ Inspect the actual runtime and optical submission status when diagnosing this pa
 | --- | --- | --- | --- |
 | File picker | Native file dialog | AppKit open panel | Zenity or KDialog |
 | Directory opening | Shell | NSWorkspace | `xdg-open` |
-| Image clipboard and decoding | Clipboard/WIC | Pasteboard/ImageIO | Unavailable result |
-| Screen colour selection | Cursor sampling | Native colour sampler | Unavailable result |
+| Image clipboard and decoding | Clipboard/WIC | Pasteboard/ImageIO | stb decoding and wl-clipboard or xclip |
+| Screen colour selection | Cursor sampling | Native colour sampler | Desktop Screenshot portal |
 | Configured monitor wallpaper | Desktop wallpaper provider | NSWorkspace wallpaper | Empty image |
-| Global media session | WinRT companion | MediaRemote companion | Support reported by the facade |
+| Global media session | WinRT companion | MediaRemote companion | MPRIS over the session bus |
+| Audio loopback capture | WASAPI | CoreAudio and ScreenCaptureKit | PulseAudio and PipeWire's PulseAudio service |
+| System tray | Notification area | Status menu | StatusNotifierItem and D-Bus menu |
+| Secure credential storage | Windows Credential Manager | Keychain | Desktop Secret Service |
 | System notification provider | WinRT companion and access checks | Unsupported | Unsupported |
 
 `native_desktop_wallpaper(position, size)` retrieves the configured monitor

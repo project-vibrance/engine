@@ -1247,7 +1247,13 @@ struct UiColourPalettePanel::Impl
         }
         if (pickingScreen)
         {
-            if (nativeScreenPicker) return;
+            if (nativeScreenPicker)
+            {
+#if defined(VIBRANCE_HAS_GIO)
+                colour_palette::screen_pick_state();
+#endif
+                return;
+            }
             const auto state = colour_palette::screen_pick_state();
             if (!state.primaryDown) screenReleased = true;
             if (state.cancelled || (screenReleased && state.primaryDown))

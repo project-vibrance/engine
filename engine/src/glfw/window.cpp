@@ -34,7 +34,7 @@ bool glfw_macos_native_window_drag_active();
 
 namespace
 {
-    bool glfw_supports_window_position()
+    bool glfw_controls_window_placement()
     {
 #if defined(__unix__) && !defined(__APPLE__) && defined(GLFW_PLATFORM_WAYLAND)
         return glfwGetPlatform() != GLFW_PLATFORM_WAYLAND;
@@ -326,7 +326,7 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     {
         glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
     }
-    if (createInfo.alwaysOnTop)
+    if (createInfo.alwaysOnTop && glfw_controls_window_placement())
     {
         glfwWindowHint(GLFW_FLOATING, GLFW_TRUE);
     }
@@ -1038,7 +1038,7 @@ bool glfw_window_position(GLFWwindow* window, int& x, int& y)
 {
     x = 0;
     y = 0;
-    if (!window || !glfw_supports_window_position())
+    if (!window || !glfw_controls_window_placement())
     {
         return false;
     }
@@ -1244,7 +1244,7 @@ void set_glfw_window_decorated(GLFWwindow* window, bool decorated)
 
 void set_glfw_window_always_on_top(GLFWwindow* window, bool alwaysOnTop)
 {
-    if (!window)
+    if (!window || !glfw_controls_window_placement())
     {
         return;
     }
@@ -1398,10 +1398,7 @@ bool apply_glfw_window_placement(
 
     set_glfw_window_position(window, placement.position.x, placement.position.y);
     glfwSetWindowSize(window, placement.size.x, placement.size.y);
-    glfwSetWindowAttrib(
-        window,
-        GLFW_FLOATING,
-        placement.alwaysOnTop ? GLFW_TRUE : GLFW_FALSE);
+    set_glfw_window_always_on_top(window, placement.alwaysOnTop);
     return true;
 #endif
 }
@@ -1409,7 +1406,7 @@ bool apply_glfw_window_placement(
 
 void set_glfw_window_position(GLFWwindow* window, int x, int y)
 {
-    if (window && glfw_supports_window_position())
+    if (window && glfw_controls_window_placement())
     {
         glfwSetWindowPos(window, x, y);
     }

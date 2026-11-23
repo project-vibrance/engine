@@ -17,6 +17,8 @@
 #include <vibranceUI/renderer/renderer2d.h>
 #include <vibranceUI/renderer/renderer3d.h>
 
+namespace vibrance::vulkan { class X11WindowShape; }
+
 class Frame
 {
     public:
@@ -53,7 +55,8 @@ class Frame
         bool compositionImageFirstUse = true,
         glm::uvec4 pendingCompositionDamageRect = glm::uvec4(0u),
         uint32_t graphicsQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        vk::Extent2D compositionExtent = {}
+        vk::Extent2D compositionExtent = {},
+        vibrance::vulkan::X11WindowShape* x11WindowShape = nullptr
     );
 
     void resize_resources(vk::Extent2D newRenderExtent, vk::Extent2D newModelRenderExtent);
@@ -95,8 +98,6 @@ class Frame
     vk::SampleCountFlagBits hosted3DSamples = vk::SampleCountFlagBits::e1;
 
     vk::Semaphore imageAcquiredSemaphore;
-
-    vk::Semaphore renderFinishedSemaphore;
 
     vk::Fence renderFinishedFence;
 

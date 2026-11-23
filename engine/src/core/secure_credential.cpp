@@ -18,6 +18,8 @@
 #include <wincred.h>
 #elif defined(__APPLE__)
 #include <Security/Security.h>
+#elif defined(VIBRANCE_HAS_SECRET_SERVICE)
+#include <libsecret/secret.h>
 #endif
 
 namespace
@@ -34,6 +36,26 @@ SecureCredentialResult make_result(
 {
     return { status, std::move(error) };
 }
+
+#if defined(VIBRANCE_HAS_SECRET_SERVICE)
+const SecretSchema credentialSchema {
+    "com.vibrance.SecureCredential", SECRET_SCHEMA_NONE,
+    {{"service", SECRET_SCHEMA_ATTRIBUTE_STRING}, {"account", SECRET_SCHEMA_ATTRIBUTE_STRING}},
+};
+
+SecureCredentialResult secret_service_failure(GError* error)
+{
+    const bool unavailable = error && (
+        g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_SERVICE_UNKNOWN) ||
+        g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_NAME_HAS_NO_OWNER) ||
+        g_error_matches(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED) ||
+        g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CLOSED));
+    g_clear_error(&error);
+    return unavailable ? make_result(SecureCredentialStatus::eUnavailable,
+        "The desktop Secret Service is unavailable.") :
+        make_result(SecureCredentialStatus::ePlatformError, "The desktop Secret Service rejected the credential operation.");
+}
+#endif
 
 bool valid_key_part(std::string_view value)
 {
@@ -379,6 +401,15 @@ SecureCredentialResult secure_credential_store(
             "macOS Keychain rejected the credential operation.");
     }
     return make_result(SecureCredentialStatus::eSuccess);
+#elif defined(VIBRANCE_HAS_SECRET_SERVICE)
+    const std::string serviceName(service), accountName(account);
+    SecretValue* value = secret_value_new(secret.data(), secret.size(), "application/octet-stream");
+    if (!value) return secret_service_failure(nullptr);
+    GError* error = nullptr;
+    const bool stored = secret_password_store_binary_sync(&credentialSchema, SECRET_COLLECTION_DEFAULT,
+        serviceName.c_str(), value, nullptr, &error, "service", serviceName.c_str(), "account", accountName.c_str(), nullptr);
+    secret_value_unref(value);
+    return stored ? make_result(SecureCredentialStatus::eSuccess) : secret_service_failure(error);
 #else
     return make_result(
         SecureCredentialStatus::eUnavailable,
@@ -486,6 +517,25 @@ std::optional<std::string> secure_credential_load(
     SecKeychainItemFreeContent(nullptr, passwordData);
     publish(make_result(SecureCredentialStatus::eSuccess));
     return secret;
+#elif defined(VIBRANCE_HAS_SECRET_SERVICE)
+    const std::string serviceName(service), accountName(account);
+    GError* error = nullptr;
+    SecretValue* value = secret_password_lookup_binary_sync(&credentialSchema, nullptr, &error,
+        "service", serviceName.c_str(), "account", accountName.c_str(), nullptr);
+    if (!value)
+    {
+        publish(error ? secret_service_failure(error) :
+            make_result(SecureCredentialStatus::eNotFound, "The credential was not found."));
+        return std::nullopt;
+    }
+    gsize size = 0;
+    const char* bytes = secret_value_get(value, &size);
+    std::optional<std::string> resultValue;
+    if (bytes && size && size <= maximumCredentialBytes) resultValue.emplace(bytes, size);
+    secret_value_unref(value);
+    publish(resultValue ? make_result(SecureCredentialStatus::eSuccess) :
+        make_result(SecureCredentialStatus::eInvalidData, "The stored credential is empty or invalid."));
+    return resultValue;
 #else
     publish(make_result(
         SecureCredentialStatus::eUnavailable,
@@ -555,6 +605,12 @@ SecureCredentialResult secure_credential_erase(
         make_result(
             SecureCredentialStatus::ePlatformError,
             "macOS Keychain rejected the credential operation.");
+#elif defined(VIBRANCE_HAS_SECRET_SERVICE)
+    const std::string serviceName(service), accountName(account);
+    GError* error = nullptr;
+    secret_password_clear_sync(&credentialSchema, nullptr, &error,
+        "service", serviceName.c_str(), "account", accountName.c_str(), nullptr);
+    return error ? secret_service_failure(error) : make_result(SecureCredentialStatus::eSuccess);
 #else
     return make_result(
         SecureCredentialStatus::eUnavailable,

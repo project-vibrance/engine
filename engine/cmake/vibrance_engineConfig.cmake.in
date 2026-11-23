@@ -92,6 +92,10 @@ set_and_check(
 
 include("${CMAKE_CURRENT_LIST_DIR}/vibrance_engineTargets.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/VibranceLockedRuntime.cmake")
+if(TARGET vibrance::glfw)
+    set_and_check(vibrance_engine_GLFW_LICENCE
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/vibrance_engine/licences/glfw.txt")
+endif()
 
 if(WIN32)
     if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(ARM64|arm64|aarch64)$" OR
@@ -140,6 +144,13 @@ if(NOT COMMAND vibrance_engine_copy_runtime_companions)
                     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                         "$<TARGET_FILE:vibrance::engine>"
                         "$<TARGET_FILE_DIR:${target_name}>/$<TARGET_SONAME_FILE_NAME:vibrance::engine>"
+                    VERBATIM)
+            endif()
+            if(TARGET vibrance::glfw)
+                add_custom_command(TARGET "${_vibrance_engine_copy_target}" POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "$<TARGET_FILE:vibrance::glfw>"
+                        "$<TARGET_FILE_DIR:${target_name}>/$<TARGET_SONAME_FILE_NAME:vibrance::glfw>"
                     VERBATIM)
             endif()
             if(APPLE)

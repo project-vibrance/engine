@@ -3,6 +3,7 @@
 
 #include <vibranceUI/renderer/swapchain.h>
 #include <vibranceUI/renderer/image.h>
+#include <vibranceUI/renderer/synchronisation.h>
 #include <vibranceUI/core/logger.h>
 #include <algorithm>
 #include <string>
@@ -163,6 +164,8 @@ void Swapchain::destroy(vk::Device logicalDevice)
 
     images.clear();
     imageViews.clear();
+    presentationSemaphores.clear();
+    chain = nullptr;
 }
 
 void Swapchain::build(
@@ -354,9 +357,19 @@ void Swapchain::build(
         images.push_back(rawImage);
     }
     
-    for (uint32_t i = 0; i < images.size(); ++i) 
+    presentationSemaphores.reserve(images.size());
+    for (const auto image : images)
     {
-        vk::ImageView imageView = create_image_view(logicalDevice, images[i], format.format);
+        const auto semaphore = make_semaphore(logicalDevice, deletionQueue);
+        if (!semaphore)
+        {
+            destroy(logicalDevice);
+            outdated = true;
+            logger->vulkan("Failed to allocate a swapchain presentation semaphore.");
+            return;
+        }
+        presentationSemaphores.push_back(semaphore);
+        vk::ImageView imageView = create_image_view(logicalDevice, image, format.format);
         imageViews.push_back(imageView);
         VkImageView imageViewHandle = imageView;
         deletionQueue.push_back([imageViewHandle](vk::Device device) {

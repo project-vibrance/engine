@@ -20,6 +20,15 @@
 #include "composition_readback.h"
 #include "composition_frame_delivery.h"
 #include "../common/media_prepared_upload.h"
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+#include "x11_window_shape.h"
+#endif
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+#include "../../platform/unix/desktop_backdrop.h"
+#endif
+#if defined(VIBRANCE_HAS_X11_WINDOW_SHAPE) || defined(VIBRANCE_HAS_DESKTOP_BACKDROP)
+#include <vibranceUI/glfw/window.h>
+#endif
 #if defined(_WIN32)
 #include "../../platform/win32/composition_bridge_abi.h"
 #endif
@@ -1037,6 +1046,12 @@ private:
 	Swapchain swapchain;
 	bool rendererReady = false;
 	bool transparentFramebuffer = false;
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+	std::unique_ptr<vibrance::vulkan::X11WindowShape> x11WindowShape;
+#endif
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+	std::unique_ptr<vibrance::DesktopBackdrop> desktopBackdrop;
+#endif
 	CompositionPresenter compositionPresenter;
 	bool compositionGpuInterop = false;
 	vk::Buffer compositionReadbackBuffer {};
@@ -1618,6 +1633,28 @@ Engine::Impl::Impl(const EngineCreateInfo& createInfo)
 		return;
 	}
 	outputExtent = swapchain.extent;
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+	if (transparentFramebuffer && createSurface == vibrance_glfw_create_surface)
+	{
+		auto* window = static_cast<GLFWwindow*>(surfaceUserData);
+		swapchain.x11PremultipliedAlpha = vibrance::vulkan::X11WindowShape::uses_native_alpha(window);
+		if (!swapchain.x11PremultipliedAlpha)
+			x11WindowShape = vibrance::vulkan::X11WindowShape::create(window, allocator);
+	}
+#endif
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+	if (transparentFramebuffer && createSurface == vibrance_glfw_create_surface)
+	{
+		bool opaqueSurface = swapchain.compositeAlpha == vk::CompositeAlphaFlagBitsKHR::eOpaque &&
+			!swapchain.x11PremultipliedAlpha;
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+		opaqueSurface = opaqueSurface || static_cast<bool>(x11WindowShape);
+#endif
+		desktopBackdrop = std::make_unique<vibrance::DesktopBackdrop>(
+			static_cast<GLFWwindow*>(surfaceUserData), opaqueSurface);
+		renderer2DScene.registry().ctx().insert_or_assign(desktopBackdrop->paint());
+	}
+#endif
 	if (compositionRequested && initialise_composition_presenter())
 	{
 		activePresentationBackend = PresentationBackend::eWindowsCompositionD3D11;
@@ -2186,7 +2223,7 @@ std::vector<SystemBackdropRegion>
 Engine::Impl::collect_system_backdrop_regions(double renderTimeSeconds)
 {
 	const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::eBackdropGeometry);
-	if (!compositionPresenter.available())
+	if (!system_backdrop_available())
 	{
 		return {};
 	}
@@ -2765,6 +2802,13 @@ void Engine::Impl::draw()
 		return;
 	}
 
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+	if (x11WindowShape && !x11WindowShape->apply_completed(logicalDevice))
+	{
+		return;
+	}
+#endif
+
 	if (framebufferWidth == 0 || framebufferHeight == 0)
 	{
 		swapchain.outdated = true;
@@ -3095,6 +3139,9 @@ void Engine::Impl::draw()
 		activity.settled = true;
 		return;
 	}
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+	if (desktopBackdrop && !desktopBackdrop->frame_ready()) return;
+#endif
 	Frame& frame = frames[frameIndex];
     
 	vk::Result fenceResult;
@@ -3257,7 +3304,11 @@ void Engine::Impl::draw()
 			compositionImageFirstUse,
 			pendingCompositionDamageRect,
 			graphicsQueueFamilyIndex,
-			outputExtent);
+			outputExtent
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+			, x11WindowShape.get()
+#endif
+		);
 	}
 	if (compositionBufferAcquired)
 	{
@@ -3278,8 +3329,9 @@ void Engine::Impl::draw()
 	submitInfo.pWaitSemaphores = presentNativeSurface ?
 		&frame.imageAcquiredSemaphore : nullptr;
 	submitInfo.signalSemaphoreCount = presentNativeSurface ? 1u : 0u;
-	submitInfo.pSignalSemaphores = presentNativeSurface ?
-		&frame.renderFinishedSemaphore : nullptr;
+	const vk::Semaphore* presentationSemaphore = presentNativeSurface ?
+		&swapchain.presentationSemaphores[imageIndex] : nullptr;
+	submitInfo.pSignalSemaphores = presentationSemaphore;
 
 
 
@@ -3327,6 +3379,12 @@ void Engine::Impl::draw()
 		logger->vulkan("Failed to submit buffer to graphics queue.");
 		return;
 	}
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+	if (x11WindowShape)
+	{
+		x11WindowShape->submitted(frame.renderFinishedFence);
+	}
+#endif
 	if (renderDiagnosticsEnabled)
 	{
 		++diagnosticSubmissions;
@@ -3368,18 +3426,32 @@ void Engine::Impl::draw()
 
 	if (presentNativeSurface)
 	{
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+		if (desktopBackdrop && desktopBackdrop->available())
+		{
+			desktopBackdrop->update(collect_system_backdrop_regions(renderTimeSeconds),
+				{ outputExtent.width, outputExtent.height }, [&] {
+					return logicalDevice.waitForFences(frame.renderFinishedFence, false, UINT64_MAX) ==
+						vk::Result::eSuccess;
+				});
+		}
+#endif
 		vk::PresentInfoKHR presentInfo = {};
 		presentInfo.swapchainCount = 1;
 		presentInfo.pSwapchains = &swapchain.chain;
 		presentInfo.pImageIndices = &imageIndex;
 		presentInfo.waitSemaphoreCount = 1;
-		presentInfo.pWaitSemaphores = &frame.renderFinishedSemaphore;
+		presentInfo.pWaitSemaphores = presentationSemaphore;
 		VkPresentInfoKHR rawPresentInfo = presentInfo;
 		VkResult presentResult;
 		{
 			const auto cpuTiming = measure_cpu_phase(RendererCpuPhase::ePresent);
 			presentResult = vkQueuePresentKHR(graphicsQueue, &rawPresentInfo);
 		}
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+		if (desktopBackdrop && presentResult != VK_SUCCESS && presentResult != VK_SUBOPTIMAL_KHR)
+			desktopBackdrop->presentation_failed();
+#endif
 
 		if (presentResult == VK_ERROR_OUT_OF_DATE_KHR ||
 			presentResult == VK_SUBOPTIMAL_KHR)
@@ -4071,6 +4143,9 @@ PresentationBackend Engine::Impl::presentation_backend() const
 
 bool Engine::Impl::system_backdrop_available() const
 {
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+	if (desktopBackdrop && desktopBackdrop->available()) return true;
+#endif
 	return compositionPresenter.available();
 }
 
@@ -4165,6 +4240,9 @@ Engine::Impl::~Impl()
 	pipelineCache.reset();
 	compositionPresenter.shutdown(logicalDevice);
 	destroy_composition_readback();
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+	x11WindowShape.reset();
+#endif
 
     logger->vulkan("Exiting application.");
 

@@ -15,6 +15,7 @@ layout (set = 1, binding = 7, rgba8) writeonly uniform image2D compositionSurfac
 const uint COMPOSITE_USE_EXTERNAL_BACKDROP_UNDERLAY = 1u << 0;
 const uint COMPOSITE_WRITE_COMPOSITION_SURFACE = 1u << 1;
 const uint COMPOSITE_WRITE_NATIVE_SURFACE = 1u << 2;
+const uint COMPOSITE_PREMULTIPLY_NATIVE_SURFACE = 1u << 5;
 
 layout (push_constant) uniform Composite2DConstants {
     uvec4 data;
@@ -80,7 +81,8 @@ void main() {
         color.a *= alpha;
     }
     if ((pc.data.x & COMPOSITE_WRITE_NATIVE_SURFACE) != 0u) {
-        imageStore(tempSurface, pixel, color);
+        bool premultiply = (pc.data.x & COMPOSITE_PREMULTIPLY_NATIVE_SURFACE) != 0u;
+        imageStore(tempSurface, pixel, vec4(premultiply ? color.rgb * color.a : color.rgb, color.a));
     }
     if ((pc.data.x & COMPOSITE_WRITE_COMPOSITION_SURFACE) != 0u) {
         imageStore(compositionSurface, pixel, vec4(color.rgb * color.a, color.a));

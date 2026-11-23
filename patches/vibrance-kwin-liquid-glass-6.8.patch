@@ -1,0 +1,1214 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -55,7 +55,7 @@
+ )
+ 
+ if(GLASS_WAYLAND)
+-    find_package(KWin COMPONENTS
++    find_package(KWin 6.8...<6.9 REQUIRED COMPONENTS
+         kwineffects
+     )
+     if (${KWin_FOUND})
+@@ -94,6 +94,4 @@
+ 
+ add_subdirectory(src)
+ 
+-ki18n_install(po)
+-
+ feature_summary(WHAT ALL FATAL_ON_MISSING_REQUIRED_PACKAGES)
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1,19 +1,19 @@
+ # Add the localization domain
+ add_definitions(-DTRANSLATION_DOMAIN="kwin_effects_glass")
+ 
+-add_subdirectory(kcm)
+ 
+ # Read compat preambles
+ file(READ shaders/compat_core.glsl COMPAT_CORE)
+ #file(READ shaders/compat_legacy.glsl COMPAT_LEGACY)
+ file(READ shaders/oklab.glsl OKLAB_SHADER)
+-file(READ shaders/snells-glass.glsl SNELLS_GLASS_SHADER)
+-file(READ shaders/rim.glsl RIM_SHADER)
+-file(READ shaders/glass.glsl GLASS_SHADER)
+-
+-# Pre-expand snells-glass.glsl and rim.glsl into glass.glsl
+-string(REPLACE "#include \"snells-glass.glsl\"" "${SNELLS_GLASS_SHADER}" GLASS_SHADER "${GLASS_SHADER}")
+-string(REPLACE "#include \"rim.glsl\"" "${RIM_SHADER}" GLASS_SHADER "${GLASS_SHADER}")
++set(VIBRANCE_LIQUID_GLASS_PROTOCOL "" CACHE FILEPATH "Vibrance Liquid Glass protocol XML")
++get_filename_component(protocol_dir "${VIBRANCE_LIQUID_GLASS_PROTOCOL}" DIRECTORY)
++find_file(VIBRANCE_LIQUID_GLASS_PROFILE liquid_glass_refraction.h
++    HINTS "${protocol_dir}/../../../include/vibranceUI/graphics"
++          "${protocol_dir}/../include/vibranceUI/graphics"
++    REQUIRED)
++set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${VIBRANCE_LIQUID_GLASS_PROFILE}")
++file(READ "${VIBRANCE_LIQUID_GLASS_PROFILE}" VIBRANCE_PROFILE)
+ 
+ # Generate a core shader variant from a single .glsl source.
+ # Output goes into generated/ to keep source shaders/ clean.
+@@ -22,10 +22,11 @@
+ 
+     # Expand helper-shader includes
+     string(REPLACE "#include \"oklab.glsl\"" "${OKLAB_SHADER}" SHADER_SRC_EXPANDED "${SHADER_SRC}")
+-    string(REPLACE "#include \"glass.glsl\"" "${GLASS_SHADER}" SHADER_SRC_EXPANDED "${SHADER_SRC_EXPANDED}")
++    string(REPLACE "#include \"liquid_glass_refraction.h\"" "${VIBRANCE_PROFILE}" SHADER_SRC_EXPANDED "${SHADER_SRC_EXPANDED}")
+ 
+     # Core variant
+-    file(WRITE "generated/${output_base}${ARGN}" "${COMPAT_CORE}\n${SHADER_SRC_EXPANDED}")
++    file(GENERATE OUTPUT "${CMAKE_CURRENT_SOURCE_DIR}/generated/${output_base}${ARGN}"
++        CONTENT "${COMPAT_CORE}\n${SHADER_SRC_EXPANDED}")
+ endfunction()
+ 
+ # Generate vertex shaders
+@@ -50,11 +51,25 @@
+ )
+ 
+ if(GLASS_WAYLAND)
+-    add_library(glass MODULE ${glass_SOURCES})
++    find_package(XCB REQUIRED COMPONENTS XCB)
++    find_package(PkgConfig REQUIRED)
++    pkg_check_modules(WaylandServer REQUIRED IMPORTED_TARGET wayland-server)
++    find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
++    set(protocol "${CMAKE_CURRENT_BINARY_DIR}/vibrance-liquid-glass-v1")
++    add_custom_command(
++        OUTPUT "${protocol}.h" "${protocol}.c"
++        COMMAND "${WAYLAND_SCANNER}" server-header "${VIBRANCE_LIQUID_GLASS_PROTOCOL}" "${protocol}.h"
++        COMMAND "${WAYLAND_SCANNER}" private-code "${VIBRANCE_LIQUID_GLASS_PROTOCOL}" "${protocol}.c"
++        DEPENDS "${VIBRANCE_LIQUID_GLASS_PROTOCOL}" VERBATIM)
++    add_library(glass MODULE ${glass_SOURCES} "${protocol}.h" "${protocol}.c")
++    set_target_properties(glass PROPERTIES OUTPUT_NAME vibrance_liquid_glass
++        INSTALL_RPATH "" INSTALL_RPATH_USE_LINK_PATH OFF)
++    target_link_options(glass PRIVATE "LINKER:-z,nodelete")
+     target_link_libraries(glass PRIVATE
+         KDecoration3::KDecoration
+         KF6::ConfigGui
+         KWin::kwin
++        XCB::XCB PkgConfig::WaylandServer
+     )
+     if(GLASS_KWIN_67)
+         target_compile_definitions(glass PRIVATE GLASS_KWIN_67)
+--- a/src/metadata.json
++++ b/src/metadata.json
+@@ -15,12 +15,9 @@
+             }
+         ],
+         "Category": "Appearance",
+-        "Description": "Glass effect with refraction, blur and more",
+-        "Description[fr]": "Effet de verre avec réfraction, flou et plus",
++        "Description": "Backdrop refraction for Vibrance Liquid Glass",
+         "EnabledByDefault": false,
+         "License": "GPL",
+-        "Name": "Glass",
+-        "Name[fr]": "Verre"
+-    },
+-    "X-KDE-ConfigModule": "kwin_glass_config"
++        "Name": "Vibrance Liquid Glass"
++    }
+ }
+--- a/src/blur.kcfg
++++ b/src/blur.kcfg
+@@ -4,7 +4,7 @@
+     xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+     http://www.kde.org/standards/kcfg/1.0/kcfg.xsd" >
+     <kcfgfile arg="true"/>
+-    <group name="Effect-blurplus">
++    <group name="Effect-vibrance-liquid-glass">
+         <entry name="EdgeLighting" type="Bool">
+             <default>false</default>
+         </entry>
+--- a/src/blur.h
++++ b/src/blur.h
+@@ -7,6 +7,11 @@
+ 
+ #pragma once
+ 
++#include <unordered_set>
++
++struct wl_global;
++struct wl_resource;
++
+ #include "effect/effect.h"
+ #ifndef GLASS_X11
+ #include "core/region.h"
+@@ -29,6 +34,7 @@
+ class ContrastManagerInterface;
+ #endif
+ class BackgroundEffectItem;
++class SurfaceInterface;
+ 
+ #ifdef GLASS_X11
+ using BlurOutput = Output;
+@@ -40,6 +46,7 @@
+ 
+ struct BlurRenderData
+ {
++    QRect captureRect;
+     /// Temporary render targets needed for the Dual Kawase algorithm, the first texture
+     /// contains not blurred background behind the window, it's cached.
+     std::vector<std::unique_ptr<GLTexture>> textures;
+@@ -48,6 +55,11 @@
+ 
+ struct BlurEffectData
+ {
++    uint32_t frameSequence = 0;
++    float refraction = 0.0f;
++    float blur = 0.0f;
++    float dispersion = 0.0f;
++    float radius = 0.0f;
+     /// The region that should be blurred behind the window
+     std::optional<BlurRegion> content;
+ 
+@@ -153,7 +165,18 @@
+     BlurRegion decorationBlurRegion(const EffectWindow *w) const;
+     bool decorationSupportsBlurBehind(const EffectWindow *w) const;
+     bool shouldBlur(const EffectWindow *w, int mask, const WindowPaintData &data) const;
+-    void updateBlurRegion(EffectWindow *w);
++    void updateBlurRegion(EffectWindow *w, bool bufferReady = false);
++    void setLiquidSurface(SurfaceInterface *surface, std::span<const uint32_t> words);
++    void createLiquidGlobal();
++
++    wl_global *liquidGlobal = nullptr;
++    std::unordered_set<wl_resource *> liquidResources;
++    struct LiquidSurface;
++    std::unordered_map<SurfaceInterface *, std::unique_ptr<LiquidSurface>> liquidSurfaces;
++#if KWIN_BUILD_X11
++    std::unordered_set<EffectWindow *> pendingX11Regions;
++    void watchX11Frames(EffectWindow *window);
++#endif
+     void repaintDynamicCorners();
+     void blur(const RenderTarget &renderTarget, const RenderViewport &viewport, EffectWindow *w, int mask, const BlurRegion &deviceRegion, WindowPaintData &data);
+     GLTexture *ensureNoiseTexture(int noiseStrength);
+@@ -165,45 +188,15 @@
+     {
+         std::unique_ptr<GLShader> shader;
+         int mvpMatrixLocation;
+-        int colorMatrixLocation;
+-        int useOklabSaturationLocation;
+-        int saturationLocation;
+-        int offsetLocation;
+-        int halfpixelLocation;
+         int boxLocation;
+-        int cornerRadiusLocation;
++        int lensRadiusLocation;
+         int opacityLocation;
+         int texUnitLocation;
+-
+-        int blurSizeLocation;
+-        int edgeSizePixelsLocation;
+-        int refractionStrengthLocation;
+-        int refractionNormalPowLocation;
+-        int refractionRGBFringingLocation;
+-        int refractionOffsetStrengthLocation;
+-        int refractionBevelIntensityLocation;
+-        int physicallyBasedRefractionLocation;
+-        int bodyRefractionLocation;
+-        int bodyRefractionReachLocation;
+-        int bodyRefractionStrengthLocation;
+-
+-        int tintColorLocation;
+-        int tintGrayLocation;
+-        int tintStrengthLocation;
+-        int autoTintAlphaRangeLocation;
+-        int autoTintAlphaLocation;
+-
+-        int glowColorLocation;
+-        int glowStrengthLocation;
+-        int edgeLightingLocation;
+-        int rimGlowLocation;
+-        int glowOffsetLocation;
+-        int rimGlowColorMixLocation;
+-        int rimSpecularLocation;
+-        int rimSpecularScaleLocation;
+-        int rimWidthLocation;
+-        int rimAdaptToRefractionLocation;
+-        int rimAdaptMultiplierLocation;
++        int sharpBackdropLocation;
++        int backdropPixelSizeLocation;
++        int refractionAmountLocation;
++        int blurAmountLocation;
++        int dispersionAmountLocation;
+     } m_roundedOnscreenPass;
+ 
+     struct
+@@ -238,6 +231,7 @@
+     bool m_valid = false;
+ #if KWIN_BUILD_X11
+     long net_wm_blur_region = 0;
++    long liquidFrameAtom = 0;
+ #endif
+     BlurRegion m_paintedDeviceArea; // keeps track of all painted areas (from bottom to top)
+     BlurRegion m_currentDeviceBlur; // keeps track of currently blurred area of the windows (from bottom to top)
+--- a/src/blur.cpp
++++ b/src/blur.cpp
+@@ -10,6 +10,10 @@
+ // KConfigSkeleton
+ #include "blurconfig.h"
+ #include "settings.h"
++#include "vibrance-liquid-glass-v1.h"
++#include "wayland_server.h"
++#include <wayland-server-core.h>
++#include <wayland-server-protocol.h>
+ 
+ #include "core/pixelgrid.h"
+ #ifndef GLASS_X11
+@@ -42,6 +46,7 @@
+ 
+ #if KWIN_BUILD_X11
+ #include "utils/xcbutils.h"
++#include "x11window.h"
+ #endif
+ 
+ #include <QGuiApplication>
+@@ -70,7 +75,8 @@
+ namespace KWin
+ {
+ 
+-static const QByteArray s_blurAtomName = QByteArrayLiteral("_KDE_NET_WM_BLUR_BEHIND_REGION");
++static const QByteArray s_blurAtomName = QByteArrayLiteral("_VIBRANCE_LIQUID_GLASS_V1");
++static const QByteArray s_liquidFrameAtomName = QByteArrayLiteral("_VIBRANCE_LIQUID_GLASS_FRAME_V1");
+ 
+ #if !defined(GLASS_X11) && !defined(GLASS_KWIN_67)
+ BlurManagerInterface *BlurEffect::s_blurManager = nullptr;
+@@ -112,6 +118,32 @@
+ 
+     return contrastMatrix * saturationMatrix * brightnessMatrix;
+ }
++
++struct LiquidSurfaceState : SurfaceAttachedState<LiquidSurfaceState>
++{
++    std::optional<std::vector<uint32_t>> words;
++};
++
++struct BlurEffect::LiquidSurface : SurfaceExtension<LiquidSurface, LiquidSurfaceState>
++{
++    LiquidSurface(BlurEffect *effect, SurfaceInterface *surface)
++        : SurfaceExtension(surface)
++        , effect(effect)
++    {
++    }
++
++    void apply(LiquidSurfaceState *state)
++    {
++        if (!state->words)
++            return;
++        active = std::move(*state->words);
++        if (auto *window = effects->findWindow(surface))
++            effect->updateBlurRegion(window);
++    }
++
++    BlurEffect *effect;
++    std::vector<uint32_t> active;
++};
+ 
+ BlurEffect::BlurEffect()
+ {
+@@ -130,42 +162,15 @@
+         return;
+     } else {
+         m_roundedOnscreenPass.mvpMatrixLocation = m_roundedOnscreenPass.shader->uniformLocation("modelViewProjectionMatrix");
+-        m_roundedOnscreenPass.colorMatrixLocation = m_roundedOnscreenPass.shader->uniformLocation("colorMatrix");
+-        m_roundedOnscreenPass.useOklabSaturationLocation = m_roundedOnscreenPass.shader->uniformLocation("useOklabSaturation");
+-        m_roundedOnscreenPass.saturationLocation = m_roundedOnscreenPass.shader->uniformLocation("saturation");
+-        m_roundedOnscreenPass.offsetLocation = m_roundedOnscreenPass.shader->uniformLocation("offset");
+-        m_roundedOnscreenPass.halfpixelLocation = m_roundedOnscreenPass.shader->uniformLocation("halfpixel");
+         m_roundedOnscreenPass.boxLocation = m_roundedOnscreenPass.shader->uniformLocation("box");
+-        m_roundedOnscreenPass.cornerRadiusLocation = m_roundedOnscreenPass.shader->uniformLocation("cornerRadius");
++        m_roundedOnscreenPass.lensRadiusLocation = m_roundedOnscreenPass.shader->uniformLocation("lensRadius");
+         m_roundedOnscreenPass.opacityLocation = m_roundedOnscreenPass.shader->uniformLocation("opacity");
+         m_roundedOnscreenPass.texUnitLocation = m_roundedOnscreenPass.shader->uniformLocation("texUnit");
+-        m_roundedOnscreenPass.blurSizeLocation = m_roundedOnscreenPass.shader->uniformLocation("blurSize");
+-        m_roundedOnscreenPass.edgeSizePixelsLocation = m_roundedOnscreenPass.shader->uniformLocation("edgeSizePixels");
+-        m_roundedOnscreenPass.refractionStrengthLocation = m_roundedOnscreenPass.shader->uniformLocation("refractionStrength");
+-        m_roundedOnscreenPass.refractionNormalPowLocation = m_roundedOnscreenPass.shader->uniformLocation("refractionNormalPow");
+-        m_roundedOnscreenPass.refractionRGBFringingLocation = m_roundedOnscreenPass.shader->uniformLocation("refractionRGBFringing");
+-        m_roundedOnscreenPass.refractionOffsetStrengthLocation = m_roundedOnscreenPass.shader->uniformLocation("refractionOffsetStrength");
+-        m_roundedOnscreenPass.refractionBevelIntensityLocation = m_roundedOnscreenPass.shader->uniformLocation("refractionBevelIntensity");
+-        m_roundedOnscreenPass.physicallyBasedRefractionLocation = m_roundedOnscreenPass.shader->uniformLocation("physicallyBasedRefraction");
+-        m_roundedOnscreenPass.bodyRefractionLocation = m_roundedOnscreenPass.shader->uniformLocation("bodyRefraction");
+-        m_roundedOnscreenPass.bodyRefractionReachLocation = m_roundedOnscreenPass.shader->uniformLocation("bodyRefractionReach");
+-        m_roundedOnscreenPass.bodyRefractionStrengthLocation = m_roundedOnscreenPass.shader->uniformLocation("bodyRefractionStrength");
+-        m_roundedOnscreenPass.tintColorLocation = m_roundedOnscreenPass.shader->uniformLocation("tintColor");
+-        m_roundedOnscreenPass.tintGrayLocation = m_roundedOnscreenPass.shader->uniformLocation("tintGray");
+-        m_roundedOnscreenPass.tintStrengthLocation = m_roundedOnscreenPass.shader->uniformLocation("tintStrength");
+-        m_roundedOnscreenPass.autoTintAlphaRangeLocation = m_roundedOnscreenPass.shader->uniformLocation("autoTintAlphaRange");
+-        m_roundedOnscreenPass.autoTintAlphaLocation = m_roundedOnscreenPass.shader->uniformLocation("autoTintAlpha");
+-        m_roundedOnscreenPass.glowColorLocation = m_roundedOnscreenPass.shader->uniformLocation("glowColor");
+-        m_roundedOnscreenPass.glowStrengthLocation = m_roundedOnscreenPass.shader->uniformLocation("glowStrength");
+-        m_roundedOnscreenPass.edgeLightingLocation = m_roundedOnscreenPass.shader->uniformLocation("edgeLighting");
+-        m_roundedOnscreenPass.rimGlowLocation = m_roundedOnscreenPass.shader->uniformLocation("rimGlow");
+-        m_roundedOnscreenPass.glowOffsetLocation = m_roundedOnscreenPass.shader->uniformLocation("glowOffset");
+-        m_roundedOnscreenPass.rimGlowColorMixLocation = m_roundedOnscreenPass.shader->uniformLocation("rimGlowColorMix");
+-        m_roundedOnscreenPass.rimSpecularLocation = m_roundedOnscreenPass.shader->uniformLocation("rimSpecular");
+-        m_roundedOnscreenPass.rimSpecularScaleLocation = m_roundedOnscreenPass.shader->uniformLocation("rimSpecularScale");
+-        m_roundedOnscreenPass.rimWidthLocation = m_roundedOnscreenPass.shader->uniformLocation("rimWidth");
+-        m_roundedOnscreenPass.rimAdaptToRefractionLocation = m_roundedOnscreenPass.shader->uniformLocation("rimAdaptToRefraction");
+-        m_roundedOnscreenPass.rimAdaptMultiplierLocation = m_roundedOnscreenPass.shader->uniformLocation("rimAdaptMultiplier");
++        m_roundedOnscreenPass.sharpBackdropLocation = m_roundedOnscreenPass.shader->uniformLocation("sharpBackdrop");
++        m_roundedOnscreenPass.backdropPixelSizeLocation = m_roundedOnscreenPass.shader->uniformLocation("backdropPixelSize");
++        m_roundedOnscreenPass.refractionAmountLocation = m_roundedOnscreenPass.shader->uniformLocation("refractionAmount");
++        m_roundedOnscreenPass.blurAmountLocation = m_roundedOnscreenPass.shader->uniformLocation("blurAmount");
++        m_roundedOnscreenPass.dispersionAmountLocation = m_roundedOnscreenPass.shader->uniformLocation("dispersionAmount");
+     }
+ 
+     m_downsamplePass.shader = ShaderManager::instance()->generateShaderFromFile(ShaderTrait::MapTexture,
+@@ -209,12 +214,11 @@
+ #if KWIN_BUILD_X11
+     if (effects->xcbConnection()) {
+         net_wm_blur_region = effects->announceSupportProperty(s_blurAtomName, this);
+-    }
+-#endif
+-
+-#ifdef GLASS_KWIN_67
+-    waylandServer()->backgroundEffectManager()->addBlurCapability();
+-#endif
++        liquidFrameAtom = effects->announceSupportProperty(s_liquidFrameAtomName, this);
++    }
++#endif
++
++    createLiquidGlobal();
+ 
+     connect(effects, &EffectsHandler::windowAdded, this, &BlurEffect::slotWindowAdded);
+     connect(effects, &EffectsHandler::windowDeleted, this, &BlurEffect::slotWindowDeleted);
+@@ -227,6 +231,7 @@
+     connect(effects, &EffectsHandler::propertyNotify, this, &BlurEffect::slotPropertyNotify);
+     connect(effects, &EffectsHandler::xcbConnectionChanged, this, [this]() {
+         net_wm_blur_region = effects->announceSupportProperty(s_blurAtomName, this);
++        liquidFrameAtom = effects->announceSupportProperty(s_liquidFrameAtomName, this);
+     });
+ #endif
+ 
+@@ -271,6 +276,10 @@
+ 
+ BlurEffect::~BlurEffect()
+ {
++    if (liquidGlobal)
++        wl_global_destroy(liquidGlobal);
++    for (auto *resource : liquidResources)
++        wl_resource_set_user_data(resource, nullptr);
+ #if !defined(GLASS_X11) && !defined(GLASS_KWIN_67)
+     // When compositing is restarted, avoid removing the manager immediately.
+     if (s_blurManager) {
+@@ -282,9 +291,6 @@
+     }
+ #endif
+ 
+-#ifdef GLASS_WIN_67
+-    waylandServer()->backgroundEffectManager()->removeBlurCapability();
+-#endif
+ }
+ 
+ void BlurEffect::initBlurStrengthValues()
+@@ -364,12 +370,15 @@
+         m_settings.general.dockBlurStrength,
+         m_settings.general.dockNoiseStrength
+     );
++    const auto maxLiquidBlur = pipelineSettingsForStrength(11, 0);
+     m_maxIterationCount = std::max({
++        maxLiquidBlur.iterationCount,
+         m_contentBlurSettings.iterationCount,
+         m_decorationBlurSettings.iterationCount,
+         m_dockBlurSettings.iterationCount,
+     });
+     m_expandSize = std::max({
++        32, maxLiquidBlur.expandSize,
+         m_contentBlurSettings.expandSize,
+         m_decorationBlurSettings.expandSize,
+         m_dockBlurSettings.expandSize,
+@@ -436,150 +445,143 @@
+     };
+ }
+ 
+-void BlurEffect::updateBlurRegion(EffectWindow *w)
+-{
+-    std::optional<BlurRegion> content;
+-    std::optional<BlurRegion> frame;
+-    std::optional<qreal> saturation;
+-    std::optional<qreal> contrast;
+-
+-#ifdef GLASS_X11
+-    if (net_wm_blur_region != XCB_ATOM_NONE) {
+-        const QByteArray value = w->readProperty(net_wm_blur_region, XCB_ATOM_CARDINAL, 32);
+-        BlurRegion region;
+-        if (value.size() > 0 && !(value.size() % (4 * sizeof(uint32_t)))) {
+-            const uint32_t *cardinals = reinterpret_cast<const uint32_t *>(value.constData());
+-            for (unsigned int i = 0; i < value.size() / sizeof(uint32_t);) {
+-                int x = cardinals[i++];
+-                int y = cardinals[i++];
+-                int w = cardinals[i++];
+-                int h = cardinals[i++];
+-#ifdef GLASS_X11
+-                region += Xcb::fromXNative(QRect(x, y, w, h)).toRect();
+-#else
+-                region += Xcb::fromXNative(Rect(x, y, w, h)).toRect();
+-#endif
++void BlurEffect::createLiquidGlobal()
++{
++    if (!waylandServer())
++        return;
++    liquidGlobal = wl_global_create(*waylandServer()->display(), &vibrance_liquid_glass_v1_interface,
++        1, this, [](wl_client *client, void *data, uint32_t version, uint32_t id) {
++            auto *effect = static_cast<BlurEffect *>(data);
++            auto *resource = wl_resource_create(client, &vibrance_liquid_glass_v1_interface, version, id);
++            if (!resource) {
++                wl_client_post_no_memory(client);
++                return;
+             }
+-        }
+-        if (!value.isNull()) {
+-            content = region;
+-        }
+-    }
+-#endif
+-
+-    if (SurfaceInterface *surface = w->surface()) {
+-#ifdef GLASS_KWIN_67
+-        const RegionF surfaceBlurRegion = surface->blurRegion();
+-        if (!surfaceBlurRegion.isEmpty()) {
+-            Region region;
+-            for (const RectF &rect : surfaceBlurRegion.rects()) {
+-                region += rect.toAlignedRect();
++            static const struct vibrance_liquid_glass_v1_interface implementation {
++                [](wl_client *, wl_resource *resource) { wl_resource_destroy(resource); },
++                [](wl_client *, wl_resource *resource, wl_resource *surfaceResource, wl_array *material) {
++                    auto *effect = static_cast<BlurEffect *>(wl_resource_get_user_data(resource));
++                    auto *surface = SurfaceInterface::get(surfaceResource);
++                    if (effect && surface && material->size % sizeof(uint32_t) == 0 && material->size <= 32784)
++                        effect->setLiquidSurface(surface, { static_cast<const uint32_t *>(material->data),
++                            material->size / sizeof(uint32_t) });
++                }
++            };
++            effect->liquidResources.insert(resource);
++            wl_resource_set_implementation(resource, &implementation, effect, [](wl_resource *destroyed) {
++                if (auto *effect = static_cast<BlurEffect *>(wl_resource_get_user_data(destroyed)))
++                    effect->liquidResources.erase(destroyed);
++            });
++        });
++}
++
++void BlurEffect::setLiquidSurface(SurfaceInterface *surface, std::span<const uint32_t> words)
++{
++    auto &request = liquidSurfaces[surface];
++    if (!request) {
++        request = std::make_unique<LiquidSurface>(this, surface);
++        connect(surface, &SurfaceInterface::aboutToBeDestroyed, this, [this, surface] {
++            liquidSurfaces.erase(surface);
++        });
++    }
++    auto &pending = request->pending->words.emplace();
++    if (!words.empty())
++        pending.assign(words.begin(), words.end());
++}
++
++void BlurEffect::updateBlurRegion(EffectWindow *w, [[maybe_unused]] bool bufferReady)
++{
++    std::span<const uint32_t> words;
++    uint32_t frameSequence = 0;
++    double scale = 1.0;
++#if KWIN_BUILD_X11
++    std::vector<uint32_t> x11Words;
++    if (const auto *window = qobject_cast<X11Window *>(w->window())) {
++        if (net_wm_blur_region != XCB_ATOM_NONE) {
++            Xcb::Property property(false, window->window(), net_wm_blur_region, XCB_ATOM_CARDINAL, 0, 8200);
++            if (const auto values = property.array<uint32_t>()) {
++                x11Words.assign(values->begin(), values->end());
++                words = x11Words;
++                if (liquidFrameAtom != XCB_ATOM_NONE && words.size() >= 8 && words.size() % 4 == 0) {
++                    const auto marker = words.last(4);
++                    if (marker[0] && !marker[1] && !marker[2] && !marker[3]) {
++                        if (!bufferReady)
++                            return;
++                        frameSequence = marker[0];
++                        const auto previous = m_windows.find(w);
++                        const auto connection = effects->xcbConnection();
++                        if (connection && (previous == m_windows.end() || previous->second.frameSequence != frameSequence)) {
++                            xcb_change_property(connection, XCB_PROP_MODE_REPLACE, window->window(),
++                                liquidFrameAtom, XCB_ATOM_CARDINAL, 32, 1, &frameSequence);
++                            xcb_flush(connection);
++                        }
++                        words = words.first(words.size() - marker.size());
++                    }
++                }
++                scale = Xcb::fromXNative(100) / 100.0;
+             }
+-            content = region;
+-        }
+-#else
+-        if (surface->blur()) {
+-            content = surface->blur()->region();
+-        }
+-        if (surface->contrast()) {
+-            saturation = surface->contrast()->saturation();
+-            contrast = surface->contrast()->contrast();
+-        }
+-#endif
+-    }
+-
+-    if (auto internal = w->internalWindow()) {
+-        const auto property = internal->property("kwin_blur");
+-        if (property.isValid()) {
+-            content = property.value<BlurRegion>();
+-        }
+-    }
+-
+-    if (w->decorationHasAlpha() && decorationSupportsBlurBehind(w)) {
+-        frame = decorationBlurRegion(w);
+-    }
+-
+-    if (
+-        m_settings.forceBlur.blurDecorations &&
+-        !(
+-            w->isDock() ||
+-            w->isMenu() ||
+-            w->isDropdownMenu() ||
+-            w->isPopupMenu() ||
+-            w->isPopupWindow()
+-        )
+-    ) {
+-#ifdef GLASS_X11
+-        frame = BlurRegion(w->frameGeometry().translated(-w->x(), -w->y()).toRect());
+-#else
+-        BlurRegion glass(Rect(w->frameGeometry().translated(-w->x(), -w->y()).toRect()));
+-        if (SurfaceInterface *surface = w->surface()) {
+-#ifdef GLASS_KWIN_67
+-            const RegionF opaque = surface->opaque();
+-            if (!opaque.isEmpty()) {
+-                const QPoint clientOffset = w->contentsRect().topLeft().toPoint();
+-                Region opaqueInFrame;
+-                for (const RectF &rect : opaque.rects()) {
+-                    opaqueInFrame += rect.toAlignedRect().translated(clientOffset);
+-                }
+-                glass -= opaqueInFrame;
+-            }
+-#else
+-            const Region opaque = surface->opaque();
+-            if (!opaque.isEmpty()) {
+-                const QPoint clientOffset = w->contentsRect().topLeft().toPoint();
+-                Region opaqueInFrame;
+-                for (const Rect &rect : opaque.rects()) {
+-                    opaqueInFrame += rect.translated(clientOffset);
+-                }
+-                glass -= opaqueInFrame;
+-            }
+-#endif
+-        }
+-        frame = glass;
+-#endif
+-    }
+-
+-    if (content.has_value() || frame.has_value()) {
+-        BlurEffectData &data = m_windows[w];
+-        data.content = content;
+-        data.frame = frame;
+-        data.colorMatrix = colorTransformMatrix(saturation.value_or(1.0), contrast.value_or(1.0), 1.0);
+-#if PLASMA_VERSION < 0x060404 || defined(GLASS_X11)
+-        data.windowEffect = ItemEffect(w->windowItem());
+-#else
+-        if (!data.blurItem) {
+-            data.blurItem = std::make_unique<BackgroundEffectItem>(w->windowItem());
+-        }
++        }
++    } else
++#endif
++    if (auto *surface = w->surface()) {
++        const auto request = liquidSurfaces.find(surface);
++        if (request != liquidSurfaces.end()) {
++            words = request->second->active;
++            scale = 1.0 / surface->clientToCompositorScale();
++        }
++    }
++
++    BlurRegion content;
++    const auto bounds = w->contentsRect().toAlignedRect();
++    if (words.size() >= 8 && words.size() % 4 == 0) {
++        for (std::size_t i = 4; i < words.size(); i += 4) {
++            const auto rect = RectF(words[i] * scale, words[i + 1] * scale,
++                words[i + 2] * scale, words[i + 3] * scale).intersected(bounds);
++            if (!rect.isEmpty()) content += rect.toAlignedRect();
++        }
++    }
++    const auto previous = m_windows.find(w);
++    const Rect oldBounds = previous != m_windows.end() && previous->second.content ?
++        previous->second.content->boundingRect() : Rect{};
++    if (content.isEmpty()) {
++        if (previous != m_windows.end()) {
++            w->addRepaint(RectF(oldBounds));
++            effects->makeOpenGLContextCurrent();
++            m_windows.erase(previous);
++        }
++        return;
++    }
++
++    const float refraction = std::min(words[0], 100u) / 100.0f;
++    const float blur = std::min(words[1], 100u) / 100.0f;
++    const float dispersion = std::min(words[2], 100u) / 100.0f;
++    const float radius = std::min(words[3], 256u) * scale;
++    auto &data = m_windows[w];
++    data.frameSequence = frameSequence;
++    if (data.content && *data.content == content && data.refraction == refraction &&
++        data.blur == blur && data.dispersion == dispersion && data.radius == radius) {
++        return;
++    }
++    data.content = content;
++    data.refraction = refraction;
++    data.blur = blur;
++    data.dispersion = dispersion;
++    data.radius = radius;
++    if (!data.blurItem) {
++        data.blurItem = std::make_unique<BackgroundEffectItem>(w->windowItem());
+         data.blurItem->setPixelsToExpandRepaintsBelowOpaqueRegions(m_expandSize);
+-        data.blurItem->setEffectBoundingRect(blurRegion(w).boundingRect());
+-#endif
+-    } else {
+-        if (auto it = m_windows.find(w); it != m_windows.end()) {
+-            effects->makeOpenGLContextCurrent();
+-            m_windows.erase(it);
+-        }
+-    }
++    }
++    const Rect newBounds = content.boundingRect();
++    data.blurItem->setEffectBoundingRect(newBounds);
++    w->addRepaint(RectF(oldBounds.isEmpty() ? newBounds : oldBounds.united(newBounds)));
+ }
+ 
+ void BlurEffect::slotWindowAdded(EffectWindow *w)
+ {
+-    SurfaceInterface *surf = w->surface();
+-
+-    if (surf) {
+-        windowBlurChangedConnections[w] = connect(surf, &SurfaceInterface::blurChanged, this, [this, w]() {
+-            if (w) {
+-                updateBlurRegion(w);
+-            }
+-        });
+-#if !defined(GLASS_X11) && !defined(GLASS_KWIN_67)
+-        windowContrastChangedConnections[w] = connect(surf, &SurfaceInterface::contrastChanged, this, [this, w]() {
+-            if (w) {
+-                updateBlurRegion(w);
+-            }
+-        });
+-#endif
+-    }
++#if KWIN_BUILD_X11
++    if (w->isX11Client())
++        watchX11Frames(w);
++#endif
+ 
+     windowFrameGeometryChangedConnections[w] = connect(w, &EffectWindow::windowFrameGeometryChanged, this, [this,w]() {
+         if (w) {
+@@ -604,6 +606,9 @@
+ 
+ void BlurEffect::slotWindowDeleted(EffectWindow *w)
+ {
++#if KWIN_BUILD_X11
++    pendingX11Regions.erase(w);
++#endif
+     if (auto it = m_windows.find(w); it != m_windows.end()) {
+         effects->makeOpenGLContextCurrent();
+         m_windows.erase(it);
+@@ -636,9 +641,27 @@
+ }
+ 
+ #if KWIN_BUILD_X11
++void BlurEffect::watchX11Frames(EffectWindow *window)
++{
++    if (windowBlurChangedConnections.contains(window))
++        return;
++    pendingX11Regions.insert(window);
++    windowBlurChangedConnections[window] = connect(window->window(), &Window::damaged,
++        this, [this, window] {
++            const bool pending = pendingX11Regions.erase(window) != 0;
++            if (pending || m_windows.contains(window))
++                updateBlurRegion(window, true);
++        });
++}
++
+ void BlurEffect::slotPropertyNotify(EffectWindow *w, long atom)
+ {
+-    if (w && atom == net_wm_blur_region && net_wm_blur_region != XCB_ATOM_NONE) {
++    if (!w || atom != net_wm_blur_region || net_wm_blur_region == XCB_ATOM_NONE)
++        return;
++    pendingX11Regions.insert(w);
++    if (w->surface()) {
++        watchX11Frames(w);
++    } else {
+         updateBlurRegion(w);
+     }
+ }
+@@ -1165,29 +1188,29 @@
+         return shape;
+     };
+ 
+-    BorderRadius cornerRadius = w->window()->borderRadius();
+-    if (!blurInfo.originalCornerRadius.has_value()) {
+-        blurInfo.originalCornerRadius = cornerRadius;
+-    }
+-    bool isOverRounded = false;
+-
+-    cornerRadius = effectiveWindowCornerRadius(w, blurInfo.originalCornerRadius.value(), &isOverRounded);
+-
+-    const BlurRegion effectShape = transformShape(blurRegion(w, &cornerRadius));
+-    const BlurRegion contentShape = transformShape(contentRegion(w, &cornerRadius));
+-    const BlurRegion frameShape = effectShape - contentShape;
+-    const BlurPipelineSettings &contentBlurSettings = w->isDock() ? m_dockBlurSettings : m_contentBlurSettings;
+-    const float blurRadius = w->isDock() ? m_dockBlurRadius : m_blurRadius;
+-    const float upsampleOffset = w->isDock() ? m_dockUpsampleOffset : m_upsampleOffset;
+-    const BlurPipelineSettings &combinedBlurSettings =
+-        (contentShape.isEmpty() && !frameShape.isEmpty()) ? m_decorationBlurSettings : contentBlurSettings;
+-    const bool splitBlurSettings = !frameShape.isEmpty() &&
+-        !contentShape.isEmpty();
+-    const bool splitTintSettings = m_settings.general.excludeDecorations &&
+-        !frameShape.isEmpty() &&
+-        !contentShape.isEmpty();
+-    const bool splitRenderRegions = splitBlurSettings || splitTintSettings;
+-    const QRect backgroundRect = effectShape.boundingRect();
++    const BlurRegion effectShape = transformShape(blurRegion(w));
++    if (effectShape.isEmpty()) {
++        return;
++    }
++    const auto contentBlurSettings = pipelineSettingsForStrength(
++        static_cast<int>(std::round(blurInfo.blur * 11.0f)), 0);
++    const float blurRadius = std::lerp(0.45f, 1.6f, blurInfo.blur);
++    const QRect lensRect = effectShape.boundingRect();
++    const QRect padded = lensRect.adjusted(-m_expandSize, -m_expandSize, m_expandSize, m_expandSize);
++    constexpr int tileSize = 128;
++    const auto floorToTile = [](int value) {
++        return static_cast<int>(std::floor(static_cast<double>(value) / tileSize)) * tileSize;
++    };
++    const auto ceilToTile = [floorToTile](int value) { return floorToTile(value + tileSize - 1); };
++    const int left = floorToTile(padded.x());
++    const int top = floorToTile(padded.y());
++    const QRect backgroundRect = QRect(left, top,
++        ceilToTile(padded.x() + padded.width()) - left,
++        ceilToTile(padded.y() + padded.height()) - top)
++        .intersected(viewport.renderRect().toAlignedRect());
++    if (backgroundRect.isEmpty()) {
++        return;
++    }
+ #ifdef GLASS_X11
+     const QRect scaledBackgroundRect = snapToPixelGrid(scaledRect(backgroundRect, viewport.scale()));
+     const QRect deviceBackgroundRect = scaledBackgroundRect;
+@@ -1242,8 +1265,6 @@
+     };
+ 
+     const auto effectiveEffectShape = buildEffectiveShape(effectShape);
+-    const auto effectiveContentShape = splitRenderRegions ? buildEffectiveShape(contentShape) : effectiveEffectShape;
+-    const auto effectiveFrameShape = splitRenderRegions ? buildEffectiveShape(frameShape) : decltype(effectiveEffectShape){};
+ 
+     if (effectiveEffectShape.isEmpty()) {
+         return;
+@@ -1256,7 +1277,10 @@
+         textureFormat = renderTarget.texture()->internalFormat();
+     }
+ 
+-    if (renderInfo.framebuffers.size() != (m_maxIterationCount + 1) || renderInfo.textures[0]->size() != backgroundRect.size() || renderInfo.textures[0]->internalFormat() != textureFormat) {
++    const bool reallocate = renderInfo.framebuffers.size() != m_maxIterationCount + 1 ||
++        renderInfo.textures[0]->size() != backgroundRect.size() ||
++        renderInfo.textures[0]->internalFormat() != textureFormat;
++    if (reallocate) {
+         renderInfo.framebuffers.clear();
+         renderInfo.textures.clear();
+ 
+@@ -1290,13 +1314,16 @@
+     }
+ 
+     // Fetch the pixels behind the shape that is going to be blurred.
++    const bool freshCapture = reallocate || renderInfo.captureRect != backgroundRect;
++    renderInfo.captureRect = backgroundRect;
+ #ifdef GLASS_X11
+-    const QRegion dirtyRegion = deviceRegion & backgroundRect;
++    const QRegion dirtyRegion = freshCapture ? QRegion(backgroundRect) : deviceRegion & backgroundRect;
+     for (const QRect &dirtyRect : dirtyRegion) {
+         renderInfo.framebuffers[0]->blitFromRenderTarget(renderTarget, viewport, dirtyRect, dirtyRect.translated(-backgroundRect.topLeft()));
+     }
+ #else
+-    const Region dirtyRegion = viewport.mapFromDeviceCoordinatesContained(deviceRegion) & backgroundRect;
++    const Region dirtyRegion = freshCapture ? Region(Rect(backgroundRect)) :
++        viewport.mapFromDeviceCoordinatesContained(deviceRegion) & backgroundRect;
+     for (const Rect &dirtyRect : dirtyRegion.rects()) {
+         renderInfo.framebuffers[0]->blitFromRenderTarget(renderTarget, viewport, dirtyRect, dirtyRect.translated(-backgroundRect.topLeft()));
+     }
+@@ -1308,9 +1335,7 @@
+     vbo->reset();
+     vbo->setAttribLayout(std::span(GLVertexBuffer::GLVertex2DLayout), sizeof(GLVertex2D));
+ 
+-    const int contentVertexCount = effectiveContentShape.size() * 6;
+-    const int frameVertexCount = effectiveFrameShape.size() * 6;
+-    const int vertexCount = splitRenderRegions ? (contentVertexCount + frameVertexCount) : contentVertexCount;
++    const int vertexCount = effectiveEffectShape.size() * 6;
+     if (auto result = vbo->map<GLVertex2D>(6 + vertexCount)) {
+         auto map = *result;
+ 
+@@ -1399,10 +1424,7 @@
+             }
+         };
+ 
+-        appendScreenGeometry(effectiveContentShape);
+-        if (splitBlurSettings) {
+-            appendScreenGeometry(effectiveFrameShape);
+-        }
++        appendScreenGeometry(effectiveEffectShape);
+ 
+         vbo->unmap();
+     } else {
+@@ -1413,6 +1435,8 @@
+     vbo->bindArrays();
+ 
+     auto runBlurPass = [&](const BlurPipelineSettings &settings) -> GLTexture * {
++        if (blurInfo.blur == 0.0f)
++            return renderInfo.textures[0].get();
+         glDisable(GL_BLEND);
+         ShaderManager::instance()->pushShader(m_downsamplePass.shader.get());
+ 
+@@ -1442,11 +1466,7 @@
+         ShaderManager::instance()->pushShader(m_upsamplePass.shader.get());
+ 
+         m_upsamplePass.shader->setUniform(m_upsamplePass.mvpMatrixLocation, projectionMatrix);
+-        m_upsamplePass.shader->setUniform(m_upsamplePass.offsetLocation, settings.offset * upsampleOffset);
+-
+-        const float upsampleSaturationBoost = m_settings.general.saturationCompensation
+-            ? (1.18f + 0.13f * (blurRadius + upsampleOffset) * 0.5f)
+-            : 1.0f;
++        m_upsamplePass.shader->setUniform(m_upsamplePass.offsetLocation, settings.offset * blurRadius);
+ 
+         for (size_t i = settings.iterationCount; i > 1; --i) {
+             GLFramebuffer::popFramebuffer();
+@@ -1455,7 +1475,7 @@
+             const QVector2D halfpixel(0.5 / read->colorAttachment()->width(),
+                                       0.5 / read->colorAttachment()->height());
+             m_upsamplePass.shader->setUniform(m_upsamplePass.halfpixelLocation, halfpixel);
+-            m_upsamplePass.shader->setUniform(m_upsamplePass.saturationCompensationLocation, i == 2 ? upsampleSaturationBoost : 1.0f);
++            m_upsamplePass.shader->setUniform(m_upsamplePass.saturationCompensationLocation, 1.0f);
+ 
+             glActiveTexture(GL_TEXTURE0);
+             read->colorAttachment()->bind();
+@@ -1469,196 +1489,39 @@
+         return renderInfo.framebuffers[1]->colorAttachment();
+     };
+ 
+-    const QMatrix4x4 &colorMatrix = m_colorMatrix;
+-    const float modulation = opacity * opacity;
+-
+-    w->window()->setBorderRadius(cornerRadius);
+-
+-
++    GLTexture *softBackdrop = runBlurPass(contentBlurSettings);
+     ShaderManager::instance()->pushShader(m_roundedOnscreenPass.shader.get());
+ 
+     QMatrix4x4 projectionMatrix = viewport.projectionMatrix();
+     projectionMatrix.translate(scaledBackgroundRect.x(), scaledBackgroundRect.y());
+-
+-    const QVector2D halfpixel(0.5 / renderInfo.framebuffers[1]->colorAttachment()->width(),
+-                              0.5 / renderInfo.framebuffers[1]->colorAttachment()->height());
+-
+-    const QRectF transformedRect = QRectF{
+-        w->frameGeometry().x() + data.xTranslation(),
+-        w->frameGeometry().y() + data.yTranslation(),
+-        w->frameGeometry().width() * data.xScale(),
+-        w->frameGeometry().height() * data.yScale(),
+-    };
+-#ifdef GLASS_X11
+-    const QRectF nativeBox = snapToPixelGridF(scaledRect(transformedRect, viewport.scale()))
+-                                 .translated(-scaledBackgroundRect.topLeft());
+-#else
+-    const RectF nativeBox = RectF(transformedRect)
+-                                .scaled(viewport.scale())
+-                                .rounded()
+-                                .translated(-scaledBackgroundRect.topLeft());
+-#endif
+-    const BorderRadius nativeCornerRadius = cornerRadius.scaled(viewport.scale()).rounded();
+-    const bool isRefractionExcluded =
+-        (m_settings.refraction.excludeDocks && w->isDock()) ||
+-        (m_settings.refraction.excludeTooltips && w->isTooltip()) ||
+-        (m_settings.refraction.excludeOSD && (w->isNotification() || w->isOnScreenDisplay())) ||
+-        (m_settings.refraction.excludeMenus && !w->isTooltip() &&
+-            (w->isMenu() || w->isDropdownMenu() || w->isPopupMenu() || w->isPopupWindow())) ||
+-        (m_settings.refraction.excludeWindows &&
+-            !w->isDock() &&
+-            !w->isTooltip() &&
+-            !w->isNotification() &&
+-            !w->isOnScreenDisplay() &&
+-            !w->isMenu() &&
+-            !w->isDropdownMenu() &&
+-            !w->isPopupMenu() &&
+-            !w->isPopupWindow());
+-
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.mvpMatrixLocation, projectionMatrix);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.colorMatrixLocation, colorMatrix);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.useOklabSaturationLocation, m_settings.general.oklabSaturation ? 1 : 0);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.saturationLocation, static_cast<float>(m_settings.general.saturation));
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.halfpixelLocation, halfpixel);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.offsetLocation, combinedBlurSettings.offset * upsampleOffset);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.boxLocation, QVector4D(nativeBox.x() + nativeBox.width() * 0.5, nativeBox.y() + nativeBox.height() * 0.5, nativeBox.width() * 0.5, nativeBox.height() * 0.5));
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.cornerRadiusLocation, nativeCornerRadius.toVector());
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.opacityLocation, modulation);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.texUnitLocation, 0);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.blurSizeLocation, QVector2D(nativeBox.width(), nativeBox.height()));
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.edgeSizePixelsLocation, m_settings.refraction.edgeSizePixels);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.refractionStrengthLocation, isRefractionExcluded ? 0.0f : m_settings.refraction.refractionStrength);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.refractionNormalPowLocation, m_settings.refraction.refractionNormalPow);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.refractionRGBFringingLocation, m_settings.refraction.refractionRGBFringing);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.refractionOffsetStrengthLocation, m_settings.refraction.refractionOffsetStrength);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.refractionBevelIntensityLocation, m_settings.refraction.refractionBevelIntensity);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.physicallyBasedRefractionLocation, m_settings.refraction.physicallyBased ? 1 : 0);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.bodyRefractionLocation, m_settings.refraction.bodyRefraction ? 1 : 0);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.bodyRefractionReachLocation, m_settings.refraction.bodyRefractionReach);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.bodyRefractionStrengthLocation, m_settings.refraction.bodyRefractionStrength);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.rimGlowLocation, m_settings.general.rimGlow ? 1 : 0);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.glowOffsetLocation, m_settings.general.glowOffset);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.rimGlowColorMixLocation, m_settings.general.rimGlowColorMix ? 1 : 0);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.rimSpecularLocation, m_settings.general.rimSpecular ? 1 : 0);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.rimSpecularScaleLocation, m_settings.general.rimSpecularScale);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.rimWidthLocation, m_settings.general.rimWidth);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.rimAdaptToRefractionLocation, m_settings.general.rimAdaptToRefraction ? 1 : 0);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.rimAdaptMultiplierLocation, m_settings.general.rimAdaptMultiplier);
+-
+-    QColor tint(m_settings.general.tintColor);
+-    QVector3D tintVec(tint.redF(), tint.greenF(), tint.blueF());
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.tintColorLocation, tintVec);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.tintGrayLocation, static_cast<float>(0.299 * tint.redF() + 0.587 * tint.greenF() + 0.114 * tint.blueF()));
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.autoTintAlphaRangeLocation, QVector2D(m_settings.general.autoTintAlphaMin, m_settings.general.autoTintAlphaMax));
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.autoTintAlphaLocation, m_settings.general.autoTintAlpha ? 1 : 0);
+-    auto tintStrengthForRegion = [&](bool decorationRegion) {
+-        if (w->isDock() && m_settings.general.excludeDocks) {
+-            return 0.0f;
+-        }
+-        if (w->isTooltip() && m_settings.general.excludeTooltips) {
+-            return 0.0f;
+-        }
+-        if ((w->isNotification() || w->isOnScreenDisplay()) && m_settings.general.excludeOSD) {
+-            return 0.0f;
+-        }
+-        if (m_settings.general.excludeMenus && !w->isTooltip() &&
+-                (w->isMenu() || w->isDropdownMenu() || w->isPopupMenu() || w->isPopupWindow())
+-           ) {
+-            return 0.0f;
+-        }
+-        if (decorationRegion && m_settings.general.excludeDecorations) {
+-            return 0.0f;
+-        }
+-        return static_cast<float>(tint.alphaF());
+-    };
+-
+-    QColor glow(m_settings.general.glowColor);
+-    QVector3D glowVec(glow.redF(), glow.greenF(), glow.blueF());
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.glowColorLocation, glowVec);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.glowStrengthLocation, static_cast<float>(glow.alphaF()));
+-    const bool edgeLightingExcluded = (isOverRounded && w->isDock()) ||
+-        (m_settings.general.edgeLightingDock && w->isDock()) ||
+-        (m_settings.general.edgeLightingTooltip && w->isTooltip());
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.edgeLightingLocation, edgeLightingExcluded ? false : m_settings.general.edgeLighting);
+-
+-
+-    auto drawBlurredRegion = [&](GLTexture *blurredTexture, int vertexOffset, int currentVertexCount, float blurOffset) {
+-        glEnable(GL_BLEND);
+-        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+-        m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.offsetLocation, blurOffset * m_upsampleOffset);
+-        glActiveTexture(GL_TEXTURE0);
+-        blurredTexture->bind();
+-        vbo->draw(GL_TRIANGLES, vertexOffset, currentVertexCount);
+-    };
+-
+-    auto drawNoiseRegion = [&](int noiseStrength, int vertexOffset, int currentVertexCount) {
+-        if (noiseStrength <= 0 || currentVertexCount == 0) {
+-            return;
+-        }
+-
+-        if (GLTexture *noiseTexture = ensureNoiseTexture(noiseStrength)) {
+-            ShaderManager::instance()->pushShader(m_noisePass.shader.get());
+-
+-            QMatrix4x4 noiseProjectionMatrix = viewport.projectionMatrix();
+-            noiseProjectionMatrix.translate(scaledBackgroundRect.x(), scaledBackgroundRect.y());
+-
+-            m_noisePass.shader->setUniform(m_noisePass.mvpMatrixLocation, noiseProjectionMatrix);
+-            m_noisePass.shader->setUniform(m_noisePass.noiseTextureSizeLocation, QVector2D(noiseTexture->width(), noiseTexture->height()));
+-
+-            glActiveTexture(GL_TEXTURE0);
+-            noiseTexture->bind();
+-            vbo->draw(GL_TRIANGLES, vertexOffset, currentVertexCount);
+-
+-            ShaderManager::instance()->popShader();
+-        }
+-    };
+-
+-    const float contentTintStrength = tintStrengthForRegion(contentShape.isEmpty() && !frameShape.isEmpty());
+-    const float frameTintStrength = tintStrengthForRegion(true);
+-
+-    GLTexture *contentBlurredTexture = runBlurPass(splitBlurSettings ? contentBlurSettings : combinedBlurSettings);
+-    m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.tintStrengthLocation, contentTintStrength);
+-    drawBlurredRegion(contentBlurredTexture,
+-                      6,
+-                      contentVertexCount,
+-                      splitBlurSettings ? contentBlurSettings.offset : combinedBlurSettings.offset);
+-
+-    if (splitRenderRegions && frameVertexCount > 0) {
+-        GLTexture *frameBlurredTexture = splitBlurSettings ? runBlurPass(m_decorationBlurSettings) : contentBlurredTexture;
+-        m_roundedOnscreenPass.shader->setUniform(m_roundedOnscreenPass.tintStrengthLocation, frameTintStrength);
+-        drawBlurredRegion(frameBlurredTexture,
+-                          6 + contentVertexCount,
+-                          frameVertexCount,
+-                          splitBlurSettings ? m_decorationBlurSettings.offset : combinedBlurSettings.offset);
+-    }
+-
++    const auto nativeBox = RectF(lensRect).scaled(viewport.scale()).rounded()
++        .translated(-scaledBackgroundRect.topLeft());
++    const auto radius = std::clamp(blurInfo.radius * viewport.scale(), 0.0,
++        std::min(nativeBox.width(), nativeBox.height()) * 0.5);
++    auto &pass = m_roundedOnscreenPass;
++    pass.shader->setUniform(pass.mvpMatrixLocation, projectionMatrix);
++    pass.shader->setUniform(pass.boxLocation, QVector4D(
++        nativeBox.x() + nativeBox.width() * 0.5, nativeBox.y() + nativeBox.height() * 0.5,
++        nativeBox.width() * 0.5, nativeBox.height() * 0.5));
++    pass.shader->setUniform(pass.lensRadiusLocation, static_cast<float>(radius));
++    pass.shader->setUniform(pass.opacityLocation, static_cast<float>(opacity * opacity));
++    pass.shader->setUniform(pass.texUnitLocation, 0);
++    pass.shader->setUniform(pass.sharpBackdropLocation, 1);
++    pass.shader->setUniform(pass.backdropPixelSizeLocation, QVector2D(
++        1.0f / scaledBackgroundRect.width(), 1.0f / scaledBackgroundRect.height()));
++    pass.shader->setUniform(pass.refractionAmountLocation, blurInfo.refraction);
++    pass.shader->setUniform(pass.blurAmountLocation, blurInfo.blur);
++    pass.shader->setUniform(pass.dispersionAmountLocation, blurInfo.dispersion);
++
++    glEnable(GL_BLEND);
++    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
++    glActiveTexture(GL_TEXTURE1);
++    renderInfo.textures.front()->bind();
++    glActiveTexture(GL_TEXTURE0);
++    softBackdrop->bind();
++    vbo->draw(GL_TRIANGLES, 6, vertexCount);
+     glDisable(GL_BLEND);
+-
+     ShaderManager::instance()->popShader();
+-
+-    if (combinedBlurSettings.noiseStrength > 0 || (splitRenderRegions && m_decorationBlurSettings.noiseStrength > 0)) {
+-        // Apply an additive noise onto the blurred image. The noise is useful to mask banding
+-        // artifacts, which often happens due to the smooth color transitions in the blurred image.
+-
+-        glEnable(GL_BLEND);
+-        if (opacity < 1.0) {
+-            glBlendFunc(GL_CONSTANT_ALPHA, GL_ONE);
+-        } else {
+-            glBlendFunc(GL_ONE, GL_ONE);
+-        }
+-
+-        drawNoiseRegion(splitBlurSettings ? contentBlurSettings.noiseStrength : combinedBlurSettings.noiseStrength,
+-                        6,
+-                        contentVertexCount);
+-        if (splitRenderRegions) {
+-            drawNoiseRegion(splitBlurSettings ? m_decorationBlurSettings.noiseStrength : combinedBlurSettings.noiseStrength,
+-                            6 + contentVertexCount,
+-                            frameVertexCount);
+-        }
+-
+-        glDisable(GL_BLEND);
+-    }
+-
+     vbo->unbindArrays();
+ }
+ 
+--- a/src/shaders/onscreen_rounded.glsl
++++ b/src/shaders/onscreen_rounded.glsl
+@@ -1,49 +1,69 @@
+-#include "sdf.glsl"
++// Copyright 2026 59xa
++// SPDX-License-Identifier: Apache-2.0
++
++#include "liquid_glass_refraction.h"
+ 
+ uniform sampler2D texUnit;
+-uniform mat4 colorMatrix;
+-uniform float offset;
+-uniform vec2 halfpixel;
++uniform sampler2D sharpBackdrop;
++uniform vec2 backdropPixelSize;
+ uniform vec4 box;
+-uniform vec4 cornerRadius;
++uniform float lensRadius;
++uniform float refractionAmount;
++uniform float blurAmount;
++uniform float dispersionAmount;
+ uniform float opacity;
+-uniform vec2 blurSize;
+ 
+ in vec2 uv;
+ in vec2 vertex;
+-#include "oklab.glsl"
+-#include "glass.glsl"
+ 
+-void main(void)
++float lens_distance(vec2 p)
+ {
+-    vec2 halfBlurSize = blurSize * 0.5;
+-    float minHalfSize = min(halfBlurSize.x, halfBlurSize.y);
++    vec2 q = abs(p) - (box.zw - vec2(lensRadius));
++    vec2 corner = max(q, vec2(0.0));
++    const float power = 3.65;
++    float arc = pow(pow(corner.x, power) + pow(corner.y, power), 1.0 / power);
++    return arc + min(max(q.x, q.y), 0.0) - lensRadius;
++}
+ 
+-    vec2 position = uv * blurSize - halfBlurSize.xy;
+-    float dist = roundedRectangleDist(position, halfBlurSize, cornerRadius);
++vec3 sample_lens(vec2 point, vec3 original)
++{
++    vec4 sharp = texture(sharpBackdrop, point);
++    vec4 soft = texture(texUnit, point);
++    float diffusion = smoothstep(0.0, 0.85, blurAmount) * soft.a;
++    return mix(mix(original, sharp.rgb, sharp.a), soft.rgb, diffusion);
++}
+ 
+-    vec4 sum = vec4(0);
+-    if (dist <= 0.0) {
+-        sum = texture(texUnit, uv + vec2(-halfpixel.x * 2.0, 0.0) * offset);
+-        sum += texture(texUnit, uv + vec2(-halfpixel.x, halfpixel.y) * offset) * 2.0;
+-        sum += texture(texUnit, uv + vec2(0.0, halfpixel.y * 2.0) * offset);
+-        sum += texture(texUnit, uv + vec2(halfpixel.x, halfpixel.y) * offset) * 2.0;
+-        sum += texture(texUnit, uv + vec2(halfpixel.x * 2.0, 0.0) * offset);
+-        sum += texture(texUnit, uv + vec2(halfpixel.x, -halfpixel.y) * offset) * 2.0;
+-        sum += texture(texUnit, uv + vec2(0.0, -halfpixel.y * 2.0) * offset);
+-        sum += texture(texUnit, uv + vec2(-halfpixel.x, -halfpixel.y) * offset) * 2.0;
+-        sum /= 12.0;
++void main()
++{
++    vec2 position = vertex - box.xy;
++    vec2 size = box.zw * 2.0;
++    float distance = lens_distance(position);
++    float edge = glass_edge_thickness(size.x, size.y, lensRadius);
++    float bend = glass_refraction_strength(size.x, size.y, refractionAmount, lensRadius);
++    const vec2 stepX = vec2(0.5, 0.0);
++    const vec2 stepY = vec2(0.0, 0.5);
++    vec2 normal = vec2(lens_distance(position + stepX) - lens_distance(position - stepX),
++        lens_distance(position + stepY) - lens_distance(position - stepY));
++    normal /= max(length(normal), 0.0001);
++
++    vec2 local = position + box.zw;
++    vec2 displacement;
++    glass_lens_offset(distance, edge, bend, normal.x, normal.y, local.x, local.y,
++        size.x, size.y, displacement.x, displacement.y);
++    float contourBlend = smoothstep(0.0, 2.0, -distance);
++    vec2 texel = backdropPixelSize * vec2(1.0, -1.0);
++    vec2 refracted = uv + displacement * texel;
++    vec3 original = texture(sharpBackdrop, uv).rgb;
++    vec3 colour = sample_lens(refracted, original);
++
++    float band = glass_lens_band(distance, edge, size.x, size.y, normal.x);
++    float dispersion = glass_dispersion_strength(dispersionAmount) * band * (1.0 - 0.75 * blurAmount);
++    if (bend > 0.0 && dispersion > 0.0) {
++        vec2 split = normal * texel * dispersion;
++        colour.r = sample_lens(refracted + split, original).r;
++        colour.b = sample_lens(refracted - split, original).b;
+     }
+ 
+-    sum = glass(sum, cornerRadius);
+-
+-    float f = sdfRoundedBox(vertex, box.xy, box.zw, cornerRadius);
+-    float df = fwidth(f);
+-    sum *= 1.0 - clamp(0.5 + f / df, 0.0, 1.0);
+-
+-    if (useOklabSaturation == 1) {
+-        sum.rgb = oklabSaturate(sum.rgb, saturation);
+-    }
+-
+-    fragColor = sum * colorMatrix * opacity;
++    colour = mix(sample_lens(uv, original), colour, contourBlend);
++    fragColor = vec4(colour * opacity, opacity);
+ }

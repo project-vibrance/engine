@@ -10,6 +10,9 @@
 #include <vibranceUI/renderer/renderer3d.h>
 #include "timestamp_diagnostics.h"
 #include "composition_readback.h"
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+#include "x11_window_shape.h"
+#endif
 #include <array>
 #include <cstddef>
 #include <stdexcept>
@@ -201,7 +204,6 @@ Frame::Frame(
 	try
 	{
 		imageAcquiredSemaphore = make_semaphore(logicalDevice, deletionQueue);
-		renderFinishedSemaphore = make_semaphore(logicalDevice, deletionQueue);
 		renderFinishedFence = make_fence(logicalDevice, deletionQueue);
 		create_frame_storage_images(*this);
 		update_frame_descriptor_sets(*this);
@@ -282,7 +284,8 @@ void Frame::record_command_buffer(
 	bool compositionImageFirstUse,
 	glm::uvec4 pendingCompositionDamageRect,
 	uint32_t graphicsQueueFamilyIndex,
-	vk::Extent2D compositionExtent)
+	vk::Extent2D compositionExtent,
+	[[maybe_unused]] vibrance::vulkan::X11WindowShape* x11WindowShape)
 {
 	if (!compositionExtent.width || !compositionExtent.height) compositionExtent = swapchain.extent;
 
@@ -292,6 +295,8 @@ void Frame::record_command_buffer(
 	prepare_text_batch_resources();
 	Swapchain renderTarget;
 	renderTarget.extent = renderExtent;
+	renderTarget.compositeAlpha = swapchain.x11PremultipliedAlpha ?
+		vk::CompositeAlphaFlagBitsKHR::ePreMultiplied : swapchain.compositeAlpha;
 
 	vk::Result result = commandBuffer.reset();
 	if (result != vk::Result::eSuccess)
@@ -601,6 +606,12 @@ void Frame::record_command_buffer(
 				swapchain.images[imageIndex],
 				tempSurface->extent,
 				swapchain.extent);
+#ifdef VIBRANCE_HAS_X11_WINDOW_SHAPE
+			if (x11WindowShape)
+			{
+				x11WindowShape->record(commandBuffer, tempSurface->image, renderExtent, contentRect);
+			}
+#endif
 		}
 
 		transition_image_layout(commandBuffer, swapchain.images[imageIndex],

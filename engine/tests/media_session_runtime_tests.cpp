@@ -3,7 +3,9 @@
 
 #include <vibranceUI/media/session.h>
 
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 int main()
 {
@@ -29,6 +31,17 @@ int main()
     }
 
     if (!session.bridge_loaded() && session.snapshot().diagnostic.empty()) return 1;
+#elif defined(VIBRANCE_HAS_GIO)
+    if (!GlobalMediaSession::platform_supported()) return 1;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        session.refresh();
+        if (session.bridge_loaded() || !session.snapshot().diagnostic.empty()) return 0;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    std::cerr << "The MPRIS provider did not report its session bus status.\n";
+    return 1;
 #else
     if (GlobalMediaSession::platform_supported() || session.bridge_loaded())
     {

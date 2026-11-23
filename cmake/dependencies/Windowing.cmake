@@ -8,9 +8,14 @@ if(DEFINED GLFW_PATH AND GLFW_PATH)
     endif()
 endif()
 
-if(DEFINED GLFW_PATH)
+if(GLFW_PATH)
     set(GLFW_INCLUDE_DIRS "${GLFW_PATH}/include")
-    if((APPLE OR (WIN32 AND VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64")) AND
+    if(UNIX AND NOT APPLE AND EXISTS "${GLFW_PATH}/src/x11_window.c")
+        include("${CMAKE_CURRENT_LIST_DIR}/GlfwX11Alpha.cmake")
+        vibrance_build_glfw("${GLFW_PATH}")
+        set(GLFW_LIBRARIES glfw)
+        set(VIBRANCE_BUNDLED_GLFW TRUE)
+    elseif((APPLE OR (WIN32 AND VIBRANCE_WINDOWS_ARCHITECTURE STREQUAL "arm64")) AND
        EXISTS "${GLFW_PATH}/CMakeLists.txt")
         set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
         set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
