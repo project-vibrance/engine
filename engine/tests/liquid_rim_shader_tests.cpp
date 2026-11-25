@@ -261,6 +261,34 @@ try
     Harness strokeGpu(320,160,shapeShader,shapeShader);
     std::vector<uint8_t> black(256u*128u*4u,0u);
     for (unsigned image=0;image<5;++image) shapeGpu.set_input_pixels(image,black);
+    {
+        Case glass;
+        glass.constants.rect = { 32, 24, 160, 80 };
+        glass.constants.color0 = { 0.4f, 0.4f, 0.4f, 0.65f };
+        glass.constants.effect0 = { 14, 0, 0.5f, 1 };
+        glass.constants.data = { 2u, 4u, 0u, 0u };
+        glass.dispatchWidth = 256;
+        glass.dispatchHeight = 128;
+        const auto render = [&] { return shapeGpu.run(glass, true, 1u, false, false, true); };
+        const auto sample = [](const Result& result, unsigned x, unsigned y) {
+            return static_cast<int>(result.bytes[(y * 256u + x) * 4u]);
+        };
+        const auto disabled = render();
+        glass.constants.data[1] |= 1u << 13u;
+        glass.constants.effect0[1] = -255.0f;
+        const auto still = render();
+        if (sample(still, 112, 24) <= sample(disabled, 112, 24) + 15 ||
+            sample(still, 112, 103) <= sample(disabled, 112, 103) + 15 ||
+            sample(still, 32, 64) >= sample(disabled, 32, 64) - 5 ||
+            sample(still, 112, 64) != sample(disabled, 112, 64))
+            throw std::runtime_error("The desktop rim must light the horizontal edges, shade the sides and leave the centre intact");
+        glass.constants.effect0[1] = -static_cast<float>((1u << 8u) | 255u);
+        const auto first = render();
+        glass.constants.effect0[1] = -static_cast<float>((128u << 8u) | 255u);
+        if (first.bytes == render().bytes)
+            throw std::runtime_error("The desktop rim light must follow the animation phase");
+        checks += 5;
+    }
     for (const float scale : { 0.65f, 0.75f, 1.0f, 1.25f, 1.5f })
     for (const float fraction : { 0.0f, 0.25f, 0.5f })
     for (const float softness : { 0.5f, 1.25f, 2.0f })

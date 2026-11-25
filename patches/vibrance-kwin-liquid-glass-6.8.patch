@@ -787,16 +787,46 @@
  #ifdef GLASS_X11
      const QRect scaledBackgroundRect = snapToPixelGrid(scaledRect(backgroundRect, viewport.scale()));
      const QRect deviceBackgroundRect = scaledBackgroundRect;
-@@ -1242,8 +1265,6 @@
+@@ -1241,11 +1264,33 @@
+ #endif
      };
  
-     const auto effectiveEffectShape = buildEffectiveShape(effectShape);
+-    const auto effectiveEffectShape = buildEffectiveShape(effectShape);
 -    const auto effectiveContentShape = splitRenderRegions ? buildEffectiveShape(contentShape) : effectiveEffectShape;
 -    const auto effectiveFrameShape = splitRenderRegions ? buildEffectiveShape(frameShape) : decltype(effectiveEffectShape){};
- 
-     if (effectiveEffectShape.isEmpty()) {
+-
+-    if (effectiveEffectShape.isEmpty()) {
++    std::vector<BlurRegion> contours;
++    int contourBottom = 0;
++#ifdef GLASS_X11
++    const auto &shapeRects = effectShape;
++#else
++    const auto shapeRects = effectShape.rects();
++#endif
++    for (const auto &rect : shapeRects) {
++        if (contours.empty() || rect.y() > contourBottom) {
++            contours.emplace_back();
++            contourBottom = rect.y() + rect.height();
++        } else {
++            contourBottom = std::max(contourBottom, rect.y() + rect.height());
++        }
++        contours.back() += rect;
++    }
++
++    std::vector<std::pair<QRect, decltype(buildEffectiveShape(effectShape))>> lenses;
++    int vertexCount = 0;
++    for (const auto &contour : contours) {
++        auto geometry = buildEffectiveShape(contour);
++        if (!geometry.isEmpty()) {
++            vertexCount += geometry.size() * 6;
++            lenses.emplace_back(contour.boundingRect(), std::move(geometry));
++        }
++    }
++    if (lenses.empty()) {
          return;
-@@ -1256,7 +1277,10 @@
+     }
+
+@@ -1256,7 +1301,10 @@
          textureFormat = renderTarget.texture()->internalFormat();
      }
  
@@ -808,7 +838,7 @@
          renderInfo.framebuffers.clear();
          renderInfo.textures.clear();
  
-@@ -1290,13 +1314,16 @@
+@@ -1290,13 +1338,16 @@
      }
  
      // Fetch the pixels behind the shape that is going to be blurred.
@@ -827,30 +857,29 @@
      for (const Rect &dirtyRect : dirtyRegion.rects()) {
          renderInfo.framebuffers[0]->blitFromRenderTarget(renderTarget, viewport, dirtyRect, dirtyRect.translated(-backgroundRect.topLeft()));
      }
-@@ -1308,9 +1335,7 @@
+@@ -1308,9 +1359,6 @@
      vbo->reset();
      vbo->setAttribLayout(std::span(GLVertexBuffer::GLVertex2DLayout), sizeof(GLVertex2D));
  
 -    const int contentVertexCount = effectiveContentShape.size() * 6;
 -    const int frameVertexCount = effectiveFrameShape.size() * 6;
 -    const int vertexCount = splitRenderRegions ? (contentVertexCount + frameVertexCount) : contentVertexCount;
-+    const int vertexCount = effectiveEffectShape.size() * 6;
      if (auto result = vbo->map<GLVertex2D>(6 + vertexCount)) {
          auto map = *result;
  
-@@ -1399,10 +1424,7 @@
+@@ -1399,9 +1447,8 @@
              }
          };
  
 -        appendScreenGeometry(effectiveContentShape);
 -        if (splitBlurSettings) {
 -            appendScreenGeometry(effectiveFrameShape);
--        }
-+        appendScreenGeometry(effectiveEffectShape);
++        for (const auto &lens : lenses) {
++            appendScreenGeometry(lens.second);
+         }
  
          vbo->unmap();
-     } else {
-@@ -1413,6 +1435,8 @@
+@@ -1413,6 +1460,8 @@
      vbo->bindArrays();
  
      auto runBlurPass = [&](const BlurPipelineSettings &settings) -> GLTexture * {
@@ -859,7 +888,7 @@
          glDisable(GL_BLEND);
          ShaderManager::instance()->pushShader(m_downsamplePass.shader.get());
  
-@@ -1442,11 +1466,7 @@
+@@ -1442,11 +1491,7 @@
          ShaderManager::instance()->pushShader(m_upsamplePass.shader.get());
  
          m_upsamplePass.shader->setUniform(m_upsamplePass.mvpMatrixLocation, projectionMatrix);
@@ -872,7 +901,7 @@
  
          for (size_t i = settings.iterationCount; i > 1; --i) {
              GLFramebuffer::popFramebuffer();
-@@ -1455,7 +1475,7 @@
+@@ -1455,7 +1500,7 @@
              const QVector2D halfpixel(0.5 / read->colorAttachment()->width(),
                                        0.5 / read->colorAttachment()->height());
              m_upsamplePass.shader->setUniform(m_upsamplePass.halfpixelLocation, halfpixel);
@@ -881,7 +910,7 @@
  
              glActiveTexture(GL_TEXTURE0);
              read->colorAttachment()->bind();
-@@ -1469,196 +1489,39 @@
+@@ -1469,196 +1514,44 @@
          return renderInfo.framebuffers[1]->colorAttachment();
      };
  
@@ -1049,16 +1078,8 @@
 -                          splitBlurSettings ? m_decorationBlurSettings.offset : combinedBlurSettings.offset);
 -    }
 -
-+    const auto nativeBox = RectF(lensRect).scaled(viewport.scale()).rounded()
-+        .translated(-scaledBackgroundRect.topLeft());
-+    const auto radius = std::clamp(blurInfo.radius * viewport.scale(), 0.0,
-+        std::min(nativeBox.width(), nativeBox.height()) * 0.5);
 +    auto &pass = m_roundedOnscreenPass;
 +    pass.shader->setUniform(pass.mvpMatrixLocation, projectionMatrix);
-+    pass.shader->setUniform(pass.boxLocation, QVector4D(
-+        nativeBox.x() + nativeBox.width() * 0.5, nativeBox.y() + nativeBox.height() * 0.5,
-+        nativeBox.width() * 0.5, nativeBox.height() * 0.5));
-+    pass.shader->setUniform(pass.lensRadiusLocation, static_cast<float>(radius));
 +    pass.shader->setUniform(pass.opacityLocation, static_cast<float>(opacity * opacity));
 +    pass.shader->setUniform(pass.texUnitLocation, 0);
 +    pass.shader->setUniform(pass.sharpBackdropLocation, 1);
@@ -1074,7 +1095,20 @@
 +    renderInfo.textures.front()->bind();
 +    glActiveTexture(GL_TEXTURE0);
 +    softBackdrop->bind();
-+    vbo->draw(GL_TRIANGLES, 6, vertexCount);
++    int firstVertex = 6;
++    for (const auto &[bounds, geometry] : lenses) {
++        const auto nativeBox = RectF(bounds).scaled(viewport.scale()).rounded()
++            .translated(-scaledBackgroundRect.topLeft());
++        const auto radius = std::clamp(blurInfo.radius * viewport.scale(), 0.0,
++            std::min(nativeBox.width(), nativeBox.height()) * 0.5);
++        pass.shader->setUniform(pass.boxLocation, QVector4D(
++            nativeBox.x() + nativeBox.width() * 0.5, nativeBox.y() + nativeBox.height() * 0.5,
++            nativeBox.width() * 0.5, nativeBox.height() * 0.5));
++        pass.shader->setUniform(pass.lensRadiusLocation, static_cast<float>(radius));
++        const int count = geometry.size() * 6;
++        vbo->draw(GL_TRIANGLES, firstVertex, count);
++        firstVertex += count;
++    }
      glDisable(GL_BLEND);
 -
      ShaderManager::instance()->popShader();
@@ -1107,7 +1141,7 @@
  
 --- a/src/shaders/onscreen_rounded.glsl
 +++ b/src/shaders/onscreen_rounded.glsl
-@@ -1,49 +1,69 @@
+@@ -1,49 +1,67 @@
 -#include "sdf.glsl"
 +// Copyright 2026 59xa
 +// SPDX-License-Identifier: Apache-2.0
@@ -1148,12 +1182,11 @@
  
 -    vec2 position = uv * blurSize - halfBlurSize.xy;
 -    float dist = roundedRectangleDist(position, halfBlurSize, cornerRadius);
-+vec3 sample_lens(vec2 point, vec3 original)
++vec3 sample_lens(vec2 point)
 +{
-+    vec4 sharp = texture(sharpBackdrop, point);
-+    vec4 soft = texture(texUnit, point);
-+    float diffusion = smoothstep(0.0, 0.85, blurAmount) * soft.a;
-+    return mix(mix(original, sharp.rgb, sharp.a), soft.rgb, diffusion);
++    vec3 sharp = texture(sharpBackdrop, point).rgb;
++    vec3 soft = texture(texUnit, point).rgb;
++    return mix(sharp, soft, smoothstep(0.0, 0.85, blurAmount));
 +}
  
 -    vec4 sum = vec4(0);
@@ -1187,15 +1220,14 @@
 +    float contourBlend = smoothstep(0.0, 2.0, -distance);
 +    vec2 texel = backdropPixelSize * vec2(1.0, -1.0);
 +    vec2 refracted = uv + displacement * texel;
-+    vec3 original = texture(sharpBackdrop, uv).rgb;
-+    vec3 colour = sample_lens(refracted, original);
++    vec3 colour = sample_lens(refracted);
 +
 +    float band = glass_lens_band(distance, edge, size.x, size.y, normal.x);
 +    float dispersion = glass_dispersion_strength(dispersionAmount) * band * (1.0 - 0.75 * blurAmount);
 +    if (bend > 0.0 && dispersion > 0.0) {
 +        vec2 split = normal * texel * dispersion;
-+        colour.r = sample_lens(refracted + split, original).r;
-+        colour.b = sample_lens(refracted - split, original).b;
++        colour.r = sample_lens(refracted + split).r;
++        colour.b = sample_lens(refracted - split).b;
      }
  
 -    sum = glass(sum, cornerRadius);
@@ -1209,6 +1241,6 @@
 -    }
 -
 -    fragColor = sum * colorMatrix * opacity;
-+    colour = mix(sample_lens(uv, original), colour, contourBlend);
++    colour = mix(sample_lens(uv), colour, contourBlend);
 +    fragColor = vec4(colour * opacity, opacity);
  }

@@ -119,6 +119,7 @@ enum Renderer2DStyleFlags : uint32_t
     eRenderer2DStyleLiquidGlass = 1u << 22,
 
     eRenderer2DStyleLiquidStaticRim = 1u << 13,
+    eRenderer2DStyleDesktopLiquidRim = 1u << 13,
     eRenderer2DStyleShadowOutsideOnly = 1u << 23,
 
     eRenderer2DStyleBlurDynamicContentOnly = 1u << 23,
@@ -503,6 +504,7 @@ struct HitRegion2DComponent
 
 
     bool enabled = true;
+    bool rectangular = false;
 };
 
 struct InputTransparent2DComponent

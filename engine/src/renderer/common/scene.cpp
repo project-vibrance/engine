@@ -14,9 +14,15 @@ namespace
     {
         const auto* liquid = registry.try_get<LiquidGlassComponent>(entity);
         const auto* transform = registry.try_get<Transform2DComponent>(entity);
-        return liquid && liquid->material == GlassMaterial::eLiquid &&
-            liquid->sceneBackdrop && liquid->rimAnimated && liquid->rim > 0.0f && transform &&
-            transform2_5d_flags(*transform) == 0u;
+        if (!liquid || liquid->material != GlassMaterial::eLiquid || !transform ||
+            transform2_5d_flags(*transform) != 0u) return false;
+#ifdef VIBRANCE_HAS_DESKTOP_BACKDROP
+        const auto* backdrop = registry.try_get<SystemBackdropComponent>(entity);
+        if (registry.ctx().contains<vibrance::DesktopBackdropPaint>() && backdrop &&
+            backdrop->region.provider == SystemBackdropProvider::eDesktopCompositor)
+            return backdrop->region.liquidRimAnimated && backdrop->region.liquidRim > 0.0f;
+#endif
+        return liquid->sceneBackdrop && liquid->rimAnimated && liquid->rim > 0.0f;
     }
 
     bool portable_liquid_rim_visible(const Renderer2DScene& scene,
@@ -661,7 +667,8 @@ entt::entity Renderer2DScene::entity_at(glm::vec2 point)
             entity,
             make_bounds(transform, shape.size));
         const float edgePadding = std::max(style.outlineWidth, 0.0f) + std::max(style.edgeSoftness, 0.0f);
-        if (point_in_primitive(
+        const bool rectangularHit = hitRegion && hitRegion->enabled && hitRegion->rectangular;
+        if (rectangularHit ? point_in_rect(rect, point) : point_in_primitive(
             shape.primitive,
             expand_rect(rect, edgePadding),
             ui_layout_corner_radii(registry_, entity, shape, edgePadding),
@@ -835,7 +842,8 @@ bool Renderer2DScene::hit_test(glm::vec2 point)
             (hitRegion && hitRegion->enabled))
         {
             const float edgePadding = std::max(style.outlineWidth, 0.0f) + std::max(style.edgeSoftness, 0.0f);
-            if (point_in_primitive(
+            const bool rectangularHit = hitRegion && hitRegion->enabled && hitRegion->rectangular;
+            if (rectangularHit ? point_in_rect(rect, point) : point_in_primitive(
                 shape.primitive,
                 expand_rect(rect, edgePadding),
                 ui_layout_corner_radii(registry_, entity, shape, edgePadding),
@@ -1326,14 +1334,12 @@ void Renderer2DScene::build_render_plan_impl(
                 };
                 batch.color0 = paint(batch.color0);
                 batch.color1 = paint(batch.color1);
-                if (liquidSurface && region.liquidRim > 0.0f)
+                if (liquidSurface && region.liquidRim > 0.0f && transformFlags == 0u)
                 {
-                    batch.flags |= eRenderer2DStyleOutline;
-                    batch.effect0.y = std::max(batch.effect0.y, 1.3f * region.liquidRim);
-                    const float rimAlpha = 0.42f * region.liquidRim;
-                    batch.color2 = desktop->opaqueSurface
-                        ? glm::vec4(glm::mix(glm::vec3(batch.color1), glm::vec3(1.0f), rimAlpha), 1.0f)
-                        : glm::vec4(1.0f, 1.0f, 1.0f, rimAlpha);
+                    batch.flags |= eRenderer2DStyleDesktopLiquidRim;
+                    const uint32_t phase = region.liquidRimAnimated
+                        ? 1u + portable_liquid_rim_phase(currentTimeSeconds) : 0u;
+                    batch.effect0.y = -static_cast<float>((phase << 8u) | pack_unorm8(region.liquidRim));
                 }
             }
         }
@@ -1436,7 +1442,7 @@ void Renderer2DScene::build_render_plan_impl(
             {
                 shadowBatch.flags |= eRenderer2DStyleShadowExcludeShapeExtensions;
             }
-            shadowBatch.flags &= ~(eRenderer2DStyleTransform2_5D |
+            shadowBatch.flags &= ~(eRenderer2DStyleTransform2_5D | eRenderer2DStyleDesktopLiquidRim |
                 eRenderer2DStyleMaskedLiquidShapeParameters);
             if ((shadowBatch.flags & eRenderer2DStyleCornerRadii) != 0u)
             {
@@ -1497,7 +1503,7 @@ void Renderer2DScene::build_render_plan_impl(
                 0.0f,
                 0.0f
             };
-            blurBatch.flags |= eRenderer2DStyleBlur;
+            blurBatch.flags = (blurBatch.flags & ~eRenderer2DStyleDesktopLiquidRim) | eRenderer2DStyleBlur;
 #if defined(__APPLE__)
 
 
@@ -1627,7 +1633,7 @@ void Renderer2DScene::build_render_plan_impl(
         const bool nativeLiquid = liquid && liquid->material == GlassMaterial::eLiquid &&
             liquid->backend == LiquidGlassBackend::eMacOSNative &&
             alpha_visible(style.opacity * visualOpacity);
-        if (foregroundVisible || nativeLiquid)
+        if (foregroundVisible || nativeLiquid || (batch.flags & eRenderer2DStyleDesktopLiquidRim) != 0u)
         {
             (cachedBatch ? plan.cachedShapes : plan.shapes).push_back(batch);
         }
@@ -1639,7 +1645,7 @@ void Renderer2DScene::build_render_plan_impl(
         {
             auto highlight = batch;
             highlight.flags &= ~(eRenderer2DStyleGradient | eRenderer2DStyleRadialGradient |
-                eRenderer2DStyleOutline | eRenderer2DStyleBlur | eRenderer2DStyleLiquidRim |
+                eRenderer2DStyleOutline | eRenderer2DStyleBlur | eRenderer2DStyleLiquidRim | eRenderer2DStyleDesktopLiquidRim |
                 eRenderer2DStyleLiquidOuterStroke | eRenderer2DStyleLiquidPaintedSurface);
             highlight.flags |= eRenderer2DStyleLiquidContact;
             highlight.uvRect = { contact->point.x, contact->point.y, contact->radius, 0.0f };

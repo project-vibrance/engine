@@ -9,6 +9,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string_view>
 
 class AudioSpectrumProcessor;
 
@@ -66,6 +67,7 @@ public:
 
 
     bool set_target_process_id(std::uint32_t processId);
+    bool set_target_process_id(std::uint32_t processId, std::string_view application);
 
 private:
     struct Impl;

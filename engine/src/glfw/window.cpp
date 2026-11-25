@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <vibranceUI/glfw/window.h>
+#include <vibranceUI/glfw/pointer_position.h>
 #include <vibranceUI/core/logger.h>
 #include <vibranceUI/ui/controls.h>
 #include <vibranceUI/ui/liquid_controls.h>
 #include "cursor_macos.h"
+#if defined(__unix__) && !defined(__APPLE__)
+#include "../platform/unix/window_metadata.h"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <exception>
@@ -34,6 +38,8 @@ bool glfw_macos_native_window_drag_active();
 
 namespace
 {
+    std::unordered_map<GLFWwindow*, GlfwPointerPositionQuery> pointerPositionQueries;
+
     bool glfw_controls_window_placement()
     {
 #if defined(__unix__) && !defined(__APPLE__) && defined(GLFW_PLATFORM_WAYLAND)
@@ -275,7 +281,8 @@ extern "C" CreateWindowExWFunction __wrap___imp_CreateWindowExW =
     vibrance_CreateWindowExW;
 #endif
 
-GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
+static GLFWwindow* build_glfw_window_impl(const GlfwWindowCreateInfo& createInfo,
+    [[maybe_unused]] bool useDesktopLayer)
 {
     Logger* logger = Logger::fetch_logger();
 
@@ -362,6 +369,9 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
             SetWindowLongPtrW(nativeWindow, GWL_EXSTYLE, style | WS_EX_NOACTIVATE);
         }
 #endif
+#if defined(__unix__) && !defined(__APPLE__)
+        vibrance::unix_window::configure(window, createInfo, useDesktopLayer);
+#endif
         if (createInfo.position)
         {
             set_glfw_window_position(
@@ -399,6 +409,11 @@ GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
     }
 
     return window;
+}
+
+GLFWwindow* build_glfw_window(const GlfwWindowCreateInfo& createInfo)
+{
+    return build_glfw_window_impl(createInfo, false);
 }
 
 GlfwWindowHost::GlfwWindowHost(GlfwWindowHostOptions options) :
@@ -498,7 +513,7 @@ bool GlfwWindowHost::open()
             *hostOptions.positioning);
     }
 
-    hostedWindow = build_glfw_window(windowInfo);
+    hostedWindow = build_glfw_window_impl(windowInfo, hostOptions.placement.has_value());
     if (!hostedWindow)
     {
         return false;
@@ -613,6 +628,10 @@ void destroy_glfw_window(GLFWwindow* window)
 #if defined(__APPLE__)
         glfw_macos_forget_window(window);
 #endif
+#if defined(__unix__) && !defined(__APPLE__)
+        vibrance::unix_window::forget(window);
+#endif
+        pointerPositionQueries.erase(window);
         glfwDestroyWindow(window);
     }
 }
@@ -627,6 +646,9 @@ void terminate_glfw()
 #endif
 #if defined(__APPLE__)
     glfw_macos_forget_window(nullptr);
+#endif
+#if defined(__unix__) && !defined(__APPLE__)
+    vibrance::unix_window::shutdown();
 #endif
     glfwTerminate();
 }
@@ -1038,10 +1060,16 @@ bool glfw_window_position(GLFWwindow* window, int& x, int& y)
 {
     x = 0;
     y = 0;
-    if (!window || !glfw_controls_window_placement())
+    if (!window)
     {
         return false;
     }
+#if defined(__unix__) && !defined(__APPLE__)
+    if (!glfw_controls_window_placement())
+    {
+        return vibrance::unix_window::fixed_position(window, x, y);
+    }
+#endif
     glfwGetWindowPos(window, &x, &y);
     return true;
 }
@@ -1244,10 +1272,14 @@ void set_glfw_window_decorated(GLFWwindow* window, bool decorated)
 
 void set_glfw_window_always_on_top(GLFWwindow* window, bool alwaysOnTop)
 {
-    if (!window || !glfw_controls_window_placement())
+    if (!window) return;
+#if defined(__unix__) && !defined(__APPLE__)
+    if (!glfw_controls_window_placement())
     {
+        vibrance::unix_window::set_above(window, alwaysOnTop);
         return;
     }
+#endif
     const int desiredFloating = alwaysOnTop ? GLFW_TRUE : GLFW_FALSE;
     if (glfwGetWindowAttrib(window, GLFW_FLOATING) != desiredFloating)
     {
@@ -1347,6 +1379,8 @@ void set_glfw_window_application_presence(
     {
         CoUninitialize();
     }
+#elif defined(__unix__)
+    vibrance::unix_window::set_presence(window, showInTaskbar, showInAltTab);
 #else
     (void)showInTaskbar;
     (void)showInAltTab;
@@ -1406,10 +1440,15 @@ bool apply_glfw_window_placement(
 
 void set_glfw_window_position(GLFWwindow* window, int x, int y)
 {
-    if (window && glfw_controls_window_placement())
+    if (!window) return;
+#if defined(__unix__) && !defined(__APPLE__)
+    if (!glfw_controls_window_placement())
     {
-        glfwSetWindowPos(window, x, y);
+        vibrance::unix_window::set_position(window, { x, y });
+        return;
     }
+#endif
+    glfwSetWindowPos(window, x, y);
 }
 
 void set_glfw_window_size(GLFWwindow* window, int width, int height)
@@ -1493,8 +1532,12 @@ void* glfw_native_window_handle(GLFWwindow* window)
 #if !defined(__APPLE__)
 bool begin_glfw_native_window_drag(GLFWwindow* window)
 {
+#if defined(__unix__) && !defined(__APPLE__)
+    return vibrance::unix_window::begin_move(window);
+#else
     (void)window;
     return false;
+#endif
 }
 #endif
 
@@ -1805,6 +1848,13 @@ UiKeyMap ui_key_map_from_glfw()
     return keys;
 }
 
+void set_glfw_pointer_position_query(GLFWwindow* window, GlfwPointerPositionQuery query)
+{
+    if (!window) return;
+    if (query) pointerPositionQueries.insert_or_assign(window, std::move(query));
+    else pointerPositionQueries.erase(window);
+}
+
 bool glfw_cursor_framebuffer_point(GLFWwindow* window, int renderWidth, int renderHeight, glm::vec2& point)
 {
 
@@ -1823,7 +1873,17 @@ bool glfw_cursor_framebuffer_point(GLFWwindow* window, int renderWidth, int rend
 
     double cursorX = 0.0;
     double cursorY = 0.0;
-    glfwGetCursorPos(window, &cursorX, &cursorY);
+    if (const auto it = pointerPositionQueries.find(window); it != pointerPositionQueries.end())
+    {
+        const auto position = it->second();
+        if (!position) return false;
+        cursorX = position->x;
+        cursorY = position->y;
+    }
+    else
+    {
+        glfwGetCursorPos(window, &cursorX, &cursorY);
+    }
     if (!std::isfinite(cursorX) || !std::isfinite(cursorY)) return false;
 
 

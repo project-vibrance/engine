@@ -14,12 +14,14 @@ namespace
 {
 constexpr auto itemPath = "/StatusNotifierItem";
 constexpr auto menuPath = "/MenuBar";
+constexpr auto customMenuPath = "/NO_DBUSMENU";
 constexpr auto watcherName = "org.kde.StatusNotifierWatcher";
 constexpr auto itemInterface = "org.kde.StatusNotifierItem";
 constexpr auto menuInterface = "com.canonical.dbusmenu";
 constexpr auto interfaces = R"xml(
 <node>
   <interface name="org.kde.StatusNotifierItem">
+    <signal name="NewMenu"/>
     <method name="Activate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
     <method name="ContextMenu"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
     <method name="SecondaryActivate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
@@ -171,12 +173,10 @@ struct NativeTray::Impl
             int x = 0, y = 0;
             g_variant_get(parameters, "(ii)", &x, &y);
             self.anchor = {x, y, 1, 1, x || y};
-            if (name != "ContextMenu")
-            {
-                if (self.options.preferCustomMenu && self.anchor.valid)
-                    self.events.push_back({NativeTrayEventKind::eToggleCustomMenu});
-                else self.open_settings();
-            }
+            if (self.options.preferCustomMenu && self.anchor.valid)
+                self.events.push_back({NativeTrayEventKind::eToggleCustomMenu});
+            else if (name != "ContextMenu")
+                self.open_settings();
             g_dbus_method_invocation_return_value(reply, nullptr);
         }
         else if (name == "GetLayout")
@@ -235,7 +235,8 @@ struct NativeTray::Impl
     static GVariant* property(GDBusConnection*, const char*, const char*, const char* interface,
         const char* property, GError**, gpointer user)
     {
-        const auto& options = static_cast<Impl*>(user)->options;
+        const auto& self = *static_cast<Impl*>(user);
+        const auto& options = self.options;
         const std::string_view name(property);
         if (std::string_view(interface) == menuInterface)
         {
@@ -255,10 +256,14 @@ struct NativeTray::Impl
             return g_variant_new("(s@a(iiay)ss)", "", g_variant_new_array(G_VARIANT_TYPE("(iiay)"), nullptr, 0),
                 options.tooltip.c_str(), "");
         if (name == "ItemIsMenu") return g_variant_new_boolean(!options.preferCustomMenu);
-        return g_variant_new_object_path(menuPath);
+        return g_variant_new_object_path(options.preferCustomMenu && self.plasmaTray ? customMenuPath : menuPath);
     }
 
     static constexpr GDBusInterfaceVTable vtable {method_call, property, nullptr, {}};
+    const bool plasmaTray = [] {
+        const char* desktop = g_getenv("XDG_CURRENT_DESKTOP");
+        return desktop && (':' + std::string(desktop) + ':').find(":KDE:") != std::string::npos;
+    }();
     NativeTrayOptions options;
     NativeTrayAnchor anchor;
     std::deque<NativeTrayEvent> events;
@@ -285,6 +290,13 @@ NativeTrayEvent NativeTray::take_event()
 }
 
 NativeTrayAnchor NativeTray::menu_anchor() const { return impl->anchor; }
-void NativeTray::set_custom_menu_enabled(bool enabled) { impl->options.preferCustomMenu = enabled; }
+void NativeTray::set_custom_menu_enabled(bool enabled)
+{
+    if (impl->options.preferCustomMenu == enabled) return;
+    impl->options.preferCustomMenu = enabled;
+    if (impl->bus)
+        g_dbus_connection_emit_signal(impl->bus.get(), nullptr, itemPath, itemInterface,
+            "NewMenu", nullptr, nullptr);
+}
 bool NativeTray::custom_menu_enabled() const { return impl->options.preferCustomMenu; }
 void NativeTray::show_native_menu() { impl->open_settings(); }

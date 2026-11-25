@@ -5,6 +5,7 @@
 
 #include <vibranceUI/export.h>
 #include <vibranceUI/ui/styles.h>
+#include <vibranceUI/ui/glass.h>
 #include <vibranceUI/renderer/renderer2d_components.h>
 
 #include <glm/vec2.hpp>
@@ -28,6 +29,7 @@ inline constexpr float kUiNotificationThreeLineCardHeight = 108.0f;
 inline constexpr float kUiNotificationActionCardHeight = 104.0f;
 inline constexpr float kUiNotificationTwoLineActionCardHeight = 122.0f;
 inline constexpr float kUiNotificationThreeLineActionCardHeight = 140.0f;
+inline constexpr float kUiNotificationOptionsInset = 10.0f;
 
 struct UiNotificationCardMetrics
 {
@@ -71,6 +73,8 @@ struct UiNotificationCardOptions
     UiNotificationCardMetrics metrics {};
     Media2DHandle iconMedia {};
     Media2DHandle dismissIcon {};
+    Media2DHandle optionsChevron {};
+    UiGlassOptions dismissGlass {};
 
     std::vector<UiNotificationCardAction> actions;
     std::size_t groupSize = 1u;
@@ -92,6 +96,12 @@ struct UiNotificationCardHandle
     entt::entity timestampText = entt::null;
     entt::entity dismissButton = entt::null;
     entt::entity optionsButton = entt::null;
+    entt::entity optionsTextMask = entt::null;
+    entt::entity optionsFeatheredText = entt::null;
+    float optionsUnobscuredWidth = 0.0f;
+    float optionsHoveredWidth = 0.0f;
+    float optionsOpacity = 0.0f;
+    double lastOptionsUpdate = -1.0;
     std::vector<entt::entity> actionButtons;
     bool dismissVisible = false;
 };
@@ -142,4 +152,10 @@ VIBRANCE_ENGINE_API void ui_prepare_notification_card_fan(
 VIBRANCE_ENGINE_API void ui_update_notification_card_motion(
     Renderer2DScene& scene,
     UiNotificationCardHandle& card,
+    double currentTimeSeconds);
+
+VIBRANCE_ENGINE_API void ui_update_notification_options_hover(
+    Renderer2DScene& scene,
+    UiNotificationCardHandle& card,
+    bool visible,
     double currentTimeSeconds);

@@ -222,7 +222,15 @@ namespace
         passed &= expect(open(first.root) && selections == 0u,
             "A disabled dropdown row is inside its menu and must not select or dismiss it");
         const auto selected = registry.get<UiDropdownControlComponent>(first.root).itemRows[0];
-        click(centre(selected));
+        scene.build_render_plan(0.0, 0u);
+        const auto rowRect = ui_entity_framebuffer_rect(registry, selected);
+        const glm::vec2 blankCorner { rowRect.x + rowRect.z - 0.5f, rowRect.y + 0.5f };
+        state.clear_hover();
+        ui_update_input_hover(scene, atlas, state, true, blankCorner);
+        passed &= expect(state.hoveredButton == selected &&
+            registry.get<ButtonInputComponent>(selected).hovered,
+            "A dropdown option must hover at a blank corner when entered without touching the label");
+        click(blankCorner);
         passed &= expect(!open(first.root) && selections == 1u,
             "A menu row must still select normally and end its outside subscription");
         click(centre(first.root));
@@ -320,8 +328,9 @@ int main()
                 { 20, 150 }, { 160, 36 }, { "First", "Second" }, 2, 0, ui_dropdown_options_from_theme(theme));
             const auto& menu = registry.get<UiDropdownControlComponent>(dropdown.root);
             passed &= expect(registry.get<ShapeComponent>(menu.itemRows.front()).size.y == 28 * dpi &&
-                registry.get<ButtonVisualComponent>(menu.itemRows.front()).hovered.color0.a == 0,
-                "Dropdown rows must use the panel spacing without adding hover tint over translucent menus");
+                registry.get<ButtonVisualComponent>(menu.itemRows.front()).hovered.color0 ==
+                    renderer2d_hex_color(theme.accentHover),
+                "Dropdown rows must use the panel spacing and the selected accent");
             UiThemePreviewOptions previewOptions;
             previewOptions.theme = theme;
             previewOptions.label = "Light";

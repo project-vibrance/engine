@@ -513,7 +513,11 @@ struct AudioLoopbackCapture::Impl
         AudioLoopbackCaptureOptions requestedOptions) :
         callbacks(std::move(requestedCallbacks)),
         mode(requestedOptions.mode),
+#if defined(VIBRANCE_HAS_PULSE)
+        target(std::make_shared<const UnixAudioCaptureTarget>(requestedOptions.targetProcessId, std::string{}))
+#else
         targetProcessId(requestedOptions.targetProcessId)
+#endif
     {
     }
 
@@ -898,13 +902,17 @@ struct AudioLoopbackCapture::Impl
 #elif defined(__APPLE__)
         mac_audio_capture_loop(callbacks, mode, targetProcessId, captureRequested);
 #elif defined(VIBRANCE_HAS_PULSE)
-        unix_audio_capture_loop(callbacks, mode, targetProcessId, captureRequested);
+        unix_audio_capture_loop(callbacks, mode, target, captureRequested);
 #endif
     }
 
     AudioLoopbackCaptureCallbacks callbacks;
     std::atomic<AudioLoopbackCaptureMode> mode;
+#if defined(VIBRANCE_HAS_PULSE)
+    std::atomic<std::shared_ptr<const UnixAudioCaptureTarget>> target;
+#else
     std::atomic<std::uint32_t> targetProcessId { 0u };
+#endif
     std::atomic_bool captureRequested { false };
     std::mutex lifecycleMutex;
     std::thread captureThread;
@@ -982,14 +990,30 @@ bool AudioLoopbackCapture::set_mode(AudioLoopbackCaptureMode mode)
 
 std::uint32_t AudioLoopbackCapture::target_process_id() const
 {
+#if defined(VIBRANCE_HAS_PULSE)
+    return impl->target.load()->processId;
+#else
     return impl->targetProcessId.load();
+#endif
 }
 
 bool AudioLoopbackCapture::set_target_process_id(std::uint32_t processId)
+{
+    return set_target_process_id(processId, {});
+}
+
+bool AudioLoopbackCapture::set_target_process_id(std::uint32_t processId, [[maybe_unused]] std::string_view application)
 {
     if (!captures_process_tree())
     {
         return false;
     }
+#if defined(VIBRANCE_HAS_PULSE)
+    const auto current = impl->target.load();
+    if (current->processId == processId && current->application == application) return false;
+    impl->target.store(std::make_shared<const UnixAudioCaptureTarget>(processId, std::string(application)));
+    return true;
+#else
     return impl->targetProcessId.exchange(processId) != processId;
+#endif
 }

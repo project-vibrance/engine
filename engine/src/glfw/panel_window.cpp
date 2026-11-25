@@ -4,6 +4,9 @@
 #include <vibranceUI/core/path_utf8.h>
 #include <vibranceUI/glfw/panel_window.h>
 #include "cursor_macos.h"
+#if defined(__unix__) && !defined(__APPLE__)
+#include "../platform/unix/window_metadata.h"
+#endif
 
 #include <vibranceUI/ui/builder.h>
 #include <vibranceUI/ui/controls.h>
@@ -1472,6 +1475,14 @@ bool GlfwPanelWindow::begin_window_action(glm::vec2 framebufferPoint)
         }
     }
 
+#if defined(__unix__) && !defined(__APPLE__)
+    if (resize)
+    {
+        const int horizontal = (activeResizeEdges & eResizeLeft) ? -1 : (activeResizeEdges & eResizeRight) ? 1 : 0;
+        const int vertical = (activeResizeEdges & eResizeTop) ? -1 : (activeResizeEdges & eResizeBottom) ? 1 : 0;
+        if (vibrance::unix_window::begin_resize(window, horizontal, vertical)) return true;
+    }
+#endif
     if (!cursor_screen_point(actionStartCursorScreen) ||
         !glfw_window_position(window, actionStartWindowPosition.x, actionStartWindowPosition.y) ||
         !glfw_window_size(window, actionStartWindowSize.x, actionStartWindowSize.y))

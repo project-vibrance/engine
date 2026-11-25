@@ -95,12 +95,12 @@ inline UiDropdownOptions ui_dropdown_options_from_theme(
     options.buttonHoveredBackgroundColor = options.buttonBackgroundColor;
     options.buttonPressedBackgroundColor = theme.settingsPanel.cardSurface;
     options.backgroundColor = theme.surfaceMuted;
-    options.rowHoveredColor = "#00000000";
+    options.rowHoveredColor = theme.accentHover;
     options.rowPressedColor = theme.accentPressed;
     options.rowTextColor = theme.text;
-    options.rowHoveredTextColor = options.rowTextColor;
+    options.rowHoveredTextColor = "#FFFFFFFF";
     options.rowCheckTint = theme.text;
-    options.rowHoveredCheckTint = options.rowCheckTint;
+    options.rowHoveredCheckTint = options.rowHoveredTextColor;
     return options;
 }
 
@@ -522,8 +522,8 @@ inline UiControlHandle ui_create_dropdown(
                 { 0.0f, 0.0f },
                 scaled_size(menuWidth - 8.0f, options.rowHeight, ui.scale()),
                 ui_macos26_control_style(ui, "#FFFFFF01", "#00000000", 0.0f, 1.0f),
-                Renderer2DPrimitive::eSquircle);
-            ui.set_shape(row, 20.0f);
+                Renderer2DPrimitive::eRoundedRectangle);
+            ui.set_shape(row, UiControlAppearance::menuRowCornerRadius);
             ui.set_layer(row, layer + 31, order + 310u + i, true);
             ui.attach_aligned(
                 row,
@@ -563,7 +563,7 @@ inline UiControlHandle ui_create_dropdown(
             registry.emplace<ButtonInputComponent>(row, std::move(rowButton));
 
 
-            registry.emplace<HitRegion2DComponent>(row);
+            registry.emplace<HitRegion2DComponent>(row, true, true);
             ButtonVisualComponent rowVisual = {};
             rowVisual.idle = ui_macos26_control_style(ui, "#FFFFFF00", "#00000000", 0.0f, 1.0f);
             rowVisual.hovered = ui_macos26_control_style(ui, options.rowHoveredColor, "#00000000", 0.0f, 1.0f);

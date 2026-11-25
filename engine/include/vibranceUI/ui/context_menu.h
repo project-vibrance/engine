@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+struct UiTheme;
+
 enum class UiContextMenuItemRole
 {
     eAction,
@@ -77,6 +79,7 @@ struct UiContextMenuOptions
 
     bool buildInlineSubmenu = true;
     float cornerRadius = 18.0f;
+    float rowCornerRadius = 0.0f;
     float submenuOverlap = 5.0f;
     float fontSize = 17.0f;
     float headingFontSize = 13.0f;
@@ -115,6 +118,8 @@ struct UiContextMenuHandle
 VIBRANCE_ENGINE_API UiContextMenuOptions ui_compact_context_menu_options(
     float menuWidth = 168.0f);
 
+VIBRANCE_ENGINE_API UiContextMenuOptions ui_dropdown_context_menu_options(
+    const UiTheme& theme, float menuWidth);
 
 
 VIBRANCE_ENGINE_API UiContextMenuHandle ui_create_context_menu(

@@ -102,6 +102,9 @@ For example, when using a standalone Vulkan SDK, set `VULKAN_SDK_PATH` to its
 architecture directory containing `include`, `lib` and `bin`.
 
 Build with `glib2-devel` for MPRIS, the tray and desktop portal integration.
+`libcurl-devel` enables album artwork from HTTP(S) URLs such as Spotify's.
+FFmpeg development libraries, available in Fedora's `ffmpeg-free-devel`
+package, let MPRIS verify the codec of local audio files.
 `pulseaudio-libs-devel` enables audio capture, `libsecret-devel` enables secure
 credential storage, and `libxcb-devel` enables X11 fullscreen detection.
 `libXext-devel` and `libXrandr-devel` enable window shaping for X11 Vulkan

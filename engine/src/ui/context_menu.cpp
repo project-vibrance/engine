@@ -192,7 +192,9 @@ namespace
                 scaled_size(rowWidth, placement.height, ui.scale()),
                 item.enabled ? idle : disabled,
                 Renderer2DPrimitive::eRoundedRectangle);
-            ui.set_shape(row, std::min(9.0f, placement.height * 0.28f));
+            ui.set_shape(row, options.rowCornerRadius > 0.0f ?
+                std::min(options.rowCornerRadius, placement.height * 0.5f) :
+                std::min(9.0f, placement.height * 0.28f));
             ui.set_layer(row, options.layer + 2, order);
             ui.attach_aligned(
                 row,
@@ -209,7 +211,7 @@ namespace
 
 
 
-            ui.registry().emplace<HitRegion2DComponent>(row);
+            ui.registry().emplace<HitRegion2DComponent>(row, true, true);
 
             ButtonVisualComponent visual = {};
             visual.idle = idle;
@@ -412,6 +414,28 @@ UiContextMenuOptions ui_compact_context_menu_options(float menuWidth)
     options.hoveredColor = "rgba(104, 108, 114, 0.34)";
     options.pressedColor = "rgba(82, 86, 92, 0.46)";
     options.separatorColor = "rgba(72, 76, 84, 0.18)";
+    return options;
+}
+
+UiContextMenuOptions ui_dropdown_context_menu_options(const UiTheme& theme, float menuWidth)
+{
+    const auto dropdown = ui_dropdown_options_from_theme(theme);
+    auto options = ui_compact_context_menu_options(menuWidth);
+    options.metrics.rowHeight = dropdown.rowHeight;
+    options.metrics.rowGap = 0.0f;
+    options.metrics.padding = glm::vec4(4.0f);
+    options.cornerRadius = 16.0f;
+    options.rowCornerRadius = UiControlAppearance::menuRowCornerRadius;
+    options.leadingInset = 10.0f;
+    options.fontSize = 12.5f;
+    options.surfaceTop = options.surfaceBottom = dropdown.backgroundColor;
+    options.surfaceOutline = theme.outline;
+    options.textColor = dropdown.rowTextColor;
+    options.headingColor = options.disabledTextColor = theme.textMuted;
+    options.selectedTextColor = dropdown.rowHoveredTextColor;
+    options.hoveredColor = dropdown.rowHoveredColor;
+    options.pressedColor = dropdown.rowPressedColor;
+    options.separatorColor = theme.outline;
     return options;
 }
 

@@ -43,6 +43,7 @@ struct UiControlAppearance
     static constexpr float buttonFontSize = 13.5f;
     static constexpr float buttonFontWeight = 460.0f;
     static constexpr float menuRowHeight = 28.0f;
+    static constexpr float menuRowCornerRadius = 8.0f;
     static constexpr glm::vec2 sliderThumbSize { 24.0f, 18.0f };
 };
 

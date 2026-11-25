@@ -113,10 +113,15 @@ routes capture through the app's audio-rendering process/session relationships.
 Transport and seeking still depend on source capabilities and provider support.
 A process-specific workaround belongs behind that service boundary.
 
-`AudioLoopbackCapture` and `AudioSpectrumProcessor` expose audio capture/processing
-without deciding which product widget uses them. Notification providers similarly
-publish neutral items and access/readiness state. Applications own inbox models,
-actions, persistence and display policy.
+`AudioLoopbackCapture` and `AudioSpectrumProcessor` expose audio capture and
+processing. On Linux, capture uses the PCM monitors exposed by PulseAudio or
+PipeWire's PulseAudio service. Per-player capture follows matching playback
+streams to their current outputs, and system capture combines the available
+output monitors. Audio routed directly to a device needs a monitor exposed by
+one of these services to be captured.
+
+Notification providers publish neutral items and access/readiness state.
+Applications own inbox models, actions, persistence and display policy.
 
 A platform-supported provider can still be unavailable because its companion is
 missing, its ABI is incompatible or access was denied. Inspect the service result

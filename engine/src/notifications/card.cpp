@@ -622,7 +622,7 @@ UiNotificationCardHandle ui_create_notification_card(
     }
 
     auto iconMetrics = options.metrics;
-    if (options.showOptions || !options.actions.empty()) iconMetrics.size.y -= 32.0f;
+    if (!options.actions.empty()) iconMetrics.size.y -= 32.0f;
     handle.icon = create_icon(
         ui,
         handle.surface,
@@ -683,6 +683,10 @@ UiNotificationCardHandle ui_create_notification_card(
         displayMessage,
         14.0f,
         contentWidth);
+    const float optionsWidth = std::max(76.0f,
+        ui_text_width(fontAtlas, options.content.optionsLabel, 13.0f) +
+            (options.optionsChevron.valid() ? 35.0f : 23.0f));
+    const float optionsHeight = 24.0f;
     for (std::size_t lineIndex = 0u;
         lineIndex < lines.size();
         ++lineIndex)
@@ -691,20 +695,44 @@ UiNotificationCardHandle ui_create_notification_card(
         {
             continue;
         }
-        ui.create_aligned_text(
+        const float lineTop = messageTop + 18.0f * static_cast<float>(lineIndex);
+        entt::entity textParent = handle.surface;
+        glm::vec2 textOffset { contentLeft, lineTop };
+        if (options.showOptions &&
+            lineTop + 12.0f > options.metrics.size.y - kUiNotificationOptionsInset - optionsHeight)
+        {
+            UiSurfaceBlockOptions mask = {};
+            mask.style = ui_clear_surface_style();
+            mask.primitive = Renderer2DPrimitive::eRectangle;
+            const float unobscured = contentWidth + 8.0f;
+            const float hovered = std::max(options.metrics.size.x - kUiNotificationOptionsInset -
+                optionsWidth - contentLeft + 2.0f, 1.0f);
+            handle.optionsTextMask = ui_create_surface_block(ui, handle.surface,
+                UiAlignment::eTopLeft, { contentLeft - 3.0f, lineTop - 3.0f },
+                { unobscured, 24.0f }, mask);
+            ui.registry().emplace<Mask2DComponent>(handle.optionsTextMask, false, false);
+            handle.optionsUnobscuredWidth = scaled_size(unobscured, 1.0f, ui.scale()).x;
+            handle.optionsHoveredWidth = scaled_size(hovered, 1.0f, ui.scale()).x;
+            textParent = handle.optionsTextMask;
+            textOffset = { 3.0f, 3.0f };
+        }
+        const auto line = ui.create_aligned_text(
             Text::literal(lines[lineIndex]),
             localisation,
             fontAtlas,
-            handle.surface,
+            textParent,
             UiAlignment::eTopLeft,
             14.0f,
             notification_text_style(options.theme.text, 460.0f),
             4,
             options.order + 4u + static_cast<std::uint32_t>(lineIndex),
-            {
-                contentLeft,
-                messageTop + 18.0f * static_cast<float>(lineIndex)
-            });
+            textOffset);
+        if (textParent == handle.optionsTextMask)
+        {
+            handle.optionsFeatheredText = line;
+            ui.registry().emplace<TextEdgeFade2DComponent>(line,
+                false, 0.0f, scaled_size(24.0f, 1.0f, ui.scale()).x);
+        }
     }
 
     UiIconButtonOptions dismissOptions = {};
@@ -719,6 +747,16 @@ UiNotificationCardHandle ui_create_notification_card(
         options.theme.surfaceMuted;
     dismissOptions.outlineColor = options.theme.outline;
     dismissOptions.outlineWidth = 0.9f;
+    if (options.dismissGlass.material == GlassMaterial::eLiquid)
+    {
+        const auto colour = renderer2d_hex_color(options.theme.text);
+        const bool dark = colour.r + colour.g + colour.b > 1.5f;
+        dismissOptions.backgroundColor = dark ? "#222433A6" : "#F2F3F7BF";
+        dismissOptions.hoveredBackgroundColor = dark ? "#303344B3" : "#FAFAFCD9";
+        dismissOptions.pressedBackgroundColor = dark ? "#171927B3" : "#DDDFE6D9";
+        dismissOptions.outlineWidth = 0.0f;
+        dismissOptions.glass = options.dismissGlass;
+    }
     if (options.callbacks.dismiss)
     {
         dismissOptions.onClick = [callback = options.callbacks.dismiss](
@@ -781,18 +819,21 @@ UiNotificationCardHandle ui_create_notification_card(
     else if (options.showOptions)
     {
         UiButtonOptions buttonOptions = {};
-        buttonOptions.cornerRadius = 13.0f;
-        buttonOptions.fontSize = 11.5f;
+        const auto colour = renderer2d_hex_color(options.theme.text);
+        const bool dark = colour.r + colour.g + colour.b > 1.5f;
+        buttonOptions.primitive = Renderer2DPrimitive::eRoundedRectangle;
+        buttonOptions.cornerRadius = optionsHeight * 0.5f;
+        buttonOptions.fontSize = 13.0f;
+        buttonOptions.fontWeight = 510.0f;
         buttonOptions.textColor = options.theme.text;
-        buttonOptions.backgroundColor = options.theme.surfaceMuted;
-        buttonOptions.hoveredBackgroundColor =
-            options.theme.surfaceElevated;
-        buttonOptions.pressedBackgroundColor =
-            options.theme.surface;
-        buttonOptions.outlineColor = options.theme.outline;
-        buttonOptions.hoveredOutlineColor =
-            options.theme.outlineStrong;
-        buttonOptions.outlineWidth = 0.7f;
+        buttonOptions.iconTint = options.theme.text;
+        buttonOptions.trailingIcon = options.optionsChevron;
+        buttonOptions.trailingIconSize = 11.0f;
+        buttonOptions.iconTextGap = 4.0f;
+        buttonOptions.padding = glm::vec4(0.0f);
+        buttonOptions.backgroundColor = dark ? "#FFFFFF20" : "#00000012";
+        buttonOptions.hoveredBackgroundColor = dark ? "#FFFFFF2B" : "#0000001C";
+        buttonOptions.pressedBackgroundColor = dark ? "#FFFFFF38" : "#00000028";
         if (options.callbacks.showOptions)
         {
             buttonOptions.onClick = [callback = options.callbacks.showOptions](
@@ -800,19 +841,57 @@ UiNotificationCardHandle ui_create_notification_card(
                 callback();
             };
         }
-        handle.optionsButton = ui_create_aligned_text_button(
+        const auto button = ui_create_aligned_text_button(
             ui,
             fontAtlas,
             handle.surface,
             UiAlignment::eBottomRight,
-            { -12.0f, -8.0f },
+            { -kUiNotificationOptionsInset, -kUiNotificationOptionsInset },
             options.content.optionsLabel,
-            { 100.0f, 26.0f },
+            { optionsWidth, optionsHeight },
             7,
             options.order + 1u,
-            std::move(buttonOptions)).root;
+            std::move(buttonOptions));
+        handle.optionsButton = button.root;
+        if (button.trailingIcon != entt::null)
+            ui.registry().get<Layout2DComponent>(button.trailingIcon).offset.x =
+                scaled_offset(-11.0f, 0.0f, ui.scale()).x;
+        ui.registry().get<ButtonInputComponent>(handle.optionsButton).enabled = false;
+        ui.registry().emplace<InteractiveVisual2DComponent>(handle.optionsButton).opacity = 0.0f;
+        ui.registry().get<RenderLayer2DComponent>(handle.optionsButton).visible = false;
     }
     return handle;
+}
+
+void ui_update_notification_options_hover(
+    Renderer2DScene& scene,
+    UiNotificationCardHandle& card,
+    bool visible,
+    double currentTimeSeconds)
+{
+    auto& registry = scene.registry();
+    if (!registry.valid(card.optionsButton)) return;
+    const double elapsed = card.lastOptionsUpdate >= 0.0
+        ? currentTimeSeconds - card.lastOptionsUpdate : 1.0 / 60.0;
+    card.lastOptionsUpdate = currentTimeSeconds;
+    const float step = static_cast<float>(std::clamp(elapsed / 0.16, 0.0, 1.0));
+    const float next = std::clamp(card.optionsOpacity + (visible ? step : -step), 0.0f, 1.0f);
+    if (next == card.optionsOpacity) return;
+    card.optionsOpacity = next;
+    const float opacity = glm::smoothstep(0.0f, 1.0f, next);
+    auto& input = registry.get<ButtonInputComponent>(card.optionsButton);
+    input.enabled = visible;
+    registry.get<InteractiveVisual2DComponent>(card.optionsButton).opacity = opacity;
+    registry.get<RenderLayer2DComponent>(card.optionsButton).visible = opacity > 0.0f;
+    scene.mark_dirty(card.optionsButton);
+    if (registry.valid(card.optionsTextMask))
+    {
+        registry.get<Layout2DComponent>(card.optionsTextMask).size.x =
+            glm::mix(card.optionsUnobscuredWidth, card.optionsHoveredWidth, opacity);
+        registry.get<Mask2DComponent>(card.optionsTextMask).enabled = opacity > 0.0f;
+        registry.get<TextEdgeFade2DComponent>(card.optionsFeatheredText).enabled = opacity > 0.0f;
+        scene.mark_dirty(card.optionsTextMask);
+    }
 }
 
 void ui_prepare_notification_card_fan(

@@ -3,11 +3,25 @@
 
 #include "session_unix.h"
 
+#ifdef VIBRANCE_HAS_ARTWORK_CURL
+#include "session_unix_artwork.h"
+#endif
+
+#ifdef VIBRANCE_HAS_MPRIS_CODEC
+extern "C"
+{
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+}
+#endif
+
 #include <gio/gio.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
+#include <fstream>
 #include <limits>
 #include <mutex>
 #include <string_view>
@@ -49,14 +63,17 @@ bool boolean_property(GVariant* values, const char* key)
 std::int64_t time_property(GVariant* values, const char* key)
 {
     gint64 microseconds = 0;
-    g_variant_lookup(values, key, "x", &microseconds);
-    return std::max<std::int64_t>(0, microseconds / 1000);
+    if (g_variant_lookup(values, key, "x", &microseconds))
+        return std::max<std::int64_t>(0, microseconds / 1000);
+    guint64 unsignedMicroseconds = 0;
+    g_variant_lookup(values, key, "t", &unsignedMicroseconds);
+    return static_cast<std::int64_t>(unsignedMicroseconds / 1000);
 }
 
-std::string artists(GVariant* metadata)
+std::string artists(GVariant* metadata, const char* key)
 {
-    Variant values(g_variant_lookup_value(metadata, "xesam:artist", G_VARIANT_TYPE_STRING_ARRAY), g_variant_unref);
-    if (!values) return {};
+    Variant values(g_variant_lookup_value(metadata, key, G_VARIANT_TYPE_STRING_ARRAY), g_variant_unref);
+    if (!values) return text_property(metadata, key);
     std::string result;
     GVariantIter iterator;
     g_variant_iter_init(&iterator, values.get());
@@ -69,11 +86,79 @@ std::string artists(GVariant* metadata)
     return result;
 }
 
-std::string artwork_path(GVariant* metadata)
+std::string local_path(const std::string& uri)
 {
-    const char* uri = text_property(metadata, "mpris:artUrl");
-    std::unique_ptr<char, decltype(&g_free)> filename(g_filename_from_uri(uri, nullptr, nullptr), g_free);
-    return filename ? filename.get() : "";
+    if (!std::string_view(uri).starts_with("file:")) return {};
+    char* hostname = nullptr;
+    const std::unique_ptr<char, decltype(&g_free)> filename(g_filename_from_uri(uri.c_str(), &hostname, nullptr), g_free);
+    const std::unique_ptr<char, decltype(&g_free)> host(hostname, g_free);
+    return filename && (!host || !*host || g_ascii_strcasecmp(host.get(), "localhost") == 0) &&
+        g_file_test(filename.get(), G_FILE_TEST_IS_REGULAR) ? filename.get() : "";
+}
+
+MediaPlaybackQuality reported_quality(GVariant* metadata)
+{
+    bool lossless = false;
+    for (const char* key : {"xesam:audioCodec", "xesam:audioCodecType", "xesam:audioQuality"})
+    {
+        const std::unique_ptr<char, decltype(&g_free)> label(g_ascii_strdown(text_property(metadata, key), -1), g_free);
+        const std::string_view format = g_strstrip(label.get());
+        if (format == "dolby atmos" || format == "e-ac-3 joc" || format == "eac3 joc" ||
+            format == "truehd atmos") return MediaPlaybackQuality::eDolbyAtmos;
+        lossless |= format == "lossless" || format == "hi-res lossless" || format == "flac" ||
+            format == "alac" || format == "apple lossless";
+    }
+    return media_playback_quality(false, lossless);
+}
+
+MediaPlaybackQuality local_quality(const std::string& uri)
+{
+    const auto path = local_path(uri);
+    if (path.empty()) return MediaPlaybackQuality::eUnknown;
+#ifdef VIBRANCE_HAS_MPRIS_CODEC
+    auto* format = avformat_alloc_context();
+    if (!format) return MediaPlaybackQuality::eUnknown;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(150);
+    format->interrupt_callback = {+[](void* value) {
+        return std::chrono::steady_clock::now() >= *static_cast<decltype(deadline)*>(value) ? 1 : 0;
+    }, &deadline};
+    AVDictionary* options = nullptr;
+    av_dict_set(&options, "protocol_whitelist", "file", 0);
+    av_dict_set_int(&options, "probesize", 256 * 1024, 0);
+    av_dict_set_int(&options, "analyzeduration", 100000, 0);
+    const int opened = avformat_open_input(&format, path.c_str(), nullptr, &options);
+    av_dict_free(&options);
+    if (opened < 0) return MediaPlaybackQuality::eUnknown;
+    auto deleter = [](AVFormatContext* context) { avformat_close_input(&context); };
+    const std::unique_ptr<AVFormatContext, decltype(deleter)> input(format, deleter);
+    avformat_find_stream_info(format, nullptr);
+    const AVCodecParameters* audio = nullptr;
+    for (unsigned index = 0; index < format->nb_streams; ++index)
+    {
+        const auto* parameters = format->streams[index]->codecpar;
+        if (parameters->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+        if (audio) return MediaPlaybackQuality::eUnknown;
+        audio = parameters;
+    }
+    if (!audio) return MediaPlaybackQuality::eUnknown;
+#if defined(AV_PROFILE_EAC3_DDP_ATMOS) && defined(AV_PROFILE_TRUEHD_ATMOS)
+    if ((audio->codec_id == AV_CODEC_ID_EAC3 && audio->profile == AV_PROFILE_EAC3_DDP_ATMOS) ||
+        (audio->codec_id == AV_CODEC_ID_TRUEHD && audio->profile == AV_PROFILE_TRUEHD_ATMOS))
+        return MediaPlaybackQuality::eDolbyAtmos;
+#elif defined(FF_PROFILE_EAC3_DDP_ATMOS) && defined(FF_PROFILE_TRUEHD_ATMOS)
+    if ((audio->codec_id == AV_CODEC_ID_EAC3 && audio->profile == FF_PROFILE_EAC3_DDP_ATMOS) ||
+        (audio->codec_id == AV_CODEC_ID_TRUEHD && audio->profile == FF_PROFILE_TRUEHD_ATMOS))
+        return MediaPlaybackQuality::eDolbyAtmos;
+#endif
+    const auto* codec = avcodec_descriptor_get(audio->codec_id);
+    return media_playback_quality(false, codec && (codec->props & AV_CODEC_PROP_LOSSLESS) &&
+        !(codec->props & AV_CODEC_PROP_LOSSY));
+#else
+    std::ifstream file(path, std::ios::binary);
+    std::array<char, 4> signature {};
+    return media_playback_quality(false, file.read(signature.data(), signature.size()) &&
+        std::string_view(signature.data(), signature.size()) == "fLaC");
+#endif
 }
 
 struct Player
@@ -81,6 +166,9 @@ struct Player
     MediaSessionSnapshot snapshot;
     std::string service;
     std::string track;
+    std::string artworkUri;
+    std::string mediaUri;
+    MediaPlaybackQuality localQuality = MediaPlaybackQuality::eUnknown;
     bool canSeek = false;
 };
 
@@ -113,11 +201,19 @@ Player read_player(GDBusConnection* bus, const char* service, GCancellable* canc
     if (metadata)
     {
         snapshot.title = text_property(metadata.get(), "xesam:title");
-        snapshot.artist = artists(metadata.get());
+        snapshot.artist = artists(metadata.get(), "xesam:artist");
+        if (snapshot.artist.empty()) snapshot.artist = artists(metadata.get(), "xesam:albumArtist");
         snapshot.album = text_property(metadata.get(), "xesam:album");
         snapshot.durationMilliseconds = time_property(metadata.get(), "mpris:length");
-        snapshot.thumbnailPath = artwork_path(metadata.get());
+        player.artworkUri = text_property(metadata.get(), "mpris:artUrl");
+        player.mediaUri = text_property(metadata.get(), "xesam:url");
+        snapshot.playbackQuality = reported_quality(metadata.get());
         player.track = text_property(metadata.get(), "mpris:trackid", "&o");
+        if (player.track.empty())
+        {
+            const char* track = text_property(metadata.get(), "mpris:trackid");
+            if (g_variant_is_object_path(track)) player.track = track;
+        }
     }
     return player;
 }
@@ -159,8 +255,23 @@ Player read_session(GDBusConnection* bus, const Player& previous, GCancellable* 
     }
     if (selected.snapshot.sessionAvailable)
     {
-        selected.snapshot.sourceProcessId = selected.service == previous.service && previous.snapshot.sourceProcessId ?
-            previous.snapshot.sourceProcessId : player_process(bus, selected.service, cancel);
+        auto& snapshot = selected.snapshot;
+        snapshot.sourceProcessId = player_process(bus, selected.service, cancel);
+        if (selected.service == previous.service && snapshot.sourceProcessId == previous.snapshot.sourceProcessId)
+            snapshot.sourceApp = previous.snapshot.sourceApp;
+        else
+        {
+            const auto entry = call(bus, selected.service.c_str(), playerPath, "org.freedesktop.DBus.Properties",
+                "Get", g_variant_new("(ss)", "org.mpris.MediaPlayer2", "DesktopEntry"), cancel);
+            if (entry && g_variant_is_of_type(entry.get(), G_VARIANT_TYPE("(v)")))
+            {
+                GVariant* raw = nullptr;
+                g_variant_get(entry.get(), "(v)", &raw);
+                const Variant name(raw, g_variant_unref);
+                if (g_variant_is_of_type(name.get(), G_VARIANT_TYPE_STRING) && g_variant_get_string(name.get(), nullptr)[0])
+                    snapshot.sourceApp = g_variant_get_string(name.get(), nullptr);
+            }
+        }
     }
     selected.snapshot.bridgeLoaded = true;
     selected.snapshot.serviceReady = true;
@@ -172,7 +283,7 @@ auto snapshot_fields(const MediaSessionSnapshot& value)
     return std::tie(value.bridgeLoaded, value.serviceReady, value.sessionAvailable, value.canTogglePlayPause,
         value.canSkipNext, value.canSkipPrevious, value.positionMilliseconds, value.durationMilliseconds,
         value.playbackStatus, value.sourceProcessId, value.sourceApp, value.title, value.artist, value.album,
-        value.thumbnailPath, value.diagnostic);
+        value.thumbnailPath, value.diagnostic, value.playbackQuality);
 }
 
 struct Request
@@ -192,6 +303,9 @@ struct UnixMediaSession::Impl
     Player displayed;
     std::vector<Request> pending;
     std::unique_ptr<GCancellable, decltype(&g_object_unref)> cancel {g_cancellable_new(), g_object_unref};
+#ifdef VIBRANCE_HAS_ARTWORK_CURL
+    UnixMediaArtwork artwork;
+#endif
     std::jthread worker {[this](std::stop_token stop) { run(stop); }};
 
     ~Impl()
@@ -228,6 +342,18 @@ struct UnixMediaSession::Impl
             else next.snapshot.diagnostic = "The desktop session bus is unavailable.";
 
             auto& snapshot = next.snapshot;
+            snapshot.thumbnailPath = local_path(next.artworkUri);
+#ifdef VIBRANCE_HAS_ARTWORK_CURL
+            auto downloaded = artwork.resolve(next.artworkUri);
+            if (snapshot.thumbnailPath.empty()) snapshot.thumbnailPath = std::move(downloaded);
+#endif
+            if (snapshot.playbackQuality == MediaPlaybackQuality::eUnknown && !next.mediaUri.empty())
+            {
+                const bool sameTrack = next.service == previous.service && next.track == previous.track &&
+                    next.mediaUri == previous.mediaUri && previous.snapshot.playbackQuality == previous.localQuality;
+                next.localQuality = sameTrack ? previous.localQuality : local_quality(next.mediaUri);
+                snapshot.playbackQuality = next.localQuality;
+            }
             snapshot.thumbnailRevision = previous.snapshot.thumbnailRevision +
                 (snapshot.thumbnailPath != previous.snapshot.thumbnailPath);
             snapshot.revision = previous.snapshot.revision +
