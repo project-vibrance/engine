@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set(VIBRANCE_ENGINE_NAME "vibranceUI")
-set(VIBRANCE_ENGINE_RELEASE_STAGE "alpha" CACHE STRING
+set(VIBRANCE_ENGINE_RELEASE_STAGE "beta" CACHE STRING
     "Human-facing engine build stage: alpha, beta, release-candidate, or release" FORCE)
 set_property(CACHE VIBRANCE_ENGINE_RELEASE_STAGE PROPERTY STRINGS
     alpha beta release-candidate release)
