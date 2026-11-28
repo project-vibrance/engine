@@ -67,6 +67,9 @@ if(DEFINED GLTF_PATH)
         FASTGLTF_USE_64BIT_FLOAT=0
         FASTGLTF_ENABLE_KHR_IMPLICIT_SHAPES=0
         FASTGLTF_ENABLE_KHR_PHYSICS_RIGID_BODIES=0)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        target_compile_options(vibrance_fastgltf PRIVATE -flax-vector-conversions)
+    endif()
     target_link_libraries(vibrance_fastgltf PRIVATE simdjson::simdjson)
     set_target_properties(vibrance_fastgltf PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()

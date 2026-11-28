@@ -23,6 +23,16 @@ case "${build_type}" in
 esac
 
 engine_sdk="${2:-${VIBRANCE_ENGINE_ROOT:-}}"
+if [[ -z "${engine_sdk}" && "$(uname -s)" == Linux ]]; then
+  case "$(uname -m)" in
+    x86_64) sdk_name=linux-x86_64 ;;
+    aarch64|arm64) sdk_name=linux-aarch64 ;;
+    *) sdk_name="" ;;
+  esac
+  if [[ -n "${sdk_name}" && -f "../vibrance-engine/install/${sdk_name}/lib/cmake/vibrance_engine/vibrance_engineConfig.cmake" ]]; then
+    engine_sdk="../vibrance-engine/install/${sdk_name}"
+  fi
+fi
 if [[ -z "${engine_sdk}" && -f "../vibrance-engine/install/lib/cmake/vibrance_engine/vibrance_engineConfig.cmake" ]]; then
   engine_sdk="../vibrance-engine/install"
 fi

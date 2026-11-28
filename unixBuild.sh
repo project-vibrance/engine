@@ -41,11 +41,13 @@ if [[ -n "${KWIN_GLASS}" && "${PLATFORM}" != Linux ]]; then
 fi
 ARCH=native
 INSTALL_DIR="${SCRIPT_DIR}/install"
+DEFAULT_INSTALL_DIR=1
 
 if [[ $# -ge 2 ]] && [[ "${2}" =~ ^(native|silicon|intel|all)$ ]]; then
   ARCH="${2}"
 elif [[ $# -ge 2 ]]; then
   INSTALL_DIR="${2:-${INSTALL_DIR}}"
+  if [[ -n "${2}" ]]; then DEFAULT_INSTALL_DIR=0; fi
   if [[ $# -ge 3 ]]; then
     ARCH="${3}"
   fi
@@ -67,6 +69,12 @@ if [[ "${PLATFORM}" == Darwin ]]; then
     silicon|intel) ARCHITECTURES=("${ARCH}") ;;
     all) ARCHITECTURES=(silicon intel) ;;
     *) echo "Expected native, silicon, intel, or all as the platform." >&2; exit 1 ;;
+  esac
+elif [[ "${PLATFORM}" == Linux && "${ARCH}" == native ]]; then
+  case "${VIBRANCE_LINUX_ARCH:-$(uname -m)}" in
+    x86_64) ARCHITECTURES=(x86_64) ;;
+    aarch64|arm64) ARCHITECTURES=(aarch64) ;;
+    *) echo "Expected x86_64 or aarch64 for VIBRANCE_LINUX_ARCH." >&2; exit 1 ;;
   esac
 else
   if [[ "${ARCH}" != native ]]; then
@@ -95,6 +103,14 @@ for TARGET_ARCH in "${ARCHITECTURES[@]}"; do
     if [[ "${ARCH}" == all || ( $# -ge 3 && -z "${2:-}" ) ]]; then
       PREFIX="${INSTALL_DIR}/${PLATFORM_NAME}"
     fi
+  elif [[ "${PLATFORM}" == Linux ]]; then
+    if [[ "${TARGET_ARCH}" == aarch64 ]]; then
+      TARGET_DIR="build/aarch64/${BUILD_TYPE}"
+    fi
+    if [[ "${DEFAULT_INSTALL_DIR}" == 1 ]]; then
+      PREFIX="${INSTALL_DIR}/linux-${TARGET_ARCH}"
+    fi
+    CONFIGURE_ARGS+=("-DVIBRANCE_EXPECTED_LINUX_PLATFORM=linux-${TARGET_ARCH}")
   fi
   echo "Building vibrance-engine ${BUILD_TYPE} (${TARGET_ARCH})"
   echo "Installing vibrance-engine SDK to: ${PREFIX}"

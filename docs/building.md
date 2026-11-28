@@ -126,9 +126,13 @@ can use the shaped-window fallback.
 ctest --test-dir build/Release --output-on-failure
 ```
 
-The script installs into `install/` by default, with the CMake package under
-`lib/cmake/vibrance_engine`. Pass a path as the second argument to select another
-SDK prefix. For desktop integrations, see the
+The script installs x86-64 builds into `install/linux-x86_64` and ARM64 builds
+into `install/linux-aarch64`, with the CMake package under `lib/cmake/vibrance_engine`
+in each prefix. Pass a path as the second argument to select another SDK
+prefix. For an ARM64 cross-build, set `VIBRANCE_LINUX_ARCH=aarch64` and
+`CMAKE_TOOLCHAIN_FILE` to your Linux ARM64 toolchain file before running
+`unixBuild.sh`. Use `build/aarch64/Release` for ARM64 release tests. For desktop
+integrations, see the
 [native feature table](platforms.md#native-services).
 
 ## Direct CMake and tests
