@@ -203,7 +203,13 @@ UiConfirmationDialogHandle ui_create_confirmation_dialog(
         handle.messageText = ui_create_text_block(ui, fontAtlas, handle.root,
             options.message, messageOptions).entity;
 
-    auto confirmOptions = ui_button_options_from_theme(options.theme, true);
+    const auto action_options = [&](bool primary = false) {
+        auto button = ui_button_options_from_theme(options.theme, primary);
+        button.primitive = Renderer2DPrimitive::eRoundedRectangle;
+        button.cornerRadius = buttonHeight * 0.5f;
+        return button;
+    };
+    auto confirmOptions = action_options(true);
     if (options.destructive)
     {
         confirmOptions.backgroundColor = options.theme.danger;
@@ -227,7 +233,7 @@ UiConfirmationDialogHandle ui_create_confirmation_dialog(
     ui_apply_liquid_button(ui, confirm.root);
     if (hasAdditional)
     {
-        auto additionalOptions = ui_button_options_from_theme(options.theme);
+        auto additionalOptions = action_options();
         additionalOptions.onClick = [action = std::move(options.onAdditional)](const PointerInputEvent&) {
             if (action) action();
         };
@@ -242,7 +248,7 @@ UiConfirmationDialogHandle ui_create_confirmation_dialog(
     }
     if (hasCancel)
     {
-        auto cancelOptions = ui_button_options_from_theme(options.theme);
+        auto cancelOptions = action_options();
         cancelOptions.onClick = [action = std::move(options.onCancel)](const PointerInputEvent&) {
             if (action) action();
         };
